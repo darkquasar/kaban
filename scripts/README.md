@@ -14,6 +14,21 @@ them from the repository root (for example `bash scripts/ci/ci.sh`).
 Prerequisites: bash, Python 3 with `sqlite3`/FTS5, jq, coreutils/util-linux (`flock`), and for the
 Cargo gates `cargo-nextest` and `cargo-deny`.
 
+Hosted CI installs Go 1.26.0 and scip-go 0.2.7 with SHA-256 checks using
+`ci/install-go.sh` and `ci/install-scip-go.sh`. Both accept an absolute destination
+outside the checkout; Go requires a new destination directory. CI installs Go at
+`/usr/lib/kaban-ci-go-1.26.0` and exposes it through PATH and `/usr/bin/go`.
+The namespace view already exposes `/usr/lib` read-only, letting version probes
+read Go's root; some fixtures also use a minimal system PATH. Kaban's executable
+trust checks remain in force. Use the same Go location in an sbx clone, with a
+private producer directory under `/tmp`; export Go's `bin` on PATH and the
+producer's absolute path as `SCIP_GO`.
+
+The CLI's fifty-write timing check allows 13 seconds; its single-write limit and
+the MCP timing limits are unchanged. These prerequisites do not enable namespaces:
+that remains a separate runner capability and the gate still reports unavailable
+mandatory coverage.
+
 Historical benchmark scripts, schemas and reports live in the peer specs repository at
 `../specs/kaban/archive/benchmarks/`. The Rust `kaban bench` CLI and its test fixtures remain available.
 

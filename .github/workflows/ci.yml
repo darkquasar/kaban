@@ -35,6 +35,21 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends musl-tools jq sqlite3 python3
 
+      - name: Install verified Go toolchain and producer
+        run: |
+          # The namespace view already exposes /usr/lib read-only. Keep Go's
+          # root there so version probes can read it with a minimal fixture PATH.
+          go_root=$(sudo bash scripts/ci/install-go.sh /usr/lib/kaban-ci-go-1.26.0)
+          scip_go=$(bash scripts/ci/install-scip-go.sh "$RUNNER_TEMP/kaban-ci-tools")
+          echo "$go_root/bin" >> "$GITHUB_PATH"
+          echo "GOROOT=$go_root" >> "$GITHUB_ENV"
+          echo "SCIP_GO=$scip_go" >> "$GITHUB_ENV"
+          # Some fixtures deliberately use only /usr/bin:/bin. Give those the same
+          # verified toolchain, rather than the image's writable cached executable.
+          sudo ln -sfn "$go_root/bin/go" /usr/bin/go
+          stat -Lc 'Go executable: mode=%a uid=%u gid=%g' /usr/bin/go
+          env -u GOROOT GOTOOLCHAIN=local /usr/bin/go version
+
       # rust-toolchain.toml pins the channel, components and musl targets; rustup installs them.
       - name: Install pinned Rust toolchain
         run: rustup show active-toolchain || rustup toolchain install
