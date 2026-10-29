@@ -15,7 +15,7 @@ BASH = shutil.which("bash")
 
 
 class CiToolSelection(unittest.TestCase):
-    def run_gate(self, *, tools=("nextest", "deny"), fail="nextest", color="always"):
+    def run_gate(self, *, tools=("nextest", "deny"), fail="nextest", color="always", inherited_fd=False):
         with tempfile.TemporaryDirectory(prefix="kaban-ci-tools-") as scratch:
             root = Path(scratch)
             script = root / "scripts/ci/ci.sh"
@@ -31,6 +31,12 @@ class CiToolSelection(unittest.TestCase):
                 "args = sys.argv[1:]\n"
                 "with open(os.environ['CALLS'], 'a') as log:\n"
                 "    log.write(json.dumps(args) + '\\n')\n"
+                "if args[0] == 'fmt' and os.environ['CHECK_FD'] == '1':\n"
+                "    try: os.fstat(142)\n"
+                "    except OSError: pass\n"
+                "    else: sys.exit(56)\n"
+                "    print('input: ' + sys.stdin.readline().rstrip())\n"
+                "    print('env: ' + os.environ['PRESERVED_VALUE'], file=sys.stderr)\n"
                 "if args == ['--list']:\n"
                 "    for tool in os.environ['TOOLS'].split(','):\n"
                 "        if os.environ.get('CARGO_TERM_COLOR') == 'always':\n"
@@ -48,8 +54,11 @@ class CiToolSelection(unittest.TestCase):
                 "    sys.exit(97)\n"
             )
             cargo.chmod(0o700)
+            command = [BASH, str(script)]
+            if inherited_fd:
+                command = [BASH, "-c", 'exec 142>/dev/null\nexec "$@"', "bash", *command]
             result = subprocess.run(
-                [BASH, str(script)],
+                command,
                 env={
                     **os.environ,
                     "BASH_ENV": os.devnull,
@@ -58,7 +67,10 @@ class CiToolSelection(unittest.TestCase):
                     "CALLS": str(calls),
                     "TOOLS": ",".join(tools),
                     "FAIL": fail,
+                    "CHECK_FD": "1" if inherited_fd else "0",
+                    "PRESERVED_VALUE": "retained environment",
                 },
+                input="retained standard input\n" if inherited_fd else None,
                 capture_output=True,
                 text=True,
                 timeout=10,
@@ -75,6 +87,14 @@ class CiToolSelection(unittest.TestCase):
         result, calls = self.run_gate(color="never")
         self.assertEqual(result.returncode, 37, result.stdout + result.stderr)
         self.assertFalse(any(call[0] == "test" for call in calls))
+
+    def test_inherited_high_descriptor_is_closed_without_losing_streams_environment_or_failure(self):
+        result, calls = self.run_gate(inherited_fd=True)
+        self.assertEqual(result.returncode, 37, result.stdout + result.stderr)
+        self.assertIn("input: retained standard input", result.stdout)
+        self.assertIn("env: retained environment", result.stderr)
+        self.assertIn(["fmt", "--all", "--check"], calls)
+        self.assertTrue(any(call[0] == "nextest" for call in calls))
 
     def test_absent_nextest_uses_fallback_and_preserves_failure(self):
         result, calls = self.run_gate(tools=("deny",))

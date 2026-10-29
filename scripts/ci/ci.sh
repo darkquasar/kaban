@@ -13,7 +13,31 @@
 #                                      KABAN_SIZE_TABLE=1 adds the per-feature size table, three more
 #                                      release builds, run by the coordinator at lane boundaries)
 set -u
-cd "$(dirname "$0")/../.."
+kaban_ci_dir=$(cd "$(dirname "$0")" && pwd -P) || exit
+cd "$kaban_ci_dir/../.." || exit
+
+# Hosted runners may pass non-CLOEXEC descriptors (including fd 142) to the job.
+# Start the gates with only their standard streams; keep the parent's streams,
+# environment and exit status, and leave the production Refuse policy intact.
+kaban_ci_inherited=$(python3 -c '
+import os
+inherited = False
+for name in os.listdir("/dev/fd"):
+    fd = int(name)
+    if fd > 2:
+        try:
+            inherited |= os.get_inheritable(fd)
+        except OSError:
+            pass
+print(int(inherited))
+') || exit
+if [ "$kaban_ci_inherited" = 1 ]; then
+  exec python3 -c '
+import subprocess, sys
+status = subprocess.call(["bash", *sys.argv[1:]], close_fds=True)
+sys.exit(status if status >= 0 else 128 - status)
+' "$kaban_ci_dir/ci.sh" "$@"
+fi
 kaban_target_dir=${CARGO_TARGET_DIR:-target}
 
 # core-spec N1 (OWN-64, OWN-110, OWN-112) as amended by spec 05 OWN-B (2026-10-26, SS-13b): the default build

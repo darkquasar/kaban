@@ -160,7 +160,7 @@ fn kaban_index(inputs: &Inputs, home: &Path, args: &[&str]) -> Output {
         let _ = write!(acc, " {n}>&-");
         acc
     });
-    Command::new("/bin/sh")
+    Command::new("/bin/bash")
         .arg("-c")
         .arg(format!("exec{closes}\nexec \"$0\" \"$@\"\n"))
         .arg(&inputs.index_bin)

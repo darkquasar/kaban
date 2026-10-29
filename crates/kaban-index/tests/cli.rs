@@ -2,7 +2,7 @@
 //! the JSON report and the exit codes; G1-S5.8 revalidation before every spawn; G1-S8 fixed
 //! classes; §7; stage1-plan CG4.6) through the `kaban-index` binary over scripted git
 //! repositories under `/tmp` and fake indexers written per test (`test-integration-dir`,
-//! `test-fixture-raii`). The binary is started through `/bin/sh` closing exactly the
+//! `test-fixture-raii`). The binary is started through `/bin/bash` closing exactly the
 //! descriptors this test process inherited without `FD_CLOEXEC` (nextest under `flock(1)`
 //! leaks its lock fd), so the production descriptor policy (`Refuse`) holds in the child.
 //! The tier is whatever `doctor` selects on this host (`namespaces` where unprivileged user
@@ -163,7 +163,7 @@ fn kaban_index_env(home: &Path, args: &[&str], env: &[(&str, &str)]) -> Output {
         acc
     });
     let script = format!("exec{closes}\nexec \"$0\" \"$@\"\n");
-    let mut cmd = Command::new("/bin/sh");
+    let mut cmd = Command::new("/bin/bash");
     cmd.arg("-c")
         .arg(&script)
         .arg(env!("CARGO_BIN_EXE_kaban-index"))
@@ -203,7 +203,7 @@ fn kaban_index_bounded(
     let script = format!("exec{closes}\n{ulimit}exec \"$0\" \"$@\"\n");
     let out_path = dir.join("bounded.stdout");
     let err_path = dir.join("bounded.stderr");
-    let mut child = Command::new("/bin/sh")
+    let mut child = Command::new("/bin/bash")
         .arg("-c")
         .arg(&script)
         .arg(env!("CARGO_BIN_EXE_kaban-index"))
@@ -4317,7 +4317,7 @@ fn an_inherited_descriptor_is_named_in_the_refusal() {
     });
     // a clean descriptor table, then fd 9 opened by the launcher without CLOEXEC
     let script = format!("exec{closes}\nexec 9>/dev/null\nexec \"$0\" \"$@\"\n");
-    let out = Command::new("/bin/sh")
+    let out = Command::new("/bin/bash")
         .arg("-c")
         .arg(&script)
         .arg(env!("CARGO_BIN_EXE_kaban-index"))

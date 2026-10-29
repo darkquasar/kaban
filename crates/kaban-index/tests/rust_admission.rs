@@ -2,7 +2,7 @@
 //! toolchain resource admitted by the Rust driver arm, never taken from `PATH` or the
 //! repository, and the checkout boundary of `doctor` cannot be shrunk by an inner `.git`
 //! entry (astra ri3-1). Fake producers and fake toolchains are written per test under `/tmp`
-//! (`test-integration-dir`, `test-fixture-raii`); the binary is started through `/bin/sh`
+//! (`test-integration-dir`, `test-fixture-raii`); the binary is started through `/bin/bash`
 //! closing the descriptors this process inherited without `FD_CLOEXEC`, so the production
 //! descriptor policy (`Refuse`) holds in the child. The tier is whatever `doctor` selects on
 //! this host; the `none` tier is forced with `index.isolation: off`.
@@ -106,6 +106,40 @@ fn non_cloexec_fds() -> Vec<u32> {
     out
 }
 
+/// Native probes enforce `Refuse` on their caller, so re-execute these tests cleanly when
+/// the runner inherited descriptors. The clean child runs the same enabled assertions.
+fn rerun_native_test_with_clean_descriptors(name: &str) -> bool {
+    let inherited = non_cloexec_fds();
+    if inherited.is_empty() {
+        return false;
+    }
+    let closes = inherited.iter().fold(String::new(), |mut acc, n| {
+        let _ = write!(acc, " {n}>&-");
+        acc
+    });
+    let script = format!("exec{closes}\nexec \"$0\" --exact \"$1\" --nocapture\n");
+    let out = Command::new("/bin/bash")
+        .arg("-c")
+        .arg(script)
+        .arg(std::env::current_exe().expect("test executable"))
+        .arg(name)
+        .output()
+        .expect("clean native test starts");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "clean native test {name} failed:\n{stdout}\n{}",
+        stderr(&out)
+    );
+    assert!(
+        stdout.contains("test result: ok. 1 passed"),
+        "clean native test {name} ran: {stdout}"
+    );
+    // Keep unavailable-host markers visible to CI when the assertions run in a child.
+    eprint!("{stdout}{}", stderr(&out));
+    true
+}
+
 /// Run `kaban-index <args>` with `KABAN_HOME=<home>` and the extra environment, in a child
 /// holding only the standard descriptors.
 fn kaban_index_env(home: &Path, args: &[&str], env: &[(&str, &str)]) -> Output {
@@ -114,7 +148,7 @@ fn kaban_index_env(home: &Path, args: &[&str], env: &[(&str, &str)]) -> Output {
         acc
     });
     let script = format!("exec{closes}\nexec \"$0\" \"$@\"\n");
-    let mut cmd = Command::new("/bin/sh");
+    let mut cmd = Command::new("/bin/bash");
     cmd.arg("-c")
         .arg(&script)
         .arg(env!("CARGO_BIN_EXE_kaban-index"))
@@ -694,6 +728,11 @@ fn producer_answering_protocol_1_is_refused_through_doctor_and_index() {
 /// forbidden root over it refuses the linker as a whole.
 #[test]
 fn linker_helpers_are_admitted_narrowly_and_under_the_same_forbidden_roots() {
+    if rerun_native_test_with_clean_descriptors(
+        "linker_helpers_are_admitted_narrowly_and_under_the_same_forbidden_roots",
+    ) {
+        return;
+    }
     let system = Path::new("/usr/bin/cc");
     let Ok(cc) = fs::canonicalize(system) else {
         eprintln!("NOT RUN: linker helpers: /usr/bin/cc absent");
@@ -757,6 +796,9 @@ fn linker_helpers_are_admitted_narrowly_and_under_the_same_forbidden_roots() {
 /// the real `cc1` is admitted with exactly its canonical directory.
 #[test]
 fn linker_helper_directory_is_one_gcc_leaf() {
+    if rerun_native_test_with_clean_descriptors("linker_helper_directory_is_one_gcc_leaf") {
+        return;
+    }
     let system = Path::new("/usr/bin/cc");
     let Ok(cc) = fs::canonicalize(system) else {
         eprintln!("NOT RUN: linker helper directory: /usr/bin/cc absent");
