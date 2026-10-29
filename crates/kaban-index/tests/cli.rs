@@ -2,7 +2,7 @@
 //! the JSON report and the exit codes; G1-S5.8 revalidation before every spawn; G1-S8 fixed
 //! classes; §7; stage1-plan CG4.6) through the `kaban-index` binary over scripted git
 //! repositories under `/tmp` and fake indexers written per test (`test-integration-dir`,
-//! `test-fixture-raii`). The binary is started through `/bin/sh` closing exactly the
+//! `test-fixture-raii`). The binary is started through `/bin/bash` closing exactly the
 //! descriptors this test process inherited without `FD_CLOEXEC` (nextest under `flock(1)`
 //! leaks its lock fd), so the production descriptor policy (`Refuse`) holds in the child.
 //! The tier is whatever `doctor` selects on this host (`namespaces` where unprivileged user
@@ -163,7 +163,7 @@ fn kaban_index_env(home: &Path, args: &[&str], env: &[(&str, &str)]) -> Output {
         acc
     });
     let script = format!("exec{closes}\nexec \"$0\" \"$@\"\n");
-    let mut cmd = Command::new("/bin/sh");
+    let mut cmd = Command::new("/bin/bash");
     cmd.arg("-c")
         .arg(&script)
         .arg(env!("CARGO_BIN_EXE_kaban-index"))
@@ -203,7 +203,7 @@ fn kaban_index_bounded(
     let script = format!("exec{closes}\n{ulimit}exec \"$0\" \"$@\"\n");
     let out_path = dir.join("bounded.stdout");
     let err_path = dir.join("bounded.stderr");
-    let mut child = Command::new("/bin/sh")
+    let mut child = Command::new("/bin/bash")
         .arg("-c")
         .arg(&script)
         .arg(env!("CARGO_BIN_EXE_kaban-index"))
@@ -4214,10 +4214,19 @@ fn a_cached_toolchain_with_a_helper_linked_into_the_checkout_is_refused() {
     fake_indexer(&repo, "evil", "exit 0");
     std::os::unix::fs::symlink(repo.join("evil"), host_tools.join("compile")).unwrap();
     let marker = s.path().join("indexer-ran");
+    // Probe output remains observable when the namespace view makes the marker path read-only.
+    let probe_version = "test-scip-go-probed";
     let indexer = fake_indexer(
         &fakes(&s),
         "scip-go",
-        &format!("touch '{}'\nexit 0", marker.display()),
+        &format!(
+            r#"touch '{}' 2>/dev/null || true
+if [ "$1" = --version ] || [ "$2" = --help ]; then
+  echo '{probe_version}'
+fi
+exit 0"#,
+            marker.display()
+        ),
     );
     trust(&home, &repo);
     let env = [("GOMODCACHE", modcache.to_str().unwrap())];
@@ -4238,6 +4247,11 @@ fn a_cached_toolchain_with_a_helper_linked_into_the_checkout_is_refused() {
         stderr(&out).contains(&expected),
         "doctor does not show the tainted toolchain as admitted; expected {expected:?} in:\n{}",
         stderr(&out)
+    );
+    assert_eq!(
+        json(&out)["doctor"]["indexers"][0]["version"]["Err"],
+        "go_toolchain_too_old",
+        "doctor must refuse the toolchain before probing the indexer"
     );
     assert!(
         !marker.exists(),
@@ -4281,8 +4295,9 @@ fn a_cached_toolchain_with_a_helper_linked_into_the_checkout_is_refused() {
         "the benign toolchain is admitted; expected {row:?} in:\n{}",
         stderr(&out)
     );
-    assert!(
-        marker.exists(),
+    assert_eq!(
+        json(&out)["doctor"]["indexers"][0]["version"]["Ok"],
+        probe_version,
         "doctor probes the admitted benign toolchain's indexer"
     );
 }
@@ -4302,7 +4317,7 @@ fn an_inherited_descriptor_is_named_in_the_refusal() {
     });
     // a clean descriptor table, then fd 9 opened by the launcher without CLOEXEC
     let script = format!("exec{closes}\nexec 9>/dev/null\nexec \"$0\" \"$@\"\n");
-    let out = Command::new("/bin/sh")
+    let out = Command::new("/bin/bash")
         .arg("-c")
         .arg(&script)
         .arg(env!("CARGO_BIN_EXE_kaban-index"))

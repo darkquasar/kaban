@@ -64,7 +64,7 @@ const PDF_NOM: Exception = (("nom", "8.0.0"), ("pdf_oxide", "0.3.78"));
 const NOM_EXCEPTIONS: [Exception; 2] = [TANTIVY_NOM, PDF_NOM];
 
 /// Approved grant rows: the original deliveries plus the integration security fixes.
-const GRANT_ROWS: [&str; 7] = [
+const GRANT_ROWS: [&str; 8] = [
     "DI1.2/OWN60",
     "CG3.1",
     "DI2.1/OWN69",
@@ -72,6 +72,7 @@ const GRANT_ROWS: [&str; 7] = [
     "TANTIVY/OWN-J",
     "ZSTD/OWN-I",
     "SECURITY/20261028",
+    "SECURITY/20261029",
 ];
 
 const CRATES_IO: &str = "registry+https://github.com/rust-lang/crates.io-index";

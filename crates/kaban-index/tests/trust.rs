@@ -115,7 +115,7 @@ fn kaban_index(home: &Path, args: &[&str]) -> Output {
         acc
     });
     let script = format!("exec{closes}\nexec \"$0\" \"$@\"\n");
-    Command::new("/bin/sh")
+    Command::new("/bin/bash")
         .arg("-c")
         .arg(&script)
         .arg(env!("CARGO_BIN_EXE_kaban-index"))

@@ -859,13 +859,62 @@ fn non_cloexec_fds() -> Vec<u32> {
 
 const CLEAN_PROCESS_TEST: &str =
     "a_handle_child_in_a_clean_process_inherits_exactly_the_standard_descriptors";
+#[cfg(target_os = "linux")]
+const HIGH_FD_PROCESS_TEST: &str = "a_handle_child_cleans_an_inherited_high_descriptor";
+
+// GitHub's runner can leave descriptor 142 open. Start a real inherited-descriptor case,
+// then exercise the same cleanup launcher as the ordinary clean-process test below.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_handle_child_inherits_only_standard_descriptors_with_a_high_parent_descriptor() {
+    let scratch = Scratch::new("fds-high-parent");
+    let exe = std::env::current_exe().unwrap();
+    let mut s = spec(
+        Exec::Path(PathBuf::from("/bin/bash")),
+        &[
+            "-c",
+            "exec 142>/dev/null\nexec \"$1\" --exact \"$2\" --ignored --nocapture\n",
+            "bash",
+            &exe.to_string_lossy(),
+            HIGH_FD_PROCESS_TEST,
+        ],
+        &scratch.0,
+        Duration::from_secs(60),
+    );
+    s.stderr_cap = 64 * 1024;
+    s.inherited_fds = InheritedFds::Tolerate;
+    let outcome = run(s).unwrap();
+    let stdout = String::from_utf8_lossy(&outcome.stdout);
+    let stderr = String::from_utf8_lossy(&outcome.stderr);
+    assert_eq!(outcome.killed, None, "{stdout}\n{stderr}");
+    assert!(
+        outcome.status.unwrap().success(),
+        "the high-descriptor clean-process test failed:\n{stdout}\n{stderr}"
+    );
+    assert!(
+        stdout.contains("test result: ok. 1 passed"),
+        "the high-descriptor child test ran:\n{stdout}\n{stderr}"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "re-executed with descriptor 142 by the high-parent-descriptor test"]
+fn a_handle_child_cleans_an_inherited_high_descriptor() {
+    assert!(
+        non_cloexec_fds().contains(&142),
+        "the cleanup launcher must receive the real inherited high descriptor"
+    );
+    a_handle_child_inherits_only_the_standard_descriptors();
+}
 
 // slice 5c: descriptor lifecycle: under `Refuse`, a child started through a handle sees exactly
 // 0, 1, 2 and the directory descriptor `ls` opens itself; the handle and every descriptor Rust
 // opened are CLOEXEC and gone at exec. The assertion needs a process holding no non-CLOEXEC
 // descriptor, which the test runner does not guarantee (nextest under `flock(1)` leaks the lock
 // fd), so this test re-executes the test binary for the ignored clean-process test below
-// through `run` itself, with a shell closing exactly the leaked descriptors before the exec.
+// through `run` itself, with Bash closing exactly the leaked descriptors before the exec.
+// Bash accepts arbitrary descriptor numbers; `/bin/sh` may only accept single digits.
 #[cfg(target_os = "linux")]
 #[test]
 fn a_handle_child_inherits_only_the_standard_descriptors() {
@@ -878,11 +927,11 @@ fn a_handle_child_inherits_only_the_standard_descriptors() {
     });
     let script = format!("exec{closes}\nexec \"$1\" --exact \"$2\" --ignored --nocapture\n");
     let mut s = spec(
-        Exec::Path(PathBuf::from("/bin/sh")),
+        Exec::Path(PathBuf::from("/bin/bash")),
         &[
             "-c",
             &script,
-            "sh",
+            "bash",
             &exe.to_string_lossy(),
             CLEAN_PROCESS_TEST,
         ],

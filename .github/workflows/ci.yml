@@ -21,6 +21,12 @@ jobs:
     name: Rust gates (scripts/ci/ci.sh)
     runs-on: ubuntu-24.04
     timeout-minutes: 90
+    env:
+      # Hundreds of linked integration-test binaries must fit the hosted runner's disk.
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_DEV_STRIP: "symbols"
+      CARGO_INCREMENTAL: "0"
+      CARGO_BUILD_JOBS: "2"
     steps:
       - uses: actions/checkout@v4
 
@@ -34,6 +40,10 @@ jobs:
         run: rustup show active-toolchain || rustup toolchain install
 
       - uses: Swatinem/rust-cache@v2
+
+      # Offline dependency inspections also traverse non-host target dependencies.
+      - name: Fetch locked dependencies
+        run: cargo fetch --locked
 
       - name: Install cargo-nextest and cargo-deny
         uses: taiki-e/install-action@v2

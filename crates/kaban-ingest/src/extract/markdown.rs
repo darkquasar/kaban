@@ -17,7 +17,7 @@ use pulldown_cmark::{
 use serde_json::Value;
 use std::ops::Range;
 
-/// `.md` / `.markdown` through `pulldown-cmark 0.13.4`.
+/// `.md` / `.markdown` through `pulldown-cmark 0.13.5`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct MarkdownExtractor;
 
@@ -25,7 +25,7 @@ impl super::private::Sealed for MarkdownExtractor {}
 
 impl Extractor for MarkdownExtractor {
     fn id(&self) -> &'static str {
-        "pulldown-cmark@0.13.4"
+        "pulldown-cmark@0.13.5"
     }
 
     fn formats(&self) -> &'static [Format] {
