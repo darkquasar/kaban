@@ -4214,10 +4214,19 @@ fn a_cached_toolchain_with_a_helper_linked_into_the_checkout_is_refused() {
     fake_indexer(&repo, "evil", "exit 0");
     std::os::unix::fs::symlink(repo.join("evil"), host_tools.join("compile")).unwrap();
     let marker = s.path().join("indexer-ran");
+    // Probe output remains observable when the namespace view makes the marker path read-only.
+    let probe_version = "test-scip-go-probed";
     let indexer = fake_indexer(
         &fakes(&s),
         "scip-go",
-        &format!("touch '{}'\nexit 0", marker.display()),
+        &format!(
+            r#"touch '{}' 2>/dev/null || true
+if [ "$1" = --version ] || [ "$2" = --help ]; then
+  echo '{probe_version}'
+fi
+exit 0"#,
+            marker.display()
+        ),
     );
     trust(&home, &repo);
     let env = [("GOMODCACHE", modcache.to_str().unwrap())];
@@ -4238,6 +4247,11 @@ fn a_cached_toolchain_with_a_helper_linked_into_the_checkout_is_refused() {
         stderr(&out).contains(&expected),
         "doctor does not show the tainted toolchain as admitted; expected {expected:?} in:\n{}",
         stderr(&out)
+    );
+    assert_eq!(
+        json(&out)["doctor"]["indexers"][0]["version"]["Err"],
+        "go_toolchain_too_old",
+        "doctor must refuse the toolchain before probing the indexer"
     );
     assert!(
         !marker.exists(),
@@ -4281,8 +4295,9 @@ fn a_cached_toolchain_with_a_helper_linked_into_the_checkout_is_refused() {
         "the benign toolchain is admitted; expected {row:?} in:\n{}",
         stderr(&out)
     );
-    assert!(
-        marker.exists(),
+    assert_eq!(
+        json(&out)["doctor"]["indexers"][0]["version"]["Ok"],
+        probe_version,
         "doctor probes the admitted benign toolchain's indexer"
     );
 }

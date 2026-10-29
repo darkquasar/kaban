@@ -35,7 +35,8 @@ step() {
 }
 
 have_cargo_subcommand() {
-  "${CARGO:-cargo}" --list 2>/dev/null | awk '{print $1}' | grep -qx "$1"
+  # CI colors human-facing Cargo output; command names here must remain plain text.
+  CARGO_TERM_COLOR=never "${CARGO:-cargo}" --list 2>/dev/null | awk '{print $1}' | grep -qx "$1"
 }
 
 step "${CARGO:-cargo}" fmt --all --check
