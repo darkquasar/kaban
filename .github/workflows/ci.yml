@@ -35,8 +35,14 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends musl-tools jq sqlite3 python3
 
-      - name: Install verified Go toolchain and producer
+      - name: Prepare trusted language tools
         run: |
+          # The image's cached Node may be group/other-writable or owned by the
+          # image-builder user. Normalize that executable before Kaban admits it.
+          node_exe=$(readlink -f "$(command -v node)")
+          sudo chown root:root "$node_exe"
+          sudo chmod go-w "$node_exe"
+          stat -Lc 'Node executable: mode=%a uid=%u gid=%g' "$node_exe"
           # The namespace view already exposes /usr/lib read-only. Keep Go's
           # root there so version probes can read it with a minimal fixture PATH.
           go_root=$(sudo bash scripts/ci/install-go.sh /usr/lib/kaban-ci-go-1.26.0)

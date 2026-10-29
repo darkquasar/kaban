@@ -23,6 +23,8 @@ read Go's root; some fixtures also use a minimal system PATH. Kaban's executable
 trust checks remain in force. Use the same Go location in an sbx clone, with a
 private producer directory under `/tmp`; export Go's `bin` on PATH and the
 producer's absolute path as `SCIP_GO`.
+CI also makes the image's resolved Node executable root-owned and removes
+group/other write permissions before running TypeScript tests.
 
 The CLI's fifty-write timing check allows 13 seconds; its single-write limit and
 the MCP timing limits are unchanged. These prerequisites do not enable namespaces:
