@@ -1,0 +1,33 @@
+---
+source: crates/kaban-ingest/tests/ingest_finish.rs
+expression: snapshot
+---
+{
+  "assertions": 6,
+  "changes": {
+    "first_seq": "<FIRST_SEQ>",
+    "last_seq": "<LAST_SEQ>"
+  },
+  "created": 2,
+  "deleted_edges": 0,
+  "edges": 4,
+  "evidence_dropped": {},
+  "job": "<JOB>",
+  "orphans": [],
+  "predecessor_terminal": 0,
+  "receipt": {
+    "instance_id": "<INSTANCE_ID>",
+    "outcome": "committed",
+    "pack_lineage_id": "<PACK_LINEAGE_ID>",
+    "seq": "<LAST_SEQ>"
+  },
+  "reconcile": "complete",
+  "redactions": 0,
+  "retired_assertions": 0,
+  "revision_candidates": 0,
+  "skipped": {},
+  "status": "finished",
+  "submits": 2,
+  "unchanged": 0,
+  "updated": 0
+}

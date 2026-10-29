@@ -1,0 +1,140 @@
+---
+source: crates/kaban-ingest/tests/golden_markdown.rs
+expression: first
+---
+{
+  "path": "docs/mixed.md",
+  "source_id": "5cbbfb1a01e6e244da3bee84b164fd52428ae02d046a38945c699b0fced4de3e",
+  "document_id": "7ee63ff4-3819-7f78-925d-a706438cef15",
+  "title": "Mixed fixture",
+  "content_hash": "631b5e0f3201d2517fecd457bae8214ee24b0f4eea10faf9e54a89f19d9b5e27",
+  "sections": [
+    {
+      "id": "a09e8f0f-e66e-75d8-a626-ae8579224527",
+      "heading_path": [],
+      "kind": "frontmatter"
+    },
+    {
+      "id": "b8815103-682f-70c7-b4e5-8631da171ece",
+      "heading_path": [
+        "Mixed note"
+      ],
+      "kind": "heading"
+    },
+    {
+      "id": "907c531b-3131-7448-ae63-d4b0a9c92026",
+      "heading_path": [
+        "Mixed note",
+        "Code"
+      ],
+      "kind": "heading"
+    },
+    {
+      "id": "5a3501db-ad1d-7d8c-801a-ffae1463d8be",
+      "heading_path": [
+        "Mixed note",
+        "Table"
+      ],
+      "kind": "heading"
+    }
+  ],
+  "chunks": [
+    {
+      "id": "181964e8-9f87-7f40-8c67-fc0b117cb6f2",
+      "section": "b8815103-682f-70c7-b4e5-8631da171ece",
+      "kind": "text",
+      "token_estimate": 19
+    },
+    {
+      "id": "c3f0bc82-5d9b-79e9-bc00-c5466fbe30d4",
+      "section": "907c531b-3131-7448-ae63-d4b0a9c92026",
+      "kind": "{\"code\":{\"lang\":\"rust\"}}",
+      "token_estimate": 14
+    },
+    {
+      "id": "178a6aaa-72d9-7614-8720-7410c1d09a75",
+      "section": "5a3501db-ad1d-7d8c-801a-ffae1463d8be",
+      "kind": "table",
+      "token_estimate": 8
+    },
+    {
+      "id": "fe21d8a9-e5a8-76b8-8a00-9b3523a3985a",
+      "section": "5a3501db-ad1d-7d8c-801a-ffae1463d8be",
+      "kind": "text",
+      "token_estimate": 12
+    }
+  ],
+  "edges": {
+    "LINKS_TO": [
+      [
+        "7ee63ff4-3819-7f78-925d-a706438cef15",
+        "9d485a23-f7cc-7c39-8146-61604e1a6f9c"
+      ],
+      [
+        "7ee63ff4-3819-7f78-925d-a706438cef15",
+        "7043509c-b2fa-7044-9cce-d1d446da4f1b"
+      ]
+    ],
+    "NEXT": [
+      [
+        "a09e8f0f-e66e-75d8-a626-ae8579224527",
+        "b8815103-682f-70c7-b4e5-8631da171ece"
+      ],
+      [
+        "907c531b-3131-7448-ae63-d4b0a9c92026",
+        "5a3501db-ad1d-7d8c-801a-ffae1463d8be"
+      ],
+      [
+        "178a6aaa-72d9-7614-8720-7410c1d09a75",
+        "fe21d8a9-e5a8-76b8-8a00-9b3523a3985a"
+      ]
+    ],
+    "PART_OF": [
+      [
+        "a09e8f0f-e66e-75d8-a626-ae8579224527",
+        "7ee63ff4-3819-7f78-925d-a706438cef15"
+      ],
+      [
+        "b8815103-682f-70c7-b4e5-8631da171ece",
+        "7ee63ff4-3819-7f78-925d-a706438cef15"
+      ],
+      [
+        "181964e8-9f87-7f40-8c67-fc0b117cb6f2",
+        "b8815103-682f-70c7-b4e5-8631da171ece"
+      ],
+      [
+        "907c531b-3131-7448-ae63-d4b0a9c92026",
+        "7ee63ff4-3819-7f78-925d-a706438cef15"
+      ],
+      [
+        "c3f0bc82-5d9b-79e9-bc00-c5466fbe30d4",
+        "907c531b-3131-7448-ae63-d4b0a9c92026"
+      ],
+      [
+        "5a3501db-ad1d-7d8c-801a-ffae1463d8be",
+        "7ee63ff4-3819-7f78-925d-a706438cef15"
+      ],
+      [
+        "178a6aaa-72d9-7614-8720-7410c1d09a75",
+        "5a3501db-ad1d-7d8c-801a-ffae1463d8be"
+      ],
+      [
+        "fe21d8a9-e5a8-76b8-8a00-9b3523a3985a",
+        "5a3501db-ad1d-7d8c-801a-ffae1463d8be"
+      ]
+    ],
+    "TAGGED": [
+      [
+        "7ee63ff4-3819-7f78-925d-a706438cef15",
+        "80648bc2-5e4c-74c4-bd42-93163408b159"
+      ]
+    ]
+  },
+  "tags": [
+    "golden"
+  ],
+  "links": [
+    "headings",
+    "links"
+  ]
+}

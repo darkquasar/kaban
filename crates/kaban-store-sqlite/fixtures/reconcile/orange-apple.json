@@ -1,0 +1,40 @@
+{
+  "source": "engine-spec EN-F13 'orange or apple'; the integers (S, P, margin) of every span are pinned at the core level by crates/kaban-core/fixtures/reconcile/orange-apple.json (E2.1, tests/reconcile_props.rs); this file is the store-level materialisation: the a1..a7 rows as BatchAssertion input and the persisted outcome of each span and variant, since E2.5 the graph level too (EN-F13 span-winner materialisation: `edges` rows are [src text, rel, dst text, layer, method, score in units of 1/10000, offset, len]; `records` rows are [kind, text, governance]; `object` names a row of `nodes`, the entity the producer resolved)",
+  "chunk": {"id": "c17", "text": "We moved the macOS jobs to apple silicon runners; the orange team keeps the Intel pool."},
+  "nodes": {
+    "apple": {"id": "01a17a03-5344-7000-8000-00000000000a", "kind": "infra:Vendor", "text": "Apple Inc."}
+  },
+  "ontology": "ontology: infra\nversion: 1\nrels: {}\nkinds:\n  Vendor: {description: vendor, min_confidence: 0.6}\n  Team: {description: team, min_confidence: 0.6}\n  Hardware: {description: hardware, min_confidence: 0.6}\n",
+  "assertions": [
+    {"id": "a1", "offset": 27, "len": 5, "value": "infra:Vendor", "layer": "gazetteer", "method": "alias", "raw_score": 4500, "lineage_id": "a1", "object": "apple"},
+    {"id": "a2", "offset": 27, "len": 5, "value": "x:Fruit", "layer": "gliner", "method": "gliner", "raw_score": 6200, "lineage_id": "a2"},
+    {"id": "a3", "offset": 27, "len": 5, "value": "infra:Vendor", "layer": "gliner", "method": "gliner", "raw_score": 5800, "lineage_id": "a3", "object": "apple"},
+    {"id": "a4", "offset": 27, "len": 13, "value": "infra:Hardware", "layer": "llm", "method": "llm", "raw_score": 9000, "lineage_id": "a4"},
+    {"id": "a5", "offset": 56, "len": 6, "value": "x:Fruit", "layer": "gliner", "method": "gliner", "raw_score": 6600, "lineage_id": "a5"},
+    {"id": "a6", "offset": 56, "len": 6, "value": "infra:Team", "layer": "llm", "method": "llm", "raw_score": 8500, "lineage_id": "a6"},
+    {"id": "a7", "offset": 56, "len": 6, "value": "infra:Vendor", "layer": "gazetteer", "method": "alias", "raw_score": 4000, "lineage_id": "a7"}
+  ],
+  "human_first": {"id": "h1", "offset": 27, "len": 5, "value": "infra:Vendor", "layer": "human", "method": "link", "raw_score": 10000, "lineage_id": "human:cli:1", "rank": "preferred", "object": "apple"},
+  "human_first_edges": [["c17", "MENTIONS", "Apple Inc.", "human", "reconciled", 10000, 27, 5]],
+  "variants": {
+    "forward": {
+      "submit": ["a1", "a2", "a3", "a4", "a5", "a6", "a7"],
+      "statuses": {"a1": "winner", "a2": "dissent", "a3": "dissent", "a4": "winner", "a5": "candidate", "a6": "candidate", "a7": "candidate"},
+      "verdicts": {"winner": 2, "candidate": 1},
+      "review_rows": [],
+      "edges": [
+        ["c17", "EVIDENCE_FOR", "apple silicon", "llm", "reconciled", 10000, 27, 13],
+        ["c17", "MENTIONS", "Apple Inc.", "gazetteer", "reconciled", 6556, 27, 5]
+      ],
+      "records": [["infra:Hardware", "apple silicon", "proposed"]]
+    },
+    "without_llm": {
+      "submit": ["a1", "a2", "a3", "a5", "a7"],
+      "statuses": {"a1": "winner", "a2": "dissent", "a3": "dissent", "a5": "candidate", "a7": "candidate"},
+      "verdicts": {"winner": 1, "candidate": 1},
+      "review_rows": [],
+      "edges": [["c17", "MENTIONS", "Apple Inc.", "gazetteer", "reconciled", 6556, 27, 5]],
+      "records": []
+    }
+  }
+}

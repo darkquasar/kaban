@@ -1,0 +1,6 @@
+{
+  "name": "@example/drivers",
+  "version": "1.0.0",
+  "private": true,
+  "description": "kaban code-graph TypeScript fixture (stage1-spec 8.1); imports nothing"
+}

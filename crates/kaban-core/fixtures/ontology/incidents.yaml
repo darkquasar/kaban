@@ -1,0 +1,23 @@
+# E1.4 fixture (engine-spec EN-F4 slices): a user ontology whose `Incident` carries the
+# governance mixin (`acceptance: human`, serialized), whose `Outage` is governed without a file
+# (`serialize: none`), whose `Decision` deliberately has NO mixin (the negative: a governed name
+# in another namespace is `governance: none`), and whose `REPLACES` archives its target like
+# `SUPERSEDES` (`on_link: archive_target`) while `MENTIONED_IN` has no side effect. Stored
+# names: `incidents:Incident`, `incidents:REPLACES`, ...
+ontology: incidents
+version: 1
+kinds:
+  Incident:
+    description: "A production incident."
+    governed: {acceptance: human, serialize: {dir: incidents, format: md-frontmatter},
+               export: {digest: false, marker: true, heading: Incidents}, display: {label: Incident, plural: Incidents},
+               governs_paths: true, dedup: none}
+  Outage:
+    description: "An outage record kept in the store only."
+    governed: {acceptance: agent, serialize: none, export: {digest: false, marker: false},
+               display: {label: Outage, plural: Outages}, governs_paths: false, dedup: none}
+  Decision:
+    description: "A decision taken during an incident (not governed: no mixin)."
+rels:
+  REPLACES: {from: [], to: [], directed: true, description: "A newer record replaces the target.", on_link: archive_target}
+  MENTIONED_IN: {from: [], to: [], directed: true, description: "Mentioned in another record."}

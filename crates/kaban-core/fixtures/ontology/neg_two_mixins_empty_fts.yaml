@@ -1,0 +1,8 @@
+ontology: shop
+version: 1
+mixins:
+  Quiet: {fts_fields: []}
+  Loud: {fts_fields: [props.title]}
+kinds:
+  Thing: {description: "a thing", mixins: [Quiet, Loud]}
+rels: {}

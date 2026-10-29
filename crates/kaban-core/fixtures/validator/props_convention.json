@@ -1,0 +1,72 @@
+[
+ {
+  "name": "full",
+  "props": {
+   "decision": "use sqlite",
+   "rule": "one file",
+   "rationale": "portable",
+   "rejected_alternatives": [
+    "postgres"
+   ],
+   "consequences": "single writer",
+   "exceptions": [
+    "tests"
+   ],
+   "evidence": [
+    {
+     "id": "cr1",
+     "quote": "fn main"
+    },
+    {
+     "id": "ch2"
+    }
+   ],
+   "accepted_commit": "deadbeef"
+  }
+ },
+ {
+  "name": "empty object",
+  "props": {}
+ },
+ {
+  "name": "no rationale is fine",
+  "props": {
+   "rule": "x"
+  }
+ },
+ {
+  "name": "unknown key",
+  "props": {
+   "rule": "x",
+   "extra": 1
+  }
+ },
+ {
+  "name": "rule wrong type",
+  "props": {
+   "rule": 1
+  }
+ },
+ {
+  "name": "evidence missing id",
+  "props": {
+   "evidence": [
+    {}
+   ]
+  }
+ },
+ {
+  "name": "exceptions not strings",
+  "props": {
+   "exceptions": [
+    true
+   ]
+  }
+ },
+ {
+  "name": "accepted_commit not hex is accepted by the struct and the loose golden",
+  "props": {
+   "accepted_commit": "zzz"
+  }
+ }
+]

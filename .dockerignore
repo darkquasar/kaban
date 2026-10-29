@@ -1,0 +1,9 @@
+target/
+.git/
+reviews/
+docs/
+*.db
+*.db-wal
+*.db-shm
+*.audit.jsonl
+*.audit.jsonl.key

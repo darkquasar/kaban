@@ -1,0 +1,4 @@
+SYNTHETIC WALKTHROUGH PROVENANCE ONLY — not a protobuf SCIP index.
+Never decoded by the engine or an indexer. shop_rows.rs supplies typed snapshot rows.
+Initial: CartService::apply_discount, price_lines, six Cart aliases.
+Rename: CartService::apply_promotion replaces the discount symbol; no guessed join.

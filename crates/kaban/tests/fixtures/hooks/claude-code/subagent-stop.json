@@ -1,0 +1,14 @@
+{
+  "session_id": "sess-claude-0005",
+  "transcript_path": "/invented/home/.claude/projects/nightjar-service/sess-claude-0005.jsonl",
+  "cwd": "/invented/repo/nightjar-service",
+  "permission_mode": "default",
+  "hook_event_name": "SubagentStop",
+  "agent_id": "agent-invented-01",
+  "agent_type": "reviewer",
+  "stop_hook_active": false,
+  "agent_transcript_path": "/invented/home/.claude/projects/nightjar-service/agent-invented-01.jsonl",
+  "last_assistant_message": "Reviewed the store module: the WAL retry loop needs a bound on its backoff.",
+  "background_tasks": [],
+  "session_crons": []
+}

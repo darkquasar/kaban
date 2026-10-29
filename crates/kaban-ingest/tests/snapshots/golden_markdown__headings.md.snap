@@ -1,0 +1,167 @@
+---
+source: crates/kaban-ingest/tests/golden_markdown.rs
+expression: first
+---
+{
+  "path": "docs/headings.md",
+  "source_id": "350df2a7672b767955934b4ce29fb9869c808148440416113e881d58f7167c79",
+  "document_id": "9d485a23-f7cc-7c39-8146-61604e1a6f9c",
+  "title": "Project notes",
+  "content_hash": "4d7d16cb38601825fdb83edfd8ea2d8732c29d321ff7f1abcfa1acd95c4ce53c",
+  "sections": [
+    {
+      "id": "e162bac7-b86c-7c50-a3d4-f67115cd1cb6",
+      "heading_path": [
+        "Project notes"
+      ],
+      "kind": "heading"
+    },
+    {
+      "id": "b23f0f9b-c6ed-732f-bf07-ae8c796ec484",
+      "heading_path": [
+        "Project notes",
+        "Setup"
+      ],
+      "kind": "heading"
+    },
+    {
+      "id": "fd462031-479a-7e76-9d12-2ed646c65427",
+      "heading_path": [
+        "Project notes",
+        "Setup",
+        "Linux"
+      ],
+      "kind": "heading"
+    },
+    {
+      "id": "4fff54db-3eec-7079-8be0-d57638e4d5e1",
+      "heading_path": [
+        "Project notes",
+        "Setup",
+        "macOS"
+      ],
+      "kind": "heading"
+    },
+    {
+      "id": "aae8d7bb-be91-758b-87ed-a60e42c5dcea",
+      "heading_path": [
+        "Project notes",
+        "Usage"
+      ],
+      "kind": "heading"
+    },
+    {
+      "id": "c768abc6-8e42-7e4e-ae0b-e2affc15587e",
+      "heading_path": [
+        "Appendix"
+      ],
+      "kind": "heading"
+    }
+  ],
+  "chunks": [
+    {
+      "id": "7f842091-b350-71f4-8d1a-9af0fb17b85e",
+      "section": "e162bac7-b86c-7c50-a3d4-f67115cd1cb6",
+      "kind": "text",
+      "token_estimate": 10
+    },
+    {
+      "id": "c4021831-dc7f-7d2e-95ca-6ae100e4fa76",
+      "section": "b23f0f9b-c6ed-732f-bf07-ae8c796ec484",
+      "kind": "text",
+      "token_estimate": 13
+    },
+    {
+      "id": "62ae7e08-83c8-7eec-b62c-d316eeb2854a",
+      "section": "fd462031-479a-7e76-9d12-2ed646c65427",
+      "kind": "text",
+      "token_estimate": 6
+    },
+    {
+      "id": "01804c13-e1ea-73f8-afd5-9c517d60e557",
+      "section": "4fff54db-3eec-7079-8be0-d57638e4d5e1",
+      "kind": "text",
+      "token_estimate": 4
+    },
+    {
+      "id": "27a14f09-c43f-70a5-a04d-12f943056aab",
+      "section": "aae8d7bb-be91-758b-87ed-a60e42c5dcea",
+      "kind": "text",
+      "token_estimate": 3
+    },
+    {
+      "id": "19144e9b-3a8b-7f48-9654-a637be62d568",
+      "section": "c768abc6-8e42-7e4e-ae0b-e2affc15587e",
+      "kind": "text",
+      "token_estimate": 3
+    }
+  ],
+  "edges": {
+    "NEXT": [
+      [
+        "fd462031-479a-7e76-9d12-2ed646c65427",
+        "4fff54db-3eec-7079-8be0-d57638e4d5e1"
+      ],
+      [
+        "b23f0f9b-c6ed-732f-bf07-ae8c796ec484",
+        "aae8d7bb-be91-758b-87ed-a60e42c5dcea"
+      ],
+      [
+        "e162bac7-b86c-7c50-a3d4-f67115cd1cb6",
+        "c768abc6-8e42-7e4e-ae0b-e2affc15587e"
+      ]
+    ],
+    "PART_OF": [
+      [
+        "e162bac7-b86c-7c50-a3d4-f67115cd1cb6",
+        "9d485a23-f7cc-7c39-8146-61604e1a6f9c"
+      ],
+      [
+        "7f842091-b350-71f4-8d1a-9af0fb17b85e",
+        "e162bac7-b86c-7c50-a3d4-f67115cd1cb6"
+      ],
+      [
+        "b23f0f9b-c6ed-732f-bf07-ae8c796ec484",
+        "9d485a23-f7cc-7c39-8146-61604e1a6f9c"
+      ],
+      [
+        "c4021831-dc7f-7d2e-95ca-6ae100e4fa76",
+        "b23f0f9b-c6ed-732f-bf07-ae8c796ec484"
+      ],
+      [
+        "fd462031-479a-7e76-9d12-2ed646c65427",
+        "9d485a23-f7cc-7c39-8146-61604e1a6f9c"
+      ],
+      [
+        "62ae7e08-83c8-7eec-b62c-d316eeb2854a",
+        "fd462031-479a-7e76-9d12-2ed646c65427"
+      ],
+      [
+        "4fff54db-3eec-7079-8be0-d57638e4d5e1",
+        "9d485a23-f7cc-7c39-8146-61604e1a6f9c"
+      ],
+      [
+        "01804c13-e1ea-73f8-afd5-9c517d60e557",
+        "4fff54db-3eec-7079-8be0-d57638e4d5e1"
+      ],
+      [
+        "aae8d7bb-be91-758b-87ed-a60e42c5dcea",
+        "9d485a23-f7cc-7c39-8146-61604e1a6f9c"
+      ],
+      [
+        "27a14f09-c43f-70a5-a04d-12f943056aab",
+        "aae8d7bb-be91-758b-87ed-a60e42c5dcea"
+      ],
+      [
+        "c768abc6-8e42-7e4e-ae0b-e2affc15587e",
+        "9d485a23-f7cc-7c39-8146-61604e1a6f9c"
+      ],
+      [
+        "19144e9b-3a8b-7f48-9654-a637be62d568",
+        "c768abc6-8e42-7e4e-ae0b-e2affc15587e"
+      ]
+    ]
+  },
+  "tags": [],
+  "links": []
+}

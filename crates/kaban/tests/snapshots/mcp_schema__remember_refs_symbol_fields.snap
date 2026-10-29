@@ -1,0 +1,28 @@
+---
+source: crates/kaban/tests/mcp_schema.rs
+assertion_line: 82
+expression: fields
+---
+{
+  "observed_at": {
+    "description": "When the reference was observed, RFC 3339 (stage1-spec §4.4); `remember` sets it when\nabsent.",
+    "type": [
+      "string",
+      "null"
+    ]
+  },
+  "snapshot_commit": {
+    "description": "Snapshot commit, 7 to 64 lowercase hex (SO-2): a short value is canonicalised to the\n40-hex commit it uniquely prefixes; stored as 40 hex.",
+    "type": [
+      "string",
+      "null"
+    ]
+  },
+  "symbol": {
+    "description": "SCIP symbol (stage1-spec G1-F9): content, scanned first, then grammar-checked\n(`symbol_invalid`); derived from `relative_path` and `name_path` when absent and a\nsnapshot resolves.",
+    "type": [
+      "string",
+      "null"
+    ]
+  }
+}

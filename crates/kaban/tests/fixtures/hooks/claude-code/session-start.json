@@ -1,0 +1,9 @@
+{
+  "session_id": "sess-claude-0002",
+  "transcript_path": "/invented/home/.claude/projects/nightjar-service/sess-claude-0002.jsonl",
+  "cwd": "/invented/repo/nightjar-service",
+  "scratchpad_dir": "/invented/home/.claude/scratch/sess-claude-0002",
+  "permission_mode": "default",
+  "hook_event_name": "SessionStart",
+  "source": "startup"
+}

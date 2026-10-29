@@ -1,0 +1,3 @@
+# v4 CG4.2 adds this key (the `index.trigram` opt-in it came with is gone since spec 05 OWN-M)
+index:
+  isolation: preferred

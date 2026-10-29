@@ -1,0 +1,29 @@
+commit	abababababababababababababababababababab
+counts:duplicates_skipped	0
+counts:edges	160
+counts:files	5
+counts:grammar_skipped_relationships	0
+counts:grammar_skipped_rows	0
+counts:label_from_descriptor	13
+counts:language_from_extension	5
+counts:malformed_range_skipped	0
+counts:occurrences	131
+counts:placeholder_rows	7
+counts:policy_dropped	2
+counts:policy_redacted_meta	0
+counts:policy_skipped_row	0
+counts:policy_skipped_source	0
+counts:source_classified_by_path	0
+counts:symbols	45
+indexer:typescript	scip-typescript 0.4.0
+isolation	none
+isolation_detail	test
+kaban_index_version	3.0.0-alpha.1
+languages	typescript
+policy_version	test
+repo_id	0123456789abcdef0123456789abcdef
+resources	
+schema_version	1
+scip_range_form	legacy
+scip_version	0.10.0
+symbols_fts_version	1

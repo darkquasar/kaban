@@ -1,0 +1,8 @@
+ontology: shop
+version: 1
+mixins:
+  Loud: {rank: {boost: 2.0}}
+  Louder: {rank: {boost: 3.0}}
+kinds:
+  Thing: {description: "a thing", mixins: [Loud, Louder]}
+rels: {}

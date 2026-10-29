@@ -1,0 +1,158 @@
+---
+title: "kaban-index CLI"
+description: "Verbs, flags, the JSON report, doctor rows, exit codes and the fixed classes of the code-graph producer."
+---
+
+`kaban-index` (3.0.0-alpha.1) writes per-commit code-graph snapshots under
+`$KABAN_HOME/codegraph/<repo-id>/` and never runs unless you call it. Every verb
+prints one JSON report on stdout and fixed texts on stderr: no repository path,
+commit argument, indexer output or configuration value is echoed by an error, and
+everything printed passes the policy in effect first. This page is the reference;
+the [guide](../guides/code-graph.mdx) explains the flow.
+
+## Verbs
+
+| Verb | What it does | Exit |
+| --- | --- | --- |
+| `trust [--repo P]` | Prints the trust text and records the mark; the mark binds the repository's common directory and root commits, never a path | 0, 4 |
+| `untrust [--repo P]` | Removes the mark | 0, 4 |
+| `index [--repo P] [--commit SHA\|HEAD] [--languages L] [--timeout DUR] [--indexer LANG=PATH]... [--partial] [--isolation preferred\|required\|off]` | Indexes the checked-out commit into `<commit40>.cg.db`, then applies `gc --keep 5` | table below |
+| `status [--repo P]` | Trust state, live repository path (scanned, never persisted), identity validation and every snapshot's `isolation`, `isolation_detail`, `resources`, `languages`, size and state | 0, 4 |
+| `gc [--repo P] [--keep N] [--dry-run] [--prune-corrupt] [--stale-policy]` | Keeps HEAD's snapshot plus the `N` most recent by commit date (default 5); collects the rest; also sweeps the left-overs of killed runs | 0, 4, 5 |
+| `purge-derived [--repo P]` | Deletes every derived file of the repository (snapshots, logs, markers, scratch); the trust mark stays | 0, 4, 5 |
+| `doctor [--repo P] [--indexer LANG=PATH]...` | Configuration in effect and overrides, detected languages and indexers, every tier's probe, the tier `index` would select, platform notes, trust and identity, the trust text | 0, 4 |
+
+`--policy <file>` (a global option, also accepted after the verb) loads a denylist
+policy; without it the builtin rules apply. `KABAN_POLICY` is not read. `--repo`
+defaults to the working directory.
+
+### Flags of `index`
+
+| Flag | Meaning |
+| --- | --- |
+| `--commit <COMMIT>` | The commit to index; must equal the checked-out `HEAD` (default `HEAD`) |
+| `--languages <L>` (alias `--lang`) | `go`, `ts` or `typescript`, `rust`; comma-separated; default: detected. One language per snapshot |
+| `--timeout <DUR>` | Hard deadline per indexer run (`600`, `600s`, `10m`, `1h`); overrides `index.deadline_secs` |
+| `--indexer <lang>=<absolute path>` | Use this indexer for the language instead of the `PATH` lookup |
+| `--partial` | Write the snapshot from the languages that succeeded when another failed (an isolation refusal is never skipped) |
+| `--isolation preferred\|required\|off` | Override `index.isolation` for this run |
+
+The language detection markers: `go.mod`; `package.json` or `tsconfig.json`;
+`Cargo.toml`. A repository with two languages needs `--languages` or `--partial`;
+otherwise the run is `multi_language_not_in_this_release`.
+
+## The JSON report
+
+`index` prints one document:
+
+```text
+{verb, ok, class?, reason?, repo_id, commit, languages[],
+ counts{files, symbols, edges, occurrences, snippets, placeholder_rows, ...derivation counters},
+ snapshot_bytes, wall_ms_per_indexer{lang}, peak_rss_bytes_per_indexer{lang},
+ skipped_targets_per_indexer{lang: [names]}, nested_workspaces[paths],
+ failure_per_indexer{lang: {signal, exit_code, peak_rss_bytes, observed_scratch_bytes, quota_breached, wall_ms}},
+ policy_scan,
+ policy_redacted_meta_per_indexer{lang: [rule ids]}?, policy_skipped_source_per_indexer{lang: [rule ids]}?,
+ source_classified_by_path_per_indexer{lang: n}?,
+ isolation, isolation_detail, resources[], cgo_enabled?, failed{lang: class}?,
+ overrides[[key, value]], warnings[], exit, gc{keep, collect, removed, swept_leftovers}}
+```
+
+- `resources` lists the read-only inputs the runs were given: `toolchain`,
+  `modcache` (Go), `registry` (Rust). There is no cache flag and no `caches` field.
+- `nested_workspaces` (2026-10-26, NEST-1) lists the Cargo workspaces found under the
+  checkout that this run did not index (for example `tools/kaban-rust-scip` in kaban itself);
+  the snapshot carries the count as `coverage:nested_workspaces_not_indexed` and the list as
+  `coverage:nested_workspace_paths`, and every `code_*` answer's `coverage` note counts them.
+- `failure_per_indexer` (2026-10-26, PERF-1) is present when a language ended `indexer_failed`
+  or `indexer_timeout`: how the child died (signal or exit code), its peak RSS, the scratch it
+  used, whether a quota was breached (never, for these two classes) and its wall time; stderr
+  says the same in plain words, for example `rust indexer failed: killed by signal 9 after 136 s
+  (peak RSS 2.1 GB, scratch 1.2 GB, no quota breach; the host was probably out of memory)`.
+- `skipped_targets_per_indexer.rust` names the Cargo targets whose
+  `required-features` are inactive; nothing to act on.
+- `policy_scan` mirrors `index.policy_scan`: `false` means the content policy did not
+  scan the output; `true` means hits were masked and counted, with the rule ids per
+  language in the two `policy_*_per_indexer` maps.
+- `source_classified_by_path_per_indexer` counts Rust files over the test
+  classifier's per-file bound (16,384 raw open delimiters, 131,072 tokens), classified
+  as test or production by their path only.
+- `cgo_enabled` is a Go run's effective setting as a fixed word: `0` or `1`,
+  `autodetect` (unset on the `none` tier) or `caller`. Under `namespaces` an unset
+  `CGO_ENABLED` becomes `0`.
+- `overrides` lists every `index.*` key whose value differs from the default, the
+  per-run `--isolation` and `--timeout` included.
+- `warnings` holds fixed classes only: `policy_skipped_row`, `policy_dropped`,
+  `grammar_skipped_row`, `isolation_none`, `partial`, `toolchain_root_refused`,
+  `coverage_invalid` (the producer's coverage sidecar was malformed: no `coverage:*`
+  row is published rather than a wrong figure), `gc_failed`.
+
+A successful `index` applies `gc --keep 5` and reports it under `gc`.
+
+## Doctor rows
+
+`doctor` prints text on stderr and the same findings in the report under `doctor`.
+The rows, in order: `config` and `config status`; `index.isolation`,
+`index.deadline_secs`, `index.quota.*`; `overrides`; one `language: <lang> (markers:
+...) indexer: found | <class>` per detected language; per found indexer `indexer
+<lang> version: <version>` (through the runner, output gated) and, for Rust, `indexer
+rust linker: admitted | rust_linker_refused | not checked` (the system C compiler's
+admission, a class only, never a path) and, for Go, `indexer go --module-version:
+present | absent | not checked` and `go toolchain: <installed>, go.mod requires <v>`
+(with the module-cache toolchain when it is the one admitted, or the action when
+nothing satisfies the directive); `tier namespaces: available (...) | <class>`, `tier
+container: deferred (not_in_this_release)`, `tier selected`; `platform kernel`,
+`platform unprivileged_userns_clone`, `platform max_user_namespaces`, `platform
+unshare`; `repo_id`, `trust`, `identity`; the trust text.
+
+`index.policy_scan` appears in the report's `doctor.index` object (`false` by
+default) but has no text row.
+
+## Exit codes and classes of `index`
+
+| Exit | Meaning | Classes in the report |
+| --- | --- | --- |
+| 0 | published, or `already_indexed` (a snapshot of this commit exists; nothing written) | |
+| 2 | usage error | a fixed diagnostic naming the kind of argument error; the argument itself is never echoed |
+| 3 | indexer not found | `indexer_not_found` (also an unsupported language with no stage-1 indexer) |
+| 4 | refused | `trust_refused`, `trust_revoked`, `repo_path_refused`, `commit_not_checked_out`, `tree_dirty`, `config_invalid` (with the field path), `unsupported_in_stage_1`, `language_not_detected`, `multi_language_not_in_this_release`, `indexer_untrusted_mode`, `indexer_untrusted_location`, `indexer_override_invalid`, `indexer_changed`, `checkout_replaced`, `toolchain_refused`, `git_untrusted`, `env` (environment, data directory or descriptor policy, see below), `inherited_fd`, the Go admission classes `go_modcache_refused`, `go_toolchain_too_old`, `go_mod_unreadable`, `go_version_unreadable`, `go_toolchain_changed`, and the Rust admission classes `rust_capabilities_refused`, `rust_toolchain_refused`, `rust_toolchain_selector_unsupported`, `rust_toolchain_selector_ambiguous`, `rust_toolchain_channel_mismatch`, `rust_toolchain_component_missing`, `rust_toolchain_component_unsupported`, `rust_toolchain_target_missing`, `rust_toolchain_target_unsupported`, `rust_cargo_config_redirects_backend`, `rust_config_unreadable`, `rust_linker_refused`, `rust_registry_refused`, `rust_prepared_file`, `rust_prepared_write`, `rust_scratch_failed` |
+| 5 | snapshot write error | `published_unsynced` (the snapshot exists, marked for re-verification), `snapshot_exists`, `snapshot_corrupt`, `scratch`, `scratch_cleanup_failed`, `log_write_failed`, `gc_failed`, the writer's `temp_exists`, `temp_swapped`, `fs`, `write`, `dangling`, `data_dir_refused` |
+| 6 | indexer failed | `indexer_failed` with `reason` `project_root_mismatch`, `index_decode_failed`, `source_classification_refused` or an output-file reason (`output_missing`, `output_symlink`, `output_not_regular`, `output_too_large`, `output_dir_replaced`, `output_read_failed`); `output_cap`, `quota_exceeded`, `quota_unobservable`, `failed:monitor`, `failed:monitor_silent`, `descendants_survived` |
+| 7 | indexer timed out | `indexer_timeout` |
+| 8 | isolation refused | `isolation_unavailable` (`required` without an isolating tier), `isolation_selfcheck_failed` |
+
+`policy_refused` no longer exists: a policy hit in the output is masked and counted
+when the scan is on, and the scan is off by default.
+
+The Rust admission classes share one stderr line (`Rust not admitted: the producer
+must be the qualified kaban-rust-scip and the toolchain on PATH the real Rust 1.99.0
+(no rustup proxy); a rust-toolchain file's channel, components and targets must be
+installed; run doctor for the row`); the `.cargo/config` refusal is named precisely by
+the producer (`[target.<triple>] linker redirects the compiler backend; remove it to
+index`). `go_toolchain_too_old` prints the versions and the action: run
+`GOTOOLCHAIN=auto go version` in the repository once, or install the required Go.
+
+### The inherited-descriptor rule
+
+`kaban-index` spawns `git` and the indexers with a clean descriptor table and refuses
+to start them when its own process inherited an open file descriptor without
+`FD_CLOEXEC`. A caller that holds a `flock(1)` lock (the repository's
+`scripts/dev/cargo-slot.sh` keeps its lock on fd 9) sees exit 4, class `env`, and the line
+`git could not run: the kaban-index process inherited an open file descriptor (fd 9);
+close it in the caller`. Close the descriptor for the child only:
+
+```bash
+scripts/dev/cargo-slot.sh bash -c 'kaban-index index --repo "$PWD" 9>&-'
+```
+
+## Files on disk
+
+`$KABAN_HOME/codegraph/<repo-id>/` (0700; `<repo-id>` is an HMAC of the canonical
+common directory under `$KABAN_HOME/keys/codegraph.key`, a storage key): `trust`,
+`<commit40>.cg.db`, `<commit40>.<lang>.<a|b>.log` (the gated indexer output; `b` is
+Go's `--skip-tests` run), `<commit40>.cg.db.unsynced` (re-verification marker),
+`run-<pid>/` (a live run's scratch, removed on exit and swept by the next verb).
+Configuration is the `index:` block of `$KABAN_HOME/config.yaml`: `isolation`,
+`deadline_secs`, `policy_scan`, `quota.{file_bytes, run_dir_bytes, tmp_bytes}` and
+the reserved `container_image`, `container_cli`. `share_caches` is not a key any
+more; a file that still names it is `config_invalid`.

@@ -1,0 +1,25 @@
+{"id":"w:architecture","workspace":"ws1","origin":"docs/ARCHITECTURE.md excerpt","text":"Checkout builds a Cart, prices it with price_lines, then CartService::apply_discount applies the promotion rules. Discounts are never trusted from the client (see ADR 0007)."}
+{"id":"w:adr","workspace":"ws1","origin":"repository ADR title","text":"Discounts are computed server-side, never in the client"}
+{"id":"w:cart-symbol","workspace":"ws1","origin":"snapshot symbol table","text":"cart::CartService::apply_discount; src/checkout/cart.rs; apply_discount"}
+{"id":"w:pricing-symbol","workspace":"ws1","origin":"snapshot symbol table","text":"pricing::price_lines; src/checkout/pricing.rs"}
+{"id":"w:decision","workspace":"ws1","origin":"structured extractor excerpt","text":"Discounts are computed server-side; client-side totals were tampered with in incident 2026-10-26; src/checkout/**; cart::CartService::apply_discount"}
+{"id":"w:rename","workspace":"ws1","origin":"Step 6 paragraph","text":"A commit renames apply_discount to apply_promotion. The old anchor key is absent there, so the anchor is reported stale; the accepted Decision 0007 is untouched."}
+{"id":"w:reference","workspace":"ws1","origin":"snapshot refs table","text":"apply_discount referenced from src/checkout/mod.rs:88"}
+{"id":"corpus:0","workspace":"ws1","origin":"seed0x9E3779B97F4A7C15 ordinal0 Idea Active","text":"note 0: zonoka lebano tunoka bakaka kakaka fileka rutuka ponoka vineka lobaka kakaka takaka sakaka katuba fisaka bakaka nonoka bafika lokaka kakaka"}
+{"id":"corpus:1","workspace":"ws1","origin":"seed0x9E3779B97F4A7C15 ordinal1 Failure Active","text":"note 1: tukaka Err9b10 gobaka bafika nokaka src/baleri/sameme.rs mekaka src/zogode/ledeba.rs rumeka tukaka kakaka kakaka kakaka melevi tukaka src/nemusa/zoleme.rs sarika nomuvi"}
+{"id":"corpus:2","workspace":"ws1","origin":"seed0x9E3779B97F4A7C15 ordinal2 Fact Active","text":"note 2: kakaka rikaka runoka kakaka Err1b6b bakaka rikaka noneka kakaka rikaka Errd9e1 Err7229 nokaka src/povide/norusa.rs vibaka"}
+{"id":"corpus:4","workspace":"ws1","origin":"seed0x9E3779B97F4A7C15 ordinal4 Fact Active","text":"note 4: kakaka src/rizode/tumuri.rs rukaka munoka musari kakaka kakaka muloka takaka src/rulolo/tukaka.rs nepoka bakaka vigoka golovi kakaka Err1a02 src/sakari/nowari.rs zorika mevika sanoka kakaka kasaka kakaka mebaka"}
+{"id":"t:discount","workspace":"ws1","origin":"snapshot anchor","text":"cart::CartService::apply_discount"}
+{"id":"t:price","workspace":"ws1","origin":"snapshot anchor","text":"pricing::price_lines"}
+{"id":"t:adr","workspace":"ws1","origin":"repository document alias","text":"ADR 0007: Discounts are computed server-side, never in the client"}
+{"id":"t:cart","workspace":"ws1","origin":"ambiguous walkthrough candidate","text":"Cart; ambiguous with CartService and CartLine; no uniquely resolved identity"}
+{"id":"t:promotion","workspace":"ws1","origin":"Step 6 renamed symbol","text":"apply_promotion"}
+{"id":"t:cart-file","workspace":"ws1","origin":"repository code path","text":"src/checkout/cart.rs"}
+{"id":"t:err9b10","workspace":"ws1","origin":"corpus ordinal1 token","text":"Err9b10"}
+{"id":"t:err1b6b","workspace":"ws1","origin":"corpus ordinal2 token","text":"Err1b6b"}
+{"id":"t:err1a02","workspace":"ws1","origin":"corpus ordinal4 token","text":"Err1a02"}
+{"id":"t:tukaka","workspace":"ws1","origin":"corpus ordinal1 vocabulary identity","text":"tukaka"}
+{"id":"t:pricing-file","workspace":"ws1","origin":"repository code path","text":"src/checkout/pricing.rs"}
+{"id":"t:mod-file","workspace":"ws1","origin":"snapshot reference path","text":"src/checkout/mod.rs"}
+{"id":"t:client","workspace":"ws1","origin":"architecture security term","text":"client"}
+{"id":"t:scope","workspace":"ws1","origin":"structured extractor path scope","text":"src/checkout/**"}

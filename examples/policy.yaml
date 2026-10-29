@@ -1,0 +1,34 @@
+# kaban denylist policy. Everything here is matched BEFORE anything is stored, indexed or logged.
+# The schema is strict (core-spec S7): unknown keys fail to load, allow regexes must be anchored
+# (^...$) and apply only to the listed rule ids. Matching is always case-insensitive.
+version: 1
+defaults:
+  action: reject            # reject | redact (credential-class rules always reject)
+  mask: "[REDACTED:{rule}]"
+  scan_on_read: true
+extend:
+  use_builtin: true         # aws keys, private key blocks, github/openai/slack tokens, jwt, credential assignments, high-entropy quoted tokens
+  disabled_rules: []
+words:
+  - { term: hunter2, action: redact, id: old-password }
+phrases:
+  - { term: "Project Nightjar", id: codename-nightjar }
+  - { term: "ssh private key", id: ssh-key-mention, action: redact }
+rules:
+  - id: internal-hostname
+    description: internal hostnames must not be stored
+    regex: '\b[a-z0-9-]+\.corp\.acme\.internal\b'
+    keywords: [".corp.acme.internal"]
+    action: redact
+  # Document ingestion (docs-ingest D6): `on_document: skip_file` makes any hit of this rule skip
+  # the whole file as `Document{status: blocked}` instead of stubbing the one chunk that matched.
+  # The builtin `private-key-block` and `generic-credential-assignment` rules carry it by default.
+  - id: internal-dump-marker
+    description: files stamped with a database dump marker are never indexed
+    regex: '\bDUMP-[0-9]{6}\b'
+    keywords: ["DUMP-"]
+    on_document: skip_file
+allow:
+  - description: documented OpenAI-style test keys (anchored, scoped to one rule)
+    rule_ids: [openai-api-key]
+    regexes: ['^sk-test-[A-Za-z0-9_-]{20,}$']

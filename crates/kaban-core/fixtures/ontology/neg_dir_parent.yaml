@@ -1,0 +1,10 @@
+# E1.7a RE2-3 negative: `serialize.dir` must be one relative path component (`../x` is not)
+ontology: shop
+version: 1
+kinds:
+  Thing:
+    description: "a thing"
+    governed: {acceptance: human, serialize: {dir: "../x", format: md-frontmatter},
+               export: {digest: false, marker: false}, display: {label: Thing, plural: Things},
+               governs_paths: false, dedup: none}
+rels: {}

@@ -1,0 +1,219 @@
+# Grant inventory (SO-5): every registry package added to Cargo.lock after the 18abbd4 baseline,
+# as an exact `row name version` tuple. Sourced once from the four lock-changing deliveries
+# (s25-e312-acceptance-plan.md, complete historical attribution); never from the current lock.
+
+# DI1.2/OWN60: docs-ingest-plan §3 Markdown/text pins and closure (OWN60 execution grant); commit 76305ce, 26 packages
+DI1.2/OWN60 ahash 0.8.12
+DI1.2/OWN60 allocator-api2 0.2.21
+DI1.2/OWN60 auto_enums 0.8.10
+DI1.2/OWN60 chardetng 1.0.0
+DI1.2/OWN60 core_detect 1.0.0
+DI1.2/OWN60 core_maths 0.1.1
+DI1.2/OWN60 derive_utils 0.16.0
+DI1.2/OWN60 either 1.19.0
+DI1.2/OWN60 encoding_rs 0.8.42
+DI1.2/OWN60 foldhash 0.1.5
+DI1.2/OWN60 hashbrown 0.15.5
+DI1.2/OWN60 icu_locale_fallback 2.3.0
+DI1.2/OWN60 icu_locale_fallback_data 2.3.0
+DI1.2/OWN60 icu_segmenter 2.3.0
+DI1.2/OWN60 icu_segmenter_data 2.3.0
+DI1.2/OWN60 itertools 0.15.0
+DI1.2/OWN60 libm 0.2.16
+DI1.2/OWN60 multiversion_no_op 1.0.0
+DI1.2/OWN60 pulldown-cmark 0.13.4
+DI1.2/OWN60 scopeguard 1.2.0
+DI1.2/OWN60 simdutf8 0.1.5
+DI1.2/OWN60 strum 0.28.0
+DI1.2/OWN60 strum_macros 0.28.0
+DI1.2/OWN60 text-splitter 0.33.0
+DI1.2/OWN60 unicase 2.10.0
+DI1.2/OWN60 whatlang 0.18.0
+
+# CG3.1: stage1-plan §3 scip/protobuf grant, kaban-index only; commit 975366e, 5 packages
+CG3.1 protobuf 3.7.2
+CG3.1 protobuf-support 3.7.2
+CG3.1 scip 0.10.0
+CG3.1 thiserror 1.0.69
+CG3.1 thiserror-impl 1.0.69
+
+# DI2.1/OWN69: pdf_oxide 0.3.78 closure behind the optional `pdf` feature (OWN69, OWN70); commit f071b22, 90 packages
+DI2.1/OWN69 adler2 2.0.1
+DI2.1/OWN69 aes 0.9.3
+DI2.1/OWN69 alloc-no-stdlib 3.0.0
+DI2.1/OWN69 alloc-stdlib 0.3.0
+DI2.1/OWN69 atoi_simd 0.18.1
+DI2.1/OWN69 bitflags 1.3.2
+DI2.1/OWN69 block-buffer 0.12.1
+DI2.1/OWN69 block-padding 0.4.2
+DI2.1/OWN69 brotli 9.0.0
+DI2.1/OWN69 brotli-decompressor 6.0.1
+DI2.1/OWN69 bytemuck 1.25.2
+DI2.1/OWN69 bytemuck_derive 1.12.1
+DI2.1/OWN69 byteorder 1.5.0
+DI2.1/OWN69 byteorder-lite 0.1.0
+DI2.1/OWN69 cbc 0.2.1
+DI2.1/OWN69 cipher 0.5.2
+DI2.1/OWN69 const-oid 0.10.2
+DI2.1/OWN69 cpubits 0.1.1
+DI2.1/OWN69 crc32fast 1.5.2
+DI2.1/OWN69 crunchy 0.2.4
+DI2.1/OWN69 crypto-common 0.2.2
+DI2.1/OWN69 debug_unsafe 0.1.4
+DI2.1/OWN69 defmt 1.1.1
+DI2.1/OWN69 defmt-macros 1.1.1
+DI2.1/OWN69 defmt-parser 1.0.0
+DI2.1/OWN69 digest 0.11.3
+DI2.1/OWN69 env_filter 2.0.0
+DI2.1/OWN69 env_logger 0.11.11
+DI2.1/OWN69 euclid 0.22.14
+DI2.1/OWN69 fast-float2 0.2.4
+DI2.1/OWN69 fax 0.2.7
+DI2.1/OWN69 fax 0.3.0
+DI2.1/OWN69 fdeflate 0.3.7
+DI2.1/OWN69 flate2 1.1.10
+DI2.1/OWN69 font-types 0.11.3
+DI2.1/OWN69 half 2.7.1
+DI2.1/OWN69 hybrid-array 0.4.15
+DI2.1/OWN69 image 0.25.10
+DI2.1/OWN69 inout 0.2.2
+DI2.1/OWN69 jiff 0.2.38
+DI2.1/OWN69 jiff-core 0.1.1
+DI2.1/OWN69 jiff-static 0.2.38
+DI2.1/OWN69 jpeg-decoder 0.3.2
+DI2.1/OWN69 kurbo 0.13.1
+DI2.1/OWN69 md-5 0.11.0
+DI2.1/OWN69 miniz_oxide 0.8.9
+DI2.1/OWN69 miniz_oxide 0.9.1
+DI2.1/OWN69 moxcms 0.8.1
+DI2.1/OWN69 nom 8.0.0
+DI2.1/OWN69 office_oxide 0.1.9
+DI2.1/OWN69 pdf_oxide 0.3.78
+DI2.1/OWN69 phf 0.14.0
+DI2.1/OWN69 phf_generator 0.14.0
+DI2.1/OWN69 phf_macros 0.14.0
+DI2.1/OWN69 phf_shared 0.14.0
+DI2.1/OWN69 png 0.18.1
+DI2.1/OWN69 polycool 0.4.0
+DI2.1/OWN69 portable-atomic 1.15.0
+DI2.1/OWN69 portable-atomic-util 0.2.8
+DI2.1/OWN69 pxfm 0.1.30
+DI2.1/OWN69 qcms 0.3.0
+DI2.1/OWN69 quick-error 2.0.1
+DI2.1/OWN69 quick-xml 0.41.0
+DI2.1/OWN69 quick-xml 0.42.0
+DI2.1/OWN69 rayon 1.12.0
+DI2.1/OWN69 rayon-core 1.13.0
+DI2.1/OWN69 read-fonts 0.39.2
+DI2.1/OWN69 rustc-hash 2.1.3
+DI2.1/OWN69 sha2 0.11.0
+DI2.1/OWN69 simd-adler32 0.3.10
+DI2.1/OWN69 siphasher 1.0.4
+DI2.1/OWN69 skrifa 0.42.1
+DI2.1/OWN69 slotmap 1.1.1
+DI2.1/OWN69 stringprep 0.1.5
+DI2.1/OWN69 subsetter 0.2.6
+DI2.1/OWN69 taffy 0.14.0
+DI2.1/OWN69 tiff 0.11.3
+DI2.1/OWN69 ttf-parser 0.25.1
+DI2.1/OWN69 typed-path 0.12.3
+DI2.1/OWN69 unicode-bidi 0.3.18
+DI2.1/OWN69 unicode-linebreak 0.1.5
+DI2.1/OWN69 unicode-properties 0.1.4
+DI2.1/OWN69 weezl 0.1.12
+DI2.1/OWN69 weezl 0.2.1
+DI2.1/OWN69 write-fonts 0.48.1
+DI2.1/OWN69 zip 8.6.0
+DI2.1/OWN69 zlib-rs 0.6.8
+DI2.1/OWN69 zopfli 0.8.3
+DI2.1/OWN69 zune-core 0.5.3
+DI2.1/OWN69 zune-jpeg 0.5.15
+
+# YAML/OWN86(7): yaml_serde replacing serde_yaml_ng (OWN86 item 7); commit ab9d99b, 2 packages
+YAML/OWN86(7) libyaml-rs 0.3.0
+YAML/OWN86(7) yaml_serde 0.10.7
+
+# TANTIVY/OWN-J: the Tantivy adapter (`kaban-index-tantivy`, spec 05 SS-13b) in the default feature graph;
+# `nom 7.1.3` via `tantivy-query-grammar 0.26.0` <- `tantivy 0.26.2` is the owner's grant of 2026-10-26 (OWN-J; `never_list.rs`
+# admits it under that one parent only). Every lock tuple reachable from the adapter and new since 18abbd4, from
+# `cargo tree --locked --offline --target all -e normal,build -p kaban-index-tantivy` against the baseline and the rows
+# above (the `toml`/`winnow` tuples of `kaban-index` are not granted here); 56 packages
+TANTIVY/OWN-J arc-swap 1.9.2
+TANTIVY/OWN-J async-trait 0.1.92
+TANTIVY/OWN-J base64 0.22.1
+TANTIVY/OWN-J bitpacking 0.9.3
+TANTIVY/OWN-J bon 3.10.2
+TANTIVY/OWN-J bon-macros 3.10.2
+TANTIVY/OWN-J census 0.4.2
+TANTIVY/OWN-J crossbeam-channel 0.5.17
+TANTIVY/OWN-J datasketches 0.2.0
+TANTIVY/OWN-J downcast-rs 2.0.2
+TANTIVY/OWN-J erased-serde 0.4.10
+TANTIVY/OWN-J fastdivide 0.4.2
+TANTIVY/OWN-J fs4 0.13.1
+TANTIVY/OWN-J htmlescape 0.3.1
+TANTIVY/OWN-J inventory 0.3.25
+TANTIVY/OWN-J itertools 0.14.0
+TANTIVY/OWN-J levenshtein_automata 0.2.1
+TANTIVY/OWN-J lru 0.16.4
+TANTIVY/OWN-J lz4_flex 0.13.1
+TANTIVY/OWN-J measure_time 0.9.0
+TANTIVY/OWN-J memmap2 0.9.11
+TANTIVY/OWN-J minimal-lexical 0.2.1
+TANTIVY/OWN-J murmurhash32 0.3.1
+TANTIVY/OWN-J nom 7.1.3
+TANTIVY/OWN-J oneshot 0.1.13
+TANTIVY/OWN-J ordered-float 5.5.0
+TANTIVY/OWN-J ownedbytes 0.9.0
+TANTIVY/OWN-J prettyplease 0.3.0
+TANTIVY/OWN-J rust-stemmers 1.2.0
+TANTIVY/OWN-J sketches-ddsketch 0.4.1
+TANTIVY/OWN-J tantivy 0.26.2
+TANTIVY/OWN-J tantivy-bitpacker 0.10.0
+TANTIVY/OWN-J tantivy-columnar 0.7.0
+TANTIVY/OWN-J tantivy-common 0.11.0
+TANTIVY/OWN-J tantivy-fst 0.5.0
+TANTIVY/OWN-J tantivy-query-grammar 0.26.0
+TANTIVY/OWN-J tantivy-sstable 0.7.0
+TANTIVY/OWN-J tantivy-stacker 0.7.0
+TANTIVY/OWN-J tantivy-tokenizer-api 0.7.0
+TANTIVY/OWN-J typeid 1.0.3
+TANTIVY/OWN-J typetag 0.2.23
+TANTIVY/OWN-J typetag-impl 0.2.23
+TANTIVY/OWN-J utf8-ranges 1.0.5
+TANTIVY/OWN-J winapi 0.3.9
+TANTIVY/OWN-J winapi-i686-pc-windows-gnu 0.4.0
+TANTIVY/OWN-J winapi-x86_64-pc-windows-gnu 0.4.0
+TANTIVY/OWN-J windows-sys 0.59.0
+TANTIVY/OWN-J windows-targets 0.52.6
+TANTIVY/OWN-J windows_aarch64_gnullvm 0.52.6
+TANTIVY/OWN-J windows_aarch64_msvc 0.52.6
+TANTIVY/OWN-J windows_i686_gnu 0.52.6
+TANTIVY/OWN-J windows_i686_gnullvm 0.52.6
+TANTIVY/OWN-J windows_i686_msvc 0.52.6
+TANTIVY/OWN-J windows_x86_64_gnu 0.52.6
+TANTIVY/OWN-J windows_x86_64_gnullvm 0.52.6
+TANTIVY/OWN-J windows_x86_64_msvc 0.52.6
+
+# ZSTD/OWN-I: the body codec of spec 05 SS-17 (`kaban-store-sqlite/src/body_codec.rs`): `zstd 0.13.3` (the latest stable
+# available offline at T7, 2026-10-26) with default features off, its safe layer and libzstd 1.5.7, plus `jobserver`,
+# which `zstd-sys`'s `cc` build dependency (`parallel`) pulls in; every lock tuple new since the rows above from
+# `cargo metadata --offline` at the pin; 4 packages
+ZSTD/OWN-I jobserver 0.1.35
+ZSTD/OWN-I zstd 0.13.3
+ZSTD/OWN-I zstd-safe 7.3.0
+ZSTD/OWN-I zstd-sys 2.1.1+zstd.1.5.7
+
+# SECURITY/20261028: the owner's integration grant includes fixing failing checks.
+# Tokio fixes RUSTSEC-2026-0386; the zstd stack fixes 0391, 0398, 0403 and 0410.
+# office_oxide retains the selected PDF backend while moving ZIP past 0367/0368/0369;
+# cfg_aliases, nix and typed-path are the exact additional ZIP dependency tuples.
+SECURITY/20261028 cfg_aliases 0.2.2
+SECURITY/20261028 nix 0.31.3
+SECURITY/20261028 office_oxide 0.1.15
+SECURITY/20261028 tokio 1.53.3
+SECURITY/20261028 typed-path 0.13.0
+SECURITY/20261028 zip 9.1.2
+SECURITY/20261028 zstd 0.14.3
+SECURITY/20261028 zstd-safe 8.2.0
+SECURITY/20261028 zstd-sys 2.1.2+zstd.1.5.7

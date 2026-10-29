@@ -1,0 +1,10 @@
+{
+  "cargo": {
+    "sysroot": "/toolchain",
+    "target": "aarch64-unknown-linux-gnu",
+    "allTargets": true,
+    "features": [],
+    "noDefaultFeatures": false
+  },
+  "procMacro": { "enable": true }
+}

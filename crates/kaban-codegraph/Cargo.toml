@@ -1,0 +1,36 @@
+[package]
+name = "kaban-codegraph"
+description = "kaban v4 code graph: SCIP symbol grammar, snapshot schema, read-only reader and discovery"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[features]
+# Test-only observation hooks (`symbol::testing`): the integration tests enable it through the
+# self dev-dependency below; production builds never do (stage1-plan CG2.1, G1-S4).
+instrumented = []
+# `testing::FixedSnapshot`, the `SnapshotProvider` over one file for the engine's and the adapters'
+# tests (cg-join-v1 §4, stage1-plan CG5.2); production builds never enable it.
+test-support = []
+
+[dependencies]
+kaban-core.workspace = true
+rusqlite.workspace = true
+rustix.workspace = true     # the G1-S6 handle walk (openat O_PATH|O_DIRECTORY|O_NOFOLLOW, fstat, statx) without unsafe (CG4.1)
+hmac.workspace = true       # `repo_id` HMAC-SHA256 over passed-in key bytes (§4.1, CG4.1; no kaban-policy edge)
+sha2.workspace = true       # idem
+zeroize.workspace = true    # `RepoIdKey` zeroed on drop (CG4.1)
+thiserror.workspace = true
+tracing.workspace = true    # the traced skip class of `discover` (G1-F8, cg-join-v1 §4)
+
+[dev-dependencies]
+kaban-codegraph = { path = ".", features = ["instrumented", "test-support"] }
+anyhow.workspace = true     # the chain renderings of `tests/errors.rs` only (GM2a RG2-1)
+proptest.workspace = true
+sha2.workspace = true       # byte-identical snapshot builds (G1-N5)
+tempfile = "3"              # locked 3.27.0; RAII scratch directories (test-fixture-raii)
+
+[lints]
+workspace = true

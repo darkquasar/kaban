@@ -1,0 +1,15 @@
+{
+  "session_id": "sess-codex-0001",
+  "transcript_path": "/invented/home/.codex/sessions/sess-codex-0001.jsonl",
+  "cwd": "/invented/repo/nightjar-service",
+  "hook_event_name": "PostToolUse",
+  "model": "gpt-5.6-sol",
+  "turn_id": "turn-0001",
+  "permission_mode": "default",
+  "tool_name": "Bash",
+  "tool_use_id": "call_invented_codex_0001",
+  "tool_input": {
+    "command": "pytest -q tests/test_store.py"
+  },
+  "tool_response": "Exit code: 1\nOutput:\nF...........\nE   AssertionError: expected 3 rows, got 2\ntests/test_store.py:41: AssertionError\n1 failed, 11 passed in 0.42s"
+}

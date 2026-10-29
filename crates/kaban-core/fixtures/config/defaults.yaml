@@ -1,0 +1,96 @@
+# Every engine-spec §15.1 key spelled at its register default (engine-plan E1.1 config slice):
+# loading this file equals `EngineConfig::default()` and `effective_overrides()` is empty.
+reconcile:
+  tau_type: 0.3
+  tau_id: 0.4
+  priors: null
+discovered:
+  cap: 500
+  prune_after_days: 90
+  promote_when:
+    min_count: 20
+    min_sources: 3
+    min_mean_score: 0.7
+ontology:
+  pattern_size_limit_kib: 1024
+  golden_strict: false
+gazetteer:
+  min_pattern_len: 3
+  common_word_max_len: 4
+  corpus_freq_cutoff: 0.05
+  max_targets: 5
+  max_automaton_mb: 25
+  max_chunk_ms: 1
+  v4_symbols: true
+embed:
+  model: null
+  dtype: int8
+  knn_k: 5
+  tau:
+    default: 0.80
+  scan_window_rows: 4096
+  max_scan_rss_mb: 32
+  min_topk_overlap: 0.9
+l3:
+  holdout_min_f1: 0.50
+  holdout_min_spans: 200
+recall:
+  fusion: rrf(60)
+  rrf_k: 60
+  judged_min_queries: 100
+  column_weights:
+    text: 1.0
+    summary: 1.5
+    tags: 1.0
+    ident_terms: 2.0
+ask:
+  template_depth: 1
+  template_depth_max: 3
+er:
+  m:
+    title: 0.9
+    aliases: 0.8
+    kind: 0.95
+    tags: 0.6
+    path_scope: 0.7
+    anchors: 0.95
+    summary: 0.5
+  u:
+    title: 0.01
+    aliases: 0.02
+    kind: 0.3
+    tags: 0.1
+    path_scope: 0.05
+    anchors: 0.001
+    summary: 0.1
+  match_threshold: 8.0
+  possible_threshold: 3.0
+ingest:
+  finish_cap: 10000
+  retention_days: 7
+  metadata_allowance_kib: 4
+  lru_entries: 4
+  lru_mib: 8
+  default_with: null
+pipeline:
+  retire_batch_rows: 1000
+index:
+  isolation: preferred
+  container_image: null
+  container_cli: null
+  deadline_secs: 600
+  quota:
+    file_bytes: 1073741824
+    run_dir_bytes: 4294967296
+    tmp_bytes: 536870912
+link:
+  default: none
+briefing:
+  max_candidates: 5
+budget:
+  l0_rss_mb: 64
+bench:
+  min_samples: 30
+  why_regression_pct: 10
+why:
+  anchor_prefilter: true

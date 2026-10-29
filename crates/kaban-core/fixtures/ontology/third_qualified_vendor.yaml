@@ -1,0 +1,17 @@
+# the same file with the name qualified resolves
+ontology: contracts
+version: 1
+extends: [infra, vendors]
+mixins:
+  Dated:
+    props_schema: {type: object, properties: {signed_at: {type: integer}}}
+    fts_fields: [props.counterparty]
+kinds:
+  Contract:
+    description: "A contract with a vendor."
+    is_a: infra:Vendor
+    mixins: [Dated, Dated]
+    props_schema: {type: object, additionalProperties: false, required: [region], properties: {region: {type: string}, counterparty: {type: string}}}
+    fts_fields: [props.region]
+rels:
+  SIGNED_WITH: {from: [Contract], to: [vendors:Vendor], directed: true}

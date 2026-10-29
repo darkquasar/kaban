@@ -1,0 +1,8 @@
+# the same (ns, name) as infra.yaml with an identical body: one declaration
+ontology: infra
+version: 1
+kinds:
+  Vendor:
+    description: "An infrastructure vendor."
+    props_schema: {type: object, additionalProperties: false, properties: {region: {type: string}}}
+rels: {}

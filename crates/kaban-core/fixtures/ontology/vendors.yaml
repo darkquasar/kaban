@@ -1,0 +1,6 @@
+ontology: vendors
+version: 1
+kinds:
+  Vendor:
+    description: "A commercial vendor."
+rels: {}

@@ -1,0 +1,7 @@
+ontology: shop
+version: 1
+kinds:
+  Thing: {description: "a thing"}
+rels: {}
+questions:
+  recent: {kinds: [Thing], where: {}, order: [currency], depth: 4}

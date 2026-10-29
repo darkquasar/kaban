@@ -1,0 +1,58 @@
+[workspace]
+resolver = "3"
+members = ["."]
+
+[package]
+name = "kaban-rust-scip"
+version = "0.1.0-dev"
+edition = "2024"
+rust-version = "1.99"
+license = "Apache-2.0"
+publish = false
+description = "Standalone, pinned semantic Rust SCIP producer for Kaban"
+
+[dependencies]
+anyhow = "=1.0.104"
+protobuf = "=3.7.2"
+scip = "=0.10.0"
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+toml = "=1.1.8"
+# Match ra_ap_hir_def's exact Unicode identifier-table dependency.
+unicode-ident = "=1.0.24"
+# This matched RA family requires the patched Salsa 0.28.5 unstable API.
+salsa = "=0.28.5"
+salsa-macros = "=0.28.5"
+salsa-macro-rules = "=0.28.5"
+ra_ap_hir = "=0.0.358"
+ra_ap_ide = "=0.0.358"
+ra_ap_ide_db = "=0.0.358"
+ra_ap_load-cargo = "=0.0.358"
+ra_ap_paths = "=0.0.358"
+ra_ap_project_model = "=0.0.358"
+ra_ap_vfs = "=0.0.358"
+ra_ap_syntax = "=0.0.358"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+unreachable_pub = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+doc_markdown = "warn"
+semicolon_if_nothing_returned = "warn"
+wildcard_imports = "warn"
+unwrap_used = "deny"
+dbg_macro = "deny"
+
+[lints]
+workspace = true
+
+[profile.dev]
+debug = 0
+incremental = false
+
+[profile.test]
+debug = 0
+incremental = false

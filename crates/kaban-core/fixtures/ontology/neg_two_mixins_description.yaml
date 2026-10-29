@@ -1,0 +1,8 @@
+ontology: shop
+version: 1
+mixins:
+  Described: {description: "from the first mixin"}
+  AlsoDescribed: {description: "from the second mixin"}
+kinds:
+  Thing: {description: "a thing", mixins: [Described, AlsoDescribed]}
+rels: {}

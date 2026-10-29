@@ -1,0 +1,39 @@
+[package]
+name = "kaban-index"
+description = "kaban v4 code indexer: decodes and gates a SCIP index and writes a per-commit code-graph snapshot"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "kaban-index"
+path = "src/main.rs"
+
+[dependencies]
+kaban-core.workspace = true
+kaban-codegraph.workspace = true
+kaban-policy.workspace = true
+scip.workspace = true           # Apache-2.0 (stage1-plan §3, OWN-4): the pinned `index.scip` schema
+protobuf.workspace = true       # MIT (stage1-plan §3, OWN-4): decode and the descriptor walk
+rustix.workspace = true         # the §4.1 file protocol without unsafe: O_CREAT|O_EXCL|O_NOFOLLOW 0600, fsync, renameat2 NOREPLACE (CG3.2, GM3 deviation 1)
+thiserror.workspace = true
+anyhow.workspace = true         # the binary edge only (G1-E1)
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+# Bounded committed-source classification only; never linked into the server.
+syn = { version = "=2.0.119", default-features = false, features = ["full", "parsing", "printing"] }
+proc-macro2 = { version = "=1.0.107", default-features = false, features = ["span-locations"] }
+
+[dev-dependencies]
+# `symbol::testing::record_inputs()` for `writer_gate_precedes_parse` (CG2.1 hook, G1-S1).
+kaban-codegraph = { workspace = true, features = ["instrumented"] }
+# Row dumps, the schema walk and the FTS `MATCH` assertions over a published snapshot in `tests/`
+# only (GM3 deviation 1); production sources carry no SQL (`sql_boundary`).
+rusqlite.workspace = true
+
+[lints]
+workspace = true

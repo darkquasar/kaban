@@ -1,0 +1,20 @@
+[
+  {"keyword": "type", "schema": {"type": "object"}, "accepts": {}, "rejects": []},
+  {"keyword": "type", "schema": {"type": "string"}, "accepts": "", "rejects": 1},
+  {"keyword": "type", "schema": {"type": "number"}, "accepts": 1.5, "rejects": "1.5"},
+  {"keyword": "type", "schema": {"type": "integer"}, "accepts": 3, "rejects": 1.0},
+  {"keyword": "type", "schema": {"type": "boolean"}, "accepts": false, "rejects": 0},
+  {"keyword": "type", "schema": {"type": "array", "items": {"type": "string"}}, "accepts": ["a"], "rejects": {}},
+  {"keyword": "required", "schema": {"type": "object", "required": ["a"]}, "accepts": {"a": 1}, "rejects": {}},
+  {"keyword": "enum", "schema": {"type": "string", "enum": ["x", "y"]}, "accepts": "y", "rejects": "z"},
+  {"keyword": "enum", "schema": {"type": "integer", "enum": [1, 2]}, "accepts": 2, "rejects": 3},
+  {"keyword": "enum", "schema": {"type": "number", "enum": [1.5]}, "accepts": 1.5, "rejects": 1},
+  {"keyword": "enum", "schema": {"type": "boolean", "enum": [true]}, "accepts": true, "rejects": false},
+  {"keyword": "additionalProperties", "schema": {"type": "object", "additionalProperties": false, "properties": {"a": {"type": "string"}}}, "accepts": {"a": "x"}, "rejects": {"b": "x"}},
+  {"keyword": "properties", "schema": {"type": "object", "properties": {"a": {"type": "integer"}}}, "accepts": {"a": 1, "other": "free"}, "rejects": {"a": "x"}},
+  {"keyword": "items", "schema": {"type": "array", "items": {"type": "integer"}}, "accepts": [1, 2], "rejects": [1, "2"]},
+  {"keyword": "minLength", "schema": {"type": "string", "minLength": 2}, "accepts": "ab", "rejects": "a"},
+  {"keyword": "maxLength", "schema": {"type": "string", "maxLength": 2}, "accepts": "ab", "rejects": "abc"},
+  {"keyword": "pattern", "schema": {"type": "string", "pattern": "a"}, "accepts": "a", "rejects": "ba"},
+  {"keyword": "pattern", "schema": {"type": "string", "pattern": "[0-9a-f]{7,40}"}, "accepts": "deadbeef", "rejects": "xyz"}
+]

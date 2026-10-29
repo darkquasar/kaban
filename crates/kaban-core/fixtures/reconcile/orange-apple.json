@@ -1,0 +1,143 @@
+{
+  "groups": [
+    {
+      "offset": 27,
+      "len": 5,
+      "supporters": [
+        [
+          "infra:Vendor",
+          "gazetteer",
+          "alias",
+          4500,
+          "a1"
+        ],
+        [
+          "x:Fruit",
+          "gliner",
+          "gliner",
+          6200,
+          "a2"
+        ],
+        [
+          "infra:Vendor",
+          "gliner",
+          "gliner",
+          5800,
+          "a3"
+        ]
+      ],
+      "scores": [
+        7080,
+        3720
+      ],
+      "p": [
+        6556,
+        3444
+      ],
+      "margin": 3111,
+      "score_values": [
+        "infra:Vendor",
+        "x:Fruit"
+      ]
+    },
+    {
+      "offset": 27,
+      "len": 13,
+      "supporters": [
+        [
+          "infra:Hardware",
+          "llm",
+          "llm",
+          9000,
+          "a4"
+        ]
+      ],
+      "scores": [
+        6750
+      ],
+      "p": [
+        10000
+      ],
+      "margin": 10000,
+      "score_values": [
+        "infra:Hardware"
+      ]
+    },
+    {
+      "offset": 56,
+      "len": 6,
+      "supporters": [
+        [
+          "x:Fruit",
+          "gliner",
+          "gliner",
+          6600,
+          "a5"
+        ],
+        [
+          "infra:Team",
+          "llm",
+          "llm",
+          8500,
+          "a6"
+        ],
+        [
+          "infra:Vendor",
+          "gazetteer",
+          "alias",
+          4000,
+          "a7"
+        ]
+      ],
+      "scores": [
+        6375,
+        3960,
+        3200
+      ],
+      "p": [
+        4710,
+        2926,
+        2364
+      ],
+      "margin": 1784,
+      "score_values": [
+        "infra:Team",
+        "x:Fruit",
+        "infra:Vendor"
+      ]
+    },
+    {
+      "offset": 56,
+      "len": 6,
+      "supporters": [
+        [
+          "x:Fruit",
+          "gliner",
+          "gliner",
+          6600,
+          "a5"
+        ],
+        [
+          "infra:Vendor",
+          "gazetteer",
+          "alias",
+          4000,
+          "a7"
+        ]
+      ],
+      "scores": [
+        3960,
+        3200
+      ],
+      "p": [
+        5531,
+        4469
+      ],
+      "margin": 1061,
+      "score_values": [
+        "x:Fruit",
+        "infra:Vendor"
+      ]
+    }
+  ]
+}

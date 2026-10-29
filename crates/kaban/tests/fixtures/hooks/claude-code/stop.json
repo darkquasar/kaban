@@ -1,0 +1,11 @@
+{
+  "session_id": "sess-claude-0003",
+  "transcript_path": "/invented/home/.claude/projects/nightjar-service/sess-claude-0003.jsonl",
+  "cwd": "/invented/repo/nightjar-service",
+  "permission_mode": "default",
+  "hook_event_name": "Stop",
+  "stop_hook_active": false,
+  "last_assistant_message": "I renamed the method and the tests pass now.",
+  "background_tasks": [],
+  "session_crons": []
+}

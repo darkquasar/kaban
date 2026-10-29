@@ -1,0 +1,61 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CODEX_HOME:-$HOME/.codex}\"/hooks/kaban/session-start.sh",
+            "timeout": 2
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "^apply_patch$|^Edit$|^Write$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CODEX_HOME:-$HOME/.codex}\"/hooks/kaban/pre-tool-use.sh",
+            "timeout": 2
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "^Bash$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CODEX_HOME:-$HOME/.codex}\"/hooks/kaban/post-tool-use.sh",
+            "timeout": 2
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CODEX_HOME:-$HOME/.codex}\"/hooks/kaban/subagent-stop.sh",
+            "timeout": 2
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CODEX_HOME:-$HOME/.codex}\"/hooks/kaban/stop.sh",
+            "timeout": 2
+          }
+        ]
+      }
+    ]
+  }
+}

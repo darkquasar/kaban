@@ -1,0 +1,53 @@
+---
+title: "Kaban"
+description: "Local memory and code context for coding agents, with explicit human governance."
+---
+
+Kaban helps a coding agent remember what your project learned, why a decision was
+made, and which records govern a file it is about to edit. It is useful when
+sessions are short but the project's reasoning needs to survive them.
+
+Records and typed relationships live in a local SQLite graph. Full-text search
+finds relevant memories, and graph expansion adds connected context. You can use
+the CLI yourself or register an MCP server so an agent can use the same service
+over stdio. There is no HTTP daemon or hosted model behind it.
+
+## A concrete workflow
+
+Suppose a team chooses SQLite for its integration database. A Fact can record
+where it is used. A Decision can retain the rationale and govern `src/storage/**`.
+A person reviews and accepts that Decision; an agent asks `why` before changing
+`src/storage/db.rs` and receives the governing record instead of guessing from
+old chat history. A later Failure can record a migration problem, with a linked
+Improvement preserving how it was fixed.
+
+Human-governed memory is more than a collection of notes: proposals, acceptance,
+supersession and provenance distinguish what was suggested from what a person
+approved. A successful extraction is not human acceptance.
+
+## Three sources of context
+
+- **Memories:** Facts, Decisions, Conventions, Failures and Episodes, retrieved by
+  lexical search and their relationships. [Memory guide](guides/memory.mdx).
+- **Documents:** bounded Markdown/plain-text ingestion creates searchable document
+  sections and chunks. Optional structured briefs help a host extractor work on
+  source text; Kaban does not run the model. [Documents guide](guides/documents.mdx).
+- **Code:** a separate, explicitly invoked indexer produces a code-graph snapshot.
+  The MCP reader can then answer definitions, references, tests and context.
+  Memory records may carry code references, but remembering a note does not index
+  your repository. [Code graph guide](guides/code-graph.mdx).
+
+## Local does not mean risk-free
+
+The policy gates incoming and outgoing content. You still need a reviewed policy,
+private data directories, safe backups and explicit trust before running code
+indexers. A denylist cannot guarantee detection of every possible secret.
+Read [security boundaries](concepts/security.mdx) before storing sensitive context.
+
+This documentation describes the local, unpublished **3.0.0-alpha.1** handoff,
+not a stable 3.0.0 release. Default builds include ingestion and code-tool adapters;
+PDF is opt-in. HTTP/REST, embedding retrieval and `ask`/workflow orchestration are
+not delivered; M6 personal/global two-store memory is cancelled.
+
+Begin with [quickstart](quickstart.mdx) or [architecture](concepts/architecture.mdx).
+The repository [release guide](developer/RELEASE.md) lists artifact and qualification limits.

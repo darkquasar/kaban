@@ -1,0 +1,7 @@
+# the same (ns, name) as infra.yaml with a different body: ontology_conflict
+ontology: infra
+version: 1
+kinds:
+  Vendor:
+    description: "Something else."
+rels: {}

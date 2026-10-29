@@ -1,0 +1,5 @@
+discovered:
+  cap: 500
+  promote_when:
+    min_count: 20
+    min_cnt: 7

@@ -1,0 +1,130 @@
+---
+title: "Quickstart"
+description: "Build locally, configure a workspace, and remember an accepted Decision."
+---
+
+The commands below are instructions, not a recorded execution. Use a trusted
+checkout and a shell on the machine where your project and data live.
+
+## 1. Build and install locally
+
+The checkout pins Rust 1.99.0 in `rust-toolchain.toml`; the MSRV is the same.
+A native C compiler is needed for bundled SQLite. Provision prerequisites in
+your own environment, then run these commands from the Kaban checkout:
+
+```sh
+cargo build --release -p kaban -p kaban-index
+mkdir -p "$HOME/.local/bin"
+install -m 755 target/release/kaban "$HOME/.local/bin/kaban"
+install -m 755 target/release/kaban-index "$HOME/.local/bin/kaban-index"
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+`install` replaces any existing binaries at those two destinations; choose another
+directory if you need to retain older copies. Building `kaban-index` does not run
+an indexer or grant repository trust.
+
+The accepted local package instead contains GNU/Linux AArch64 `kaban` default and
+minimal binaries, not an indexer or PDF binary. It needs a compatible glibc host
+with GLIBC_2.39 symbols; it is not a portable static build. See
+[release details](developer/RELEASE.md) before using packaged artifacts on another host.
+
+## 2. Choose data, policy and workspace
+
+Run from your project checkout. Use private, trusted parent directories and an
+absolute policy path. Review or adapt the repository's `examples/policy.yaml`
+before setting it as your policy; do not substitute a file that does not exist.
+
+```sh
+mkdir -p -m 700 "$HOME/.kaban"
+export KABAN_HOME="$HOME/.kaban"
+export KABAN_DB="$KABAN_HOME/demo-project.db"
+export KABAN_POLICY="/absolute/path/to/reviewed-policy.yaml"
+export KABAN_WORKSPACE="demo-project"
+```
+
+Use a project-specific database name and workspace consistently across your CLI,
+MCP server and optional hooks. `mkdir -m` sets modes only for newly created
+directories; inspect existing parents instead of assuming they are private.
+Kaban creates the database on ordinary first open and keeps audit keys under
+`KABAN_HOME/keys/`. An existing database can migrate when opened by a newer binary;
+keep protected backups and read the [maintenance guide](operations/maintenance.mdx)
+before upgrading important data.
+
+Without an explicit workspace, the default is the enclosing repository's root
+directory name, or `default` outside a repository. With no policy path, built-in
+rules still apply; a missing or invalid configured file is an error. Engine
+settings come from `KABAN_HOME/config.yaml`, separate from the policy file.
+
+## 3. Remember and recall a Fact
+
+```sh
+kaban remember Fact "The integration database uses SQLite" --tag storage
+kaban recall "integration database"
+```
+
+CLI results are JSON. A policy refusal is not a stored record; inspect the result
+instead of assuming the write succeeded. Keep the returned record IDs for later
+links or inspection. Search is lexical/graph retrieval, not embedding similarity.
+
+## 4. Propose a scoped Decision, then accept it as a person
+
+```sh
+kaban remember Decision "Use SQLite for integration storage" \
+  --summary "Integration storage uses SQLite" \
+  --props '{"rationale":"One local transactional database keeps the test setup simple"}' \
+  --path-scope 'src/storage/**'
+```
+
+This creates a proposal, not an accepted rule. Read its text, rationale and scope.
+Replace `DECISION_ID` below with the returned Decision ID. **The person who has
+reviewed the proposal runs the acceptance command**, not an agent acting alone:
+
+```sh
+kaban accept DECISION_ID --reason "Reviewed the local integration-storage choice" \
+  --path-scope 'src/storage/**'
+kaban why --path src/storage/db.rs
+```
+
+Quoted globs are passed to Kaban rather than expanded by your shell. Acceptance
+requires a reason and scope for this direct CLI route. The MCP route uses its own
+human-confirmation flow; it must not silently imitate a person's CLI acceptance.
+See [governance](guides/governance.mdx) for the review and supersession lifecycle.
+
+## 5. Register the stdio server
+
+For example, put a project-scoped `.mcp.json` in your project for Claude Code.
+Replace these absolute paths and use the same workspace as above:
+
+```json
+{
+  "mcpServers": {
+    "kaban": {
+      "type": "stdio",
+      "command": "/home/you/.local/bin/kaban",
+      "args": [
+        "--db", "/home/you/.kaban/demo-project.db",
+        "--policy", "/absolute/path/to/reviewed-policy.yaml",
+        "--workspace", "demo-project",
+        "serve"
+      ]
+    }
+  }
+}
+```
+
+The client launches and communicates with the process over stdin/stdout. With no
+subcommand Kaban also defaults to `serve`; there is no URL, service port or daemon
+installation. Ensure the host process has the intended `KABAN_HOME`, and launch
+the server from the project directory for repository/code-snapshot discovery.
+
+For Codex, pi and Cursor, use the client-specific forms in
+[REGISTER](developer/REGISTER.md). Optional [hooks](../hooks/README.md) need the same
+database, home, policy and workspace; they never create a missing database.
+
+## Next steps
+
+Try `kaban ingest docs/` in your project with the default build, or read
+[code graph](guides/code-graph.mdx) before explicitly trusting and indexing code.
+`serve --http` is a rejected placeholder; HTTP/REST and OpenAPI are unavailable.
+These instructions do not qualify performance, portability or secret coverage.

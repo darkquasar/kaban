@@ -1,0 +1,7 @@
+# prefixes are opaque strings: never parsed as URLs, never fetched (EN-S11)
+ontology: shop
+version: 1
+prefixes: {shop: not-a-url, ex: "::also not::"}
+kinds:
+  Thing: {description: "a thing"}
+rels: {}

@@ -1,0 +1,136 @@
+---
+title: "Code tools"
+description: "Request and response fields of the code_* MCP tools, their error classes, the coverage object and the kaban://code-index resource."
+---
+
+Seven read-only MCP tools answer from the code-graph snapshot the server resolves
+for its working directory: `code_definition`, `code_references`, `code_members`,
+`code_implementers`, `code_tests_for`, `code_neighbours` and `code_context`. They
+exist in the default build (`code-graph` feature). None of them starts an indexer.
+The [guide](../guides/code-graph.mdx) explains how to read the answers; this page
+lists the fields.
+
+## The target
+
+Every request has a `target`, exactly one of these forms; anything else is
+`selector_invalid`:
+
+| Form | Fields | Meaning |
+| --- | --- | --- |
+| symbol | `symbol` | the normalised cross-commit SCIP key |
+| ref | `ref` | the exact row identity in this snapshot: `scip:<scip>`, `local:<path>:<scip>` or `file:<path>` |
+| name | `label`, `name`, optional `path` | a SCIP kind name (`Struct`, `Function`, `Method`, `Trait`, `Enum`, `Field`, ...) or `File`, with the exact, case-sensitive display name; `path` keeps the one file the node must be defined in |
+| line | `path`, `line` | the nodes defined at that 0-based line of the repository-relative path |
+| path | `path` | the file node (`code_definition`, `code_members`, `code_references`, `code_tests_for`, `code_neighbours`, `code_context`; not `code_implementers`) |
+
+What the name form does beyond an exact match:
+
+- Several nodes match: `ambiguous_symbol` with `candidates` (bounded, in path then
+  ref order) and `candidates_total` when more matched. Select by `ref`; the tools
+  never merge the matches.
+- No node of that label, but exactly one of another label carries the name: the
+  answer comes from that node and `target_note.label_corrected` names its label
+  (asking for Function `Coverage` answers the Struct with `label_corrected: "Struct"`).
+- No node at all: `unknown_symbol`, with `did_you_mean` listing same-named rows of
+  other labels when there are several.
+- The name is an external placeholder (a dependency's trait such as serde's
+  `Deserialize`): it answers whatever label it lacks, with `target_note.external: true`.
+
+Each candidate row carries `label`, `name`, `path` (`null` for an external node),
+`line` (0-based, `null` without a range), `enclosing`, `external` and `ref`.
+
+## Request fields by tool
+
+| Field | Tools | Meaning |
+| --- | --- | --- |
+| `target` | all | the selector above |
+| `limit` | the list tools, `code_neighbours` | default 50, max 200; `truncated: true` says more existed. `code_references` counts sites, `code_neighbours` nodes after the start |
+| `current_path` | all | the caller's current file, repository-relative; results are ranked by path distance from it (`distance` on every card) |
+| `include_snippets` | the list tools, `code_neighbours` | include each card's source snippet (`code_definition` and `code_context` always carry it) |
+| `include_external` | `code_implementers` | also list implementers defined outside the repository |
+| `labels` | `code_members` | keep only members with these SCIP kind names, for example `["Method"]` |
+| `include_tests` | `code_references` | also list sites in test files (default false) |
+| `depth` | `code_neighbours` | 1 to 3 hops in both directions (default 1) |
+| `edge_types` | `code_neighbours` | keep only these edge types: `CONTAINS`, `DEFINED_IN`, `IMPLEMENTS`, `IMPLEMENTS_MEMBER`, `REFERENCES`, `TESTED_BY`, `TYPE_OF`; empty keeps every type |
+| `include_locals` | `code_neighbours` | also walk to document-local symbols (parameters, variables); hidden and counted in `locals_hidden` by default |
+
+## Response fields
+
+Every response carries these three objects:
+
+| Field | Meaning |
+| --- | --- |
+| `snapshot` | `commit` (40 hex), `exact` (`true` for the HEAD snapshot, `false` for the nearest indexed ancestor), `schema_version`, `policy` (`off` when the content scan was disabled at index time, `current` when the snapshot's policy version is the live one, else `stale`), `isolation` (`namespaces`, `container` or `none`) |
+| `target_note` | present only when the name selector did more than an exact match: `ref` (pass it back as `target.ref`), `label_corrected`, `external` |
+| `coverage` | what the snapshot does not cover, below |
+
+Then, per tool:
+
+| Tool | Fields |
+| --- | --- |
+| `code_definition` | `definition` (a card), `follow_ups` |
+| `code_members`, `code_implementers` | `count`, `results` (cards), `truncated`, `ranking` (`full` or `partial`), `follow_ups` |
+| `code_references` | `count` (sites over every group), `by_enclosing[]` of `{enclosing: card, sites[]: {site: range, path, roles[]}}` grouped by the enclosing symbol (or the file node when a site has none), `truncated`, `follow_ups` |
+| `code_tests_for` | `tests[]` of `{test: card, how: "direct" \| "via" \| "textual", via, matched_by: "reference" \| "naming", heuristic}`: `direct` tests reference the target; `via` tests reference a function that references the target (`via` names that function; at most 50 intermediates); `textual` tests only mention the target's name words in their path or signature and are consulted only when the graph has nothing (`heuristic: true`, may be wrong by construction). Added 2026-10-26 (TESTS-1). `truncated`, `follow_ups` |
+| `code_neighbours` | `nodes[]` (the start first, then by depth and ref), `edges[]` of `{from, type, to}` kept when both ends survive the cut, `truncated` (the limit, or the 200-per-hub and 500-total traversal bounds), `locals_hidden` (edges to document-local symbols left out; 0 with `include_locals`) |
+| `code_context` | `definition`, `callers` and `callees` (up to 3 each over `REFERENCES` edges, `approximate: true` because no call graph is derived), `tests` (up to 3 links), `governing` (the records of `why(symbol)` with their currency and `superseded_by`), `last_change` (`commit`, `author_date`, `summary` of the last commit touching the file; `null` when git is slow or the file unknown), `follow_ups` |
+
+`follow_ups` is empty in this release. A card (`CodeNode`) carries `kind`, `label`,
+`name`, `path`, `range` and `enclosing` (0-based lines and columns), `signature`,
+`doc`, `snippet`, `symbol`, `raw`, `ref`, `language`, `external`, `is_test` and
+`distance`.
+
+### The `coverage` object
+
+Projected from the snapshot's `coverage:*` meta rows, which the Rust producer
+writes. A Go or TypeScript snapshot has none: every number is 0 and there is no note.
+
+| Field | Meaning |
+| --- | --- |
+| `declarations` | declarations the producer published |
+| `block_items_unique` | distinct items inside function bodies and macro expansions that have no identity in the graph |
+| `incomplete_modules` | modules indexed with an unresolved import, module or macro, whose references are partial |
+| `skipped_targets` | Cargo targets skipped for inactive `required-features` |
+| `note` | present when any gap counter is non-zero: one sentence naming every non-zero gap and ending in "an empty answer does not prove absence" |
+
+The gap counters the note can name, in the producer's order: `targets_skipped`,
+`proc_macros_not_built`, `block_items_skipped` (only from a producer that wrote no
+`block_items_unique`), `block_items_unique`, `block_item_references`,
+`shared_file_contexts_skipped`, `incomplete_modules`, `divergent_bodies`,
+`cfg_divergent_declarations`, `tokens_without_symbol`, `positions_skipped`,
+`derived_impls_generic_skipped` (a derived impl with generics or a `where` clause
+keeps its declaration without an `IMPLEMENTS` edge). The size counters `contexts`,
+`declarations`, `scip_bytes` and `block_item_lines` are never gaps.
+
+## Error classes
+
+Each failure is a fixed first sentence that never echoes a request value:
+
+| Class | Text |
+| --- | --- |
+| `no_snapshot` | no code-graph snapshot for this repository and commit; run `kaban-index index` |
+| `snapshot_too_new` | the code-graph snapshot was written by a newer kaban-index; upgrade kaban or re-index |
+| `selector_invalid` | target must set exactly one of symbol, ref, {label, name} (with an optional path), {path, line} or path |
+| `symbol_invalid` | target.symbol is not a SCIP symbol |
+| `ref_invalid` | target.ref is not a scip:, local: or file: ref |
+| `unknown_symbol` | no node matches the target in the resolved snapshot; then `did_you_mean: [...]` when there are same-named rows of other labels |
+| `ambiguous_symbol` | several nodes match the target; select by ref; then `candidates: [...]` and `candidates_total: <n>` |
+
+## The `kaban://code-index` resource
+
+The resolved snapshot's `meta`, for a caller that wants to know what the tools answer
+from: `snapshot` (as above), `languages[]`, `indexers{lang: version text}`,
+`kaban_index_version`, `scip_version`, `schema_version`, `policy_version` (`off`
+when the scan was disabled), `isolation_detail`, `resources[]` (`toolchain`,
+`modcache`, `registry`), `counts{...}` and `coverage`: every `coverage:*` counter by
+key plus `per_crate[]` of `{crate, declarations, block_items_unique,
+block_item_lines}`. `coverage` is `null` without coverage rows. Without a snapshot
+the body is the `no_snapshot` sentence.
+
+On Kaban at `0e583ae` the table reads: `declarations` 65,449, `contexts` 278,
+`block_items_unique` 2,809 over `block_item_lines` 6,999, `block_item_references`
+4,280, `incomplete_modules` 9, `targets_skipped` 3, `proc_macros_not_built` 1,
+`shared_file_contexts_skipped` 352, `divergent_bodies` 1, `tokens_without_symbol`
+406, `derived_impls_generic_skipped` 44, `scip_bytes` 95,215,760, and nine
+`per_crate` rows (`kaban-api` the largest: 15,922 declarations, 1,095 skipped block
+items).

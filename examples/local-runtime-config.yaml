@@ -1,0 +1,3 @@
+# Template copied only into the launcher's dedicated default runtime-home.
+# Kaban reads KABAN_HOME/config.yaml. The store owns the Tantivy text index by default.
+{}

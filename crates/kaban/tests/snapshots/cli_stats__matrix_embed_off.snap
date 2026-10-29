@@ -1,0 +1,52 @@
+---
+source: crates/kaban/tests/cli_stats.rs
+expression: "serde_json::to_string_pretty(&tool[\"layers\"]).unwrap()"
+---
+[
+  {
+    "last_outcome": null,
+    "last_run": null,
+    "layer": "fts",
+    "on": true,
+    "owner": "kaban-ingest",
+    "producer_layers": [
+      "fts"
+    ],
+    "reason_off": null
+  },
+  {
+    "last_outcome": "failed",
+    "last_run": 42,
+    "layer": "gazetteer",
+    "on": false,
+    "owner": "kaban-ingest",
+    "producer_layers": [
+      "gazetteer"
+    ],
+    "reason_off": "not_enabled"
+  },
+  {
+    "last_outcome": null,
+    "last_run": null,
+    "layer": "embed",
+    "on": false,
+    "owner": "kaban-embed",
+    "producer_layers": [
+      "embed"
+    ],
+    "reason_off": "not_available_in_this_release"
+  },
+  {
+    "last_outcome": null,
+    "last_run": null,
+    "layer": "extractors",
+    "on": false,
+    "owner": "kaban-parse",
+    "producer_layers": [
+      "llm",
+      "gliner",
+      "script"
+    ],
+    "reason_off": "explicit_selection_only"
+  }
+]

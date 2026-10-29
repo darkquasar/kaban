@@ -1,0 +1,38 @@
+# What the shipped `kaban-core.yaml` will be (engine-spec §3.1; E1.3 ships it). Fixture copy for
+# the EN-F1 golden: the `core` kinds and rels of `schema.rs` SEED_LABELS / SEED_RELS. Free-form
+# kinds carry an open `props_schema` ({type: object}) because the spec default is closed.
+ontology: core
+version: 1
+kinds:
+  Document:
+    description: "An ingested document (docs-ingest)."
+    props_schema: {type: object}
+    index: {stamp: none}
+  Section:
+    description: "A section of an ingested document."
+    props_schema: {type: object}
+    index: {stamp: none}
+  Chunk:
+    description: "A retrievable chunk of a section."
+    props_schema: {type: object}
+    index: {stamp: none}
+  Entity:
+    description: "A named thing: project, file, symbol, service, person."
+    props_schema: {type: object}
+  CodeRef:
+    description: "A pointer to code: repo, commit, path, symbol, line."
+    props_schema: {type: object}
+  Tag:
+    description: "A tag node for TAGGED edges."
+    props_schema: {type: object}
+    index: {stamp: none}
+rels:
+  MENTIONS: {from: [], to: [], directed: true, description: "Mentions an entity."}
+  ABOUT: {from: [], to: [], directed: true, description: "Memory is about an Entity."}
+  EVIDENCE_FOR: {from: [], to: [], directed: true, description: "Supports the target claim."}
+  DERIVED_FROM: {from: [], to: [], directed: true, description: "Derived from a source memory or episode."}
+  PART_OF: {from: [], to: [], directed: true, description: "Containment / membership."}
+  NEXT: {from: [], to: [], directed: true, description: "Reading order between sections or chunks."}
+  LINKS_TO: {from: [], to: [], directed: true, description: "A document links to another document."}
+  TAGGED: {from: [], to: [Tag], directed: true, description: "Tagged with a Tag node."}
+  RELATES_TO: {from: [], to: [], directed: true, description: "Generic association."}

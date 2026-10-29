@@ -1,0 +1,9 @@
+{
+  "session_id": "sess-codex-0001",
+  "transcript_path": "/invented/home/.codex/sessions/sess-codex-0001.jsonl",
+  "cwd": "/invented/repo/nightjar-service",
+  "hook_event_name": "SessionStart",
+  "model": "gpt-5.6-sol",
+  "source": "startup",
+  "permission_mode": "default"
+}

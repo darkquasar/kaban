@@ -1,0 +1,6 @@
+{
+  "title": {"m": 9000, "u": 100, "agreement": 64919, "disagreement": -33074},
+  "arithmetic": ["round_half_even(10000 * log2(90)) = 64919", "round_half_even(10000 * log2(10/99)) = -33074"],
+  "mixed": [64919, -33074, -33074, -26381, 10000],
+  "sum": -17610
+}

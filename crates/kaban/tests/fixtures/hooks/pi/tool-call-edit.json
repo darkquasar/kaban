@@ -1,0 +1,16 @@
+{
+  "session_id": "sess-pi-0001",
+  "cwd": "/invented/repo/nightjar-service",
+  "hook_event_name": "tool_call",
+  "toolCallId": "call_pi_0003",
+  "toolName": "edit",
+  "input": {
+    "path": "src/store/sqlite.rs",
+    "edits": [
+      {
+        "oldText": "fn open(path: &Path)",
+        "newText": "fn open(path: &Path) // AKIAQWERTYUIOPASDFGH is edit content a hook must never read"
+      }
+    ]
+  }
+}

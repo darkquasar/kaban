@@ -1,0 +1,7 @@
+ontology: shop
+version: 1
+kinds:
+  Alpha: {description: "a", is_a: Beta}
+  Beta: {description: "b", is_a: Gamma}
+  Gamma: {description: "c", is_a: Alpha}
+rels: {}

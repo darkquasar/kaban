@@ -1,0 +1,21 @@
+---
+source: crates/kaban/tests/mcp_docs.rs
+assertion_line: 139
+expression: card
+---
+{
+  "created_at": "[created_at]",
+  "governance": "none",
+  "id": "[id]",
+  "kind": "Chunk",
+  "lifecycle": "active",
+  "provenance": {
+    "store": "project"
+  },
+  "score": "[score]",
+  "summary": "crates/kaban-ingest/tests/fixtures/md/links.md > Linked note > Ignored heading title",
+  "why": [
+    "bm25:1"
+  ],
+  "workspace_id": "[workspace]"
+}

@@ -1,0 +1,5 @@
+ontology: shop
+version: 1
+kinds:
+  Thing: {description: "a thing", rank: {boost: 1.0, expand_rels: [], expand_depth: 5}}
+rels: {}

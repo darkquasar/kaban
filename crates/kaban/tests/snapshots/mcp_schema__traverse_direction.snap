@@ -1,0 +1,24 @@
+---
+source: crates/kaban/tests/mcp_schema.rs
+expression: direction
+---
+{
+  "description": "Which edges a traversal follows from a node (MT-5, `rust-bp-review-dispositions.md` RB-4).\nClosed set: an unknown wire value fails deserialization.",
+  "oneOf": [
+    {
+      "const": "out",
+      "description": "Outgoing edges only (`src` = the node).",
+      "type": "string"
+    },
+    {
+      "const": "in",
+      "description": "Incoming edges only (`dst` = the node).",
+      "type": "string"
+    },
+    {
+      "const": "both",
+      "description": "Both directions (the default).",
+      "type": "string"
+    }
+  ]
+}

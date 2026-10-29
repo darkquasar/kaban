@@ -1,0 +1,5 @@
+ontology: shop
+version: 1
+extends: [missing]
+kinds: {}
+rels: {}

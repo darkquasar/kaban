@@ -1,0 +1,8 @@
+[package]
+name = "block-attribute"
+version = "0.1.0"
+edition = "2024"
+[workspace]
+members = ["macros"]
+[dependencies]
+block-macros = { path = "macros" }

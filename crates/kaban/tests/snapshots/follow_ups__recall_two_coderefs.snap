@@ -1,0 +1,76 @@
+---
+source: crates/kaban/tests/follow_ups.rs
+expression: v
+---
+{
+  "count": 3,
+  "follow_ups": [
+    {
+      "args": {
+        "relative_path": "src/store/open.rs"
+      },
+      "reason": "a card in this result points at src/store/open.rs; read the symbol",
+      "tool": "serena.find_symbol"
+    },
+    {
+      "args": {
+        "relative_path": "src/store/close.rs"
+      },
+      "reason": "a card in this result points at src/store/close.rs; read the symbol",
+      "tool": "serena.find_symbol"
+    }
+  ],
+  "results": [
+    {
+      "created_at": "<ts>",
+      "governance": "none",
+      "id": "<id-0>",
+      "kind": "Fact",
+      "lifecycle": "active",
+      "provenance": {
+        "repo": "<repo>",
+        "store": "project"
+      },
+      "score": 0.014,
+      "text": "quokka opens and closes the store",
+      "why": [
+        "bm25:1"
+      ],
+      "workspace_id": "fu"
+    },
+    {
+      "created_at": "<ts>",
+      "governance": "none",
+      "id": "<id-1>",
+      "kind": "CodeRef",
+      "lifecycle": "active",
+      "provenance": {
+        "repo": "<repo>",
+        "store": "project"
+      },
+      "score": 0.008,
+      "summary": "src/store/open.rs",
+      "why": [
+        "hop1:ABOUT"
+      ],
+      "workspace_id": "fu"
+    },
+    {
+      "created_at": "<ts>",
+      "governance": "none",
+      "id": "<id-2>",
+      "kind": "CodeRef",
+      "lifecycle": "active",
+      "provenance": {
+        "repo": "<repo>",
+        "store": "project"
+      },
+      "score": 0.008,
+      "summary": "src/store/close.rs",
+      "why": [
+        "hop1:ABOUT"
+      ],
+      "workspace_id": "fu"
+    }
+  ]
+}

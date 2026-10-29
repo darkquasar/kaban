@@ -1,0 +1,9 @@
+ontology: shop
+version: 1
+kinds:
+  Thing:
+    description: "a thing"
+    governed: {acceptance: human, serialize: {dir: things, format: md-frontmatter, typo: red},
+               export: {digest: false, marker: false}, display: {label: Thing, plural: Things},
+               governs_paths: false, dedup: none}
+rels: {}

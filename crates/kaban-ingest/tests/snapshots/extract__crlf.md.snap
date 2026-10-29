@@ -1,0 +1,68 @@
+---
+source: crates/kaban-ingest/tests/extract.rs
+expression: ex
+---
+{
+  "title": "CRLF file",
+  "frontmatter": null,
+  "sections": [
+    {
+      "heading_path": [
+        "CRLF file"
+      ],
+      "level": 1,
+      "kind": "heading",
+      "byte_start": 0,
+      "byte_end": 65,
+      "blocks": [
+        {
+          "block": "paragraph",
+          "text": "First line\nsecond line of the same paragraph.",
+          "byte_start": 15,
+          "byte_end": 63
+        }
+      ]
+    },
+    {
+      "heading_path": [
+        "CRLF file",
+        "Section"
+      ],
+      "level": 2,
+      "kind": "heading",
+      "byte_start": 65,
+      "byte_end": 142,
+      "blocks": [
+        {
+          "block": "paragraph",
+          "text": "Another paragraph with a #tag and [[Link]].",
+          "byte_start": 79,
+          "byte_end": 124
+        },
+        {
+          "block": "code",
+          "text": "code",
+          "byte_start": 126,
+          "byte_end": 140
+        }
+      ]
+    }
+  ],
+  "links": [
+    {
+      "raw_target": "Link",
+      "anchor_kind": "note",
+      "embed": false,
+      "byte_offset": 113
+    }
+  ],
+  "tags": [
+    {
+      "tag": "tag",
+      "byte_offset": 104
+    }
+  ],
+  "partial": false,
+  "needs_ocr": false,
+  "lang": "eng"
+}

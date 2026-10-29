@@ -1,0 +1,18 @@
+{
+  "_comment": "Closed per-host hook event vocabulary (R4-1), derived from hooks/HOST-EVENTS.md: Claude Code and Codex `hook_event_name` values (sections 1 and 2, observed and configured-but-unverified rows), pi extension `type` values (section 3) plus the two harness marker events the pi capture extension emits. capture.sh and entrypoint.sh export an event name only when it is listed here; anything else is exported as \"other\" with `event_unknown: true`.",
+  "claude-code": [
+    "SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "PostToolUseFailure",
+    "SubagentStart", "SubagentStop", "Stop", "SessionEnd"
+  ],
+  "codex": [
+    "SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse",
+    "SubagentStart", "SubagentStop", "Stop", "SessionEnd",
+    "PreCompact", "PostCompact", "PermissionRequest", "Interrupt"
+  ],
+  "pi": [
+    "session_start", "before_agent_start", "agent_start", "turn_start",
+    "tool_call", "tool_execution_start", "tool_execution_end", "tool_result",
+    "turn_end", "agent_end", "agent_before_settle", "agent_settled", "session_shutdown",
+    "kbn_stop_probe_can_continue", "kbn_stop_probe_cannot_continue"
+  ]
+}

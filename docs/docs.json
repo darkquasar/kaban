@@ -1,0 +1,47 @@
+{
+  "theme": "mint",
+  "name": "Kaban",
+  "colors": {
+    "primary": "#087F5B",
+    "light": "#12B886",
+    "dark": "#087F5B"
+  },
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Start here",
+            "pages": ["index", "quickstart"]
+          },
+          {
+            "group": "Concepts",
+            "pages": ["concepts/architecture", "concepts/security"]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/memory",
+              "guides/governance",
+              "guides/documents",
+              "guides/code-graph"
+            ]
+          },
+          {
+            "group": "Reference",
+            "pages": [
+              "reference/configuration",
+              "reference/kaban-index",
+              "reference/code-tools"
+            ]
+          },
+          {
+            "group": "Operations",
+            "pages": ["operations/maintenance", "operations/troubleshooting"]
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,37 @@
+[package]
+name = "kaban-store-sqlite"
+description = "kaban GraphStore implementation on SQLite (rusqlite bundled) with FTS5"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[features]
+# `SqliteStore::with_text_index`: ordinary recall seeds through an injected `TextIndex` instead of
+# the FTS5 adapter (spec 05 SS-07; lane B's external adapter and `tests/text_index_override.rs`)
+text-index-override = []
+
+[dependencies]
+kaban-core.workspace = true
+kaban-policy.workspace = true
+kaban-index-tantivy.workspace = true # the store owns its text index (spec 05 OWN-M, lane T8a): opened, admitted or rebuilt at open, projected after every commit
+tracing.workspace = true             # a post-commit projection failure is logged, never a rejection (OWN-M constraint 2)
+rusqlite = { workspace = true, features = ["functions"] } # `kaban_writer()`, the connection-local writer the stamp triggers read (spec 05 SS-26)
+serde_json.workspace = true
+subtle.workspace = true
+rustix.workspace = true
+zstd.workspace = true   # the body codec (spec 05 SS-17, OWN-I): per-record zstd with the shipped dictionary
+crc32fast.workspace = true # the length and checksum framing of a body stored plain behind the tag (T8c review t8c-3)
+
+[dev-dependencies]
+kaban-core = { workspace = true, features = ["test-fake"] } # `FakeIndex` for the `recall_with` seam test (spec 05 SS-07)
+kaban-store-sqlite = { path = ".", features = ["text-index-override"] } # the override constructor for `tests/text_index_override.rs` and the adapter goldens (spec 05 SS-07)
+rusqlite = { workspace = true, features = ["trace"] }
+tantivy.workspace = true   # the adapter suites moved in with the composition (OWN-M): two erasure canaries read the raw index (already linked through kaban-index-tantivy)
+proptest.workspace = true
+zstd = { workspace = true, features = ["zdict_builder"] } # the offline dictionary trainer (`body_codec::tests::train_dictionary`, ignored)
+kaban-codegraph = { workspace = true, features = ["test-support"] } # the §10 fixture builder and `validate_for_attach` in `tests/attach.rs` (cg-join-v1 §2 SO-3: a dev edge only)
+
+[lints]
+workspace = true

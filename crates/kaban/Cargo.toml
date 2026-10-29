@@ -1,0 +1,59 @@
+[package]
+name = "kaban"
+description = "kaban: local, secret-safe memory for coding agents (MCP stdio server and CLI)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "kaban"
+path = "src/main.rs"
+
+[features]
+# `ingest` (default on) wires document ingestion into the CLI/MCP adapters (docs-ingest DI1.6);
+# `cargo build -p kaban --no-default-features` builds the binary without it (DI0.1, D-1).
+# `code-graph` (default on) wires the typed `code_*` MCP tools (stage1-plan CG7.1); the
+# `kaban-codegraph` dependency itself stays unconditional (`serve` resolves the provider,
+# CG5.2), so the feature gates the adapter module only.
+default = ["ingest", "code-graph", "text-index-tantivy"]
+ingest = ["dep:kaban-ingest"]
+code-graph = []
+# `bench` (never default) adds `kaban bench cg gen|run` (stage1-plan §18, CG7.3) over the
+# synthetic corpus of `kaban_codegraph::testing`; `binary_sizes` never measures it.
+bench = ["kaban-codegraph/test-support"]
+# `text-index-tantivy` (default on since spec 05 SS-13b, T5.1): since OWN-M the store owns its
+# Tantivy index in every build (`--no-default-features` included; lane T8b), so the feature only
+# enables `kaban bench recall --text-index tantivy` through the store's `text-index-override` and
+# the tests that need it. `tantivy` pulls `nom 7.1.3`, a never-list package, under
+# `tantivy-query-grammar` only: granted by OWN-J (`tests/never_list.rs`, grant row `TANTIVY/OWN-J`).
+text-index-tantivy = ["kaban-store-sqlite/text-index-override"]
+
+[dependencies]
+kaban-core.workspace = true
+kaban-policy.workspace = true
+kaban-store-sqlite.workspace = true
+kaban-index-tantivy.workspace = true  # the pack admission of a captured index (SS-19)
+kaban-api.workspace = true
+kaban-codegraph.workspace = true  # `identity::{resolve_common_dir, repo_id}` and `DiscoverProvider` for `serve` (CG5.2)
+kaban-ingest = { workspace = true, optional = true }
+rmcp.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+zeroize.workspace = true      # the codegraph key bytes read by `serve` are zeroed on drop (CG5.2)
+
+[dev-dependencies]
+rusqlite.workspace = true
+tracing-log.workspace = true  # install the `log` bridge explicitly in the RD-1 regression
+insta.workspace = true        # `tools/list` input-schema snapshot (C3.1)
+kaban-index.workspace = true  # publishes the fixture snapshots for `tests/acceptance_north_star.rs` (CG10.2 stop 1 grant)
+
+[lints]
+workspace = true

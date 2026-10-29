@@ -1,0 +1,19 @@
+---
+source: crates/kaban-ingest/tests/golden_pdf.rs
+expression: first
+---
+frontmatter: ~
+sections:
+  - heading_path:
+      - p.1
+    level: 1
+    kind: page
+    byte_start: 0
+    byte_end: 0
+    page: 1
+    blocks: []
+links: []
+tags: []
+partial: true
+needs_ocr: true
+page_count: 1

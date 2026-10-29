@@ -1,0 +1,64 @@
+# What the shipped `adr.yaml` will be (engine-spec §3.1 excerpt; E1.3 ships it). Fixture copy for
+# the EN-F1 golden: the `adr` kinds and rels of `schema.rs` SEED_LABELS / SEED_RELS; the
+# Decision, Convention and Failure schemas are the EN-F3a goldens of fixtures/validator
+# (golden_strict = false). JSON is YAML, so the schemas are pasted verbatim.
+ontology: adr
+version: 1
+extends: [core]
+mixins:
+  Governed: {governed: {acceptance: human, serialize: none, export: {digest: false, marker: false},
+                        display: {label: Record, plural: Records}, governs_paths: false, dedup: none}}
+kinds:
+  Fact:
+    description: "A verified statement about the world, code or project."
+    props_schema: {type: object}
+  Idea:
+    description: "A proposal or hypothesis not yet acted upon."
+    props_schema: {type: object}
+  Insight:
+    description: "A derived reflection or lesson learned."
+    props_schema: {type: object}
+  Improvement:
+    description: "A change that made something better, or a fix."
+    props_schema: {type: object}
+  Episode:
+    description: "A sanitized source interaction or event used as provenance."
+    props_schema: {type: object}
+  Decision:
+    description: "A choice made, with its rationale."
+    mixins: [Governed]
+    props_schema: {"type": "object", "additionalProperties": false, "required": ["rationale"], "properties": {"decision": {"type": "string"}, "rule": {"type": "string"}, "rationale": {"type": "string", "minLength": 1}, "rejected_alternatives": {"type": "array", "items": {"type": "string"}}, "consequences": {"type": "string"}, "exceptions": {"type": "array", "items": {"type": "string"}}, "evidence": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["id"], "properties": {"id": {"type": "string", "minLength": 1}, "quote": {"type": "string"}}}}, "accepted_commit": {"type": "string"}}}
+    governed: {acceptance: human, serialize: {dir: decisions, format: md-frontmatter},
+               export: {digest: true, marker: true, heading: Decisions}, display: {label: Decision, plural: Decisions},
+               governs_paths: true, dedup: title+scope}
+    rank: {boost: 1.2, expand_rels: [CAUSED_BY, FIXED_BY, SUPERSEDES], expand_depth: 2}
+    fts_fields: [props.rationale]
+    extract: {enabled: true, labels: ["architecture decision", "design decision"], gazetteer: [summary, props.aliases]}
+    min_confidence: 0.6
+  Convention:
+    description: "A rule the project follows, with its rationale (governed)."
+    mixins: [Governed]
+    props_schema: {"type": "object", "additionalProperties": false, "required": [], "properties": {"decision": {"type": "string"}, "rule": {"type": "string"}, "rationale": {"type": "string", "minLength": 1}, "rejected_alternatives": {"type": "array", "items": {"type": "string"}}, "consequences": {"type": "string"}, "exceptions": {"type": "array", "items": {"type": "string"}}, "evidence": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["id"], "properties": {"id": {"type": "string", "minLength": 1}, "quote": {"type": "string"}}}}, "accepted_commit": {"type": "string"}}}
+    governed: {acceptance: agent, serialize: {dir: conventions, format: md-frontmatter},
+               export: {digest: true, marker: true, heading: Conventions}, display: {label: Convention, plural: Conventions},
+               governs_paths: true, dedup: title+scope}
+  Failure:
+    description: "Something that went wrong: a bug, outage, failed approach."
+    mixins: [Governed]
+    props_schema: {"type": "object", "additionalProperties": false, "required": [], "properties": {"error_text": {"type": "string"}, "command": {"type": "string"}, "stack_head": {"type": "string"}, "fix": {"type": "string"}, "environment": {"type": "string"}, "pending_fix": {"type": "boolean"}, "command_fingerprint": {"type": "string"}, "evidence_runs": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["ts"], "properties": {"ts": {"type": "integer"}, "files_edited_since": {"type": "array", "items": {"type": "string"}}}}}}}
+    governed: {acceptance: agent, serialize: {dir: failures, format: md-frontmatter},
+               export: {digest: false, marker: false}, display: {label: Failure, plural: Failures},
+               governs_paths: false, dedup: none}
+rels:
+  SUPERSEDES: {from: [Decision], to: [Decision], directed: true, description: "Newer memory replaces the older one.", on_link: archive_target, confidence_required: 0.95, governed_semantics: true}
+  CONTRADICTS: {from: [], to: [], directed: false, description: "Two memories conflict."}
+  INVALIDATES: {from: [], to: [], directed: true, description: "Source shows the target is no longer valid."}
+  DEPENDS_ON: {from: [], to: [], directed: true, description: "Dependency."}
+  CAUSED_BY: {from: [Failure], to: [], directed: true, description: "Failure was caused by the target."}
+  FIXED_BY: {from: [Failure], to: [], directed: true, description: "Failure was fixed by the target."}
+  GOVERNS: {from: [Decision, Convention], to: [CodeRef, path], directed: true, description: "A Decision or Convention governs the target (CodeRef or path).", governed_semantics: true}
+discovered: {policy: review, cap: 500, prune_after_days: 90, promote_when: {min_count: 20, min_sources: 3, min_mean_score: 0.7}}
+source_types: {adr: {kinds: [Decision, Fact], paths: ["docs/adr/**"]}, postmortem: {kinds: [Failure, Improvement]}}
+default_kind: Fact
+questions:
+  governing_decisions: {kinds: governs_paths, where: {path_scope: {governs: $path}}, exclude_via: SUPERSEDES, order: [governance, currency], depth: 1}

@@ -1,0 +1,70 @@
+---
+source: crates/kaban/tests/recall_determinism.rs
+expression: v
+---
+{
+  "count": 3,
+  "follow_ups": [],
+  "results": [
+    {
+      "created_at": "<ts>",
+      "governance": "none",
+      "id": "<id-0>",
+      "kind": "Fact",
+      "lifecycle": "active",
+      "provenance": {
+        "agent_id": "codex",
+        "repo": "<repo>",
+        "store": "project"
+      },
+      "score": 0.022,
+      "summary": "libssl-dev fixes the quokka build",
+      "why": [
+        "bm25:1",
+        "hop1:FIXED_BY"
+      ],
+      "workspace_id": "det"
+    },
+    {
+      "created_at": "<ts>",
+      "governance": "proposed",
+      "id": "<id-1>",
+      "kind": "Failure",
+      "lifecycle": "active",
+      "provenance": {
+        "agent_id": "claude",
+        "repo": "<repo>",
+        "session_id": "s-1",
+        "store": "project"
+      },
+      "score": 0.022,
+      "tags": [
+        "build",
+        "ssl"
+      ],
+      "text": "quokka build failed: libssl not found",
+      "why": [
+        "bm25:2",
+        "hop1:FIXED_BY"
+      ],
+      "workspace_id": "det"
+    },
+    {
+      "created_at": "<ts>",
+      "governance": "none",
+      "id": "<id-2>",
+      "kind": "Idea",
+      "lifecycle": "active",
+      "provenance": {
+        "repo": "<repo>",
+        "store": "project"
+      },
+      "score": 0.013,
+      "text": "cache the quokka toolchain between builds",
+      "why": [
+        "bm25:3"
+      ],
+      "workspace_id": "det"
+    }
+  ]
+}

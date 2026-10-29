@@ -1,0 +1,5 @@
+ontology: shop
+version: 1
+kinds: {}
+rels:
+  R: {from: [], to: [], directed: true, confidence_required: 2}

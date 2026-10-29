@@ -1,0 +1,7 @@
+CONTAINS	descriptor grammar of the gated SymbolInformation.symbol	measured
+DEFINED_IN	Occurrence.symbol_roles & Definition	measured
+IMPLEMENTS	Relationship.is_implementation, endpoints not both members	measured
+IMPLEMENTS_MEMBER	Relationship.is_implementation, endpoints both Method or MethodSpecification	measured
+REFERENCES	non-definition occurrence inside the enclosing range of E, else the file node	rule
+TESTED_BY	reference form: occurrences in test files (rule); naming form: file names (heuristic)	heuristic
+TYPE_OF	Relationship.is_type_definition	measured

@@ -1,0 +1,1 @@
+//! Trusted build failure fixture.

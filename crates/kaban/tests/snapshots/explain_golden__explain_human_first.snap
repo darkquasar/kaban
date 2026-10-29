@@ -1,0 +1,151 @@
+---
+source: crates/kaban/tests/explain_golden.rs
+expression: "explanations(&s, &store, 3)"
+---
+[
+  {
+    "candidates": [
+      {
+        "lineages": [
+          {
+            "best": {
+              "assertion_key": "972ae4ecf16371a706e2a05488c44a4ff7aa1fa1799121052bd7a994abc331df",
+              "layer": "llm",
+              "method": "llm",
+              "prior": "0.7500",
+              "raw_score": "0.9000"
+            },
+            "lineage_id": "a4",
+            "others": 0,
+            "rank": "normal"
+          }
+        ],
+        "p": "1.0000",
+        "value": "infra:Hardware"
+      }
+    ],
+    "group_key": "[\"default\",\"type\",{\"span\":{\"chunk_rid\":1,\"len\":13,\"offset\":27}},null]",
+    "margin": "1.0000",
+    "min_confidence": "0.6000",
+    "rule": "weighted_vote_v1",
+    "threshold": "0.3000",
+    "verdict": "winner"
+  },
+  {
+    "candidates": [
+      {
+        "lineages": [
+          {
+            "best": {
+              "assertion_key": "7f2229c56b509fcbd2f409da2bb61e6e1307b7b27169fec17dc52e95c59c9c51",
+              "layer": "gazetteer",
+              "method": "alias",
+              "prior": "0.8000",
+              "raw_score": "0.4500"
+            },
+            "lineage_id": "a1",
+            "others": 0,
+            "rank": "normal"
+          },
+          {
+            "best": {
+              "assertion_key": "eaa4b3df63bae3fdba49221f0425c44272a84262e96b34aa2982f3395d49efb8",
+              "layer": "gliner",
+              "method": "gliner",
+              "prior": "0.6000",
+              "raw_score": "0.5800"
+            },
+            "lineage_id": "a3",
+            "others": 0,
+            "rank": "normal"
+          },
+          {
+            "best": {
+              "assertion_key": "e83b25b33e78622c71d8e250f8b2f7b729e3eb7b11a9850f0e2ceb95b77a2ce5",
+              "layer": "human",
+              "method": "link",
+              "prior": "1.0000",
+              "raw_score": "1.0000"
+            },
+            "lineage_id": "human:cli:1",
+            "others": 0,
+            "rank": "preferred"
+          }
+        ],
+        "p": "1.0000",
+        "value": "infra:Vendor"
+      }
+    ],
+    "group_key": "[\"default\",\"type\",{\"span\":{\"chunk_rid\":1,\"len\":5,\"offset\":27}},null]",
+    "margin": "1.0000",
+    "min_confidence": "0.6000",
+    "protected_by": "e83b25b33e78622c71d8e250f8b2f7b729e3eb7b11a9850f0e2ceb95b77a2ce5",
+    "rule": "weighted_vote_v1",
+    "threshold": "0.3000",
+    "verdict": "winner"
+  },
+  {
+    "candidates": [
+      {
+        "lineages": [
+          {
+            "best": {
+              "assertion_key": "289d5f81afc7bd08c6f1a31b8a91a82beaed4b69de4f2d99533869dbb28848a3",
+              "layer": "llm",
+              "method": "llm",
+              "prior": "0.7500",
+              "raw_score": "0.8500"
+            },
+            "lineage_id": "a6",
+            "others": 0,
+            "rank": "normal"
+          }
+        ],
+        "p": "0.4710",
+        "value": "infra:Team"
+      },
+      {
+        "lineages": [
+          {
+            "best": {
+              "assertion_key": "b7522dbe9a58b5bc090e615a64494f4e26b98b725dc0800fe99eb80adc9eeaee",
+              "layer": "gliner",
+              "method": "gliner",
+              "prior": "0.6000",
+              "raw_score": "0.6600"
+            },
+            "lineage_id": "a5",
+            "others": 0,
+            "rank": "normal"
+          }
+        ],
+        "p": "0.2926",
+        "value": "x:Fruit"
+      },
+      {
+        "lineages": [
+          {
+            "best": {
+              "assertion_key": "23b3b00ecdd31aef6b1bfab0dc1dd88ca79a9bb5fa10ad1618f2e451d13c4892",
+              "layer": "gazetteer",
+              "method": "alias",
+              "prior": "0.8000",
+              "raw_score": "0.4000"
+            },
+            "lineage_id": "a7",
+            "others": 0,
+            "rank": "normal"
+          }
+        ],
+        "p": "0.2364",
+        "value": "infra:Vendor"
+      }
+    ],
+    "group_key": "[\"default\",\"type\",{\"span\":{\"chunk_rid\":1,\"len\":6,\"offset\":56}},null]",
+    "margin": "0.1784",
+    "min_confidence": "0.6000",
+    "rule": "weighted_vote_v1",
+    "threshold": "0.3000",
+    "verdict": "candidate"
+  }
+]

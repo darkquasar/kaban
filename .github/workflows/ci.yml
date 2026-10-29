@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  gates:
+    name: Rust gates (scripts/ci/ci.sh)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends musl-tools jq sqlite3 python3
+
+      # rust-toolchain.toml pins the channel, components and musl targets; rustup installs them.
+      - name: Install pinned Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-nextest and cargo-deny
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest,cargo-deny
+
+      # Exit 3 means "a gate was skipped": ci.sh documents that CI must never treat it as a pass.
+      - name: Run gates
+        run: bash scripts/ci/ci.sh
+
+  script-tests:
+    name: Helper script unit tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: MCP catalog helpers
+        working-directory: scripts/mcp
+        run: python3 -m unittest -v test_mcp_catalog
+      - name: Build helpers
+        run: python3 -m unittest discover -s scripts/tests -v
+      - name: Shell syntax
+        run: |
+          find scripts hooks -name '*.sh' -print0 | xargs -0 -n1 bash -n

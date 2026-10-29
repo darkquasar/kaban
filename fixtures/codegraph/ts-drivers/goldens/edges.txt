@@ -1,0 +1,160 @@
+file:src/postgres.ts	TESTED_BY	file:src/postgres.test.ts	1
+local:src/postgres.ts:local 2	DEFINED_IN	file:src/postgres.ts	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/	CONTAINS	scip:scip-typescript npm @example/drivers 1.0.0 src/`driver.ts`/	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/	CONTAINS	scip:scip-typescript npm @example/drivers 1.0.0 src/`mem.ts`/	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/	CONTAINS	scip:scip-typescript npm @example/drivers 1.0.0 src/`mock.ts`/	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/	CONTAINS	scip:scip-typescript npm @example/drivers 1.0.0 src/`postgres.test.ts`/	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/	CONTAINS	scip:scip-typescript npm @example/drivers 1.0.0 src/`postgres.ts`/	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`driver.ts`/	CONTAINS	scip:scip-typescript npm @example/drivers 1.0.0 src/`driver.ts`/Conn#	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`driver.ts`/	CONTAINS	scip:scip-typescript npm @example/drivers 1.0.0 src/`driver.ts`/DatabaseDriver#	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`driver.ts`/	DEFINED_IN	file:src/driver.ts	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`driver.ts`/Conn#	CONTAINS	scip:scip-typescript npm @example/drivers 1.0.0 src/`driver.ts`/Conn#close().	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`driver.ts`/Conn#	DEFINED_IN	file:src/driver.ts	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`driver.ts`/Conn#	REFERENCES	scip:scip-typescript npm typescript 5.9.3 lib/`lib.es2015.iterable.d.ts`/Promise#	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`driver.ts`/Conn#	REFERENCES	scip:scip-typescript npm typescript 5.9.3 lib/`lib.es2015.promise.d.ts`/Promise.	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`driver.ts`/Conn#	REFERENCES	scip:scip-typescript npm typescript 5.9.3 lib/`lib.es2015.symbol.wellknown.d.ts`/Promise#	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`driver.ts`/Conn#	REFERENCES	scip:scip-typescript npm typescript 5.9.3 lib/`lib.es2018.promise.d.ts`/Promise#	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`driver.ts`/Conn#	REFERENCES	scip:scip-typescript npm typescript 5.9.3 lib/`lib.es5.d.ts`/Promise#	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`driver.ts`/Conn#close().	DEFINED_IN	file:src/driver.ts	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`driver.ts`/DatabaseDriver#	CONTAINS	scip:scip-typescript npm @example/drivers 1.0.0 src/`driver.ts`/DatabaseDriver#close().	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`driver.ts`/DatabaseDriver#	CONTAINS	scip:scip-typescript npm @example/drivers 1.0.0 src/`driver.ts`/DatabaseDriver#open().	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`driver.ts`/DatabaseDriver#	DEFINED_IN	file:src/driver.ts	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`driver.ts`/DatabaseDriver#	REFERENCES	scip:scip-typescript npm @example/drivers 1.0.0 src/`driver.ts`/Conn#	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`driver.ts`/DatabaseDriver#	REFERENCES	scip:scip-typescript npm typescript 5.9.3 lib/`lib.es2015.iterable.d.ts`/Promise#	2
+scip:scip-typescript npm @example/drivers 1.0.0 src/`driver.ts`/DatabaseDriver#	REFERENCES	scip:scip-typescript npm typescript 5.9.3 lib/`lib.es2015.promise.d.ts`/Promise.	2
+scip:scip-typescript npm @example/drivers 1.0.0 src/`driver.ts`/DatabaseDriver#	REFERENCES	scip:scip-typescript npm typescript 5.9.3 lib/`lib.es2015.symbol.wellknown.d.ts`/Promise#	2
+scip:scip-typescript npm @example/drivers 1.0.0 src/`driver.ts`/DatabaseDriver#	REFERENCES	scip:scip-typescript npm typescript 5.9.3 lib/`lib.es2018.promise.d.ts`/Promise#	2
+scip:scip-typescript npm @example/drivers 1.0.0 src/`driver.ts`/DatabaseDriver#	REFERENCES	scip:scip-typescript npm typescript 5.9.3 lib/`lib.es5.d.ts`/Promise#	2
+scip:scip-typescript npm @example/drivers 1.0.0 src/`driver.ts`/DatabaseDriver#close().	DEFINED_IN	file:src/driver.ts	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`driver.ts`/DatabaseDriver#open().	CONTAINS	scip:scip-typescript npm @example/drivers 1.0.0 src/`driver.ts`/DatabaseDriver#open().(dsn)	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`driver.ts`/DatabaseDriver#open().	DEFINED_IN	file:src/driver.ts	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`driver.ts`/DatabaseDriver#open().(dsn)	DEFINED_IN	file:src/driver.ts	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`mem.ts`/	CONTAINS	scip:scip-typescript npm @example/drivers 1.0.0 src/`mem.ts`/MemConn#	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`mem.ts`/	CONTAINS	scip:scip-typescript npm @example/drivers 1.0.0 src/`mem.ts`/MemDriver#	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`mem.ts`/	DEFINED_IN	file:src/mem.ts	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`mem.ts`/	REFERENCES	scip:scip-typescript npm @example/drivers 1.0.0 src/`driver.ts`/	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`mem.ts`/	REFERENCES	scip:scip-typescript npm @example/drivers 1.0.0 src/`driver.ts`/Conn#	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`mem.ts`/	REFERENCES	scip:scip-typescript npm @example/drivers 1.0.0 src/`driver.ts`/DatabaseDriver#	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`mem.ts`/MemConn#	CONTAINS	scip:scip-typescript npm @example/drivers 1.0.0 src/`mem.ts`/MemConn#close().	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`mem.ts`/MemConn#	DEFINED_IN	file:src/mem.ts	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`mem.ts`/MemConn#	IMPLEMENTS	scip:scip-typescript npm @example/drivers 1.0.0 src/`driver.ts`/Conn#	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`mem.ts`/MemConn#	REFERENCES	scip:scip-typescript npm @example/drivers 1.0.0 src/`driver.ts`/Conn#	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`mem.ts`/MemConn#close().	DEFINED_IN	file:src/mem.ts	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`mem.ts`/MemConn#close().	IMPLEMENTS_MEMBER	scip:scip-typescript npm @example/drivers 1.0.0 src/`driver.ts`/Conn#close().	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`mem.ts`/MemConn#close().	REFERENCES	scip:scip-typescript npm typescript 5.9.3 lib/`lib.es2015.iterable.d.ts`/Promise#	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`mem.ts`/MemConn#close().	REFERENCES	scip:scip-typescript npm typescript 5.9.3 lib/`lib.es2015.promise.d.ts`/Promise.	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`mem.ts`/MemConn#close().	REFERENCES	scip:scip-typescript npm typescript 5.9.3 lib/`lib.es2015.symbol.wellknown.d.ts`/Promise#	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`mem.ts`/MemConn#close().	REFERENCES	scip:scip-typescript npm typescript 5.9.3 lib/`lib.es2018.promise.d.ts`/Promise#	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`mem.ts`/MemConn#close().	REFERENCES	scip:scip-typescript npm typescript 5.9.3 lib/`lib.es5.d.ts`/Promise#	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`mem.ts`/MemDriver#	CONTAINS	scip:scip-typescript npm @example/drivers 1.0.0 src/`mem.ts`/MemDriver#close().	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`mem.ts`/MemDriver#	CONTAINS	scip:scip-typescript npm @example/drivers 1.0.0 src/`mem.ts`/MemDriver#open().	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`mem.ts`/MemDriver#	DEFINED_IN	file:src/mem.ts	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`mem.ts`/MemDriver#	IMPLEMENTS	scip:scip-typescript npm @example/drivers 1.0.0 src/`driver.ts`/DatabaseDriver#	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`mem.ts`/MemDriver#	REFERENCES	scip:scip-typescript npm @example/drivers 1.0.0 src/`driver.ts`/DatabaseDriver#	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`mem.ts`/MemDriver#close().	DEFINED_IN	file:src/mem.ts	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`mem.ts`/MemDriver#close().	IMPLEMENTS_MEMBER	scip:scip-typescript npm @example/drivers 1.0.0 src/`driver.ts`/DatabaseDriver#close().	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`mem.ts`/MemDriver#close().	REFERENCES	scip:scip-typescript npm typescript 5.9.3 lib/`lib.es2015.iterable.d.ts`/Promise#	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`mem.ts`/MemDriver#close().	REFERENCES	scip:scip-typescript npm typescript 5.9.3 lib/`lib.es2015.promise.d.ts`/Promise.	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`mem.ts`/MemDriver#close().	REFERENCES	scip:scip-typescript npm typescript 5.9.3 lib/`lib.es2015.symbol.wellknown.d.ts`/Promise#	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`mem.ts`/MemDriver#close().	REFERENCES	scip:scip-typescript npm typescript 5.9.3 lib/`lib.es2018.promise.d.ts`/Promise#	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`mem.ts`/MemDriver#close().	REFERENCES	scip:scip-typescript npm typescript 5.9.3 lib/`lib.es5.d.ts`/Promise#	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`mem.ts`/MemDriver#open().	CONTAINS	scip:scip-typescript npm @example/drivers 1.0.0 src/`mem.ts`/MemDriver#open().(dsn)	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`mem.ts`/MemDriver#open().	DEFINED_IN	file:src/mem.ts	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`mem.ts`/MemDriver#open().	IMPLEMENTS_MEMBER	scip:scip-typescript npm @example/drivers 1.0.0 src/`driver.ts`/DatabaseDriver#open().	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`mem.ts`/MemDriver#open().	REFERENCES	scip:scip-typescript npm @example/drivers 1.0.0 src/`driver.ts`/Conn#	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`mem.ts`/MemDriver#open().	REFERENCES	scip:scip-typescript npm @example/drivers 1.0.0 src/`mem.ts`/MemConn#	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`mem.ts`/MemDriver#open().	REFERENCES	scip:scip-typescript npm typescript 5.9.3 lib/`lib.es2015.iterable.d.ts`/Promise#	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`mem.ts`/MemDriver#open().	REFERENCES	scip:scip-typescript npm typescript 5.9.3 lib/`lib.es2015.promise.d.ts`/Promise.	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`mem.ts`/MemDriver#open().	REFERENCES	scip:scip-typescript npm typescript 5.9.3 lib/`lib.es2015.symbol.wellknown.d.ts`/Promise#	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`mem.ts`/MemDriver#open().	REFERENCES	scip:scip-typescript npm typescript 5.9.3 lib/`lib.es2018.promise.d.ts`/Promise#	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`mem.ts`/MemDriver#open().	REFERENCES	scip:scip-typescript npm typescript 5.9.3 lib/`lib.es5.d.ts`/Promise#	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`mem.ts`/MemDriver#open().(dsn)	DEFINED_IN	file:src/mem.ts	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`mock.ts`/	CONTAINS	scip:scip-typescript npm @example/drivers 1.0.0 src/`mock.ts`/MockConn#	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`mock.ts`/	CONTAINS	scip:scip-typescript npm @example/drivers 1.0.0 src/`mock.ts`/MockDriver#	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`mock.ts`/	DEFINED_IN	file:src/mock.ts	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`mock.ts`/	REFERENCES	scip:scip-typescript npm @example/drivers 1.0.0 src/`driver.ts`/	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`mock.ts`/	REFERENCES	scip:scip-typescript npm @example/drivers 1.0.0 src/`driver.ts`/Conn#	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`mock.ts`/MockConn#	CONTAINS	scip:scip-typescript npm @example/drivers 1.0.0 src/`mock.ts`/MockConn#close().	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`mock.ts`/MockConn#	DEFINED_IN	file:src/mock.ts	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`mock.ts`/MockConn#	IMPLEMENTS	scip:scip-typescript npm @example/drivers 1.0.0 src/`driver.ts`/Conn#	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`mock.ts`/MockConn#	REFERENCES	scip:scip-typescript npm @example/drivers 1.0.0 src/`driver.ts`/Conn#	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`mock.ts`/MockConn#close().	DEFINED_IN	file:src/mock.ts	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`mock.ts`/MockConn#close().	IMPLEMENTS_MEMBER	scip:scip-typescript npm @example/drivers 1.0.0 src/`driver.ts`/Conn#close().	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`mock.ts`/MockConn#close().	REFERENCES	scip:scip-typescript npm typescript 5.9.3 lib/`lib.es2015.iterable.d.ts`/Promise#	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`mock.ts`/MockConn#close().	REFERENCES	scip:scip-typescript npm typescript 5.9.3 lib/`lib.es2015.promise.d.ts`/Promise.	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`mock.ts`/MockConn#close().	REFERENCES	scip:scip-typescript npm typescript 5.9.3 lib/`lib.es2015.symbol.wellknown.d.ts`/Promise#	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`mock.ts`/MockConn#close().	REFERENCES	scip:scip-typescript npm typescript 5.9.3 lib/`lib.es2018.promise.d.ts`/Promise#	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`mock.ts`/MockConn#close().	REFERENCES	scip:scip-typescript npm typescript 5.9.3 lib/`lib.es5.d.ts`/Promise#	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`mock.ts`/MockDriver#	CONTAINS	scip:scip-typescript npm @example/drivers 1.0.0 src/`mock.ts`/MockDriver#close().	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`mock.ts`/MockDriver#	CONTAINS	scip:scip-typescript npm @example/drivers 1.0.0 src/`mock.ts`/MockDriver#open().	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`mock.ts`/MockDriver#	DEFINED_IN	file:src/mock.ts	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`mock.ts`/MockDriver#close().	DEFINED_IN	file:src/mock.ts	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`mock.ts`/MockDriver#close().	REFERENCES	scip:scip-typescript npm typescript 5.9.3 lib/`lib.es2015.iterable.d.ts`/Promise#	2
+scip:scip-typescript npm @example/drivers 1.0.0 src/`mock.ts`/MockDriver#close().	REFERENCES	scip:scip-typescript npm typescript 5.9.3 lib/`lib.es2015.promise.d.ts`/Promise.	2
+scip:scip-typescript npm @example/drivers 1.0.0 src/`mock.ts`/MockDriver#close().	REFERENCES	scip:scip-typescript npm typescript 5.9.3 lib/`lib.es2015.promise.d.ts`/PromiseConstructor#resolve().	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`mock.ts`/MockDriver#close().	REFERENCES	scip:scip-typescript npm typescript 5.9.3 lib/`lib.es2015.symbol.wellknown.d.ts`/Promise#	2
+scip:scip-typescript npm @example/drivers 1.0.0 src/`mock.ts`/MockDriver#close().	REFERENCES	scip:scip-typescript npm typescript 5.9.3 lib/`lib.es2018.promise.d.ts`/Promise#	2
+scip:scip-typescript npm @example/drivers 1.0.0 src/`mock.ts`/MockDriver#close().	REFERENCES	scip:scip-typescript npm typescript 5.9.3 lib/`lib.es5.d.ts`/Promise#	2
+scip:scip-typescript npm @example/drivers 1.0.0 src/`mock.ts`/MockDriver#open().	CONTAINS	scip:scip-typescript npm @example/drivers 1.0.0 src/`mock.ts`/MockDriver#open().(dsn)	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`mock.ts`/MockDriver#open().	DEFINED_IN	file:src/mock.ts	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`mock.ts`/MockDriver#open().	REFERENCES	scip:scip-typescript npm @example/drivers 1.0.0 src/`driver.ts`/Conn#	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`mock.ts`/MockDriver#open().	REFERENCES	scip:scip-typescript npm @example/drivers 1.0.0 src/`mock.ts`/MockConn#	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`mock.ts`/MockDriver#open().	REFERENCES	scip:scip-typescript npm typescript 5.9.3 lib/`lib.es2015.iterable.d.ts`/Promise#	2
+scip:scip-typescript npm @example/drivers 1.0.0 src/`mock.ts`/MockDriver#open().	REFERENCES	scip:scip-typescript npm typescript 5.9.3 lib/`lib.es2015.promise.d.ts`/Promise.	2
+scip:scip-typescript npm @example/drivers 1.0.0 src/`mock.ts`/MockDriver#open().	REFERENCES	scip:scip-typescript npm typescript 5.9.3 lib/`lib.es2015.promise.d.ts`/PromiseConstructor#resolve().	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`mock.ts`/MockDriver#open().	REFERENCES	scip:scip-typescript npm typescript 5.9.3 lib/`lib.es2015.symbol.wellknown.d.ts`/Promise#	2
+scip:scip-typescript npm @example/drivers 1.0.0 src/`mock.ts`/MockDriver#open().	REFERENCES	scip:scip-typescript npm typescript 5.9.3 lib/`lib.es2018.promise.d.ts`/Promise#	2
+scip:scip-typescript npm @example/drivers 1.0.0 src/`mock.ts`/MockDriver#open().	REFERENCES	scip:scip-typescript npm typescript 5.9.3 lib/`lib.es5.d.ts`/Promise#	2
+scip:scip-typescript npm @example/drivers 1.0.0 src/`mock.ts`/MockDriver#open().(dsn)	DEFINED_IN	file:src/mock.ts	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`postgres.test.ts`/	CONTAINS	scip:scip-typescript npm @example/drivers 1.0.0 src/`postgres.test.ts`/test().	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`postgres.test.ts`/	DEFINED_IN	file:src/postgres.test.ts	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`postgres.test.ts`/	REFERENCES	scip:scip-typescript npm @example/drivers 1.0.0 src/`postgres.test.ts`/test().	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`postgres.test.ts`/	REFERENCES	scip:scip-typescript npm @example/drivers 1.0.0 src/`postgres.ts`/	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`postgres.test.ts`/	REFERENCES	scip:scip-typescript npm @example/drivers 1.0.0 src/`postgres.ts`/PostgresDriver#	2
+scip:scip-typescript npm @example/drivers 1.0.0 src/`postgres.test.ts`/	REFERENCES	scip:scip-typescript npm @example/drivers 1.0.0 src/`postgres.ts`/PostgresDriver#open().	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`postgres.test.ts`/test().	CONTAINS	scip:scip-typescript npm @example/drivers 1.0.0 src/`postgres.test.ts`/test().(fn)	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`postgres.test.ts`/test().	CONTAINS	scip:scip-typescript npm @example/drivers 1.0.0 src/`postgres.test.ts`/test().(name)	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`postgres.test.ts`/test().	DEFINED_IN	file:src/postgres.test.ts	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`postgres.test.ts`/test().(fn)	DEFINED_IN	file:src/postgres.test.ts	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`postgres.test.ts`/test().(name)	DEFINED_IN	file:src/postgres.test.ts	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`postgres.ts`/	CONTAINS	scip:scip-typescript npm @example/drivers 1.0.0 src/`postgres.ts`/PgConn#	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`postgres.ts`/	CONTAINS	scip:scip-typescript npm @example/drivers 1.0.0 src/`postgres.ts`/PostgresDriver#	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`postgres.ts`/	DEFINED_IN	file:src/postgres.ts	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`postgres.ts`/	REFERENCES	scip:scip-typescript npm @example/drivers 1.0.0 src/`driver.ts`/	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`postgres.ts`/	REFERENCES	scip:scip-typescript npm @example/drivers 1.0.0 src/`driver.ts`/Conn#	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`postgres.ts`/	REFERENCES	scip:scip-typescript npm @example/drivers 1.0.0 src/`driver.ts`/DatabaseDriver#	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`postgres.ts`/PgConn#	CONTAINS	scip:scip-typescript npm @example/drivers 1.0.0 src/`postgres.ts`/PgConn#close().	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`postgres.ts`/PgConn#	DEFINED_IN	file:src/postgres.ts	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`postgres.ts`/PgConn#	IMPLEMENTS	scip:scip-typescript npm @example/drivers 1.0.0 src/`driver.ts`/Conn#	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`postgres.ts`/PgConn#	REFERENCES	scip:scip-typescript npm @example/drivers 1.0.0 src/`driver.ts`/Conn#	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`postgres.ts`/PgConn#close().	DEFINED_IN	file:src/postgres.ts	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`postgres.ts`/PgConn#close().	IMPLEMENTS_MEMBER	scip:scip-typescript npm @example/drivers 1.0.0 src/`driver.ts`/Conn#close().	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`postgres.ts`/PgConn#close().	REFERENCES	scip:scip-typescript npm typescript 5.9.3 lib/`lib.es2015.iterable.d.ts`/Promise#	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`postgres.ts`/PgConn#close().	REFERENCES	scip:scip-typescript npm typescript 5.9.3 lib/`lib.es2015.promise.d.ts`/Promise.	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`postgres.ts`/PgConn#close().	REFERENCES	scip:scip-typescript npm typescript 5.9.3 lib/`lib.es2015.symbol.wellknown.d.ts`/Promise#	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`postgres.ts`/PgConn#close().	REFERENCES	scip:scip-typescript npm typescript 5.9.3 lib/`lib.es2018.promise.d.ts`/Promise#	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`postgres.ts`/PgConn#close().	REFERENCES	scip:scip-typescript npm typescript 5.9.3 lib/`lib.es5.d.ts`/Promise#	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`postgres.ts`/PostgresDriver#	CONTAINS	scip:scip-typescript npm @example/drivers 1.0.0 src/`postgres.ts`/PostgresDriver#close().	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`postgres.ts`/PostgresDriver#	CONTAINS	scip:scip-typescript npm @example/drivers 1.0.0 src/`postgres.ts`/PostgresDriver#open().	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`postgres.ts`/PostgresDriver#	DEFINED_IN	file:src/postgres.ts	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`postgres.ts`/PostgresDriver#	IMPLEMENTS	scip:scip-typescript npm @example/drivers 1.0.0 src/`driver.ts`/DatabaseDriver#	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`postgres.ts`/PostgresDriver#	REFERENCES	scip:scip-typescript npm @example/drivers 1.0.0 src/`driver.ts`/DatabaseDriver#	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`postgres.ts`/PostgresDriver#close().	DEFINED_IN	file:src/postgres.ts	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`postgres.ts`/PostgresDriver#close().	IMPLEMENTS_MEMBER	scip:scip-typescript npm @example/drivers 1.0.0 src/`driver.ts`/DatabaseDriver#close().	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`postgres.ts`/PostgresDriver#close().	REFERENCES	scip:scip-typescript npm typescript 5.9.3 lib/`lib.es2015.iterable.d.ts`/Promise#	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`postgres.ts`/PostgresDriver#close().	REFERENCES	scip:scip-typescript npm typescript 5.9.3 lib/`lib.es2015.promise.d.ts`/Promise.	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`postgres.ts`/PostgresDriver#close().	REFERENCES	scip:scip-typescript npm typescript 5.9.3 lib/`lib.es2015.symbol.wellknown.d.ts`/Promise#	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`postgres.ts`/PostgresDriver#close().	REFERENCES	scip:scip-typescript npm typescript 5.9.3 lib/`lib.es2018.promise.d.ts`/Promise#	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`postgres.ts`/PostgresDriver#close().	REFERENCES	scip:scip-typescript npm typescript 5.9.3 lib/`lib.es5.d.ts`/Promise#	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`postgres.ts`/PostgresDriver#open().	CONTAINS	scip:scip-typescript npm @example/drivers 1.0.0 src/`postgres.ts`/PostgresDriver#open().(dsn)	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`postgres.ts`/PostgresDriver#open().	DEFINED_IN	file:src/postgres.ts	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`postgres.ts`/PostgresDriver#open().	IMPLEMENTS_MEMBER	scip:scip-typescript npm @example/drivers 1.0.0 src/`driver.ts`/DatabaseDriver#open().	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`postgres.ts`/PostgresDriver#open().	REFERENCES	local:src/postgres.ts:local 2	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`postgres.ts`/PostgresDriver#open().	REFERENCES	scip:scip-typescript npm @example/drivers 1.0.0 src/`driver.ts`/Conn#	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`postgres.ts`/PostgresDriver#open().	REFERENCES	scip:scip-typescript npm @example/drivers 1.0.0 src/`postgres.ts`/PgConn#	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`postgres.ts`/PostgresDriver#open().	REFERENCES	scip:scip-typescript npm typescript 5.9.3 lib/`lib.es2015.iterable.d.ts`/Promise#	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`postgres.ts`/PostgresDriver#open().	REFERENCES	scip:scip-typescript npm typescript 5.9.3 lib/`lib.es2015.promise.d.ts`/Promise.	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`postgres.ts`/PostgresDriver#open().	REFERENCES	scip:scip-typescript npm typescript 5.9.3 lib/`lib.es2015.symbol.wellknown.d.ts`/Promise#	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`postgres.ts`/PostgresDriver#open().	REFERENCES	scip:scip-typescript npm typescript 5.9.3 lib/`lib.es2018.promise.d.ts`/Promise#	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`postgres.ts`/PostgresDriver#open().	REFERENCES	scip:scip-typescript npm typescript 5.9.3 lib/`lib.es5.d.ts`/Promise#	1
+scip:scip-typescript npm @example/drivers 1.0.0 src/`postgres.ts`/PostgresDriver#open().(dsn)	DEFINED_IN	file:src/postgres.ts	1

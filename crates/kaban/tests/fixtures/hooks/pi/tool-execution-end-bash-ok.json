@@ -1,0 +1,20 @@
+{
+  "session_id": "sess-pi-0001",
+  "cwd": "/invented/repo/nightjar-service",
+  "hook_event_name": "tool_execution_end",
+  "toolCallId": "call_pi_0002",
+  "toolName": "bash",
+  "input": {
+    "command": "npm test -- --runInBand"
+  },
+  "result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "PASS src/store.test.ts\nTests: 12 passed"
+      }
+    ],
+    "details": {}
+  },
+  "isError": false
+}

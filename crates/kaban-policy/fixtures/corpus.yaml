@@ -1,0 +1,281 @@
+# Denylist fixture corpus (core-plan.md §7, C1.2; extended by every later policy task).
+# Table-driven: `tests/corpus.rs` compiles `policy` (builtin rules + the user terms below) and
+# checks every case. `expect` is reject | redact | clean; `rules` lists rule ids that must appear.
+# A case with `key` is a structured `key=value` leaf and goes through `scan_kv(key, text)`.
+# A case with `document` (docs-ingest D6, DI1.4) is also fed to `kaban-ingest`'s `gate_document` as
+# one chunk: `skip_file` must block the whole document, `stub` must stub only that chunk
+# (checked by `crates/kaban-ingest/tests/canary.rs`).
+# False-positive budget for the `clean` cases is 0. Values are invented test data.
+policy:
+  words:
+    - { term: hunter2, action: redact, id: old-password }
+  phrases:
+    - { term: "Project Nightjar", id: codename-nightjar }
+  rules:
+    - id: internal-hostname
+      description: internal hostnames must not be stored
+      regex: '\b[a-z0-9-]+\.corp\.acme\.internal\b'
+      keywords: [".corp.acme.internal"]
+      action: redact
+cases:
+  # ---- document cases (D6 `on_document`): skip_file for private keys and .env-style assignments,
+  #      stub for other reject-class shapes
+  - { text: "DB_PASSWORD=Sup3rS3cretValue!", expect: reject, rules: [generic-credential-assignment], document: skip_file }
+  - { text: "export API_KEY=Qx9vLm2pRt7wZk", expect: reject, rules: [generic-credential-assignment], document: skip_file }
+  - { text: "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXk=", expect: reject, rules: [private-key-block], document: skip_file }
+  - { text: "the key AKIAQWERTYUIOPASDFGH leaked in CI logs", expect: reject, rules: [aws-access-key-id], document: stub }
+  - { text: "slack: xoxp-9876543210-ZYXWVUTSRQPO", expect: reject, rules: [slack-token], document: stub }
+  - { text: "maps key AIzaSyA1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q", expect: reject, rules: [google-api-key], document: stub }
+  # ---- positive cases (reject / redact)
+  - { text: "key AKIAQWERTYUIOPASDFGH leaked in CI logs", expect: reject, rules: [aws-access-key-id] }
+  - { text: "AWS_ACCESS_KEY_ID=ASIAZX9K2L8M4N6P1Q3R", expect: reject, rules: [aws-access-key-id] }
+  - { text: "export AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYzz9EXAMPLE", expect: reject, rules: [generic-credential-assignment] }
+  - { text: "aws_secret_access_key: wJalrXUtnFEMI/K7MDENG/bPxRfiCYzz9EXAMPLE", expect: reject, rules: [generic-credential-assignment] }
+  - { text: "found AKIA​QWERTYUIOPASDFGH in the dump", expect: reject, rules: [aws-access-key-id] }
+  - { text: "ＡＫＩＡＱＷＥＲＴＹＵＩＯＰＡＳＤＦＧＨ fullwidth", expect: reject, rules: [aws-access-key-id] }
+  - { text: "-----BEGIN RSA PRIVATE KEY-----", expect: reject, rules: [private-key-block] }
+  - { text: "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXk", expect: reject, rules: [private-key-block] }
+  - { text: "-----BEGIN EC PRIVATE KEY-----", expect: reject, rules: [private-key-block] }
+  - { text: "-----BEGIN PGP PRIVATE KEY BLOCK-----", expect: reject, rules: [private-key-block] }
+  - { text: "GITHUB_TOKEN=ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789", expect: reject, rules: [github-token] }
+  - { text: "use gho_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789 for the oauth flow", expect: reject, rules: [github-token] }
+  - { text: "github_pat_11ABCDEFG0abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUV", expect: reject, rules: [github-token] }
+  - { text: "GITHUB_TOKEN is ghp_q8Zt3x9LmA", expect: reject, rules: [weak-credential-assignment] }
+  - { text: "glpat-AbCdEfGhIjKlMnOpQrSt", expect: reject, rules: [gitlab-token] }
+  - { text: "CI_JOB_TOKEN := glpat-z9Y8x7W6v5U4t3S2r1Q0", expect: reject, rules: [gitlab-token] }
+  - { text: "OPENAI_API_KEY=sk-proj-AbCdEfGhIjKlMnOpQrStUvWxYz012345", expect: reject, rules: [openai-api-key] }
+  - { text: "the key sk-AbCdEfGhIjKlMnOpQrStUvWxYz012345 was pasted", expect: reject, rules: [openai-api-key] }
+  - { text: "sk_live_AbCdEfGhIjKlMnOpQrSt", expect: reject, rules: [stripe-key] }
+  - { text: "STRIPE_KEY = rk_test_AbCdEfGhIjKlMnOpQrSt1234", expect: reject, rules: [stripe-key] }
+  - { text: "maps key AIzaSyA1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q", expect: reject, rules: [google-api-key] }
+  - { text: "xoxb-123456789012-abcdefghijkl", expect: reject, rules: [slack-token] }
+  - { text: "slack: xoxp-9876543210-ZYXWVUTSRQPO", expect: reject, rules: [slack-token] }
+  - { text: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c", expect: reject, rules: [jwt] }
+  - { text: "Authorization: Bearer AbCdEfGhIjKlMnOpQrStUvWxYz0123", expect: reject, rules: [bearer-token] }
+  - { text: "curl -H 'Authorization: bearer ZmFrZXRva2VuMTIzNDU2Nzg5MA==' https://api.example.com", expect: reject, rules: [bearer-token] }
+  - { text: "postgres://admin:Passw0rd!@db.internal:5432/app", expect: reject, rules: [url-with-credentials] }
+  - { text: "redis://default:s3cr3tpass@cache:6379", expect: reject, rules: [url-with-credentials] }
+  - { text: "https://deploy:Tr0ub4dor@git.example.com/repo.git", expect: reject, rules: [url-with-credentials] }
+  - { text: "amqp://guest:gu3stpw@rabbit:5672/", expect: reject, rules: [url-with-credentials] }
+  - { text: "password = Sup3rS3cretValue!", expect: reject, rules: [generic-credential-assignment] }
+  - { text: "DB_PASSWORD=hunter2hunter2", expect: reject, rules: [generic-credential-assignment] }
+  - { text: "password: \"s3cretvalue\"", expect: reject, rules: [generic-credential-assignment] }
+  - { text: "passwd=Qx9vLm2pRt7wZk", expect: reject, rules: [generic-credential-assignment] }
+  - { text: "pwd := Zk7wRt2pLm9vQx", expect: reject, rules: [generic-credential-assignment] }
+  - { text: "pw=Rt7wZkQx9vLm2p", expect: reject, rules: [generic-credential-assignment] }
+  - { text: "export STRIPE_API_KEY='sk_live_abcdefghijklmnop'", expect: reject, rules: [generic-credential-assignment] }
+  - { text: "api_key: Qx9vLm2pRt7wZk", expect: reject, rules: [generic-credential-assignment] }
+  - { text: "apikey=Qx9vLm2pRt7wZk", expect: reject, rules: [generic-credential-assignment] }
+  - { text: "API-KEY: Qx9vLm2pRt7wZk", expect: reject, rules: [generic-credential-assignment] }
+  - { text: "api_secret => Qx9vLm2pRt7wZk", expect: reject, rules: [generic-credential-assignment] }
+  - { text: "client_secret=Qx9vLm2pRt7wZk", expect: reject, rules: [generic-credential-assignment] }
+  - { text: "client-secret: 'Qx9vLm2pRt7wZk'", expect: reject, rules: [generic-credential-assignment] }
+  - { text: "access_token=Qx9vLm2pRt7wZk", expect: reject, rules: [generic-credential-assignment] }
+  - { text: "auth_token: Qx9vLm2pRt7wZk", expect: reject, rules: [generic-credential-assignment] }
+  - { text: "refresh-token = Qx9vLm2pRt7wZk", expect: reject, rules: [generic-credential-assignment] }
+  - { text: "session_token: Qx9vLm2pRt7wZk", expect: reject, rules: [generic-credential-assignment] }
+  - { text: "private_key = Qx9vLm2pRt7wZk", expect: reject, rules: [generic-credential-assignment] }
+  - { text: "passphrase: correct-horse-battery", expect: reject, rules: [generic-credential-assignment] }
+  - { text: "PASSPHRASE=Tr0ub4dor&3", expect: reject, rules: [generic-credential-assignment] }
+  - { text: "credentials: admin:Passw0rd9", expect: reject, rules: [generic-credential-assignment] }
+  - { text: "credential = Qx9vLm2pRt7wZk", expect: reject, rules: [generic-credential-assignment] }
+  - { text: "secret: Qx9vLm2pRt7wZk", expect: reject, rules: [generic-credential-assignment] }
+  - { text: "SMTP_PASSWORD=Qx9vLm2pRt7wZk", expect: reject, rules: [generic-credential-assignment] }
+  - { text: "mysql.password=Qx9vLm2pRt7wZk", expect: reject, rules: [generic-credential-assignment] }
+  - { text: "spring.datasource.password=Qx9vLm2pRt7wZk", expect: reject, rules: [generic-credential-assignment] }
+  - { text: "{\"password\":\"s3cretvalue\"}", expect: reject, rules: [generic-credential-assignment] }
+  - { text: "{\"api_key\": \"Qx9vLm2pRt7wZk\"}", expect: reject, rules: [generic-credential-assignment] }
+  - { text: "password=Example-realSecret9", expect: reject, rules: [generic-credential-assignment] }
+  - { text: "host db1.corp.example.internal password=abcdefgh12", expect: reject, rules: [generic-credential-assignment] }
+  - { text: "set api\\_key=Qx9vLm2pRt7wZk in the markdown note", expect: reject, rules: [generic-credential-assignment] }
+  - { text: "**password**: `hunter2hunter2`", expect: reject, rules: [generic-credential-assignment] }
+  - { text: "`password` = `Qx9vLm2pRt7wZk`", expect: reject, rules: [generic-credential-assignment] }
+  - { text: "password:Qx9vLm2pRt7wZk", expect: reject, rules: [generic-credential-assignment] }
+  - { text: "PASSWORD    =    Qx9vLm2pRt7wZk", expect: reject, rules: [generic-credential-assignment] }
+  - { text: "Password=<S3cr3t!>", expect: reject, rules: [generic-credential-assignment] }
+  - { text: "password=​Qx9vLm2pRt7wZk", expect: reject, rules: [generic-credential-assignment] }
+  - { text: "ｐａｓｓｗｏｒｄ=Qx9vLm2pRt7wZk", expect: reject, rules: [generic-credential-assignment] }
+  - { text: "the password was Tr0ub4dor&3 back then", expect: reject, rules: [credential-prose-assignment] }
+  - { text: "password is hunter2hunter2", expect: reject, rules: [credential-prose-assignment] }
+  - { text: "the api key is Qx9vLm2pRt7wZk", expect: reject, rules: [credential-prose-assignment] }
+  - { text: "client secret was Qx9vLm2pRt7wZk", expect: reject, rules: [credential-prose-assignment] }
+  - { text: "| api_key | Qx9vLm2pRt7wZk |", expect: reject, rules: [credential-prose-assignment] }
+  - { text: "| password | Tr0ub4dor&3 |", expect: reject, rules: [credential-prose-assignment] }
+  - { text: "| SECRET | Qx9vLm2pRt7wZk | prod |", expect: reject, rules: [credential-prose-assignment] }
+  - { text: "token=Qx9vLm2pRt7wZk", expect: reject, rules: [weak-credential-assignment] }
+  - { text: "TOKEN: Qx9vLm2pRt7wZk", expect: reject, rules: [weak-credential-assignment] }
+  - { text: "auth = Qx9vLm2pRt7wZk", expect: reject, rules: [weak-credential-assignment] }
+  - { text: "the token was ghp_q8Zt3x9LmA", expect: reject, rules: [weak-credential-assignment] }
+  - { text: "| token | Qx9vLm2pRt7wZk |", expect: reject, rules: [weak-credential-assignment] }
+  - { text: "SLACK_TOKEN is Qx9vLm2pRt7wZk", expect: reject, rules: [weak-credential-assignment] }
+  - { text: "npm_token=npm_Qx9vLm2pRt7wZk", expect: reject, rules: [weak-credential-assignment] }
+  - { text: "Authorization: Basic YWRtaW46UGFzc3cwcmQ5", expect: reject, rules: [http-basic-auth] }
+  - { text: "token \"Zm9vYmFyYmF6cXV4MTIzNDU2Nzg5MEFCQ0RFRkdISUpL\" here", expect: reject, rules: [high-entropy-quoted] }
+  - { text: "value 'q8Zt3x9LmA7Rt2pQx9vLm2pRt7wZkYb4N' set", expect: reject, rules: [high-entropy-quoted] }
+  - { text: "`A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6` was the salt", expect: reject, rules: [high-entropy-quoted] }
+  - { text: "about Project Nightjar launch", expect: reject, rules: [codename-nightjar] }
+  - { text: "project nightjar", expect: reject, rules: [codename-nightjar] }
+  - { text: "Project  Nightjar", expect: reject, rules: [codename-nightjar] }
+  - { text: "Project Nightjar", expect: reject, rules: [codename-nightjar] }
+  - { text: "Project-Nightjar", expect: reject, rules: [codename-nightjar] }
+  - { text: "Project_Nightjar", expect: reject, rules: [codename-nightjar] }
+  - { text: "ProjectNightjar", expect: reject, rules: [codename-nightjar] }
+  - { text: "PROJECT\nNIGHTJAR", expect: reject, rules: [codename-nightjar] }
+  - { text: "Pro​ject Nightjar", expect: reject, rules: [codename-nightjar] }
+  - { text: "Ｐｒｏｊｅｃｔ Ｎｉｇｈｔｊａｒ", expect: reject, rules: [codename-nightjar] }
+  - { text: "Projéct Nightjar", expect: reject, rules: [codename-nightjar] }
+  - { text: "Рroject Nightjar", expect: reject, rules: [codename-nightjar] }
+  - { text: "Project Nightjаr", expect: reject, rules: [codename-nightjar] }
+  - { text: "Ρroject Νightjar", expect: reject, rules: [codename-nightjar] }
+  - { text: "see project.nightjar/README", expect: reject, rules: [codename-nightjar] }
+  - { text: "P-r-o-j-e-c-t N-i-g-h-t-j-a-r", expect: reject, rules: [codename-nightjar] }
+  - { text: "the old pw was Hunter2 ok", expect: redact, rules: [old-password] }
+  - { text: "note Ｈｕｎｔｅｒ２ done", expect: redact, rules: [old-password] }
+  - { text: "note hun​ter2 done", expect: redact, rules: [old-password] }
+  - { text: "HUNTER2 in caps", expect: redact, rules: [old-password] }
+  - { text: "staging db host is db1.corp.acme.internal", expect: redact, rules: [internal-hostname] }
+  - { text: "ssh to bastion-01.corp.acme.internal then jump", expect: redact, rules: [internal-hostname] }
+  - { text: "hosts: web-1.corp.acme.internal and web-2.corp.acme.internal", expect: redact, rules: [internal-hostname] }
+  - { text: "staging db host is db1.corp.acme.internal and old pw hunter2", expect: redact, rules: [internal-hostname, old-password] }
+  # structured `key=value` leaves (scanned through `scan_kv`; review R1-2: normalized key views)
+  - { key: "password", text: "a", expect: reject, rules: [credential-key] }
+  - { key: "ｓｅｃｒｅｔ", text: "a", expect: reject, rules: [credential-key] }
+  - { key: "рassword", text: "a", expect: reject, rules: [credential-key] }
+  - { key: "Smtp.Password", text: "a", expect: reject, rules: [credential-key] }
+  - { key: "api-key", text: "k9", expect: reject, rules: [credential-key] }
+  - { key: "pass​word", text: "a", expect: reject, rules: [credential-key] }
+  # ---- negative cases (must be clean; false-positive budget 0)
+  - { text: "the password field is required", expect: clean }
+  - { text: "password = ${DB_PASSWORD}", expect: clean }
+  - { text: "password=$DB_PASSWORD", expect: clean }
+  - { text: "api_key: <your-key>", expect: clean }
+  - { text: "api_key: <API KEY>", expect: clean }
+  - { text: "password=changeme", expect: clean }
+  - { text: "password: placeholder", expect: clean }
+  - { text: "secret=example", expect: clean }
+  - { text: "token = none", expect: clean }
+  - { text: "password=null", expect: clean }
+  - { text: "password = <redacted>", expect: clean }
+  - { text: "password: ****", expect: clean }
+  - { text: "password = xxxxxx", expect: clean }
+  - { text: "commit \"3f2a9c1b7d6e5f4a3b2c1d0e9f8a7b6c5d4e3f2a\" fixed it", expect: clean }
+  - { text: "uuid \"550e8400-e29b-41d4-a716-446655440000\"", expect: clean }
+  - { text: "the token is 12 chars long", expect: clean }
+  - { text: "auth was refreshed yesterday", expect: clean }
+  - { text: "token = refreshed", expect: clean }
+  - { text: "rotate the password monthly", expect: clean }
+  - { text: "password is required", expect: clean }
+  - { text: "the password is stored in vault", expect: clean }
+  - { text: "password_required: true", expect: clean }
+  - { text: "| api_key | required |", expect: clean }
+  - { text: "| column | type |", expect: clean }
+  - { text: "pwd is /home/developer/src", expect: clean }
+  - { text: "run pwd to print the working directory", expect: clean }
+  - { text: "cargo build failed: linker could not find libssl on arm64 musl", expect: clean }
+  - { text: "install pkg-config and libssl-dev, or use rustls to avoid the system OpenSSL dependency", expect: clean }
+  - { text: "deploy pipeline uses blue green", expect: clean }
+  - { text: "Project Nightingale", expect: clean }
+  - { text: "Project Night", expect: clean }
+  - { text: "nightjar is a bird", expect: clean }
+  - { text: "the project is late", expect: clean }
+  - { text: "hunter gatherer", expect: clean }
+  - { text: "Hunter 3", expect: clean }
+  - { text: "db1.corp.example.com is public", expect: clean }
+  - { text: "acme.internal is the suffix we use", expect: clean }
+  - { text: "see https://docs.rs/regex/latest/regex/", expect: clean }
+  - { text: "git clone https://github.com/rust-lang/cargo.git", expect: clean }
+  - { text: "https://user@example.com/path", expect: clean }
+  - { text: "ssh user@host.example.com", expect: clean }
+  - { text: "mailto:someone@example.com", expect: clean }
+  - { text: "postgres://db.internal:5432/app", expect: clean }
+  - { text: "redis://cache:6379/0", expect: clean }
+  - { text: "docker run -p 8080:8080 image:latest", expect: clean }
+  - { text: "tokio::spawn_blocking for SQLite work", expect: clean }
+  - { text: "Authorization header is required for this endpoint", expect: clean }
+  - { text: "Bearer tokens expire after 1h", expect: clean }
+  - { text: "bearer of bad news", expect: clean }
+  - { text: "the AKIA prefix denotes an IAM access key id", expect: clean }
+  - { text: "ASIA is a continent", expect: clean }
+  - { text: "sk- prefix means secret key in OpenAI docs", expect: clean }
+  - { text: "ghp_ tokens are classic personal access tokens", expect: clean }
+  - { text: "xoxb- is the Slack bot token prefix", expect: clean }
+  - { text: "eyJ is how base64 JSON starts", expect: clean }
+  - { text: "JWTs have three dot-separated parts", expect: clean }
+  - { text: "-----BEGIN CERTIFICATE-----", expect: clean }
+  - { text: "-----BEGIN PUBLIC KEY-----", expect: clean }
+  - { text: "private key material never leaves the HSM", expect: clean }
+  - { text: "the private_key field accepts a path", expect: clean }
+  - { text: "secret sauce of the recipe", expect: clean }
+  - { text: "top secret clearance is not needed", expect: clean }
+  - { text: "client_secret rotation happens quarterly", expect: clean }
+  - { text: "API keys are scoped per project", expect: clean }
+  - { text: "api_key is read from the environment", expect: clean }
+  - { text: "set OPENAI_API_KEY in your shell profile", expect: clean }
+  - { text: "STRIPE_KEY must be the test key in CI", expect: clean }
+  - { text: "access_token lifetime is 3600 seconds", expect: clean }
+  - { text: "refresh tokens are single use", expect: clean }
+  - { text: "passphrase prompts can be disabled with ssh-agent", expect: clean }
+  - { text: "credentials are fetched from the metadata service", expect: clean }
+  - { text: "credential helper: store", expect: clean }
+  - { text: "token bucket rate limiter at 100 rps", expect: clean }
+  - { text: "token: ${GITHUB_TOKEN}", expect: clean }
+  - { text: "auth: oidc", expect: clean }
+  - { text: "auth=basic", expect: clean }
+  - { text: "basic authentication is deprecated", expect: clean }
+  - { text: "a basic internationalization layer", expect: clean }
+  - { text: "auth is handled by the gateway", expect: clean }
+  - { text: "fn authenticate(user: &User) -> Result<Session, AuthError>", expect: clean }
+  - { text: "passwordless login via WebAuthn", expect: clean }
+  - { text: "password managers generate long random strings", expect: clean }
+  - { text: "pw: see 1password", expect: clean }
+  - { text: "note 42: rust cargo build caused timeout in docker after retry", expect: clean }
+  - { text: "note 7: sqlite fts5 index caused latency in graph after migration", expect: clean }
+  - { text: "deadlock between tokio and rusqlite mutex", expect: clean }
+  - { text: "flaky test: retries fixed it", expect: clean }
+  - { text: "the linker needs -lssl -lcrypto", expect: clean }
+  - { text: "musl target: aarch64-unknown-linux-musl", expect: clean }
+  - { text: "p50 recall 3.9 ms at 100k notes", expect: clean }
+  - { text: "git rev-parse HEAD is 27a429d0edc942a495c2145464b6084036931970", expect: clean }
+  - { text: "sha256: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", expect: clean }
+  - { text: "id 01a17a03-58a6-7a1b-9c4d-0e1f2a3b4c5d", expect: clean }
+  - { text: "version 3.0.0-alpha.2", expect: clean }
+  - { text: "ISO date 2026-10-26T12:01:10Z", expect: clean }
+  - { text: "ip 10.0.0.1 port 5432", expect: clean }
+  - { text: "path /usr/local/bin/kaban", expect: clean }
+  - { text: "C:\\Users\\dev\\project", expect: clean }
+  - { text: "regex \\b[a-z]+\\b matches words", expect: clean }
+  - { text: "sum = a + b * c", expect: clean }
+  - { text: "x == y && z != w", expect: clean }
+  - { text: "SELECT * FROM node WHERE status = 'active'", expect: clean }
+  - { text: "INSERT INTO edge(src, dst, rel) VALUES (?, ?, ?)", expect: clean }
+  - { text: "json {\"kind\": \"Fact\", \"text\": \"harmless\"}", expect: clean }
+  - { text: "yaml key: value", expect: clean }
+  - { text: "env: production", expect: clean }
+  - { text: "mode: redact", expect: clean }
+  - { text: "the mask is [REDACTED:{rule}]", expect: clean }
+  - { text: "Ünïcödé text with accents is fine", expect: clean }
+  - { text: "日本語のメモも問題ありません", expect: clean }
+  - { text: "emoji 🚀 in notes", expect: clean }
+  - { text: "tabs\tand\nnewlines", expect: clean }
+  - { text: "", expect: clean }
+  - { text: "   ", expect: clean }
+  - { text: "a", expect: clean }
+  - { text: "secret", expect: clean }
+  - { text: "password", expect: clean }
+  - { text: "token", expect: clean }
+  - { text: "key=value", expect: clean }
+  - { text: "name=kaban", expect: clean }
+  - { text: "user=admin", expect: clean }
+  - { text: "host=localhost", expect: clean }
+  - { text: "port=5432", expect: clean }
+  - { text: "timeout=30s", expect: clean }
+  - { text: "retries=3", expect: clean }
+  - { text: "level=debug", expect: clean }
+  - { text: "branch=feat/spike-sqlite-core", expect: clean }
+  - { text: "image=rust:1.99-bookworm", expect: clean }
+  # structured `key=value` leaves that are not credentials (suffix keys, placeholders)
+  - { key: "password_required", text: "true", expect: clean }
+  - { key: "secret", text: "<your-secret>", expect: clean }
+  - { key: "token", text: "none", expect: clean }
+  - { key: "password_policy", text: "12 chars minimum", expect: clean }
+  - { key: "host", text: "db1.internal", expect: clean }

@@ -1,0 +1,16 @@
+# E1.5 fixture (engine-plan E1.5 slices, engine-spec EN-F3/EN-F4): a user ontology whose
+# `Runbook` carries the governance mixin with every value the service reads through the
+# registry: `governs_paths: true` (it appears in `why` and may be the source of a `GOVERNS`
+# edge), `dedup: title+scope` (`remember` sets its dup key and reports candidate duplicates),
+# `acceptance: agent` (accepted by an agent without the confirmation handshake), and a
+# `props_schema` with an `enum` (`severity` outside `low|high` is `props.severity`). Stored
+# name: `runbooks:Runbook`.
+ontology: runbooks
+version: 1
+kinds:
+  Runbook:
+    description: "An operational procedure that governs the paths it covers."
+    props_schema: {"type": "object", "additionalProperties": false, "required": [], "properties": {"severity": {"type": "string", "enum": ["low", "high"]}, "steps": {"type": "array", "items": {"type": "string"}}}}
+    governed: {acceptance: agent, serialize: none, export: {digest: false, marker: false},
+               display: {label: Runbook, plural: Runbooks}, governs_paths: true, dedup: title+scope}
+rels: {}

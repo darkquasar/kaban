@@ -1,0 +1,7 @@
+ontology: shop
+version: 1
+kinds:
+  Thing:
+    description: "a thing"
+    props_schema: {type: object, properties: {other: {"$ref": "https://example.invalid/schema.json"}}}
+rels: {}

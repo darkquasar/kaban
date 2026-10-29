@@ -1,0 +1,30 @@
+[package]
+name = "kaban-policy"
+description = "kaban denylist policy (normalized literal + keyword-gated regex scanning) and audit signing"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+kaban-core.workspace = true
+aho-corasick.workspace = true
+regex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+yaml_serde.workspace = true
+unicode-normalization.workspace = true
+thiserror.workspace = true
+hmac.workspace = true
+sha2.workspace = true
+hex.workspace = true
+getrandom.workspace = true
+zeroize.workspace = true
+rustix.workspace = true       # O_NOFOLLOW / openat containment walk without unsafe (EN-S7, engine-plan E1.3; the S5 pin)
+
+[dev-dependencies]
+proptest.workspace = true
+
+[lints]
+workspace = true

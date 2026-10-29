@@ -1,0 +1,127 @@
+---
+source: crates/kaban-ingest/tests/extract.rs
+expression: ex
+---
+{
+  "title": "Linked note",
+  "frontmatter": {
+    "author": "Someone",
+    "reviewed": true,
+    "tags": [
+      "alpha",
+      "beta"
+    ],
+    "title": "Linked note"
+  },
+  "sections": [
+    {
+      "heading_path": [],
+      "level": 0,
+      "kind": "frontmatter",
+      "byte_start": 0,
+      "byte_end": 77,
+      "blocks": []
+    },
+    {
+      "heading_path": [
+        "Ignored heading title"
+      ],
+      "level": 1,
+      "kind": "heading",
+      "byte_start": 79,
+      "byte_end": 429,
+      "blocks": [
+        {
+          "block": "paragraph",
+          "text": "See [[Other Note]] and [[Other Note#Section]] with [[Other Note^abc123]] or [[Other Note|the alias]].\nEmbed ![[diagram.png]] and a standard link plus img.",
+          "byte_start": 104,
+          "byte_end": 304
+        },
+        {
+          "block": "paragraph",
+          "text": "Tagged #alpha and #project/sub-topic, not an issue #42.",
+          "byte_start": 305,
+          "byte_end": 361
+        },
+        {
+          "block": "list",
+          "items": [
+            "item one with [[Inline Link]]",
+            "item two #listed",
+            "nested item"
+          ],
+          "byte_start": 362,
+          "byte_end": 429
+        }
+      ]
+    }
+  ],
+  "links": [
+    {
+      "raw_target": "Other Note",
+      "anchor_kind": "note",
+      "embed": false,
+      "byte_offset": 108
+    },
+    {
+      "raw_target": "Other Note#Section",
+      "anchor_kind": "heading",
+      "embed": false,
+      "byte_offset": 127
+    },
+    {
+      "raw_target": "Other Note^abc123",
+      "anchor_kind": "block",
+      "embed": false,
+      "byte_offset": 155
+    },
+    {
+      "raw_target": "Other Note",
+      "anchor_kind": "note",
+      "alias": "the alias",
+      "embed": false,
+      "byte_offset": 180
+    },
+    {
+      "raw_target": "diagram.png",
+      "anchor_kind": "note",
+      "embed": true,
+      "byte_offset": 212
+    },
+    {
+      "raw_target": "https://example.com/page#frag",
+      "anchor_kind": "url",
+      "embed": false,
+      "byte_offset": 235
+    },
+    {
+      "raw_target": "pic.png",
+      "anchor_kind": "url",
+      "embed": true,
+      "byte_offset": 287
+    },
+    {
+      "raw_target": "Inline Link",
+      "anchor_kind": "note",
+      "embed": false,
+      "byte_offset": 378
+    }
+  ],
+  "tags": [
+    {
+      "tag": "alpha",
+      "byte_offset": 312
+    },
+    {
+      "tag": "project/sub-topic",
+      "byte_offset": 323
+    },
+    {
+      "tag": "listed",
+      "byte_offset": 405
+    }
+  ],
+  "partial": false,
+  "needs_ocr": false,
+  "lang": "eng"
+}

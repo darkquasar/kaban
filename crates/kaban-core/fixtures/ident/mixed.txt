@@ -1,0 +1,5 @@
+Store::read_file	Store::read_file Store read_file read file store::read_file store
+Reader.loadCache	Reader.loadCache Reader loadCache load Cache reader.loadcache reader loadcache cache
+path/ArchiveReader	path/ArchiveReader path ArchiveReader Archive Reader path/archivereader archivereader archive reader
+foo_bar::loadCache	foo_bar::loadCache foo_bar foo bar loadCache load Cache foo_bar::loadcache loadcache cache
+SqliteStore::apply_batch	SqliteStore::apply_batch SqliteStore Sqlite Store apply_batch apply batch sqlitestore::apply_batch sqlitestore sqlite store

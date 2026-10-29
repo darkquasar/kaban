@@ -1,0 +1,20 @@
+# engine-spec §3.1 "Indexing meta-config `index`" (OWN-65, AMD-14; engine-plan E2.0 item 5a): a
+# user ontology that turns commit stamping off on one kind, inherits it through `is_a` and
+# applies it through a mixin; `Receipt` carries no block and keeps the default (`commit`).
+ontology: shop
+version: 1
+mixins:
+  Unstamped: {index: {stamp: none}}
+kinds:
+  Catalogue:
+    description: "A supplier catalogue, imported from outside any repository."
+    index: {stamp: none}
+  Leaflet:
+    description: "A catalogue leaflet; inherits the catalogue's indexing."
+    is_a: Catalogue
+  Flyer:
+    description: "A one-page flyer; unstamped through the mixin."
+    mixins: [Unstamped]
+  Receipt:
+    description: "A receipt; default indexing."
+rels: {}

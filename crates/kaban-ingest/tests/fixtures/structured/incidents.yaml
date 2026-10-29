@@ -1,0 +1,12 @@
+ontology: incidents
+version: 1
+extends: [core, adr]
+kinds:
+  Incident:
+    description: A service incident.
+    props_schema: {type: object, properties: {impact: {type: string}}}
+    extract: {enabled: true}
+source_types:
+  postmortem: {kinds: [Incident], paths: ["incidents/**"]}
+default_kind: Incident
+rels: {}

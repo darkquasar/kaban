@@ -1,0 +1,13 @@
+[package]
+name = "target-contexts"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]
+
+[lib]
+name = "collision"
+
+[[bin]]
+name = "collision"
+path = "src/main.rs"

@@ -1,0 +1,26 @@
+# Test-only policy for the code-graph canary sweep (stage1-spec §8.1, §8.3 step 7; stage1-plan
+# CG3.4). The three canaries planted in the fixtures are credential-class rules, so every hit
+# rejects (core S1): `CANARY_DOC` sits in a doc comment (a free field: the doc is dropped,
+# `policy_dropped`), `CANARY_SNIPPET` in a function body string literal (never in a SCIP index;
+# the snippet channel of CG8.2), `CANARY_SYM` as an identifier in a fixture variant (a structural
+# field: the owning row is skipped, `policy_skipped_row`). Never a production policy.
+version: 1
+defaults:
+  action: reject
+  mask: "[REDACTED:{rule}]"
+  scan_on_read: true
+extend:
+  use_builtin: false
+rules:
+  - id: canary-doc
+    description: the documentation canary of the code-graph fixtures
+    regex: 'CANARY_DOC'
+    class: credential
+  - id: canary-snippet
+    description: the snippet canary of the code-graph fixtures
+    regex: 'CANARY_SNIPPET'
+    class: credential
+  - id: canary-sym
+    description: the symbol-name canary of the code-graph fixture variant
+    regex: 'CANARY_SYM'
+    class: credential

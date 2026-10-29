@@ -1,0 +1,6 @@
+# v4 CG4.2: the doctor_lists_effective_overrides case plus the two enums
+index:
+  isolation: required
+  deadline_secs: 30
+  quota:
+    tmp_bytes: 1

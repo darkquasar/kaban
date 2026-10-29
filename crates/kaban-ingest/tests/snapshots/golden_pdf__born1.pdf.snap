@@ -1,0 +1,58 @@
+---
+source: crates/kaban-ingest/tests/golden_pdf.rs
+expression: first
+---
+frontmatter: ~
+sections:
+  - heading_path:
+      - p.1
+    level: 1
+    kind: page
+    byte_start: 0
+    byte_end: 0
+    page: 1
+    blocks: []
+  - heading_path:
+      - p.1
+      - Born One
+    level: 3
+    kind: heading
+    byte_start: 0
+    byte_end: 367
+    page: 1
+    blocks:
+      - block: paragraph
+        text: The first fixture is a born-digital document with a real text layer. Its lines are placed one by one so the page layout is fixed by this program and not by a layout engine whose output could drift between versions.
+        byte_start: 13
+        byte_end: 228
+      - block: paragraph
+        text: "A second paragraph follows after a wider vertical gap, so the paragraph grouping of the extractor has something to separate on this page."
+        byte_start: 229
+        byte_end: 367
+  - heading_path:
+      - p.2
+    level: 1
+    kind: page
+    byte_start: 368
+    byte_end: 368
+    page: 2
+    blocks: []
+  - heading_path:
+      - p.2
+      - Second Page
+    level: 3
+    kind: heading
+    byte_start: 368
+    byte_end: 521
+    page: 2
+    blocks:
+      - block: paragraph
+        text: "The second page carries its own heading and a single paragraph, which the extractor must attribute to page two and nest under that page."
+        byte_start: 384
+        byte_end: 521
+links: []
+tags: []
+partial: false
+needs_ocr: false
+page_count: 2
+lang: eng

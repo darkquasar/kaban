@@ -1,0 +1,96 @@
+---
+source: crates/kaban-ingest/tests/golden_markdown.rs
+expression: first
+---
+{
+  "path": "docs/crlf.md",
+  "source_id": "ac080b1f0e347e48f03216028cee57daa17ffda37ac1961e823875fe4805ee7b",
+  "document_id": "7d86e787-4333-74a2-9ff2-6ab252355db2",
+  "title": "CRLF file",
+  "content_hash": "158bd99fb9c7b72543f3d912eaa5f825daa9bcff52e2f26e78e467a3ffca2ecd",
+  "sections": [
+    {
+      "id": "5bcd84f0-80ca-75a6-8897-59e07df4b30b",
+      "heading_path": [
+        "CRLF file"
+      ],
+      "kind": "heading"
+    },
+    {
+      "id": "50b0a644-b4cb-74ca-8cf8-1ba332fc2318",
+      "heading_path": [
+        "CRLF file",
+        "Section"
+      ],
+      "kind": "heading"
+    }
+  ],
+  "chunks": [
+    {
+      "id": "c27cfa4a-f2f3-774e-b02b-fc3770be690f",
+      "section": "5bcd84f0-80ca-75a6-8897-59e07df4b30b",
+      "kind": "text",
+      "token_estimate": 11
+    },
+    {
+      "id": "39c5e20b-88da-73cb-9bf3-7a9f0d0149e6",
+      "section": "50b0a644-b4cb-74ca-8cf8-1ba332fc2318",
+      "kind": "text",
+      "token_estimate": 10
+    },
+    {
+      "id": "3c40317e-0328-78bb-8aa3-d18ba14d4d4e",
+      "section": "50b0a644-b4cb-74ca-8cf8-1ba332fc2318",
+      "kind": "{\"code\":{\"lang\":null}}",
+      "token_estimate": 1
+    }
+  ],
+  "edges": {
+    "LINKS_TO": [
+      [
+        "7d86e787-4333-74a2-9ff2-6ab252355db2",
+        "10b53d16-bb38-79f2-8da3-c0df66dd5861"
+      ]
+    ],
+    "NEXT": [
+      [
+        "39c5e20b-88da-73cb-9bf3-7a9f0d0149e6",
+        "3c40317e-0328-78bb-8aa3-d18ba14d4d4e"
+      ]
+    ],
+    "PART_OF": [
+      [
+        "5bcd84f0-80ca-75a6-8897-59e07df4b30b",
+        "7d86e787-4333-74a2-9ff2-6ab252355db2"
+      ],
+      [
+        "c27cfa4a-f2f3-774e-b02b-fc3770be690f",
+        "5bcd84f0-80ca-75a6-8897-59e07df4b30b"
+      ],
+      [
+        "50b0a644-b4cb-74ca-8cf8-1ba332fc2318",
+        "7d86e787-4333-74a2-9ff2-6ab252355db2"
+      ],
+      [
+        "39c5e20b-88da-73cb-9bf3-7a9f0d0149e6",
+        "50b0a644-b4cb-74ca-8cf8-1ba332fc2318"
+      ],
+      [
+        "3c40317e-0328-78bb-8aa3-d18ba14d4d4e",
+        "50b0a644-b4cb-74ca-8cf8-1ba332fc2318"
+      ]
+    ],
+    "TAGGED": [
+      [
+        "7d86e787-4333-74a2-9ff2-6ab252355db2",
+        "093d37c9-33b9-7443-8f1a-a256286069cc"
+      ]
+    ]
+  },
+  "tags": [
+    "tag"
+  ],
+  "links": [
+    "Link"
+  ]
+}

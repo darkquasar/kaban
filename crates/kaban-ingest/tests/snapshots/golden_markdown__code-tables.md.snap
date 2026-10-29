@@ -1,0 +1,100 @@
+---
+source: crates/kaban-ingest/tests/golden_markdown.rs
+expression: first
+---
+{
+  "path": "docs/code-tables.md",
+  "source_id": "df4d1d7444b8f2a21c26fa01aad6e43b14491f707009569a1b9a316a8b9388b0",
+  "document_id": "a328e31f-8891-7c04-9a33-58dbc84972cb",
+  "title": "Code and tables",
+  "content_hash": "7f82e1555525ddbacd5e74987226b321feee4169a9bdc7e159bba0b602bba0a5",
+  "sections": [
+    {
+      "id": "08467cf1-57e2-7c62-bc0d-a76c9df0b375",
+      "heading_path": [
+        "Code and tables"
+      ],
+      "kind": "heading"
+    }
+  ],
+  "chunks": [
+    {
+      "id": "c42e22ad-5292-7d10-872b-73e74daf4fd4",
+      "section": "08467cf1-57e2-7c62-bc0d-a76c9df0b375",
+      "kind": "text",
+      "token_estimate": 13
+    },
+    {
+      "id": "86ea4680-6f45-72e1-a8cc-5e01bed4dc81",
+      "section": "08467cf1-57e2-7c62-bc0d-a76c9df0b375",
+      "kind": "{\"code\":{\"lang\":\"rust\"}}",
+      "token_estimate": 14
+    },
+    {
+      "id": "73772e53-0bd2-75fd-b3da-1c076d9ec57a",
+      "section": "08467cf1-57e2-7c62-bc0d-a76c9df0b375",
+      "kind": "{\"code\":{\"lang\":null}}",
+      "token_estimate": 7
+    },
+    {
+      "id": "f210e6db-30c0-7818-92fd-e771777e5ca1",
+      "section": "08467cf1-57e2-7c62-bc0d-a76c9df0b375",
+      "kind": "table",
+      "token_estimate": 9
+    },
+    {
+      "id": "4d075613-f7c2-73c8-b841-e04aa4eb0e62",
+      "section": "08467cf1-57e2-7c62-bc0d-a76c9df0b375",
+      "kind": "text",
+      "token_estimate": 19
+    }
+  ],
+  "edges": {
+    "NEXT": [
+      [
+        "c42e22ad-5292-7d10-872b-73e74daf4fd4",
+        "86ea4680-6f45-72e1-a8cc-5e01bed4dc81"
+      ],
+      [
+        "86ea4680-6f45-72e1-a8cc-5e01bed4dc81",
+        "73772e53-0bd2-75fd-b3da-1c076d9ec57a"
+      ],
+      [
+        "73772e53-0bd2-75fd-b3da-1c076d9ec57a",
+        "f210e6db-30c0-7818-92fd-e771777e5ca1"
+      ],
+      [
+        "f210e6db-30c0-7818-92fd-e771777e5ca1",
+        "4d075613-f7c2-73c8-b841-e04aa4eb0e62"
+      ]
+    ],
+    "PART_OF": [
+      [
+        "08467cf1-57e2-7c62-bc0d-a76c9df0b375",
+        "a328e31f-8891-7c04-9a33-58dbc84972cb"
+      ],
+      [
+        "c42e22ad-5292-7d10-872b-73e74daf4fd4",
+        "08467cf1-57e2-7c62-bc0d-a76c9df0b375"
+      ],
+      [
+        "86ea4680-6f45-72e1-a8cc-5e01bed4dc81",
+        "08467cf1-57e2-7c62-bc0d-a76c9df0b375"
+      ],
+      [
+        "73772e53-0bd2-75fd-b3da-1c076d9ec57a",
+        "08467cf1-57e2-7c62-bc0d-a76c9df0b375"
+      ],
+      [
+        "f210e6db-30c0-7818-92fd-e771777e5ca1",
+        "08467cf1-57e2-7c62-bc0d-a76c9df0b375"
+      ],
+      [
+        "4d075613-f7c2-73c8-b841-e04aa4eb0e62",
+        "08467cf1-57e2-7c62-bc0d-a76c9df0b375"
+      ]
+    ]
+  },
+  "tags": [],
+  "links": []
+}

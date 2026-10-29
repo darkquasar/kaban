@@ -1,0 +1,23 @@
+[package]
+name = "kaban-index-tantivy"
+description = "kaban text index on Tantivy (spec 05 SS-08): an ontology-driven, index-only projection beside the SQLite store"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+kaban-core.workspace = true
+tantivy.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true   # the cause of a refused (corrupt) segment, logged where it is mapped to `Unavailable`
+
+[dev-dependencies]
+kaban-store-sqlite.workspace = true  # the projector and purge unit tests drive a real store (a dev-only cycle: the store owns this adapter since OWN-M)
+rusqlite.workspace = true            # reads the fixture database beside the store in the purge test
+
+[lints]
+workspace = true

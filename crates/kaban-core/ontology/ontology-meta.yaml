@@ -1,0 +1,53 @@
+# The ontology meta-schema (engine-spec §3.1; engine-plan E1.2), expressed in the EN-F3 validator
+# subset so the E1.1 validator checks a file before the typed parse. The subset has no
+# map-of-schemas form, so this schema fixes the top-level shape, the scalar blocks and
+# `discovered`; the bodies under `mixins`, `kinds`, `rels`, `source_types` and `questions`
+# (maps keyed by user names) are checked by the typed parse with `deny_unknown_fields` at every
+# level, and identifiers by the Ns/KindName/RelName newtypes. A kind or mixin body may carry
+# `index: {stamp: commit | none}` (engine-spec §3.1 "Indexing meta-config", OWN-65, AMD-14):
+# how the store indexes records of the kind, inherited through `is_a` and mixins; `stamp` is a
+# closed set (default `commit`), the block is closed (`deny_unknown_fields`) like every other.
+# A kind body may also carry a top-level `acceptance: agent | human` (OWN-84 (1), core-spec F4;
+# E2.5g): who accepts an EN-F5a candidate or EN-F13 `proposed` record of that ungoverned kind
+# (`agent` when absent; refused beside the `governed` mixin, whose own `acceptance` is the
+# tier). The same key under `discovered` is the tier of undeclared (`x:`) labels.
+type: object
+additionalProperties: false
+required: [ontology, version, kinds, rels]
+properties:
+  ontology: {type: string}         # regex checked by the Ns newtype: invalid_identifier
+  version: {type: integer}
+  extends: {type: array, items: {type: string}}
+  prefixes: {type: object}
+  mixins: {type: object}
+  kinds: {type: object}
+  rels: {type: object}
+  discovered:
+    type: object
+    additionalProperties: false
+    required: [policy, cap, prune_after_days, promote_when]
+    properties:
+      policy: {type: string, enum: [deny, review, allow]}
+      cap: {type: integer}
+      prune_after_days: {type: integer}
+      promote_when:
+        type: object
+        additionalProperties: false
+        required: [min_count, min_sources, min_mean_score]
+        properties:
+          min_count: {type: integer}
+          min_sources: {type: integer}
+          min_mean_score: {type: number}
+      acceptance: {type: string, enum: [agent, human]}
+      auto_accept_when:           # OWN-84 (2): the promote_when shape; absent means nothing is auto-accepted
+        type: object
+        additionalProperties: false
+        required: [min_count, min_sources, min_mean_score]
+        properties:
+          min_count: {type: integer}
+          min_sources: {type: integer}
+          min_mean_score: {type: number}
+  source_types: {type: object}
+  default_kind: {type: string}
+  priors: {type: object}
+  questions: {type: object}

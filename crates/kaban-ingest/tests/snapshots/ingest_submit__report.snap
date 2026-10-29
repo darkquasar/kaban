@@ -1,0 +1,30 @@
+---
+source: crates/kaban-ingest/tests/ingest_submit.rs
+expression: snapshot
+---
+{
+  "assertions": 3,
+  "changes": {
+    "first_seq": "<FIRST_SEQ>",
+    "last_seq": "<LAST_SEQ>"
+  },
+  "chunk": 0,
+  "created": 1,
+  "edges": 2,
+  "evidence_dropped": [],
+  "job": "<JOB>",
+  "predecessor_terminal": 0,
+  "records": [
+    {
+      "id": "<RECORD>",
+      "local_id": "fact",
+      "outcome": "created"
+    }
+  ],
+  "redactions": 0,
+  "revision_candidates": [],
+  "skipped": [],
+  "status": "open",
+  "unchanged": 0,
+  "updated": 0
+}

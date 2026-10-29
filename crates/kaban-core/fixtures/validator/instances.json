@@ -1,0 +1,313 @@
+[
+  {
+    "name": "two errors at different depths: the shallow one comes first whatever the key order",
+    "schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "rationale"
+      ],
+      "properties": {
+        "rationale": {
+          "type": "string"
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id"
+            ],
+            "properties": {
+              "id": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+    "value": {
+      "evidence": [
+        {
+          "id": "ok"
+        },
+        {
+          "id": 3
+        }
+      ],
+      "zzz": 1
+    },
+    "errors": [
+      [
+        "/rationale",
+        "required"
+      ],
+      [
+        "/zzz",
+        "additionalProperties"
+      ],
+      [
+        "/evidence/1/id",
+        "type"
+      ]
+    ],
+    "first": "invalid_props props.rationale"
+  },
+  {
+    "name": "same depth: pointer bytes ascending, then the fixed keyword order",
+    "schema": {
+      "type": "object",
+      "properties": {
+        "b": {
+          "type": "string",
+          "minLength": 3,
+          "pattern": "x+"
+        },
+        "a": {
+          "type": "string",
+          "enum": [
+            "q"
+          ],
+          "maxLength": 0
+        }
+      }
+    },
+    "value": {
+      "b": "yy",
+      "a": "zz"
+    },
+    "errors": [
+      [
+        "/a",
+        "enum"
+      ],
+      [
+        "/a",
+        "maxLength"
+      ],
+      [
+        "/b",
+        "minLength"
+      ],
+      [
+        "/b",
+        "pattern"
+      ]
+    ],
+    "first": "invalid_props props.a"
+  },
+  {
+    "name": "a type mismatch stops the checks below that node",
+    "schema": {
+      "type": "object",
+      "required": [
+        "a"
+      ],
+      "properties": {
+        "a": {
+          "type": "string"
+        }
+      }
+    },
+    "value": [],
+    "errors": [
+      [
+        "",
+        "type"
+      ]
+    ],
+    "first": "invalid_props props"
+  },
+  {
+    "name": "1.0 is not an integer",
+    "schema": {
+      "type": "object",
+      "properties": {
+        "ts": {
+          "type": "integer"
+        }
+      }
+    },
+    "value": {
+      "ts": 1.0
+    },
+    "errors": [
+      [
+        "/ts",
+        "type"
+      ]
+    ],
+    "first": "invalid_props props.ts"
+  },
+  {
+    "name": "a string is not an integer either",
+    "schema": {
+      "type": "integer"
+    },
+    "value": "1.0",
+    "errors": [
+      [
+        "",
+        "type"
+      ]
+    ],
+    "first": "invalid_props props"
+  },
+  {
+    "name": "a 3-byte UTF-8 character counts 3 for minLength",
+    "schema": {
+      "type": "string",
+      "minLength": 3
+    },
+    "value": "€",
+    "errors": [],
+    "first": null
+  },
+  {
+    "name": "a 3-byte UTF-8 character counts 3 for maxLength",
+    "schema": {
+      "type": "string",
+      "maxLength": 2
+    },
+    "value": "€",
+    "errors": [
+      [
+        "",
+        "maxLength"
+      ]
+    ],
+    "first": "invalid_props props"
+  },
+  {
+    "name": "pattern a rejects ba: always anchored",
+    "schema": {
+      "type": "string",
+      "pattern": "a"
+    },
+    "value": "ba",
+    "errors": [
+      [
+        "",
+        "pattern"
+      ]
+    ],
+    "first": "invalid_props props"
+  },
+  {
+    "name": "pattern with alternation is anchored as a group",
+    "schema": {
+      "type": "string",
+      "pattern": "a|b"
+    },
+    "value": "ab",
+    "errors": [
+      [
+        "",
+        "pattern"
+      ]
+    ],
+    "first": "invalid_props props"
+  },
+  {
+    "name": "enum compares canonical JSON: 1 and 1.0 differ, strings byte-wise",
+    "schema": {
+      "type": "object",
+      "properties": {
+        "n": {
+          "type": "number",
+          "enum": [
+            1
+          ]
+        },
+        "s": {
+          "type": "string",
+          "enum": [
+            "é"
+          ]
+        }
+      }
+    },
+    "value": {
+      "n": 1.0,
+      "s": "é"
+    },
+    "errors": [
+      [
+        "/n",
+        "enum"
+      ]
+    ],
+    "first": "invalid_props props.n"
+  },
+  {
+    "name": "nested array index in the pointer and the dotted text",
+    "schema": {
+      "type": "object",
+      "properties": {
+        "evidence": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "id"
+            ]
+          }
+        }
+      }
+    },
+    "value": {
+      "evidence": [
+        {
+          "id": "a"
+        },
+        {}
+      ]
+    },
+    "errors": [
+      [
+        "/evidence/1/id",
+        "required"
+      ]
+    ],
+    "first": "invalid_props props.evidence.1.id"
+  },
+  {
+    "name": "a property name with a slash is escaped in the pointer and unescaped in the text",
+    "schema": {
+      "type": "object",
+      "additionalProperties": false
+    },
+    "value": {
+      "a/b": 1
+    },
+    "errors": [
+      [
+        "/a~1b",
+        "additionalProperties"
+      ]
+    ],
+    "first": "invalid_props props.a/b"
+  },
+  {
+    "name": "an open object accepts extra members",
+    "schema": {
+      "type": "object",
+      "properties": {
+        "a": {
+          "type": "string"
+        }
+      }
+    },
+    "value": {
+      "a": "x",
+      "extra": [
+        1,
+        2
+      ]
+    },
+    "errors": [],
+    "first": null
+  }
+]

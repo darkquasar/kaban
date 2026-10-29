@@ -1,0 +1,98 @@
+---
+title: "Remember and retrieve"
+description: "Capture useful memories, find them again, connect them and retire them deliberately."
+---
+
+Kaban stores memories as typed nodes with relationships. Start with a short statement
+that will help a future session, not a transcript dump. These examples target the
+current local `3.0.0-alpha.1` product, not a stable-release promise.
+
+## Choose a kind
+
+Use `Fact` for an observed statement, `Idea` for an untested proposal, `Insight` for
+a lesson, `Improvement` for a fix, and `Episode` for a sanitized source interaction.
+`Failure` records what went wrong. `Decision` records a choice and requires a
+`rationale` property; `Convention` records a project rule. Governed kinds have a
+separate [acceptance lifecycle](governance.mdx)—storing a choice does not mean
+someone approved it. The kind is a label, not proof that the text is correct.
+
+Inspect the MCP `schema_describe` tool for the loaded kinds and relationship endpoint
+rules. This is more reliable than assuming every installation has the same ontology.
+
+## Capture and search
+
+Run from the project directory. Use the same database, workspace and policy settings
+as your MCP server; the root flags go before the command.
+
+```bash
+kaban --db kaban.db --workspace demo remember Fact \
+  'The importer accepts UTF-8 text.' --summary 'Importer encoding' --tag ingestion
+kaban --db kaban.db --workspace demo recall 'importer encoding' --kind Fact --limit 5
+```
+
+Save the returned `id` rather than inventing one or using a summary as an identifier.
+Exact duplicates can return an existing record. Compact recall cards are the default;
+add `--full-text` when you need bodies and properties. Retrieval starts with enabled
+lexical sources and graph expansion; it is not embedding search.
+
+An MCP host calls the same service. The following is a `tools/call` request body
+(the host supplies the JSON-RPC envelope):
+
+```json
+{"name":"remember","arguments":{"kind":"Fact","text":"The importer accepts UTF-8 text.","tags":["ingestion"]}}
+```
+
+```json
+{"name":"recall","arguments":{"query":"importer encoding","kinds":["Fact"],"limit":5}}
+```
+
+## Connect a failure to its fix
+
+Create a `Failure` and an `Improvement` with `remember`, then substitute their
+returned IDs for `FAILURE_ID` and `IMPROVEMENT_ID` below. These are placeholders,
+not valid IDs. `link` and `traverse` are MCP tools, not CLI subcommands.
+
+```json
+{"name":"link","arguments":{"from":"FAILURE_ID","rel":"FIXED_BY","to":"IMPROVEMENT_ID"}}
+```
+
+```json
+{"name":"traverse","arguments":{"start_ids":["FAILURE_ID"],"rels":["FIXED_BY"],"direction":"out","max_depth":1}}
+```
+
+Relationships are typed: `FIXED_BY` starts at a Failure. Re-linking the same triple
+updates its confidence/properties rather than making an unrelated duplicate.
+For atomic creation, `remember` also accepts inline links to existing IDs.
+
+## Understand what is visible
+
+The process binds a workspace using `--workspace`/`KABAN_WORKSPACE`; otherwise it
+uses the enclosing repository root's directory name, or `default` outside Git.
+Ordinary reads use that bound workspace. An explicit `workspace_id: "*"` on supported
+read requests widens to all workspaces in the same database; it is not a second
+personal/global store. Choose names deliberately when repositories share a database.
+
+Ordinary recall hides tombstones, invalidated records and candidates under review.
+Archived/superseded records do not seed normal search; explicit inclusion flags allow
+them through graph expansion. MCP `include_candidates: true` can include candidates
+in recall/traverse; use `review`/`explain` to understand them rather than mistaking
+their presence for acceptance. Traversal follows active records by default.
+
+Treat IDs as opaque values: copy the exact ID from a response and keep it in the
+matching field. An ID or workspace name is not an authorization token. Content,
+properties, paths and returned text still pass policy checks; do not paste secrets
+into commands, shell history or client logs.
+
+## Retire a memory
+
+Replace `NODE_ID` with an actual returned ID:
+
+```bash
+kaban --db kaban.db --workspace demo forget NODE_ID
+```
+
+The default tombstone hides the node while preserving history and preventing that
+identity from being re-proposed as a duplicate. `--mode archive` is a softer
+retirement; `--mode invalidate` records invalidation. `--mode purge` is destructive:
+it removes text, index entries and edges, and is not the normal cleanup choice.
+Deletion from Kaban does not erase prior exports, Git history, backups or host logs.

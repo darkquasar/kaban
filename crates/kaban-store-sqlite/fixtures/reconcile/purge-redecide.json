@@ -1,0 +1,11 @@
+{
+  "comment": "engine-plan E2.2 item 6 (EN-F8a): three canonical_id supporters of one span naming three objects; the winner's object is purged and the group is re-decided. Weights are prior x raw_score in 1/10000: x 10000 (gazetteer id 1.0), y 3600 (gliner 0.6), z 50 (embed 0.01). Before: total 13650, x wins with p 7326 and margin 4688 (tau_id 4000). After purging x: total 3650, y wins with p 9863 and margin 9726.",
+  "span": { "offset": 4, "len": 6 },
+  "supporters": [
+    { "object": "x", "layer": "gazetteer", "method": "id", "raw_score": 10000, "lineage_id": "gaz-1" },
+    { "object": "y", "layer": "gliner", "method": "gliner", "raw_score": 6000, "lineage_id": "gl-1" },
+    { "object": "z", "layer": "embed", "method": "embed", "raw_score": 100, "lineage_id": "em-1" }
+  ],
+  "before": { "winner": "x", "confidence": 7326, "margin": 4688 },
+  "after": { "winner": "y", "confidence": 9863, "margin": 9726 }
+}

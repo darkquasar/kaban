@@ -1,0 +1,14 @@
+[
+  {"name": "scalars", "value": null, "canonical": "null"},
+  {"name": "bool", "value": true, "canonical": "true"},
+  {"name": "integer stays an integer", "value": 42, "canonical": "42"},
+  {"name": "negative integer", "value": -7, "canonical": "-7"},
+  {"name": "float shortest round trip", "value": 0.1, "canonical": "0.1"},
+  {"name": "float with integral value keeps its point", "value": 1.0, "canonical": "1.0"},
+  {"name": "large u64", "value": 18446744073709551615, "canonical": "18446744073709551615"},
+  {"name": "string escapes", "value": "a\"b\\c\n\u0001", "canonical": "\"a\\\"b\\\\c\\n\\u0001\""},
+  {"name": "unicode kept raw", "value": "é", "canonical": "\"é\""},
+  {"name": "keys sorted, no whitespace", "value": {"z": 1, "a": [1, 2, {"y": null, "x": "s"}], "m": {"q": 1.5, "p": true}},
+   "canonical": "{\"a\":[1,2,{\"x\":\"s\",\"y\":null}],\"m\":{\"p\":true,\"q\":1.5},\"z\":1}"},
+  {"name": "empty containers", "value": {"a": {}, "b": []}, "canonical": "{\"a\":{},\"b\":[]}"}
+]

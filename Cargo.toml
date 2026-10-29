@@ -1,0 +1,129 @@
+[workspace]
+resolver = "3"
+members = [
+  "crates/kaban-core",
+  "crates/kaban-policy",
+  "crates/kaban-store-sqlite",
+  "crates/kaban-api",
+  "crates/kaban",
+  "crates/kaban-ingest",
+  "crates/kaban-codegraph",
+  "crates/kaban-index",
+  "crates/kaban-index-tantivy",
+]
+
+[workspace.package]
+version = "3.0.0-alpha.1"
+edition = "2024"
+rust-version = "1.99"   # MSRV = pinned toolchain (OD-8, R0-3); bump together with rust-toolchain.toml
+license = "Apache-2.0"
+authors = ["kaban authors"]
+repository = "https://github.com/darkquasar/kaban4"
+
+[workspace.dependencies]
+# internal crates
+kaban-core = { path = "crates/kaban-core", version = "3.0.0-alpha.1" }
+kaban-policy = { path = "crates/kaban-policy", version = "3.0.0-alpha.1" }
+kaban-store-sqlite = { path = "crates/kaban-store-sqlite", version = "3.0.0-alpha.1" }
+kaban-api = { path = "crates/kaban-api", version = "3.0.0-alpha.1" }
+kaban-ingest = { path = "crates/kaban-ingest", version = "3.0.0-alpha.1" }
+kaban-codegraph = { path = "crates/kaban-codegraph", version = "3.0.0-alpha.1" }
+kaban-index = { path = "crates/kaban-index", version = "3.0.0-alpha.1" }
+kaban-index-tantivy = { path = "crates/kaban-index-tantivy", version = "3.0.0-alpha.1" }
+
+# exact pins per core-plan.md §3 (licences recorded there)
+rmcp = { version = "=3.5.1", features = ["server", "transport-io", "elicitation"] }  # elicitation (+ url): C3.2 accept handshake probe (M3-20, OWN-4)
+tokio = { version = "=1.53.3", features = ["rt-multi-thread", "macros", "io-std", "signal", "sync", "time"] }  # sync/time: LeaseKeeper (C2.5, D-18)
+tokio-util = "=0.7.19"                  # MIT: CancellationToken for the LeaseKeeper and the rescan job (C2.5, MD-18)
+rusqlite = { version = "=0.40.2", features = ["bundled"] }
+thiserror = "=2.0.21"
+anyhow = "=1.0.104"
+clap = { version = "=4.6.7", features = ["derive", "env"] }
+aho-corasick = "=1.1.5"
+yaml_serde = "=0.10.7"                 # MIT OR Apache-2.0: maintained YAML Organization fork; libyaml-rs backend
+unicode-normalization = "=0.1.25"
+zeroize = "=1.9.1"                      # Apache-2.0 OR MIT: audit key / token in zeroizing memory
+subtle = "=2.6.1"                       # BSD-3-Clause: constant-time compare of chain HMACs and tokens
+rustix = { version = "=1.1.5", features = ["fs", "process", "mount", "thread"] }  # Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT: fchmod without unsafe (S5); process: process-group kill without unsafe (C3.3, R-C3.2-4; v4 CG1.1 runner); mount, thread: the v4 namespaces tier's mount view and unshare/setns helper (stage1-plan CG1.2, consumed from CG4.4; additive, no new package, no member uses them yet)
+
+# exact pin per spec 05 SS-13b (EN-N1 amended narrowly; s31-tantivy-integration-design.md §6): the latest stable on
+# crates.io at T1 (2026-10-26; 0.26.2 is also Turso's tested pin). MIT. `mmap` is the directory and the writer lock,
+# `stemmer` the FTS5 porter twin, `lz4-compression` the doc-store codec (nothing is stored; the codec is the
+# default one the format names). Off: `stopwords`, `columnar-zstd-compression` (no `zstd-sys` before SS-17), `quickwit`.
+tantivy = { version = "=0.26.2", default-features = false, features = ["mmap", "lz4-compression", "stemmer"] }
+
+# Patched SS-17 compression stack: zstd-safe 8.2.0 and zstd-sys 2.1.2+zstd.1.5.7.
+# MIT (`zstd`), BSD-3-Clause (`zstd-safe`, `zstd-sys`: libzstd itself). Per-record body
+# compression with the one shipped dictionary (`kaban-store-sqlite/src/body_codec.rs`). Default features off: no
+# `legacy` formats, no `arrays`, no `zdict_builder` in the binary (the dictionary trainer is a dev-only feature there).
+zstd = { version = "=0.14.3", default-features = false }
+# exact pin, already in the lock through tantivy: the checksum of a body stored plain behind the tag (spec 05 SS-17; T8c review t8c-3). MIT OR Apache-2.0.
+crc32fast = "=1.5.2"
+
+# exact pins per ../specs/kaban/specs/02-code-graph-v4/stage1-plan.md §3 (licences recorded there; OWN-4 grant fetched in CG3.1)
+scip = "=0.10.0"                        # Apache-2.0: `index.scip` protobuf types; its generated `scip.rs` is the schema the G1-S1 inventory walker enumerates (`kaban-index` only, never `kaban-codegraph`: G1-E3)
+protobuf = "=3.7.2"                     # MIT: `Message::parse_from_bytes` on the decoded `Index` and the descriptor walk of the inventory test; `protobuf-support` comes with it (`kaban-index` only)
+
+# exact pins per docs-ingest-plan.md §3 (licences recorded there; DI0.1, D-11, D-19)
+blake3 = { version = "=1.8.7", default-features = false, features = ["std", "pure"] }  # CC0-1.0 OR Apache-2.0 OR Apache-2.0 WITH LLVM-exception: content hashes, derived ids (pure Rust, no C/asm)
+ignore = "=0.4.33"                      # Unlicense OR MIT: gitignore-aware walk (shared with core C5.4)
+globset = "=0.4.20"                     # Unlicense OR MIT: deny-glob matcher with glob ids (D-11; same pin as core C3.4)
+pulldown-cmark = { version = "=0.13.4", default-features = false }  # MIT: Markdown events with `into_offset_iter`, YAML metadata blocks (DI1.2, `md`)
+text-splitter = { version = "=0.33.0", features = ["markdown"] }    # MIT: intra-section split of a paragraph group above the hard max (DI1.2/DI1.3, `md`)
+chardetng = "=1.0.0"                    # Apache-2.0 OR MIT: `.txt` encoding detection (DI1.2)
+encoding_rs = "=0.8.42"                 # (Apache-2.0 OR MIT) AND BSD-3-Clause: decoding (DI1.2; BSD-3-Clause is on the allowlist)
+whatlang = "=0.18.0"                    # MIT: `Document.lang` (DI1.2)
+pdf_oxide = { version = "=0.3.78", default-features = false, features = ["icc", "legacy-crypto"] }  # MIT OR Apache-2.0: born-digital PDF text/markdown per page (DI2.1, `pdf`; OWN-68 SC-07 one backend, OWN-69 fetch; no `ocr*`, `ml`, `rendering`, `table-ml`, `parallel`)
+
+# lock versions (core-plan.md §3: `cargo update` forbidden without a manifest task)
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+schemars = "1"
+regex = "1"
+uuid = { version = "1", features = ["v7"] }
+getrandom = "0.3"
+hex = "0.4"
+hmac = "0.12"
+sha2 = "0.10"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-log = "0.2"                     # the `log` bridge `tracing-subscriber` installs; dev-only, for the RD-1 log-cap regression
+time = { version = "0.3", features = ["formatting"] }
+
+# dev-only exact pins per core-plan.md §3 (licences: proptest MIT OR Apache-2.0; insta MIT OR Apache-2.0)
+proptest = "=1.11.0"
+insta = { version = "=1.49.0", default-features = false, features = ["json", "yaml"] }  # snapshots of tool schemas and shapes (C3.1, M3-20, OWN-4)
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }  # group: priority -1 so single lints override it (clippy::lint_groups_priority)
+unreachable_pub = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "warn"
+panic = "deny"
+dbg_macro = "deny"
+print_stdout = "deny"          # stdout purity; exceptions only in cli/output.rs and the stdio transport
+print_stderr = "warn"
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "warn"
+missing_panics_doc = "allow"
+too_many_lines = "allow"
+
+# Disk (coordinator, maintenance lanes in parallel worktrees): line tables keep panic/backtrace
+# locations for workspace code; dependency debuginfo is dropped. Release is unaffected.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

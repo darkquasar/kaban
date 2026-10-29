@@ -1,0 +1,98 @@
+---
+source: crates/kaban-ingest/tests/golden_markdown.rs
+expression: first
+---
+{
+  "path": "docs/links.md",
+  "source_id": "026afc4c241dd1377b6d2f62aeb6280030a09538d03f11f1454213abb0b65429",
+  "document_id": "7043509c-b2fa-7044-9cce-d1d446da4f1b",
+  "title": "Linked note",
+  "content_hash": "2442a49037fa20593d4d31eafac3698e5ccc12e6e20269cd43f99d1e0037d72d",
+  "sections": [
+    {
+      "id": "d8926f55-689c-7206-a883-a340cfd1d68c",
+      "heading_path": [],
+      "kind": "frontmatter"
+    },
+    {
+      "id": "abed5901-caa8-7e3b-999e-dfb862705bc9",
+      "heading_path": [
+        "Ignored heading title"
+      ],
+      "kind": "heading"
+    }
+  ],
+  "chunks": [
+    {
+      "id": "0f163e11-5b8a-766a-90bf-0646f795c863",
+      "section": "abed5901-caa8-7e3b-999e-dfb862705bc9",
+      "kind": "text",
+      "token_estimate": 69
+    }
+  ],
+  "edges": {
+    "LINKS_TO": [
+      [
+        "7043509c-b2fa-7044-9cce-d1d446da4f1b",
+        "52223dcd-d3cb-778b-a356-4b5b8a536da4"
+      ],
+      [
+        "7043509c-b2fa-7044-9cce-d1d446da4f1b",
+        "3a329d63-84cd-77b1-9bbd-ec0eb8fec17f"
+      ],
+      [
+        "7043509c-b2fa-7044-9cce-d1d446da4f1b",
+        "27806bc6-7215-72a6-a1ac-132ed647c9b8"
+      ]
+    ],
+    "NEXT": [
+      [
+        "d8926f55-689c-7206-a883-a340cfd1d68c",
+        "abed5901-caa8-7e3b-999e-dfb862705bc9"
+      ]
+    ],
+    "PART_OF": [
+      [
+        "d8926f55-689c-7206-a883-a340cfd1d68c",
+        "7043509c-b2fa-7044-9cce-d1d446da4f1b"
+      ],
+      [
+        "abed5901-caa8-7e3b-999e-dfb862705bc9",
+        "7043509c-b2fa-7044-9cce-d1d446da4f1b"
+      ],
+      [
+        "0f163e11-5b8a-766a-90bf-0646f795c863",
+        "abed5901-caa8-7e3b-999e-dfb862705bc9"
+      ]
+    ],
+    "TAGGED": [
+      [
+        "7043509c-b2fa-7044-9cce-d1d446da4f1b",
+        "88b16328-06a8-7877-8d82-fb74229bc187"
+      ],
+      [
+        "7043509c-b2fa-7044-9cce-d1d446da4f1b",
+        "cd4fee3b-3fb3-744e-95ce-3ac37de1cd39"
+      ],
+      [
+        "7043509c-b2fa-7044-9cce-d1d446da4f1b",
+        "b96402cd-2f7a-7ae7-89a4-8de53662d54b"
+      ]
+    ]
+  },
+  "tags": [
+    "alpha",
+    "project/sub-topic",
+    "listed"
+  ],
+  "links": [
+    "Other Note",
+    "Other Note#Section",
+    "Other Note^abc123",
+    "Other Note",
+    "diagram.png",
+    "https://example.com/page#frag",
+    "pic.png",
+    "Inline Link"
+  ]
+}

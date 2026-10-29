@@ -1,0 +1,39 @@
+[package]
+name = "kaban-api"
+description = "kaban service layer: KabanApi request/response types, sanitization and projection"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+kaban-core.workspace = true
+kaban-policy.workspace = true
+kaban-codegraph.workspace = true # `SnapshotProvider`, `Resolved`, `SnapshotRef` behind `KabanApi` (cg-join-v1 §2, §4; CG5.2)
+serde.workspace = true
+serde_json.workspace = true
+schemars.workspace = true
+thiserror.workspace = true
+tokio-util.workspace = true   # CancellationToken for the rescan job (C2.7, MD-18)
+tracing.workspace = true
+zeroize.workspace = true      # confirmation token in zeroizing memory (C3.2, RC-5)
+getrandom.workspace = true    # 32 random bytes per confirmation token (C3.2)
+hex.workspace = true          # token and hash encoding (C3.2)
+rustix.workspace = true       # kill the git process group on timeout without unsafe (C3.3, R-C3.2-4)
+time.workspace = true         # `--since` anchor formatting and `checked_at` (C3.3, M3-21)
+globset.workspace = true      # exact path_scope attribution of git changes (C3.3, M3-22)
+yaml_serde.workspace = true # `.kaban/*.md` frontmatter (C5.1, M5-1, M5-21)
+blake3.workspace = true       # `index_meta.ontology_hash:<ns>` of a loaded ontology file (EN-F2, E1.3; already locked)
+
+[dev-dependencies]
+kaban-store-sqlite.workspace = true
+kaban-codegraph = { workspace = true, features = ["test-support", "instrumented"] } # `testing::FixedSnapshot` (CG5.2); `symbol::testing` recorder (CG5.1)
+kaban-index.workspace = true  # publishes the go-drivers and ts-drivers fixture snapshots for `tests/code_tools.rs` (CG7.1)
+scip.workspace = true         # invented Rust publication-to-query regression, test only
+protobuf.workspace = true
+rusqlite.workspace = true
+proptest.workspace = true     # `tests/traverse_determinism.rs` (EN-F46, E2.8)
+
+[lints]
+workspace = true

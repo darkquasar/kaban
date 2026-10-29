@@ -1,0 +1,33 @@
+---
+source: crates/kaban/tests/cli_ontology.rs
+assertion_line: 106
+expression: list
+---
+{
+  "ontologies": [
+    {
+      "builtin": true,
+      "hash": "[hash]",
+      "kinds": 6,
+      "ns": "core",
+      "rels": 9,
+      "version": 1
+    },
+    {
+      "builtin": true,
+      "hash": "[hash]",
+      "kinds": 8,
+      "ns": "adr",
+      "rels": 7,
+      "version": 1
+    },
+    {
+      "builtin": false,
+      "hash": "[hash]",
+      "kinds": 1,
+      "ns": "incidents",
+      "rels": 1,
+      "version": 1
+    }
+  ]
+}

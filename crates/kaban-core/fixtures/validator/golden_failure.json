@@ -1,0 +1,49 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [],
+  "properties": {
+    "error_text": {
+      "type": "string"
+    },
+    "command": {
+      "type": "string"
+    },
+    "stack_head": {
+      "type": "string"
+    },
+    "fix": {
+      "type": "string"
+    },
+    "environment": {
+      "type": "string"
+    },
+    "pending_fix": {
+      "type": "boolean"
+    },
+    "command_fingerprint": {
+      "type": "string"
+    },
+    "evidence_runs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "ts"
+        ],
+        "properties": {
+          "ts": {
+            "type": "integer"
+          },
+          "files_edited_since": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    }
+  }
+}

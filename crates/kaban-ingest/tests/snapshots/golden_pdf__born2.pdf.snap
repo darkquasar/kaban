@@ -1,0 +1,61 @@
+---
+source: crates/kaban-ingest/tests/golden_pdf.rs
+expression: first
+---
+frontmatter: ~
+sections:
+  - heading_path:
+      - p.1
+    level: 1
+    kind: page
+    byte_start: 0
+    byte_end: 0
+    page: 1
+    blocks: []
+  - heading_path:
+      - p.1
+      - Born Two
+    level: 2
+    kind: heading
+    byte_start: 0
+    byte_end: 332
+    page: 1
+    blocks:
+      - block: paragraph
+        text: "The second fixture is rendered from Markdown by the library itself, so its text layer comes from a layout engine rather than from hand-placed lines."
+        byte_start: 12
+        byte_end: 161
+      - block: paragraph
+        text: Below the two paragraphs sits a small table whose header row names three columns.
+        byte_start: 162
+        byte_end: 244
+      - block: table_row
+        cells:
+          - Part
+          - Qty
+          - Unit
+        header: true
+        byte_start: 245
+        byte_end: 332
+      - block: table_row
+        cells:
+          - Bolt
+          - "12"
+          - pcs
+        header: false
+        byte_start: 245
+        byte_end: 332
+      - block: table_row
+        cells:
+          - Nut
+          - "30"
+          - pcs
+        header: false
+        byte_start: 245
+        byte_end: 332
+links: []
+tags: []
+partial: false
+needs_ocr: false
+page_count: 1
+lang: eng

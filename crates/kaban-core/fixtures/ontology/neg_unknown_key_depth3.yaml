@@ -1,0 +1,7 @@
+ontology: shop
+version: 1
+kinds:
+  Thing:
+    description: "a thing"
+    rank: {boost: 1.0, boostt: 2.0}
+rels: {}

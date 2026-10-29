@@ -1,0 +1,119 @@
+[
+ {
+  "name": "full",
+  "props": {
+   "error_text": "boom",
+   "command": "make",
+   "stack_head": "at x",
+   "fix": "retry",
+   "environment": "ci",
+   "pending_fix": true,
+   "command_fingerprint": "abababababababababababababababababababababababababababababababab",
+   "evidence_runs": [
+    {
+     "ts": 1793004407,
+     "files_edited_since": [
+      "a.rs"
+     ]
+    },
+    {
+     "ts": 1
+    }
+   ]
+  }
+ },
+ {
+  "name": "empty object",
+  "props": {}
+ },
+ {
+  "name": "unknown key",
+  "props": {
+   "errr": "x"
+  }
+ },
+ {
+  "name": "pending_fix wrong type",
+  "props": {
+   "pending_fix": "yes"
+  }
+ },
+ {
+  "name": "evidence_runs ts missing",
+  "props": {
+   "evidence_runs": [
+    {
+     "files_edited_since": []
+    }
+   ]
+  }
+ },
+ {
+  "name": "evidence_runs ts is 1.0, not an integer",
+  "props": {
+   "evidence_runs": [
+    {
+     "ts": 1.0
+    }
+   ]
+  }
+ },
+ {
+  "name": "evidence_runs ts is a string",
+  "props": {
+   "evidence_runs": [
+    {
+     "ts": "1"
+    }
+   ]
+  }
+ },
+ {
+  "name": "evidence_runs negative ts is an integer",
+  "props": {
+   "evidence_runs": [
+    {
+     "ts": -5
+    }
+   ]
+  }
+ },
+ {
+  "name": "evidence_runs extra key",
+  "props": {
+   "evidence_runs": [
+    {
+     "ts": 1,
+     "extra": 1
+    }
+   ]
+  }
+ },
+ {
+  "name": "evidence_runs files not strings",
+  "props": {
+   "evidence_runs": [
+    {
+     "ts": 1,
+     "files_edited_since": [
+      1
+     ]
+    }
+   ]
+  }
+ },
+ {
+  "name": "evidence_runs not an array",
+  "props": {
+   "evidence_runs": {
+    "ts": 1
+   }
+  }
+ },
+ {
+  "name": "command_fingerprint wrong type",
+  "props": {
+   "command_fingerprint": 1
+  }
+ }
+]

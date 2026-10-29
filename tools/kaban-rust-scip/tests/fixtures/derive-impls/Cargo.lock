@@ -1,0 +1,8 @@
+version = 4
+[[package]]
+name = "derive-impls"
+version = "0.1.0"
+dependencies = ["derive-macros"]
+[[package]]
+name = "derive-macros"
+version = "0.1.0"

@@ -1,0 +1,36 @@
+# kaban Codex CLI hooks as `[hooks]` tables for `$CODEX_HOME/config.toml` (core-spec F8:
+# "hooks.json or [hooks] in config.toml"). Same entries as hooks.json, one array-of-tables per
+# event. Register with ONE of the two files, never both (the same hook would run twice).
+# Whether Codex 0.149.1 fires hooks from config.toml is recorded in README.md (round-2 session).
+
+[[hooks.SessionStart]]
+[[hooks.SessionStart.hooks]]
+type = "command"
+command = "bash \"${CODEX_HOME:-$HOME/.codex}\"/hooks/kaban/session-start.sh"
+timeout = 2
+
+[[hooks.PreToolUse]]
+matcher = "^apply_patch$|^Edit$|^Write$"
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = "bash \"${CODEX_HOME:-$HOME/.codex}\"/hooks/kaban/pre-tool-use.sh"
+timeout = 2
+
+[[hooks.PostToolUse]]
+matcher = "^Bash$"
+[[hooks.PostToolUse.hooks]]
+type = "command"
+command = "bash \"${CODEX_HOME:-$HOME/.codex}\"/hooks/kaban/post-tool-use.sh"
+timeout = 2
+
+[[hooks.SubagentStop]]
+[[hooks.SubagentStop.hooks]]
+type = "command"
+command = "bash \"${CODEX_HOME:-$HOME/.codex}\"/hooks/kaban/subagent-stop.sh"
+timeout = 2
+
+[[hooks.Stop]]
+[[hooks.Stop.hooks]]
+type = "command"
+command = "bash \"${CODEX_HOME:-$HOME/.codex}\"/hooks/kaban/stop.sh"
+timeout = 2

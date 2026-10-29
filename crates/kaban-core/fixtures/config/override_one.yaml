@@ -1,0 +1,3 @@
+# one key changed from the register (engine-plan E1.1 config slice)
+ontology:
+  pattern_size_limit_kib: 2048

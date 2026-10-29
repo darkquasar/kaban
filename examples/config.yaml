@@ -1,0 +1,15 @@
+# kaban user configuration: `~/.kaban/config.yaml` (`KABAN_HOME` overrides `~/.kaban`).
+# One strict-schema file for the engine (engine-spec §15.1 sections) and kaban-index (the
+# `index:` section below, stage1-spec §10, stage1-plan CG4.2; OWN-29, OWN-54). Unknown keys fail
+# the load naming the key path; every key below spells its default, so this file loads as the
+# defaults. `kaban doctor` and `kaban-index doctor` list every key whose value differs under
+# `overrides:`.
+index:
+  isolation: preferred      # preferred | required | off (OWN-29; `--isolation` overrides per run)
+  container_image: null     # "<ref>@sha256:<digest>" required for the container tier
+  container_cli: null       # absolute path; else the fixed candidate list (G1-S5.2)
+  deadline_secs: 600        # per indexer run (G1-S5.4; `--timeout` overrides)
+  quota:
+    file_bytes: 1073741824    # 1 GiB per file the indexer writes (G1-S5.6)
+    run_dir_bytes: 4294967296 # 4 GiB for the whole scratch directory
+    tmp_bytes: 536870912      # bound of the container /tmp tmpfs, charged against run_dir_bytes (RV-8)

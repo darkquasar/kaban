@@ -1,0 +1,135 @@
+---
+title: "Troubleshooting"
+description: "Find the right store, distinguish missing capabilities from failures, and choose bounded recovery actions."
+---
+
+Start by confirming the executable, working directory, `KABAN_DB`, `KABAN_HOME`,
+`KABAN_POLICY`, and `KABAN_WORKSPACE` used by the failing process. A terminal and
+an agent host often inherit different environments. Do not delete the database,
+keys, or snapshots as a first response.
+
+## Missing code-graph snapshot
+
+`no_snapshot` means the reader could not resolve a compatible snapshot for the
+repository and commit. Plain memory and document search do not need that snapshot.
+
+- Start the server inside the intended checkout; its own working directory
+  identifies the repository, not an arbitrary tool argument.
+- Confirm the server and indexer share `KABAN_HOME`. The reader needs the existing
+  `keys/codegraph.key` and the matching `codegraph/` snapshot tree.
+- If an index is actually needed, follow the [code-graph trust and setup guide](../guides/code-graph.mdx)
+  and supply the required language tooling. This example requires isolation and
+  refuses to proceed if an isolating tier is unavailable:
+
+```bash
+kaban-index index --repo /absolute/path/to/repo --isolation required
+```
+
+This is a separate, mutating indexing operation; `serve` will not launch it for
+you. The reader considers HEAD and a bounded ancestor window; an ancestor result
+has `exact: false`. `snapshot.policy: "off"` means the content scan was disabled at
+index time (the default), not that the snapshot is stale; `stale` means the live
+policy differs from the one the snapshot was gated under. For `snapshot_too_new`,
+use a compatible reader or deliberately re-index with a compatible toolchain. Do
+not manufacture or replace the signing key to suppress the error.
+
+An empty `code_references` or `code_members` answer is read together with the
+response's `coverage` object: when its `note` says what the producer skipped, the
+answer means "nothing indexed refers to it". See the
+[code tools reference](../reference/code-tools.mdx).
+
+If `kaban-index` itself refuses with the class `env` and the line `git could not run:
+the kaban-index process inherited an open file descriptor (fd 9); close it in the
+caller`, the caller holds a lock or pipe without `FD_CLOEXEC` (a `flock(1)` wrapper
+such as `scripts/dev/cargo-slot.sh` keeps fd 9): run it as `bash -c 'kaban-index ... 9>&-'`.
+
+## Missing PDF extractor
+
+`no extractor for this format` can mean the binary was built without optional
+PDF support. The default build does not imply every extractor is present. Check
+the supplied artifact's capabilities rather than changing the policy or memory
+budget.
+
+An ingestion command can exit `0` while individual documents failed. Inspect
+its report and `index_status` through MCP. With PDF support, an image-only or
+near-empty text layer can report `partial` and `needs_ocr`; it is not successful
+text extraction. OCR is not supplied merely by enabling PDF parsing. Obtain an
+appropriate supported artifact or prepare a text version explicitly, then
+re-ingest the intended source.
+
+## Hooks return an empty object
+
+`{}` is normal when a hook has nothing to inject. It is also the best-effort
+fallback for a missing/unusable database, key, or a bounded lock wait. Hook
+handlers normally exit `0`; inspect their fixed stderr diagnostic in the host log.
+
+Hooks never create or migrate a database. Connect the normal MCP `serve` process
+once using the intended database/home, then configure hooks with the same
+environment. **`doctor` does not initialize a missing database.** For an existing
+store, use [diagnostics](maintenance.mdx#start-with-diagnosis) to inspect
+schema, permissions, and key problems. Do not generate a new key for an old chain.
+
+## Policy rejection
+
+Inspect the returned rule identifiers and the selected policy path. Check paths
+and metadata as well as body text: request strings are scanned too. To understand
+a rule, use [policy scanning](../reference/configuration.mdx#policy-file) with an
+invented example, not a live secret pasted into a terminal or support message.
+
+Remove the sensitive material or correct a narrowly scoped false-positive rule
+after reviewing its implications. Do not disable built-in credential rules just
+to make ingestion succeed. A document may be blocked or stubbed rather than
+fully indexed. If older stored content is withheld on output, review the
+[mutating rescan procedure](maintenance.mdx#policy-changes).
+
+## Search returns no hits
+
+1. Confirm the same database and bound workspace as the write. The default
+   workspace depends on the Git root directory name; outside Git it is `default`.
+2. Check whether ingestion actually admitted content. Per-document failures,
+   blocked content, forgotten documents, and candidates pending review are not
+   equivalent to searchable accepted content.
+3. Start with words actually present in the text. Embedding similarity is
+   unavailable; a text query is not a semantic search request.
+4. Check optional layer state in `stats`/`doctor`. Gazetteer linking is not on by
+   default. A reset layer has no regenerated links until explicit ingestion.
+5. If diagnostics identify a derived-index problem, use
+   [full-text maintenance](maintenance.mdx#full-text-maintenance) or
+   [layer reset and re-ingestion](maintenance.mdx#layer-reset-and-re-ingestion)
+   as appropriate. Neither recreates missing source content.
+
+Do not broaden reads to all workspaces merely to hide a configuration error.
+For a document explicitly forgotten earlier, an ordinary directory scan may
+skip it. Re-admission is a deliberate choice: naming that file explicitly, or
+using `--include-forgotten`, changes that behavior.
+
+## Stale derived state or sync conflicts
+
+An open that fails with "another session holds the database; the schema migration needs it
+to itself" found another kaban process using a database still on the previous schema: close
+the other kaban processes and retry (spec 05 OWN-M: the migration runs once, exclusively).
+
+Use `doctor` to distinguish a text index problem from a stale code snapshot or a record
+conflict. `reindex text` rebuilds the Tantivy text index from the database; it does not run
+`kaban-index`. `reindex layer gazetteer` resets generated links; it does not fetch
+or re-ingest documents automatically.
+
+For an equal-revision record conflict, inspect both representations and follow
+[conflict resolution](maintenance.mdx#resolve-conflicts-deliberately).
+If a sync report says `deferred`, another process may hold the repository lock;
+let it finish before retrying. Do not delete `.kaban/` or lock-related state.
+
+## MCP protocol errors on startup
+
+The server speaks MCP over stdio. Stdout must contain protocol output only;
+startup banners, shell `echo` statements, or merged stderr can corrupt it.
+
+- Register the native executable with explicit arguments and the intended cwd.
+- Keep diagnostic logging on stderr; avoid `2>&1` in the launcher.
+- Do not allocate a terminal for the protocol connection.
+- Do not point an HTTP client at it: HTTP/REST is unavailable.
+
+Use modest logging levels and protect host logs. Before sharing a diagnostic,
+remove paths, content, identifiers, and secrets that do not need to leave the
+machine. [Back up safely](maintenance.mdx#backups-and-restoration) before
+attempting a repair that changes stored state.

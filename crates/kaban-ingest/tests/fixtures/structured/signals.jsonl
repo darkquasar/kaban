@@ -1,0 +1,35 @@
+{"path":"docs/adr/0001-storage.md","headings":["Status"],"sample":"","top":"adr","score":100}
+{"path":"doc/adr/storage.md","headings":[],"sample":"","top":"adr","score":40}
+{"path":"adr/storage.md","headings":[],"sample":"WHY: chose this","top":"adr","score":60}
+{"path":"docs/decisions/storage.md","headings":[],"sample":"","top":"adr","score":40}
+{"path":"0001-storage.md","headings":["Decision Outcome"],"sample":"","top":"adr","score":60}
+{"path":"docs/specs/storage.md","headings":["Requirements"],"sample":"TRADEOFF: cost","top":"design_spec","score":80}
+{"path":"rfcs/storage.md","headings":["Non-goals"],"sample":"","top":"design_spec","score":60}
+{"path":"AGENTS.md","headings":[],"sample":"You MUST comply","top":"conventions","score":100}
+{"path":"CONTRIBUTING.md","headings":[],"sample":"","top":"conventions","score":80}
+{"path":"CLAUDE.md","headings":[],"sample":"","top":"conventions","score":80}
+{"path":"STYLE-rust.md","headings":[],"sample":"","top":"conventions","score":80}
+{"path":"notes.md","headings":[],"sample":"You SHOULD comply","top":"conventions","score":50}
+{"path":"incidents/outage.md","headings":["Root cause"],"sample":"","top":"postmortem","score":90}
+{"path":"postmortems/outage.md","headings":[],"sample":"","top":"postmortem","score":50}
+{"path":"notes.md","headings":["Impact"],"sample":"","top":"postmortem","score":80}
+{"path":"LESSONS.md","headings":[],"sample":"","top":"lessons","score":70}
+{"path":"notes.md","headings":["Lesson"],"sample":"","top":"lessons","score":70}
+{"path":"notes.md","headings":[],"sample":"| Lesson | Owner |","top":"lessons","score":70}
+{"path":"CHANGELOG.md","headings":[],"sample":"","top":"changelog","score":80}
+{"path":"notes.md","headings":["[1.2.3] - today"],"sample":"","top":"changelog","score":80}
+{"path":"notes.md","headings":["Unreleased"],"sample":"","top":"changelog","score":80}
+{"path":"2026-10-26-notes.md","headings":[],"sample":"","top":"journal","score":60}
+{"path":"journal/notes.md","headings":[],"sample":"","top":"journal","score":60}
+{"path":"meetings/notes.md","headings":["Agenda","Attendees"],"sample":"","top":"journal","score":60}
+{"path":"notes.md","headings":[],"sample":"Term: definition","top":"glossary","score":50}
+{"path":"notes.md","headings":[],"sample":"Term\n: definition","top":"glossary","score":50}
+{"path":"TODO.md","headings":[],"sample":"","top":"todo","score":60}
+{"path":"ROADMAP.md","headings":[],"sample":"","top":"todo","score":60}
+{"path":"notes.md","headings":[],"sample":"- [ ] item","top":"todo","score":60}
+{"path":"notes.md","headings":[],"sample":"1. Install\n$ cargo build","top":"runbook","score":40}
+{"path":"README.md","headings":[],"sample":"","top":"readme","score":30}
+{"path":"notes.md","headings":["Contextual","Decisions pending"],"sample":"plain prose","top":"generic","score":30}
+{"path":"other/docs/adr/01-name.md","headings":[],"sample":"WHY: note","top":"generic","score":30}
+{"path":"notes.md","headings":[],"sample":"1. Install but no prompt","top":"generic","score":30}
+{"path":"notes.md","headings":[],"sample":"$ no numbered step","top":"generic","score":30}

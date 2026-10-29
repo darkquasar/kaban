@@ -1,0 +1,20 @@
+{
+ "comment": "E2.10 counted comparisons (EN-F51 (1)): 1000 nodes built by the test from this spec; ws w0 for i<500 else w1; dup_key d<i/10> when i%10<4; title t<i/20> when i%20>=10; one anchor key k<i%250> on every node.",
+ "nodes": 1000,
+ "spec": {
+  "workspace": "w0 if i < 500 else w1",
+  "dup_key": "d{i/10} when i % 10 < 4",
+  "title": "t{i/20} when i % 20 >= 10",
+  "anchor": "k{i % 250}"
+ },
+ "arithmetic": [
+  "dup blocks: 100 groups of 4 -> 100 * C(4,2) = 600",
+  "title blocks: 50 groups of 10 -> 50 * 45 = 2250",
+  "anchor blocks: 250 keys, each {i, i+250} in w0 and {i+500, i+750} in w1 -> 250 * 2 = 500",
+  "overlap dup within title (i%20 in 10..13 of each 20-block): 50 * 6 = 300",
+  "distinct pairs = 600 + 2250 + 500 - 300 = 3050",
+  "possible pairs without blocking: 2 * C(500,2) = 249500"
+ ],
+ "expected_pairs": 3050,
+ "all_pairs_without_blocking": 249500
+}

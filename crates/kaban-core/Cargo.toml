@@ -1,0 +1,28 @@
+[package]
+name = "kaban-core"
+description = "kaban memory core: model types, GraphStore trait, ids and errors"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[features]
+# `text_index::fake::FakeIndex` for tests of `TextIndex` callers in other crates (spec 05 SS-07)
+test-fake = []
+
+[dependencies]
+blake3.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+schemars.workspace = true
+regex.workspace = true            # anchored `pattern` with `size_limit` (engine-plan E1.1)
+yaml_serde.workspace = true    # `~/.kaban/config.yaml` loader (engine-plan E1.1, SO-11) and ontology files (E1.2)
+thiserror.workspace = true
+uuid.workspace = true
+time.workspace = true
+rustix.workspace = true     # process group kill, O_PATH handles, fstat without unsafe (v4 CG1.1)
+tracing.workspace = true    # the runner's abandoned-reader warning (v4 CG1.1)
+
+[lints]
+workspace = true

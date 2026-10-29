@@ -1,0 +1,7 @@
+{
+  "session_id": "sess-pi-0001",
+  "cwd": "/invented/repo/nightjar-service",
+  "hook_event_name": "session_start",
+  "reason": "startup",
+  "type": "session_start"
+}

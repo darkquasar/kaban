@@ -1,0 +1,11 @@
+[package]
+name = "cargo-contexts"
+version = "0.1.0"
+edition = "2024"
+[workspace]
+[lib]
+test = false
+[[test]]
+name = "custom"
+path = "tests/custom.rs"
+harness = false

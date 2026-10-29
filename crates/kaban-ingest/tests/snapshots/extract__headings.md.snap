@@ -1,0 +1,123 @@
+---
+source: crates/kaban-ingest/tests/extract.rs
+expression: ex
+---
+{
+  "title": "Project notes",
+  "frontmatter": null,
+  "sections": [
+    {
+      "heading_path": [
+        "Project notes"
+      ],
+      "level": 1,
+      "kind": "heading",
+      "byte_start": 0,
+      "byte_end": 62,
+      "blocks": [
+        {
+          "block": "paragraph",
+          "text": "Preamble paragraph under the first heading.",
+          "byte_start": 17,
+          "byte_end": 61
+        }
+      ]
+    },
+    {
+      "heading_path": [
+        "Project notes",
+        "Setup"
+      ],
+      "level": 2,
+      "kind": "heading",
+      "byte_start": 62,
+      "byte_end": 129,
+      "blocks": [
+        {
+          "block": "paragraph",
+          "text": "Install the toolchain first.\nThen clone the repository.",
+          "byte_start": 72,
+          "byte_end": 128
+        }
+      ]
+    },
+    {
+      "heading_path": [
+        "Project notes",
+        "Setup",
+        "Linux"
+      ],
+      "level": 3,
+      "kind": "heading",
+      "byte_start": 129,
+      "byte_end": 166,
+      "blocks": [
+        {
+          "block": "paragraph",
+          "text": "Use the package manager.",
+          "byte_start": 140,
+          "byte_end": 165
+        }
+      ]
+    },
+    {
+      "heading_path": [
+        "Project notes",
+        "Setup",
+        "macOS"
+      ],
+      "level": 3,
+      "kind": "heading",
+      "byte_start": 166,
+      "byte_end": 197,
+      "blocks": [
+        {
+          "block": "paragraph",
+          "text": "Use the installer.",
+          "byte_start": 177,
+          "byte_end": 196
+        }
+      ]
+    },
+    {
+      "heading_path": [
+        "Project notes",
+        "Usage"
+      ],
+      "level": 2,
+      "kind": "heading",
+      "byte_start": 197,
+      "byte_end": 224,
+      "blocks": [
+        {
+          "block": "paragraph",
+          "text": "Run the binary.",
+          "byte_start": 207,
+          "byte_end": 223
+        }
+      ]
+    },
+    {
+      "heading_path": [
+        "Appendix"
+      ],
+      "level": 1,
+      "kind": "heading",
+      "byte_start": 224,
+      "byte_end": 251,
+      "blocks": [
+        {
+          "block": "paragraph",
+          "text": "Closing words.",
+          "byte_start": 236,
+          "byte_end": 251
+        }
+      ]
+    }
+  ],
+  "links": [],
+  "tags": [],
+  "partial": false,
+  "needs_ocr": false,
+  "lang": "eng"
+}

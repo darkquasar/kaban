@@ -1,0 +1,6 @@
+ontology: shop
+version: 1
+kinds:
+  vendor:
+    description: "lowercase"
+rels: {}

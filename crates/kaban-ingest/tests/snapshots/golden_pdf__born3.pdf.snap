@@ -1,0 +1,37 @@
+---
+source: crates/kaban-ingest/tests/golden_pdf.rs
+expression: first
+---
+frontmatter: ~
+sections:
+  - heading_path:
+      - p.1
+    level: 1
+    kind: page
+    byte_start: 0
+    byte_end: 0
+    page: 1
+    blocks: []
+  - heading_path:
+      - p.1
+      - Born Three
+    level: 3
+    kind: heading
+    byte_start: 0
+    byte_end: 201
+    page: 1
+    blocks:
+      - block: paragraph
+        text: "The third fixture places three rows below this paragraph; the cells of each row sit in one text string, separated by runs of spaces and by no pipe."
+        byte_start: 15
+        byte_end: 163
+      - block: paragraph
+        text: Part Qty Unit Bolt 12 pcs Nut 30 pcs
+        byte_start: 164
+        byte_end: 201
+links: []
+tags: []
+partial: false
+needs_ocr: false
+page_count: 1
+lang: eng

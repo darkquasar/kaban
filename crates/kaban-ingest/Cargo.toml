@@ -1,0 +1,99 @@
+[package]
+name = "kaban-ingest"
+description = "kaban document ingestion: gitignore-aware walk, denylist-gated identities, bounded worker pool and single committer over GraphStore::apply_batch"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[features]
+# Extractor features are declared empty here (D-15) and strictly additive (`proj-feature-additive`);
+# DI1.2 (`md`), DI2.1 (`pdf`, `pdf-minimal`) and DI3 (`html`, `sheets`, `docx`, `watch`) attach
+# their `dep:` entries when they add the docs-ingest-plan.md §3 pins.
+# `pdf` is opt-in for 3.0.0 (OWN-70, DI2.1b): with it in the default set the release binary is
+# 18,311,056 B, over the OWN-64 N1 gate (16 MiB). PDF users build `--features pdf`
+# (`cargo build --release -p kaban --features kaban-ingest/pdf`); without it a `.pdf` document is
+# recorded `failed` with the fixed reason `no extractor for this format` (`prepare.rs`).
+default = ["md"]
+md = ["dep:pulldown-cmark"]
+# Opt-in (DI1.6, coordinator decision after the N1 size gate): `text-splitter` cuts oversize
+# paragraph groups along Markdown semantic boundaries but pulls `icu_segmenter`'s compiled
+# dictionary data (about 4.5 MB of binary); the default build uses the whitespace cut.
+md-splitter = ["dep:text-splitter"]
+pdf = ["dep:pdf_oxide"]
+pdf-minimal = [] # deferred: OWN-68 SC-07 (no pdf-extract fallback in 3.0.0)
+html = []
+sheets = []
+docx = []
+watch = []
+
+[dependencies]
+kaban-core.workspace = true
+kaban-policy.workspace = true
+kaban-api.workspace = true
+blake3.workspace = true
+ignore.workspace = true
+globset.workspace = true
+tokio.workspace = true        # rt (via rt-multi-thread), sync, time: worker pool, bounded mpsc, deadlines (D-18)
+tokio-util.workspace = true   # CancellationToken for the worker pool (F16)
+serde.workspace = true        # non-optional by workspace practice (D-14: `api-serde-optional` considered, not applied)
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+uuid.workspace = true         # v7-layout shaping of derived ids (OD-D1, D-5)
+rustix.workspace = true       # O_NOFOLLOW open of candidates without unsafe (RD-2; the S5 pin)
+regex.workspace = true        # wikilink/tag pre-pass over the Markdown source (DI1.2; the lock's existing version)
+aho-corasick.workspace = true
+strsim = "=0.11.1"
+yaml_serde.workspace = true # frontmatter (core OD-1; the policy crate's pin)
+chardetng.workspace = true    # `.txt` encoding detection (DI1.2)
+encoding_rs.workspace = true  # decoding (DI1.2)
+whatlang.workspace = true     # `Document.lang` (DI1.2)
+pulldown-cmark = { workspace = true, optional = true }  # `md`
+text-splitter = { workspace = true, optional = true }   # `md-splitter` (opt-in)
+pdf_oxide = { workspace = true, optional = true }       # `pdf` (DI2.1; the one PDF backend, OWN-68 SC-07)
+
+[dev-dependencies]
+kaban-store-sqlite.workspace = true
+tracing-subscriber.workspace = true
+insta.workspace = true        # snapshots of `Extracted` over the Markdown fixtures (DI1.2)
+proptest.workspace = true     # gate properties (DI1.4)
+
+[[example]]
+# Deterministic generator of `tests/fixtures/pdf/*` (DI2.1, OD-D5); see its module doc.
+name = "gen_pdf_fixtures"
+required-features = ["pdf"]
+
+[[test]]
+# The PDF goldens need the extractor: skipped by `--no-default-features` (DI2.1).
+name = "golden_pdf"
+required-features = ["pdf"]
+
+[[test]]
+# The D9 campaign (docs-ingest-plan.md §8.1, DI2.2): `#[ignore]`, run by `../specs/kaban/archive/benchmarks/kaban2/scripts/bench/bench.sh d9`
+# against the release binary named in `KABAN_D9_BIN`; its five generated PDFs need `pdf_oxide`.
+name = "bench_d9"
+required-features = ["pdf"]
+
+# These four binaries name `MarkdownExtractor`, which `lib.rs` exports only with `md`, so
+# `cargo clippy -p kaban-ingest --all-targets --no-default-features` compiles them only when the
+# feature is on (DI2.2, the DI2.1 residual). `md` is default: the workspace run is unchanged.
+[[test]]
+name = "chunk"
+required-features = ["md"]
+
+[[test]]
+name = "canary"
+required-features = ["md"]
+
+[[test]]
+name = "derived_sanitization"
+required-features = ["md"]
+
+[[test]]
+name = "extract"
+required-features = ["md"]
+
+[lints]
+workspace = true

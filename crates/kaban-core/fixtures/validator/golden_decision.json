@@ -1,0 +1,56 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "rationale"
+  ],
+  "properties": {
+    "decision": {
+      "type": "string"
+    },
+    "rule": {
+      "type": "string"
+    },
+    "rationale": {
+      "type": "string",
+      "minLength": 1
+    },
+    "rejected_alternatives": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "consequences": {
+      "type": "string"
+    },
+    "exceptions": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "quote": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "accepted_commit": {
+      "type": "string"
+    }
+  }
+}

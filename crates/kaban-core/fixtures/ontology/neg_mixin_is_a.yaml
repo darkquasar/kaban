@@ -1,0 +1,7 @@
+ontology: shop
+version: 1
+mixins:
+  Bad: {is_a: Thing, rank: {boost: 2.0}}
+kinds:
+  Thing: {description: "a thing", mixins: [Bad]}
+rels: {}

@@ -1,0 +1,43 @@
+# cargo-deny 0.20.2 configuration (core-plan.md §17, core-spec E4).
+[graph]
+all-features = true
+
+[licenses]
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Unicode-3.0",
+  "Zlib",
+  "MPL-2.0",
+  "CC0-1.0",
+  "Unlicense",
+  "0BSD",
+  "OpenSSL",
+]
+confidence-threshold = 0.9
+# anything not listed (GPL-*, AGPL-*, LGPL-*, SSPL, BUSL, PolyForm-*) is denied by cargo-deny's allowlist semantics
+
+[advisories]
+yanked = "deny"
+unmaintained = "all"
+ignore = [
+  { id = "RUSTSEC-2026-0192", reason = "ttf-parser is a direct dependency of pdf_oxide 0.3.78 (DI2.1); unmaintained, no CVE; revisit when pdf_oxide moves to skrifa" },
+]
+
+[bans]
+multiple-versions = "warn"
+deny = [
+  { crate = "serde_yaml" },
+  { crate = "mupdf" },
+  { crate = "mupdf-sys" },
+  { crate = "extractous" },
+  { crate = "openssl-sys" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

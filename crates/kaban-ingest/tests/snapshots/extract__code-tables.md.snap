@@ -1,0 +1,90 @@
+---
+source: crates/kaban-ingest/tests/extract.rs
+expression: ex
+---
+{
+  "title": "Code and tables",
+  "frontmatter": null,
+  "sections": [
+    {
+      "heading_path": [
+        "Code and tables"
+      ],
+      "level": 1,
+      "kind": "heading",
+      "byte_start": 0,
+      "byte_end": 346,
+      "blocks": [
+        {
+          "block": "paragraph",
+          "text": "Some prose with inline #code [[span]] before the fence.",
+          "byte_start": 19,
+          "byte_end": 77
+        },
+        {
+          "block": "code",
+          "lang": "rust",
+          "text": "fn main() {\n    println!(\"#not-a-tag [[not-a-link]]\");\n}",
+          "byte_start": 78,
+          "byte_end": 146
+        },
+        {
+          "block": "code",
+          "text": "indented code block\nsecond line",
+          "byte_start": 152,
+          "byte_end": 188
+        },
+        {
+          "block": "table_row",
+          "cells": [
+            "Name",
+            "Value"
+          ],
+          "header": true,
+          "byte_start": 189,
+          "byte_end": 206
+        },
+        {
+          "block": "table_row",
+          "cells": [
+            "a",
+            "1"
+          ],
+          "header": false,
+          "byte_start": 223,
+          "byte_end": 240
+        },
+        {
+          "block": "table_row",
+          "cells": [
+            "b",
+            "2"
+          ],
+          "header": false,
+          "byte_start": 240,
+          "byte_end": 257
+        },
+        {
+          "block": "paragraph",
+          "text": "A quoted paragraph with emphasis and strike.",
+          "byte_start": 260,
+          "byte_end": 313
+        },
+        {
+          "block": "list",
+          "items": [
+            "[x] done task",
+            "[ ] open task"
+          ],
+          "byte_start": 314,
+          "byte_end": 346
+        }
+      ]
+    }
+  ],
+  "links": [],
+  "tags": [],
+  "partial": false,
+  "needs_ocr": false,
+  "lang": "eng"
+}

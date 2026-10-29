@@ -1,0 +1,19 @@
+kaban
+Copyright 2026 the kaban authors
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+Third-party dependencies retain their own licences. See docs/developer/THIRD_PARTY.md for
+selected sources, optional-feature distinctions and known redistribution gaps.
+This NOTICE is not a complete transitive dependency notice or licence bundle.
+
+Prior art (no code copied):
+- The denylist rule model (id / regex / secret_group / keywords / entropy / allowlists) follows
+  the shape used by gitleaks (MIT, https://github.com/gitleaks/gitleaks).
+- Entropy thresholds follow detect-secrets (Apache-2.0, https://github.com/Yelp/detect-secrets).
+
+Vendored documentation (docs/developer/rust-style/, added in M0 task C0.4 under owner decision OD-9):
+- Rust style rules from leonardomso/rust-skills v1.5.1 (MIT),
+  Copyright (c) 2025 Leonardo Maldonado; see
+  docs/developer/rust-style/references/LICENSE-rust-skills.
+- Microsoft Pragmatic Rust Guidelines (MIT), Copyright (c) Microsoft Corporation; see
+  docs/developer/rust-style/references/LICENSE-microsoft-rust-guidelines.

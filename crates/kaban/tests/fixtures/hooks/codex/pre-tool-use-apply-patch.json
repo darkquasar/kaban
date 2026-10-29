@@ -1,0 +1,14 @@
+{
+  "session_id": "sess-codex-0001",
+  "transcript_path": "/invented/home/.codex/sessions/sess-codex-0001.jsonl",
+  "cwd": "/invented/repo/nightjar-service",
+  "hook_event_name": "PreToolUse",
+  "model": "gpt-5.6-sol",
+  "turn_id": "turn-0003",
+  "permission_mode": "default",
+  "tool_name": "apply_patch",
+  "tool_use_id": "call_invented_codex_0003",
+  "tool_input": {
+    "command": "*** Begin Patch\n*** Update File: src/store/sqlite.rs\n@@\n-fn open(path: &Path)\n+fn open(path: &Path) // AKIAQWERTYUIOPASDFGH is patch content a hook must never read\n*** Add File: src/store/hooks.rs\n+//! new module\n*** End Patch\n"
+  }
+}

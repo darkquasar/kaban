@@ -1,0 +1,42 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          { "type": "command", "command": "__HARNESS__/capture.sh __HOST__ SessionStart", "timeout": 5 },
+          { "type": "command", "command": "__HARNESS__/brief.sh __HOST__", "timeout": 5 }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      { "hooks": [ { "type": "command", "command": "__HARNESS__/capture.sh __HOST__ UserPromptSubmit", "timeout": 5 } ] }
+    ],
+    "PreToolUse": [
+      { "hooks": [ { "type": "command", "command": "__HARNESS__/capture.sh __HOST__ PreToolUse", "timeout": 5 } ] },
+      {
+        "matcher": "^apply_patch$|^Edit$|^Write$",
+        "hooks": [ { "type": "command", "command": "__HARNESS__/pre-probe.sh __HOST__", "timeout": 5 } ]
+      }
+    ],
+    "PostToolUse": [
+      { "hooks": [ { "type": "command", "command": "__HARNESS__/capture.sh __HOST__ PostToolUse", "timeout": 5 } ] }
+    ],
+    "SubagentStart": [
+      { "hooks": [ { "type": "command", "command": "__HARNESS__/capture.sh __HOST__ SubagentStart", "timeout": 5 } ] }
+    ],
+    "SubagentStop": [
+      { "hooks": [ { "type": "command", "command": "__HARNESS__/capture.sh __HOST__ SubagentStop", "timeout": 5 } ] }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          { "type": "command", "command": "__HARNESS__/capture.sh __HOST__ Stop", "timeout": 5 },
+          { "type": "command", "command": "__HARNESS__/stop-probe.sh __HOST__", "timeout": 5 }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      { "hooks": [ { "type": "command", "command": "__HARNESS__/capture.sh __HOST__ SessionEnd", "timeout": 1 } ] }
+    ]
+  }
+}

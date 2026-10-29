@@ -1,0 +1,32 @@
+commit	730da842221a844e8c2c82891dda9094f6428858
+counts:b_policy_dropped	1
+counts:b_policy_skipped_row	0
+counts:duplicates_skipped	0
+counts:edges	162
+counts:files	7
+counts:grammar_skipped_relationships	0
+counts:grammar_skipped_rows	1
+counts:label_from_descriptor	0
+counts:language_from_extension	0
+counts:malformed_range_skipped	0
+counts:occurrences	82
+counts:placeholder_rows	6
+counts:policy_dropped	1
+counts:policy_redacted_meta	0
+counts:policy_skipped_row	0
+counts:policy_skipped_source	0
+counts:source_classified_by_path	0
+counts:symbols	66
+indexer:go	scip-go 0.2.7 index -q --module-version 730da842221a844e8c2c82891dda9094f6428858 --output index.scip
+isolation	none
+isolation_detail	test
+kaban_index_version	3.0.0-alpha.1
+languages	go
+policy_version	test
+repo_id	0123456789abcdef0123456789abcdef
+resources	
+schema_version	1
+scip_range_form	legacy
+scip_version	0.10.0
+symbols_fts_version	1
+union_reason	scip-go 0.2.7 test-variant defect: IMPLEMENTS and IMPLEMENTS_MEMBER are the union of run A (tests compiled) and run B (--skip-tests); everything else is from A (G1-F3)

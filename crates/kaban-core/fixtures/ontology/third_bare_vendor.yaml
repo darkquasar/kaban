@@ -1,0 +1,9 @@
+# extends both namespaces that declare `Vendor`; the bare name is ambiguous
+ontology: contracts
+version: 1
+extends: [infra, vendors]
+kinds:
+  Contract:
+    description: "A contract with a vendor."
+    is_a: Vendor
+rels: {}

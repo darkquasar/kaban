@@ -1,0 +1,10 @@
+
+
+	synthetic0file:///repo¾"go
+drivers/bad.gow
+	nscip-go gomod example.com/drivers 730da842221a844e8c2c82891dda9094f6428858 `example.com/drivers/drivers`/Good#C
+:scip-go gomod example.com/drivers 1.0.0 `unterminated/Bad#A
+:scip-go gomod example.com/drivers 1.0.0 `unterminated/Bad#r
+nscip-go gomod example.com/drivers 730da842221a844e8c2c82891dda9094f6428858 `example.com/drivers/drivers`/Good#(²
+:scip-go gomod example.com/drivers 1.0.0 `unterminated/Bad#"r
+nscip-go gomod example.com/drivers 730da842221a844e8c2c82891dda9094f6428858 `example.com/drivers/drivers`/Good#(1

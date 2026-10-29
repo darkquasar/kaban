@@ -1,0 +1,11 @@
+ontology: shop
+version: 1
+kinds:
+  Parent:
+    description: "parent"
+    props_schema: {type: object, properties: {title: {type: string}}}
+  Child:
+    description: "child"
+    is_a: Parent
+    props_schema: {type: object, properties: {title: {type: integer}}}
+rels: {}

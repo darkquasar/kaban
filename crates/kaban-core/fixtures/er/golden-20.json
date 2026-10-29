@@ -1,0 +1,1524 @@
+{
+ "comment": "E2.10 20-pair golden (EN-F51): defaults of engine-spec \u00a715.1 [er]; weights hand-computed as round_half_even(10000*log2(m/u)) / round_half_even(10000*log2((1-m)/(1-u))); W summed as integers; decision by >= on 80000/30000; raw_score = clamp(W*10000/80000, 0, 10000) truncating. A pair's `priors` overrides m/u for the named fields only.",
+ "weights": {
+  "title": {
+   "m": 9000,
+   "u": 100,
+   "agreement": 64919,
+   "disagreement": -33074
+  },
+  "aliases": {
+   "m": 8000,
+   "u": 200,
+   "agreement": 53219,
+   "disagreement": -22928
+  },
+  "kind": {
+   "m": 9500,
+   "u": 3000,
+   "agreement": 16630,
+   "disagreement": -38074
+  },
+  "tags": {
+   "m": 6000,
+   "u": 1000,
+   "agreement": 25850,
+   "disagreement": -11699
+  },
+  "path_scope": {
+   "m": 7000,
+   "u": 500,
+   "agreement": 38074,
+   "disagreement": -16630
+  },
+  "anchors": {
+   "m": 9500,
+   "u": 10,
+   "agreement": 98918,
+   "disagreement": -43205
+  },
+  "summary": {
+   "m": 5000,
+   "u": 1000,
+   "agreement": 23219,
+   "disagreement": -8480
+  }
+ },
+ "arithmetic": [
+  "title: round_half_even(10000 * log2(90)) = 64919; round_half_even(10000 * log2(10/99)) = -33074",
+  "aliases: log2(40) -> 53219; log2(20/98) -> -22928",
+  "kind: log2(9.5/3) -> 16630; log2(5/70) -> -38074",
+  "tags: log2(6) -> 25850; log2(40/90) -> -11699",
+  "path_scope: log2(14) -> 38074; log2(30/95) -> -16630",
+  "anchors: log2(950) -> 98918; log2(5/99.9) -> -43205",
+  "summary: log2(5) -> 23219; log2(50/90) -> -8480",
+  "override kind 0.8/0.1: log2(8) = 3.0000 exactly -> 30000 (pair 19 sits at possible_threshold)",
+  "override summary 0.5/0.5001: log2(5000/5001) -> -3 (pair 18 is 29997, just below)"
+ ],
+ "thresholds": {
+  "match": 80000,
+  "possible": 30000
+ },
+ "pairs": [
+  {
+   "name": "all_agree",
+   "a": {
+    "id": "all_agree-a",
+    "workspace_id": "w",
+    "kind": "kind-shared",
+    "title": "title-shared",
+    "aliases": [
+     "aliases-shared"
+    ],
+    "tags": [
+     "tags-shared"
+    ],
+    "path_scope": [
+     "path_scope-shared"
+    ],
+    "anchors": [
+     "anchors-shared"
+    ],
+    "summary": "summary-shared",
+    "dup_key": null
+   },
+   "b": {
+    "id": "all_agree-b",
+    "workspace_id": "w",
+    "kind": "kind-shared",
+    "title": "title-shared",
+    "aliases": [
+     "aliases-shared"
+    ],
+    "tags": [
+     "tags-shared"
+    ],
+    "path_scope": [
+     "path_scope-shared"
+    ],
+    "anchors": [
+     "anchors-shared"
+    ],
+    "summary": "summary-shared",
+    "dup_key": null
+   },
+   "priors": null,
+   "contributions": [
+    {
+     "field": "title",
+     "level": "agree",
+     "w": 64919
+    },
+    {
+     "field": "aliases",
+     "level": "agree",
+     "w": 53219
+    },
+    {
+     "field": "kind",
+     "level": "agree",
+     "w": 16630
+    },
+    {
+     "field": "tags",
+     "level": "agree",
+     "w": 25850
+    },
+    {
+     "field": "path_scope",
+     "level": "agree",
+     "w": 38074
+    },
+    {
+     "field": "anchors",
+     "level": "agree",
+     "w": 98918
+    },
+    {
+     "field": "summary",
+     "level": "agree",
+     "w": 23219
+    }
+   ],
+   "W": 320829,
+   "decision": "match",
+   "raw_score": 10000
+  },
+  {
+   "name": "title_kind",
+   "a": {
+    "id": "title_kind-a",
+    "workspace_id": "w",
+    "kind": "kind-shared",
+    "title": "title-shared",
+    "aliases": [],
+    "tags": [],
+    "path_scope": [],
+    "anchors": [],
+    "summary": null,
+    "dup_key": null
+   },
+   "b": {
+    "id": "title_kind-b",
+    "workspace_id": "w",
+    "kind": "kind-shared",
+    "title": "title-shared",
+    "aliases": [],
+    "tags": [],
+    "path_scope": [],
+    "anchors": [],
+    "summary": null,
+    "dup_key": null
+   },
+   "priors": null,
+   "contributions": [
+    {
+     "field": "title",
+     "level": "agree",
+     "w": 64919
+    },
+    {
+     "field": "aliases",
+     "level": "missing",
+     "w": 0
+    },
+    {
+     "field": "kind",
+     "level": "agree",
+     "w": 16630
+    },
+    {
+     "field": "tags",
+     "level": "missing",
+     "w": 0
+    },
+    {
+     "field": "path_scope",
+     "level": "missing",
+     "w": 0
+    },
+    {
+     "field": "anchors",
+     "level": "missing",
+     "w": 0
+    },
+    {
+     "field": "summary",
+     "level": "missing",
+     "w": 0
+    }
+   ],
+   "W": 81549,
+   "decision": "match",
+   "raw_score": 10000
+  },
+  {
+   "name": "title_kind_summary_dis",
+   "a": {
+    "id": "title_kind_summary_dis-a",
+    "workspace_id": "w",
+    "kind": "kind-shared",
+    "title": "title-shared",
+    "aliases": [],
+    "tags": [],
+    "path_scope": [],
+    "anchors": [],
+    "summary": "summary-a",
+    "dup_key": null
+   },
+   "b": {
+    "id": "title_kind_summary_dis-b",
+    "workspace_id": "w",
+    "kind": "kind-shared",
+    "title": "title-shared",
+    "aliases": [],
+    "tags": [],
+    "path_scope": [],
+    "anchors": [],
+    "summary": "summary-b",
+    "dup_key": null
+   },
+   "priors": null,
+   "contributions": [
+    {
+     "field": "title",
+     "level": "agree",
+     "w": 64919
+    },
+    {
+     "field": "aliases",
+     "level": "missing",
+     "w": 0
+    },
+    {
+     "field": "kind",
+     "level": "agree",
+     "w": 16630
+    },
+    {
+     "field": "tags",
+     "level": "missing",
+     "w": 0
+    },
+    {
+     "field": "path_scope",
+     "level": "missing",
+     "w": 0
+    },
+    {
+     "field": "anchors",
+     "level": "missing",
+     "w": 0
+    },
+    {
+     "field": "summary",
+     "level": "disagree",
+     "w": -8480
+    }
+   ],
+   "W": 73069,
+   "decision": "possible",
+   "raw_score": 9133
+  },
+  {
+   "name": "title_only",
+   "a": {
+    "id": "title_only-a",
+    "workspace_id": "w",
+    "kind": "",
+    "title": "title-shared",
+    "aliases": [],
+    "tags": [],
+    "path_scope": [],
+    "anchors": [],
+    "summary": null,
+    "dup_key": null
+   },
+   "b": {
+    "id": "title_only-b",
+    "workspace_id": "w",
+    "kind": "",
+    "title": "title-shared",
+    "aliases": [],
+    "tags": [],
+    "path_scope": [],
+    "anchors": [],
+    "summary": null,
+    "dup_key": null
+   },
+   "priors": null,
+   "contributions": [
+    {
+     "field": "title",
+     "level": "agree",
+     "w": 64919
+    },
+    {
+     "field": "aliases",
+     "level": "missing",
+     "w": 0
+    },
+    {
+     "field": "kind",
+     "level": "missing",
+     "w": 0
+    },
+    {
+     "field": "tags",
+     "level": "missing",
+     "w": 0
+    },
+    {
+     "field": "path_scope",
+     "level": "missing",
+     "w": 0
+    },
+    {
+     "field": "anchors",
+     "level": "missing",
+     "w": 0
+    },
+    {
+     "field": "summary",
+     "level": "missing",
+     "w": 0
+    }
+   ],
+   "W": 64919,
+   "decision": "possible",
+   "raw_score": 8114
+  },
+  {
+   "name": "title_dis_kind_tags",
+   "a": {
+    "id": "title_dis_kind_tags-a",
+    "workspace_id": "w",
+    "kind": "kind-shared",
+    "title": "title-a",
+    "aliases": [],
+    "tags": [
+     "tags-shared"
+    ],
+    "path_scope": [],
+    "anchors": [],
+    "summary": null,
+    "dup_key": null
+   },
+   "b": {
+    "id": "title_dis_kind_tags-b",
+    "workspace_id": "w",
+    "kind": "kind-shared",
+    "title": "title-b",
+    "aliases": [],
+    "tags": [
+     "tags-shared"
+    ],
+    "path_scope": [],
+    "anchors": [],
+    "summary": null,
+    "dup_key": null
+   },
+   "priors": null,
+   "contributions": [
+    {
+     "field": "title",
+     "level": "disagree",
+     "w": -33074
+    },
+    {
+     "field": "aliases",
+     "level": "missing",
+     "w": 0
+    },
+    {
+     "field": "kind",
+     "level": "agree",
+     "w": 16630
+    },
+    {
+     "field": "tags",
+     "level": "agree",
+     "w": 25850
+    },
+    {
+     "field": "path_scope",
+     "level": "missing",
+     "w": 0
+    },
+    {
+     "field": "anchors",
+     "level": "missing",
+     "w": 0
+    },
+    {
+     "field": "summary",
+     "level": "missing",
+     "w": 0
+    }
+   ],
+   "W": 9406,
+   "decision": "none",
+   "raw_score": 1175
+  },
+  {
+   "name": "all_disagree",
+   "a": {
+    "id": "all_disagree-a",
+    "workspace_id": "w",
+    "kind": "kind-a",
+    "title": "title-a",
+    "aliases": [
+     "aliases-a"
+    ],
+    "tags": [
+     "tags-a"
+    ],
+    "path_scope": [
+     "path_scope-a"
+    ],
+    "anchors": [
+     "anchors-a"
+    ],
+    "summary": "summary-a",
+    "dup_key": null
+   },
+   "b": {
+    "id": "all_disagree-b",
+    "workspace_id": "w",
+    "kind": "kind-b",
+    "title": "title-b",
+    "aliases": [
+     "aliases-b"
+    ],
+    "tags": [
+     "tags-b"
+    ],
+    "path_scope": [
+     "path_scope-b"
+    ],
+    "anchors": [
+     "anchors-b"
+    ],
+    "summary": "summary-b",
+    "dup_key": null
+   },
+   "priors": null,
+   "contributions": [
+    {
+     "field": "title",
+     "level": "disagree",
+     "w": -33074
+    },
+    {
+     "field": "aliases",
+     "level": "disagree",
+     "w": -22928
+    },
+    {
+     "field": "kind",
+     "level": "disagree",
+     "w": -38074
+    },
+    {
+     "field": "tags",
+     "level": "disagree",
+     "w": -11699
+    },
+    {
+     "field": "path_scope",
+     "level": "disagree",
+     "w": -16630
+    },
+    {
+     "field": "anchors",
+     "level": "disagree",
+     "w": -43205
+    },
+    {
+     "field": "summary",
+     "level": "disagree",
+     "w": -8480
+    }
+   ],
+   "W": -174090,
+   "decision": "none",
+   "raw_score": 0
+  },
+  {
+   "name": "title_kind_dis",
+   "a": {
+    "id": "title_kind_dis-a",
+    "workspace_id": "w",
+    "kind": "kind-a",
+    "title": "title-a",
+    "aliases": [],
+    "tags": [],
+    "path_scope": [],
+    "anchors": [],
+    "summary": null,
+    "dup_key": null
+   },
+   "b": {
+    "id": "title_kind_dis-b",
+    "workspace_id": "w",
+    "kind": "kind-b",
+    "title": "title-b",
+    "aliases": [],
+    "tags": [],
+    "path_scope": [],
+    "anchors": [],
+    "summary": null,
+    "dup_key": null
+   },
+   "priors": null,
+   "contributions": [
+    {
+     "field": "title",
+     "level": "disagree",
+     "w": -33074
+    },
+    {
+     "field": "aliases",
+     "level": "missing",
+     "w": 0
+    },
+    {
+     "field": "kind",
+     "level": "disagree",
+     "w": -38074
+    },
+    {
+     "field": "tags",
+     "level": "missing",
+     "w": 0
+    },
+    {
+     "field": "path_scope",
+     "level": "missing",
+     "w": 0
+    },
+    {
+     "field": "anchors",
+     "level": "missing",
+     "w": 0
+    },
+    {
+     "field": "summary",
+     "level": "missing",
+     "w": 0
+    }
+   ],
+   "W": -71148,
+   "decision": "none",
+   "raw_score": 0
+  },
+  {
+   "name": "anchor_kind_dis",
+   "a": {
+    "id": "anchor_kind_dis-a",
+    "workspace_id": "w",
+    "kind": "kind-a",
+    "title": "",
+    "aliases": [],
+    "tags": [],
+    "path_scope": [],
+    "anchors": [
+     "anchors-shared"
+    ],
+    "summary": null,
+    "dup_key": null
+   },
+   "b": {
+    "id": "anchor_kind_dis-b",
+    "workspace_id": "w",
+    "kind": "kind-b",
+    "title": "",
+    "aliases": [],
+    "tags": [],
+    "path_scope": [],
+    "anchors": [
+     "anchors-shared"
+    ],
+    "summary": null,
+    "dup_key": null
+   },
+   "priors": null,
+   "contributions": [
+    {
+     "field": "title",
+     "level": "missing",
+     "w": 0
+    },
+    {
+     "field": "aliases",
+     "level": "missing",
+     "w": 0
+    },
+    {
+     "field": "kind",
+     "level": "disagree",
+     "w": -38074
+    },
+    {
+     "field": "tags",
+     "level": "missing",
+     "w": 0
+    },
+    {
+     "field": "path_scope",
+     "level": "missing",
+     "w": 0
+    },
+    {
+     "field": "anchors",
+     "level": "agree",
+     "w": 98918
+    },
+    {
+     "field": "summary",
+     "level": "missing",
+     "w": 0
+    }
+   ],
+   "W": 60844,
+   "decision": "possible",
+   "raw_score": 7605
+  },
+  {
+   "name": "anchor_kind",
+   "a": {
+    "id": "anchor_kind-a",
+    "workspace_id": "w",
+    "kind": "kind-shared",
+    "title": "",
+    "aliases": [],
+    "tags": [],
+    "path_scope": [],
+    "anchors": [
+     "anchors-shared"
+    ],
+    "summary": null,
+    "dup_key": null
+   },
+   "b": {
+    "id": "anchor_kind-b",
+    "workspace_id": "w",
+    "kind": "kind-shared",
+    "title": "",
+    "aliases": [],
+    "tags": [],
+    "path_scope": [],
+    "anchors": [
+     "anchors-shared"
+    ],
+    "summary": null,
+    "dup_key": null
+   },
+   "priors": null,
+   "contributions": [
+    {
+     "field": "title",
+     "level": "missing",
+     "w": 0
+    },
+    {
+     "field": "aliases",
+     "level": "missing",
+     "w": 0
+    },
+    {
+     "field": "kind",
+     "level": "agree",
+     "w": 16630
+    },
+    {
+     "field": "tags",
+     "level": "missing",
+     "w": 0
+    },
+    {
+     "field": "path_scope",
+     "level": "missing",
+     "w": 0
+    },
+    {
+     "field": "anchors",
+     "level": "agree",
+     "w": 98918
+    },
+    {
+     "field": "summary",
+     "level": "missing",
+     "w": 0
+    }
+   ],
+   "W": 115548,
+   "decision": "match",
+   "raw_score": 10000
+  },
+  {
+   "name": "alias_kind_tags_dis",
+   "a": {
+    "id": "alias_kind_tags_dis-a",
+    "workspace_id": "w",
+    "kind": "kind-shared",
+    "title": "",
+    "aliases": [
+     "aliases-shared"
+    ],
+    "tags": [
+     "tags-a"
+    ],
+    "path_scope": [],
+    "anchors": [],
+    "summary": null,
+    "dup_key": null
+   },
+   "b": {
+    "id": "alias_kind_tags_dis-b",
+    "workspace_id": "w",
+    "kind": "kind-shared",
+    "title": "",
+    "aliases": [
+     "aliases-shared"
+    ],
+    "tags": [
+     "tags-b"
+    ],
+    "path_scope": [],
+    "anchors": [],
+    "summary": null,
+    "dup_key": null
+   },
+   "priors": null,
+   "contributions": [
+    {
+     "field": "title",
+     "level": "missing",
+     "w": 0
+    },
+    {
+     "field": "aliases",
+     "level": "agree",
+     "w": 53219
+    },
+    {
+     "field": "kind",
+     "level": "agree",
+     "w": 16630
+    },
+    {
+     "field": "tags",
+     "level": "disagree",
+     "w": -11699
+    },
+    {
+     "field": "path_scope",
+     "level": "missing",
+     "w": 0
+    },
+    {
+     "field": "anchors",
+     "level": "missing",
+     "w": 0
+    },
+    {
+     "field": "summary",
+     "level": "missing",
+     "w": 0
+    }
+   ],
+   "W": 58150,
+   "decision": "possible",
+   "raw_score": 7268
+  },
+  {
+   "name": "kind_tags",
+   "a": {
+    "id": "kind_tags-a",
+    "workspace_id": "w",
+    "kind": "kind-shared",
+    "title": "",
+    "aliases": [],
+    "tags": [
+     "tags-shared"
+    ],
+    "path_scope": [],
+    "anchors": [],
+    "summary": null,
+    "dup_key": null
+   },
+   "b": {
+    "id": "kind_tags-b",
+    "workspace_id": "w",
+    "kind": "kind-shared",
+    "title": "",
+    "aliases": [],
+    "tags": [
+     "tags-shared"
+    ],
+    "path_scope": [],
+    "anchors": [],
+    "summary": null,
+    "dup_key": null
+   },
+   "priors": null,
+   "contributions": [
+    {
+     "field": "title",
+     "level": "missing",
+     "w": 0
+    },
+    {
+     "field": "aliases",
+     "level": "missing",
+     "w": 0
+    },
+    {
+     "field": "kind",
+     "level": "agree",
+     "w": 16630
+    },
+    {
+     "field": "tags",
+     "level": "agree",
+     "w": 25850
+    },
+    {
+     "field": "path_scope",
+     "level": "missing",
+     "w": 0
+    },
+    {
+     "field": "anchors",
+     "level": "missing",
+     "w": 0
+    },
+    {
+     "field": "summary",
+     "level": "missing",
+     "w": 0
+    }
+   ],
+   "W": 42480,
+   "decision": "possible",
+   "raw_score": 5310
+  },
+  {
+   "name": "kind_only",
+   "a": {
+    "id": "kind_only-a",
+    "workspace_id": "w",
+    "kind": "kind-shared",
+    "title": "",
+    "aliases": [],
+    "tags": [],
+    "path_scope": [],
+    "anchors": [],
+    "summary": null,
+    "dup_key": null
+   },
+   "b": {
+    "id": "kind_only-b",
+    "workspace_id": "w",
+    "kind": "kind-shared",
+    "title": "",
+    "aliases": [],
+    "tags": [],
+    "path_scope": [],
+    "anchors": [],
+    "summary": null,
+    "dup_key": null
+   },
+   "priors": null,
+   "contributions": [
+    {
+     "field": "title",
+     "level": "missing",
+     "w": 0
+    },
+    {
+     "field": "aliases",
+     "level": "missing",
+     "w": 0
+    },
+    {
+     "field": "kind",
+     "level": "agree",
+     "w": 16630
+    },
+    {
+     "field": "tags",
+     "level": "missing",
+     "w": 0
+    },
+    {
+     "field": "path_scope",
+     "level": "missing",
+     "w": 0
+    },
+    {
+     "field": "anchors",
+     "level": "missing",
+     "w": 0
+    },
+    {
+     "field": "summary",
+     "level": "missing",
+     "w": 0
+    }
+   ],
+   "W": 16630,
+   "decision": "none",
+   "raw_score": 2078
+  },
+  {
+   "name": "kind_summary",
+   "a": {
+    "id": "kind_summary-a",
+    "workspace_id": "w",
+    "kind": "kind-shared",
+    "title": "",
+    "aliases": [],
+    "tags": [],
+    "path_scope": [],
+    "anchors": [],
+    "summary": "summary-shared",
+    "dup_key": null
+   },
+   "b": {
+    "id": "kind_summary-b",
+    "workspace_id": "w",
+    "kind": "kind-shared",
+    "title": "",
+    "aliases": [],
+    "tags": [],
+    "path_scope": [],
+    "anchors": [],
+    "summary": "summary-shared",
+    "dup_key": null
+   },
+   "priors": null,
+   "contributions": [
+    {
+     "field": "title",
+     "level": "missing",
+     "w": 0
+    },
+    {
+     "field": "aliases",
+     "level": "missing",
+     "w": 0
+    },
+    {
+     "field": "kind",
+     "level": "agree",
+     "w": 16630
+    },
+    {
+     "field": "tags",
+     "level": "missing",
+     "w": 0
+    },
+    {
+     "field": "path_scope",
+     "level": "missing",
+     "w": 0
+    },
+    {
+     "field": "anchors",
+     "level": "missing",
+     "w": 0
+    },
+    {
+     "field": "summary",
+     "level": "agree",
+     "w": 23219
+    }
+   ],
+   "W": 39849,
+   "decision": "possible",
+   "raw_score": 4981
+  },
+  {
+   "name": "title_alias_dis_kind",
+   "a": {
+    "id": "title_alias_dis_kind-a",
+    "workspace_id": "w",
+    "kind": "kind-shared",
+    "title": "title-shared",
+    "aliases": [
+     "aliases-a"
+    ],
+    "tags": [],
+    "path_scope": [],
+    "anchors": [],
+    "summary": null,
+    "dup_key": null
+   },
+   "b": {
+    "id": "title_alias_dis_kind-b",
+    "workspace_id": "w",
+    "kind": "kind-shared",
+    "title": "title-shared",
+    "aliases": [
+     "aliases-b"
+    ],
+    "tags": [],
+    "path_scope": [],
+    "anchors": [],
+    "summary": null,
+    "dup_key": null
+   },
+   "priors": null,
+   "contributions": [
+    {
+     "field": "title",
+     "level": "agree",
+     "w": 64919
+    },
+    {
+     "field": "aliases",
+     "level": "disagree",
+     "w": -22928
+    },
+    {
+     "field": "kind",
+     "level": "agree",
+     "w": 16630
+    },
+    {
+     "field": "tags",
+     "level": "missing",
+     "w": 0
+    },
+    {
+     "field": "path_scope",
+     "level": "missing",
+     "w": 0
+    },
+    {
+     "field": "anchors",
+     "level": "missing",
+     "w": 0
+    },
+    {
+     "field": "summary",
+     "level": "missing",
+     "w": 0
+    }
+   ],
+   "W": 58621,
+   "decision": "possible",
+   "raw_score": 7327
+  },
+  {
+   "name": "path_kind_summary_dis",
+   "a": {
+    "id": "path_kind_summary_dis-a",
+    "workspace_id": "w",
+    "kind": "kind-shared",
+    "title": "",
+    "aliases": [],
+    "tags": [],
+    "path_scope": [
+     "path_scope-shared"
+    ],
+    "anchors": [],
+    "summary": "summary-a",
+    "dup_key": null
+   },
+   "b": {
+    "id": "path_kind_summary_dis-b",
+    "workspace_id": "w",
+    "kind": "kind-shared",
+    "title": "",
+    "aliases": [],
+    "tags": [],
+    "path_scope": [
+     "path_scope-shared"
+    ],
+    "anchors": [],
+    "summary": "summary-b",
+    "dup_key": null
+   },
+   "priors": null,
+   "contributions": [
+    {
+     "field": "title",
+     "level": "missing",
+     "w": 0
+    },
+    {
+     "field": "aliases",
+     "level": "missing",
+     "w": 0
+    },
+    {
+     "field": "kind",
+     "level": "agree",
+     "w": 16630
+    },
+    {
+     "field": "tags",
+     "level": "missing",
+     "w": 0
+    },
+    {
+     "field": "path_scope",
+     "level": "agree",
+     "w": 38074
+    },
+    {
+     "field": "anchors",
+     "level": "missing",
+     "w": 0
+    },
+    {
+     "field": "summary",
+     "level": "disagree",
+     "w": -8480
+    }
+   ],
+   "W": 46224,
+   "decision": "possible",
+   "raw_score": 5778
+  },
+  {
+   "name": "alias_path_dis",
+   "a": {
+    "id": "alias_path_dis-a",
+    "workspace_id": "w",
+    "kind": "",
+    "title": "",
+    "aliases": [
+     "aliases-shared"
+    ],
+    "tags": [],
+    "path_scope": [
+     "path_scope-a"
+    ],
+    "anchors": [],
+    "summary": null,
+    "dup_key": null
+   },
+   "b": {
+    "id": "alias_path_dis-b",
+    "workspace_id": "w",
+    "kind": "",
+    "title": "",
+    "aliases": [
+     "aliases-shared"
+    ],
+    "tags": [],
+    "path_scope": [
+     "path_scope-b"
+    ],
+    "anchors": [],
+    "summary": null,
+    "dup_key": null
+   },
+   "priors": null,
+   "contributions": [
+    {
+     "field": "title",
+     "level": "missing",
+     "w": 0
+    },
+    {
+     "field": "aliases",
+     "level": "agree",
+     "w": 53219
+    },
+    {
+     "field": "kind",
+     "level": "missing",
+     "w": 0
+    },
+    {
+     "field": "tags",
+     "level": "missing",
+     "w": 0
+    },
+    {
+     "field": "path_scope",
+     "level": "disagree",
+     "w": -16630
+    },
+    {
+     "field": "anchors",
+     "level": "missing",
+     "w": 0
+    },
+    {
+     "field": "summary",
+     "level": "missing",
+     "w": 0
+    }
+   ],
+   "W": 36589,
+   "decision": "possible",
+   "raw_score": 4573
+  },
+  {
+   "name": "title_alias_dis_kind_anchor",
+   "a": {
+    "id": "title_alias_dis_kind_anchor-a",
+    "workspace_id": "w",
+    "kind": "kind-shared",
+    "title": "title-a",
+    "aliases": [
+     "aliases-a"
+    ],
+    "tags": [],
+    "path_scope": [],
+    "anchors": [
+     "anchors-shared"
+    ],
+    "summary": null,
+    "dup_key": null
+   },
+   "b": {
+    "id": "title_alias_dis_kind_anchor-b",
+    "workspace_id": "w",
+    "kind": "kind-shared",
+    "title": "title-b",
+    "aliases": [
+     "aliases-b"
+    ],
+    "tags": [],
+    "path_scope": [],
+    "anchors": [
+     "anchors-shared"
+    ],
+    "summary": null,
+    "dup_key": null
+   },
+   "priors": null,
+   "contributions": [
+    {
+     "field": "title",
+     "level": "disagree",
+     "w": -33074
+    },
+    {
+     "field": "aliases",
+     "level": "disagree",
+     "w": -22928
+    },
+    {
+     "field": "kind",
+     "level": "agree",
+     "w": 16630
+    },
+    {
+     "field": "tags",
+     "level": "missing",
+     "w": 0
+    },
+    {
+     "field": "path_scope",
+     "level": "missing",
+     "w": 0
+    },
+    {
+     "field": "anchors",
+     "level": "agree",
+     "w": 98918
+    },
+    {
+     "field": "summary",
+     "level": "missing",
+     "w": 0
+    }
+   ],
+   "W": 59546,
+   "decision": "possible",
+   "raw_score": 7443
+  },
+  {
+   "name": "just_below_possible",
+   "a": {
+    "id": "just_below_possible-a",
+    "workspace_id": "w",
+    "kind": "kind-shared",
+    "title": "",
+    "aliases": [],
+    "tags": [],
+    "path_scope": [],
+    "anchors": [],
+    "summary": "summary-shared",
+    "dup_key": null
+   },
+   "b": {
+    "id": "just_below_possible-b",
+    "workspace_id": "w",
+    "kind": "kind-shared",
+    "title": "",
+    "aliases": [],
+    "tags": [],
+    "path_scope": [],
+    "anchors": [],
+    "summary": "summary-shared",
+    "dup_key": null
+   },
+   "priors": {
+    "m": {
+     "kind": 8000,
+     "summary": 5000
+    },
+    "u": {
+     "kind": 1000,
+     "summary": 5001
+    }
+   },
+   "contributions": [
+    {
+     "field": "title",
+     "level": "missing",
+     "w": 0
+    },
+    {
+     "field": "aliases",
+     "level": "missing",
+     "w": 0
+    },
+    {
+     "field": "kind",
+     "level": "agree",
+     "w": 30000
+    },
+    {
+     "field": "tags",
+     "level": "missing",
+     "w": 0
+    },
+    {
+     "field": "path_scope",
+     "level": "missing",
+     "w": 0
+    },
+    {
+     "field": "anchors",
+     "level": "missing",
+     "w": 0
+    },
+    {
+     "field": "summary",
+     "level": "agree",
+     "w": -3
+    }
+   ],
+   "W": 29997,
+   "decision": "none",
+   "raw_score": 3749
+  },
+  {
+   "name": "at_possible",
+   "a": {
+    "id": "at_possible-a",
+    "workspace_id": "w",
+    "kind": "kind-shared",
+    "title": "",
+    "aliases": [],
+    "tags": [],
+    "path_scope": [],
+    "anchors": [],
+    "summary": null,
+    "dup_key": null
+   },
+   "b": {
+    "id": "at_possible-b",
+    "workspace_id": "w",
+    "kind": "kind-shared",
+    "title": "",
+    "aliases": [],
+    "tags": [],
+    "path_scope": [],
+    "anchors": [],
+    "summary": null,
+    "dup_key": null
+   },
+   "priors": {
+    "m": {
+     "kind": 8000
+    },
+    "u": {
+     "kind": 1000
+    }
+   },
+   "contributions": [
+    {
+     "field": "title",
+     "level": "missing",
+     "w": 0
+    },
+    {
+     "field": "aliases",
+     "level": "missing",
+     "w": 0
+    },
+    {
+     "field": "kind",
+     "level": "agree",
+     "w": 30000
+    },
+    {
+     "field": "tags",
+     "level": "missing",
+     "w": 0
+    },
+    {
+     "field": "path_scope",
+     "level": "missing",
+     "w": 0
+    },
+    {
+     "field": "anchors",
+     "level": "missing",
+     "w": 0
+    },
+    {
+     "field": "summary",
+     "level": "missing",
+     "w": 0
+    }
+   ],
+   "W": 30000,
+   "decision": "possible",
+   "raw_score": 3750
+  },
+  {
+   "name": "title_alias_kind_dis",
+   "a": {
+    "id": "title_alias_kind_dis-a",
+    "workspace_id": "w",
+    "kind": "kind-a",
+    "title": "title-shared",
+    "aliases": [
+     "aliases-shared"
+    ],
+    "tags": [],
+    "path_scope": [],
+    "anchors": [],
+    "summary": null,
+    "dup_key": null
+   },
+   "b": {
+    "id": "title_alias_kind_dis-b",
+    "workspace_id": "w",
+    "kind": "kind-b",
+    "title": "title-shared",
+    "aliases": [
+     "aliases-shared"
+    ],
+    "tags": [],
+    "path_scope": [],
+    "anchors": [],
+    "summary": null,
+    "dup_key": null
+   },
+   "priors": null,
+   "contributions": [
+    {
+     "field": "title",
+     "level": "agree",
+     "w": 64919
+    },
+    {
+     "field": "aliases",
+     "level": "agree",
+     "w": 53219
+    },
+    {
+     "field": "kind",
+     "level": "disagree",
+     "w": -38074
+    },
+    {
+     "field": "tags",
+     "level": "missing",
+     "w": 0
+    },
+    {
+     "field": "path_scope",
+     "level": "missing",
+     "w": 0
+    },
+    {
+     "field": "anchors",
+     "level": "missing",
+     "w": 0
+    },
+    {
+     "field": "summary",
+     "level": "missing",
+     "w": 0
+    }
+   ],
+   "W": 80064,
+   "decision": "match",
+   "raw_score": 10000
+  }
+ ]
+}

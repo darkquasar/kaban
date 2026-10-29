@@ -1,0 +1,111 @@
+---
+title: "Documents and extraction"
+description: "Ingest local text explicitly, link known mentions, and hand structured extraction to your own worker."
+---
+
+Document ingestion and structured extraction are separate steps. Plain ingestion
+makes local text searchable. Structured extraction lets a user-run agent or script
+propose typed records from that text. Kaban does not load a model, execute an
+extractor or schedule background model jobs.
+
+## Start with Markdown or text
+
+Use a build with document ingestion enabled (the default local build includes it).
+Run from the repository root; paths must stay inside the workspace root and the
+request must use the process's bound workspace.
+
+```bash
+kaban ingest docs --dry-run
+kaban ingest docs
+kaban recall 'storage transaction' --full-text
+```
+
+The run creates `Document`, `Section` and `Chunk` nodes with deterministic identities.
+Markdown headings supply structure; chunks are the retrieval-sized pieces, not
+accepted Decisions. Paths, titles and text are policy-gated. Read the run's counters
+and per-document failures: an overall successful CLI exit does not mean every file
+was indexed successfully.
+
+Ingestion is incremental: unchanged files are normally skipped. Directory walks
+skip documents deliberately forgotten with `forget --document`; explicitly naming
+that file, or using `--include-forgotten`, allows re-ingestion. It is not a watcher:
+run ingestion again after editing source files.
+
+MCP plain-ingestion equivalent:
+
+```json
+{"name":"index_docs","arguments":{"paths":["docs"],"dry_run":true}}
+```
+
+PDF support requires a separately built binary with the opt-in `pdf` feature; it is
+not in the default or minimal local bundle. A source-build recipe is
+`cargo build --release -p kaban --features kaban-ingest/pdf`. Without that feature, PDF extraction
+reports unavailable. Do not assume arbitrary document formats are supported.
+
+## Link mentions you already know
+
+```bash
+kaban ingest docs --link gazetteer
+```
+
+The gazetteer matches known names/aliases to existing graph targets and creates
+mention links in plain ingestion. It is explicit by default, not a model that
+discovers new facts. Inspect ambiguity and coverage rather than equating a text
+match with an accepted claim. Optional symbol sources depend on an available code
+snapshot. `--symbols` lifts only the gazetteer automaton cap; it is not needed for
+the basic workflow and does not lift other resource budgets.
+
+## Extract structured records deliberately
+
+Open a brief for one existing file:
+
+```bash
+kaban ingest job brief docs/adr/0007-storage.md --with llm --json
+```
+
+The response describes allowed kinds/properties from the loaded ontology, source
+identity, a bounded chunk plan and the extractor return schema. `llm` selects
+instructions, not a model invocation; `gliner` describes a span-extraction dialect,
+and `none` provides generic manual guidance. A span extractor cannot invent a
+decision rationale from a label.
+
+Replace `JOB` with the returned job handle. Select chunk/slice numbers from the
+actual plan, and follow its continuation/pages rather than assuming one response
+contains the whole document:
+
+```bash
+kaban ingest job next JOB --chunk 0 --slice 0 --json
+kaban ingest job submit JOB --stdin-json < extractor-return.json
+kaban ingest job finish JOB --json
+```
+
+`extractor-return.json` must contain a real extractor result matching the brief's
+schema, including the matching `job`; it is not supplied by this guide. Your agent
+or script reads the slices and writes that JSON outside Kaban. Submit validates and
+atomically publishes permitted records/claims/edges; inspect skipped items and
+dropped evidence in its report. Governed output is proposed or a revision candidate,
+not automatic acceptance. Finish reconciles the successful submissions and returns
+the retained final report, preserving human and other-layer edges.
+
+Source or ontology changes can stale a job; obtain a current brief instead of
+reusing stale results. Handles are workspace-scoped identifiers, not capabilities.
+In structured mode, gazetteer matches are candidates for the extractor, not
+automatically promoted mention or ABOUT edges.
+
+## Let a worker claim pending work
+
+For user-run workers, `ingest_claim`/`kaban ingest job claim --with llm` selects an
+available pending document and returns its brief plus a fenced lease. No available
+job is represented by `job: null`; the worker polls with backoff, not a blocking
+server wait. Carry the returned fence on all subsequent operations:
+
+```bash
+kaban ingest job next JOB --fence FENCE --chunk 0 --slice 0 --json
+kaban ingest job submit JOB --fence FENCE --stdin-json < extractor-return.json
+kaban ingest job finish JOB --fence FENCE --json
+```
+
+Replace `FENCE` with the returned numeric value, not the literal word. Expired or
+superseded holders cannot publish with an old fence (`lease_lost`). The same lifecycle
+is exposed as MCP `ingest_brief`, `ingest_next`, `ingest_submit`, `ingest_finish` and
+`ingest_claim`. External extractors remain opt-in and user-run throughout.

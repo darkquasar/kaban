@@ -1,0 +1,10 @@
+[package]
+name = "required-features"
+version = "0.1.0"
+edition = "2024"
+[workspace]
+[features]
+extra = []
+[[bin]]
+name = "gated"
+required-features = ["extra"]

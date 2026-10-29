@@ -1,0 +1,3 @@
+# Invented credential canary
+
+AKIAQWERTYUIOPASDFGH

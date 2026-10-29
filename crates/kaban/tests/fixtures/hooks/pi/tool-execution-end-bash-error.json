@@ -1,0 +1,20 @@
+{
+  "session_id": "sess-pi-0001",
+  "cwd": "/invented/repo/nightjar-service",
+  "hook_event_name": "tool_execution_end",
+  "toolCallId": "call_pi_0001",
+  "toolName": "bash",
+  "input": {
+    "command": "npm test -- --runInBand"
+  },
+  "result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "FAIL src/store.test.ts\n  \u25cf opens the store \u203a returns rows\n    expect(received).toHaveLength(3)\n    Received length: 2\nTests: 1 failed, 11 passed\nnpm ERR! Test failed. See above for more details."
+      }
+    ],
+    "details": {}
+  },
+  "isError": true
+}

@@ -1,0 +1,46 @@
+target/
+*.db
+*.db-wal
+*.db-shm
+*.audit.jsonl
+*.audit.jsonl.key
+__pycache__/
+
+# --- Rust build output ---
+**/*.rs.bk
+*.profraw
+*.profdata
+
+# --- Locally built / packaged binaries (kept in bin/, never committed) ---
+bin/
+*.tar.gz
+*.zip
+
+# --- Kaban runtime state (databases, audit logs and keys) ---
+runtime-home/
+.kaban-home/
+*.db-journal
+
+# --- Python helper scripts ---
+*.py[cod]
+.venv/
+.pytest_cache/
+
+# --- Docs site (Mintlify) local tooling ---
+node_modules/
+.mintlify/
+
+# --- Secrets and local env ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# --- Editor / OS / agent tooling noise ---
+.DS_Store
+.idea/
+.vscode/
+*.swp
+.serena/
+.claude/settings.local.json

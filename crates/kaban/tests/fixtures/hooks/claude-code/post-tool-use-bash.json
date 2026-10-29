@@ -1,0 +1,26 @@
+{
+  "session_id": "sess-claude-0003",
+  "prompt_id": "prompt-0004",
+  "transcript_path": "/invented/home/.claude/projects/nightjar-service/sess-claude-0003.jsonl",
+  "cwd": "/invented/repo/nightjar-service",
+  "scratchpad_dir": "/invented/home/.claude/scratch/sess-claude-0003",
+  "permission_mode": "default",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "cargo test -p nightjar-store --lib",
+    "description": "Run the store unit tests"
+  },
+  "tool_response": {
+    "stdout": "running 12 tests\ntest result: ok. 12 passed; 0 failed",
+    "stderr": "",
+    "interrupted": false,
+    "isImage": false,
+    "noOutputExpected": false
+  },
+  "tool_use_id": "toolu_01invented0004",
+  "effort": {
+    "level": "medium"
+  },
+  "duration_ms": 2210
+}

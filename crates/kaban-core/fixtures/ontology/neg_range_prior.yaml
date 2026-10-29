@@ -1,0 +1,5 @@
+ontology: shop
+version: 1
+kinds: {}
+rels: {}
+priors: {gazetteer.id.exact: 1.5}

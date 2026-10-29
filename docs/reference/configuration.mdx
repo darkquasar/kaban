@@ -1,0 +1,129 @@
+---
+title: "Configuration"
+description: "Choose database paths, bind a workspace, load a policy, and tune supported engine options."
+---
+
+Kaban has two separate configuration files: an engine configuration at
+`KABAN_HOME/config.yaml`, and an optional content-policy file selected by
+`--policy`. The database path is independent of both.
+
+## Paths and precedence
+
+This table applies to `kaban`, not `kaban-index`. For options listed below, an
+explicit CLI flag overrides its environment variable. With neither set, the
+default applies. Put the top-level flags before the subcommand. The indexer's
+`--policy` has no `KABAN_POLICY` binding; pass its policy path explicitly.
+
+| CLI option | Environment | Default |
+| --- | --- | --- |
+| `--db` | `KABAN_DB` | `kaban.db` relative to the process working directory |
+| `--policy` | `KABAN_POLICY` | Built-in policy rules only |
+| `--audit-export` or `--audit` | `KABAN_AUDIT_EXPORT` | No JSONL audit copy |
+| `--workspace` | `KABAN_WORKSPACE` | Git root directory name, or `default` outside Git |
+
+`KABAN_HOME` defaults to `$HOME/.kaban`. It holds engine configuration and keys;
+setting it does **not** relocate the default `kaban.db`. Use absolute paths for
+agent registration so the working directory cannot silently select a different
+database. The old `SB_DB`, `SB_POLICY`, and `SB_AUDIT` variables are not supported.
+
+```bash
+export KABAN_HOME=/absolute/path/kaban-state
+export KABAN_DB=/absolute/path/kaban-state/kaban.db
+export KABAN_POLICY=/absolute/path/policy.yaml
+export KABAN_WORKSPACE=my-project
+kaban doctor
+```
+
+These are example paths to replace, not directories created by the snippet.
+`doctor` expects an existing database and key. Initialize through the normal MCP
+server connection, not through diagnostics. Give hooks the same environment.
+
+## Engine configuration
+
+An absent `config.yaml` uses defaults. A present file can contain only the
+sections you want to override:
+
+```yaml
+link:
+  default: none
+budget:
+  l0_rss_mb: 64
+```
+
+Unknown keys, wrong types, and zero resource budgets are configuration errors
+(CLI exit `4`). Maps replace the entire default map: for example, when changing
+`recall.column_weights`, specify every column weight you want to retain. Kaban
+does not merge this file with a second project-local engine configuration.
+
+The default layer setup is intentionally small: lexical full-text search is on
+(the store's Tantivy text index, fuzzy matching included),
+automatic gazetteer linking is off, and extraction requires an explicit selection.
+Reading configuration or reporting budgets does not build an optional index.
+
+- `index.trigram` and `budget.trigram_rss_mb` are gone (spec 05 OWN-M): a file that
+  still names them is refused as an unknown key; `kaban reindex trigram` no longer
+  exists and recall clients send `fuzzy` (the `trigram` alias is gone).
+- `link.default: gazetteer` enables the default gazetteer linking choice;
+  an explicit ingestion `--link` selection takes precedence.
+- `ingest.default_with` is reserved: missing or empty is accepted; nonempty
+  values return `not_available_in_this_release`.
+- `embed.model` is reserved: missing, null, or an empty map is accepted; nonempty
+  values are refused. Embeddings are not enabled by setting a model here.
+
+## Memory and other budgets
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `budget.l0_rss_mb` | 64 MiB | L0 whole-process peak allowance used by layer measurements |
+| `gazetteer.max_automaton_mb` | 25 MiB | Gazetteer automaton build/retained-memory budget |
+| `ingest.lru_mib` | 8 MiB | Reserved cache capacity; cache implementation deferred |
+| `index.deadline_secs` | 600 seconds | End-to-end indexer deadline |
+| `index.quota.file_bytes` | 1,073,741,824 bytes | Per-indexer-file quota |
+| `index.quota.run_dir_bytes` | 4,294,967,296 bytes | Combined indexer run-directory quota |
+| `index.quota.tmp_bytes` | 536,870,912 bytes | Temporary-directory quota |
+| `index.policy_scan` | `false` | Whether the denylist policy scans the code-graph output; when on, a hit is masked and counted, never a refusal |
+
+The **64 MiB L0 allowance is not an allocator cap**: setting it does not reserve,
+limit, or reduce process memory. It was raised from 48 MiB using a prior observed
+56 MiB whole-process VmHWM, including in-process corpus construction. The overall
+100 MiB promise at 100k notes is unchanged. This default correction is not a fresh
+100k qualification or a guarantee for arbitrary input or enabled layers.
+
+`doctor` shows each budget's default, effective value, source, and `cap_lifted`.
+An explicit value equal to the default is reported as `default`, not `config`.
+Overrides must be positive and should be based on measurements of your workload.
+`--symbols` bypasses only the gazetteer automaton cap; it does not lift other
+budgets or change the configured numeric value.
+
+## Policy file
+
+An engine file does not configure secret scanning. Select a separate YAML policy:
+
+```bash
+kaban --policy /absolute/path/policy.yaml scan < /path/to/synthetic-sample.txt
+```
+
+Use invented, non-sensitive samples: scanning is not permission to place live
+credentials in shell history or logs. `scan` validates and prints a verdict
+without persistence; inspect `rejected` and the rule IDs in the JSON rather than
+assuming exit `0` means the sample was accepted.
+
+The policy schema supports `defaults`, `extend`, `words`, `phrases`, `rules`, and
+`allow`. Built-ins are enabled by default; disabling rules weakens detection.
+Allow regexes must be anchored and scoped to named rule IDs. See the repository's
+`examples/policy.yaml` for a complete example. After changing policy, plan for
+existing stored content as well as new writes; [rescan is a mutating operation](../operations/maintenance.mdx#policy-changes).
+
+## Indexer and unavailable settings
+
+`index.isolation` defaults to `preferred`: use the strongest available isolating
+tier, otherwise run without isolation with a warning. `required` refuses when
+no isolating tier is available; `off` explicitly selects none. Review this choice
+before running external indexers against untrusted repositories. `index.share_caches`
+is no longer a key (a file that names it is refused as unknown): the Go module cache
+and the Cargo registry are read-only inputs of every run, recorded in the snapshot's
+`resources` row. The verbs and flags are in the [kaban-index reference](kaban-index.mdx).
+
+`--global-db`, HTTP/REST service, embeddings, and a new workflow/query engine are
+not enabled by configuration in this release. Historical design documents are
+not an availability list.
