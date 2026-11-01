@@ -1,0 +1,27 @@
+[tools]
+node = "22.23.4"
+python = "3.12.16"
+"aqua:nextest-rs/nextest/cargo-nextest" = "0.9.150"
+"aqua:EmbarkStudios/cargo-deny" = "0.20.2"
+
+[settings]
+locked_verify_provenance = true
+node.compile = false
+python.compile = false
+
+# Rust is authoritative in the two rust-toolchain.toml files, not duplicated here.
+[tasks.focused]
+description = "Explicit package regression; pass --package <name> after --"
+run = "python3 scripts/ci/verify.py run --profile focused"
+
+[tasks.core]
+description = "Developer regressions; excludes artifact and qualification claims"
+run = "python3 scripts/ci/verify.py run --profile core"
+
+[tasks.qualification]
+description = "Admitted native capability qualification"
+run = "python3 scripts/ci/verify.py run --profile qualification"
+
+[tasks.release]
+description = "Exact release outputs and their required checks"
+run = "python3 scripts/ci/verify.py run --profile release"

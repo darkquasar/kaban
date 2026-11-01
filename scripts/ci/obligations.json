@@ -1,0 +1,2997 @@
+{
+  "version": 1,
+  "profiles": {
+    "quality": {
+      "tools": [
+        "rust",
+        "cargo",
+        "python3",
+        "bash",
+        "rustfmt",
+        "clippy",
+        "deny",
+        "jq"
+      ],
+      "capabilities": [],
+      "exclusions": []
+    },
+    "functional": {
+      "tools": [
+        "rust",
+        "cargo",
+        "python3",
+        "bash",
+        "nextest",
+        "cc",
+        "git",
+        "node",
+        "go",
+        "scip-go"
+      ],
+      "capabilities": [],
+      "exclusions": []
+    },
+    "gnu": {
+      "tools": [
+        "rust",
+        "cargo",
+        "python3",
+        "bash",
+        "cc",
+        "strace"
+      ],
+      "capabilities": [
+        "linux-native"
+      ],
+      "exclusions": []
+    },
+    "musl": {
+      "tools": [
+        "rust",
+        "cargo",
+        "python3",
+        "bash",
+        "native-musl-linker",
+        "native-musl-target"
+      ],
+      "capabilities": [
+        "linux-native"
+      ],
+      "exclusions": []
+    },
+    "producer": {
+      "tools": [
+        "rust",
+        "cargo",
+        "python3",
+        "bash",
+        "producer-pinned-rust",
+        "rustfmt",
+        "clippy"
+      ],
+      "capabilities": [],
+      "exclusions": []
+    },
+    "qualification": {
+      "tools": [
+        "rust",
+        "cargo",
+        "python3",
+        "bash"
+      ],
+      "capabilities": [
+        "linux-native",
+        "complementary-isolation",
+        "native-architecture",
+        "admitted-real-producers"
+      ],
+      "exclusions": []
+    }
+  },
+  "obligations": [
+    {
+      "id": "quality.fmt",
+      "group": "quality",
+      "predicate": "selected profile",
+      "counterpart_ids": []
+    },
+    {
+      "id": "quality.clippy-workspace",
+      "group": "quality",
+      "predicate": "selected profile",
+      "counterpart_ids": []
+    },
+    {
+      "id": "quality.clippy-kaban-no-default",
+      "group": "quality",
+      "predicate": "selected profile",
+      "counterpart_ids": []
+    },
+    {
+      "id": "quality.clippy-ingest-no-default",
+      "group": "quality",
+      "predicate": "selected profile",
+      "counterpart_ids": []
+    },
+    {
+      "id": "quality.deny",
+      "group": "quality",
+      "predicate": "selected profile",
+      "counterpart_ids": []
+    },
+    {
+      "id": "quality.store-boundary",
+      "group": "quality",
+      "predicate": "selected profile",
+      "counterpart_ids": []
+    },
+    {
+      "id": "quality.deps-allowlist",
+      "group": "quality",
+      "predicate": "selected profile",
+      "counterpart_ids": []
+    },
+    {
+      "id": "quality.catalog",
+      "group": "quality",
+      "predicate": "selected profile",
+      "counterpart_ids": []
+    },
+    {
+      "id": "quality.helpers",
+      "group": "quality",
+      "predicate": "selected profile",
+      "counterpart_ids": []
+    },
+    {
+      "id": "quality.shell",
+      "group": "quality",
+      "predicate": "selected profile",
+      "counterpart_ids": []
+    },
+    {
+      "id": "functional.workspace",
+      "group": "functional",
+      "predicate": "selected profile",
+      "counterpart_ids": []
+    },
+    {
+      "id": "functional.pdf",
+      "group": "functional",
+      "predicate": "selected profile",
+      "counterpart_ids": []
+    },
+    {
+      "id": "functional.no-default",
+      "group": "functional",
+      "predicate": "selected profile",
+      "counterpart_ids": []
+    },
+    {
+      "id": "functional.doctests",
+      "group": "functional",
+      "predicate": "selected profile",
+      "counterpart_ids": []
+    },
+    {
+      "id": "gnu.default-size",
+      "group": "gnu",
+      "predicate": "selected profile",
+      "counterpart_ids": []
+    },
+    {
+      "id": "gnu.smoke",
+      "group": "gnu",
+      "predicate": "selected profile",
+      "counterpart_ids": []
+    },
+    {
+      "id": "gnu.index-report",
+      "group": "gnu",
+      "predicate": "selected profile",
+      "counterpart_ids": []
+    },
+    {
+      "id": "gnu.graph-pair",
+      "group": "gnu",
+      "predicate": "selected profile",
+      "counterpart_ids": []
+    },
+    {
+      "id": "gnu.default-integrity",
+      "group": "gnu",
+      "predicate": "selected profile",
+      "counterpart_ids": []
+    },
+    {
+      "id": "musl.index-size",
+      "group": "musl",
+      "predicate": "selected profile",
+      "counterpart_ids": []
+    },
+    {
+      "id": "musl.kaban-report",
+      "group": "musl",
+      "predicate": "selected profile",
+      "counterpart_ids": []
+    },
+    {
+      "id": "producer.checks",
+      "group": "producer",
+      "predicate": "selected profile",
+      "counterpart_ids": []
+    },
+    {
+      "id": "producer.doctests",
+      "group": "producer",
+      "predicate": "selected profile",
+      "counterpart_ids": []
+    },
+    {
+      "id": "qualification.available-isolation",
+      "group": "qualification",
+      "predicate": {
+        "os": "linux",
+        "namespaces_available": true,
+        "isolation_tier": "namespaces"
+      },
+      "counterpart_ids": [
+        "qualification.available-isolation"
+      ]
+    },
+    {
+      "id": "qualification.unavailable-isolation",
+      "group": "qualification",
+      "predicate": {
+        "isolation_tier": "none"
+      },
+      "counterpart_ids": [
+        "qualification.unavailable-isolation"
+      ]
+    },
+    {
+      "id": "qualification.real-producers",
+      "group": "qualification",
+      "predicate": "selected profile",
+      "counterpart_ids": []
+    },
+    {
+      "id": "qualification.ignored-process",
+      "group": "qualification",
+      "predicate": "selected profile",
+      "counterpart_ids": []
+    },
+    {
+      "id": "qualification.ignored-scale",
+      "group": "qualification",
+      "predicate": "selected profile",
+      "counterpart_ids": [],
+      "events": [
+        "schedule",
+        "workflow_dispatch"
+      ]
+    },
+    {
+      "id": "qualification.reproducibility",
+      "group": "qualification",
+      "predicate": "selected profile",
+      "counterpart_ids": [],
+      "events": [
+        "schedule",
+        "workflow_dispatch"
+      ]
+    },
+    {
+      "id": "gnu.optional-table",
+      "group": "gnu",
+      "predicate": "KABAN_SIZE_TABLE=1",
+      "optional": "size_table",
+      "counterpart_ids": []
+    }
+  ],
+  "discovery": {
+    "workspace": {
+      "configuration": "workspace-default",
+      "workspace": "root",
+      "packages": [
+        "kaban-api",
+        "kaban-codegraph",
+        "kaban-core",
+        "kaban-index",
+        "kaban-index-tantivy",
+        "kaban-ingest",
+        "kaban-policy",
+        "kaban-store-sqlite",
+        "kaban"
+      ],
+      "features": [
+        "default"
+      ],
+      "target": "native-linux",
+      "command": [
+        "nextest",
+        "list",
+        "--workspace",
+        "--message-format",
+        "json"
+      ]
+    },
+    "pdf": {
+      "configuration": "ingest-pdf",
+      "workspace": "root",
+      "packages": [
+        "kaban-ingest"
+      ],
+      "features": [
+        "default",
+        "pdf"
+      ],
+      "target": "native-linux",
+      "command": [
+        "nextest",
+        "list",
+        "-p",
+        "kaban-ingest",
+        "--features",
+        "pdf",
+        "--message-format",
+        "json"
+      ]
+    },
+    "no-default": {
+      "configuration": "kaban-no-default",
+      "workspace": "root",
+      "packages": [
+        "kaban"
+      ],
+      "features": [],
+      "target": "native-linux",
+      "command": [
+        "nextest",
+        "list",
+        "-p",
+        "kaban",
+        "--no-default-features",
+        "--message-format",
+        "json"
+      ]
+    },
+    "producer": {
+      "configuration": "producer-default",
+      "workspace": "producer",
+      "packages": [
+        "kaban-rust-scip"
+      ],
+      "features": [
+        "default"
+      ],
+      "target": "native-linux",
+      "command": [
+        "nextest",
+        "list",
+        "--workspace",
+        "--message-format",
+        "json"
+      ]
+    }
+  },
+  "subchecks": [
+    {
+      "id": "subcheck.first_code_call_after_warm_up_is_under_fifty_ms",
+      "group": "qualification",
+      "parent": "first_code_call_after_warm_up_is_under_fifty_ms",
+      "source": "crates/kaban/tests/mcp_code_warm.rs:143",
+      "predicate": {
+        "go_repo_directory": true,
+        "go_home_directory": true
+      },
+      "counterpart_ids": [
+        "subcheck.first_code_call_after_warm_up_is_under_fifty_ms"
+      ],
+      "marker_pattern": "NOT RUN:\\s*KABAN_TEST_GO_REPO\\ or\\ KABAN_TEST_GO_HOME\\ is\\ unset\\ or\\ not\\ a\\ directory",
+      "historical_seed": false,
+      "required_tools": [
+        "cargo",
+        "rustc",
+        "cc",
+        "python3",
+        "bash",
+        "go"
+      ],
+      "package": "kaban",
+      "binary": "mcp_code_warm",
+      "workspace": "root"
+    },
+    {
+      "id": "subcheck.inputs",
+      "group": "qualification",
+      "parent": "rust_snapshot_public_queries_through_the_mcp_server",
+      "source": "crates/kaban/tests/mcp_rust_acceptance.rs:61",
+      "predicate": {
+        "rust_producer_executable": true,
+        "rust_sysroot_rustc_executable": true,
+        "index_binary_executable": true
+      },
+      "counterpart_ids": [
+        "subcheck.inputs"
+      ],
+      "marker_pattern": "NOT RUN:\\s*KABAN_TEST_RUST_PRODUCER\\ is\\ unset\\ or\\ not\\ the\\ installed\\ kaban\\-rust\\-scip",
+      "historical_seed": false,
+      "required_tools": [
+        "cargo",
+        "rustc",
+        "cc",
+        "python3",
+        "bash",
+        "rust-producer",
+        "rust-sysroot",
+        "kaban-index"
+      ],
+      "package": "kaban",
+      "binary": "mcp_rust_acceptance",
+      "workspace": "root"
+    },
+    {
+      "id": "subcheck.inputs.branch-67",
+      "group": "qualification",
+      "parent": "rust_snapshot_public_queries_through_the_mcp_server",
+      "source": "crates/kaban/tests/mcp_rust_acceptance.rs:67",
+      "predicate": {
+        "rust_producer_executable": true,
+        "rust_sysroot_rustc_executable": true,
+        "index_binary_executable": true
+      },
+      "counterpart_ids": [
+        "subcheck.inputs.branch-67"
+      ],
+      "marker_pattern": "NOT RUN:\\s*KABAN_TEST_RUST_SYSROOT\\ is\\ unset\\ or\\ not\\ the\\ real\\ 1\\.99\\.0\\ toolchain\\ root",
+      "historical_seed": false,
+      "required_tools": [
+        "cargo",
+        "rustc",
+        "cc",
+        "python3",
+        "bash",
+        "rust-producer",
+        "rust-sysroot",
+        "kaban-index"
+      ],
+      "package": "kaban",
+      "binary": "mcp_rust_acceptance",
+      "workspace": "root"
+    },
+    {
+      "id": "subcheck.inputs.branch-77",
+      "group": "qualification",
+      "parent": "rust_snapshot_public_queries_through_the_mcp_server",
+      "source": "crates/kaban/tests/mcp_rust_acceptance.rs:77",
+      "predicate": {
+        "rust_producer_executable": true,
+        "rust_sysroot_rustc_executable": true,
+        "index_binary_executable": true
+      },
+      "counterpart_ids": [
+        "subcheck.inputs.branch-77"
+      ],
+      "marker_pattern": "NOT RUN:\\s*no\\ kaban\\-index\\ binary\\ at\\ .+?\\ \\(build\\ it,\\ or\\ set\\ KABAN_TEST_INDEX_BIN\\)",
+      "historical_seed": false,
+      "required_tools": [
+        "cargo",
+        "rustc",
+        "cc",
+        "python3",
+        "bash",
+        "rust-producer",
+        "rust-sysroot",
+        "kaban-index"
+      ],
+      "package": "kaban",
+      "binary": "mcp_rust_acceptance",
+      "workspace": "root"
+    },
+    {
+      "id": "subcheck.required_unavailable_rust_probes",
+      "group": "qualification",
+      "parent": "rust_required_unavailable_never_runs_native_producer_probes",
+      "source": "crates/kaban-index/tests/cli.rs:1158",
+      "predicate": {
+        "isolation_tier": "none"
+      },
+      "counterpart_ids": [
+        "subcheck.required_unavailable_rust_probes"
+      ],
+      "marker_pattern": "NOT RUN:\\s*required\\-unavailable\\ Rust\\ probes",
+      "historical_seed": false,
+      "required_tools": [
+        "cargo",
+        "rustc",
+        "cc",
+        "python3",
+        "bash"
+      ],
+      "package": "kaban-index",
+      "binary": "cli",
+      "workspace": "root"
+    },
+    {
+      "id": "subcheck.rust_namespace_probe_resources",
+      "group": "qualification",
+      "parent": "rust_probes_refuse_unavailable_isolation_and_use_namespace_resources",
+      "source": "crates/kaban-index/tests/cli.rs:1226",
+      "predicate": {
+        "os": "linux",
+        "namespaces_available": true,
+        "isolation_tier": "namespaces"
+      },
+      "counterpart_ids": [
+        "subcheck.rust_namespace_probe_resources"
+      ],
+      "marker_pattern": "NOT RUN:\\s*Rust\\ namespace\\ probe\\ resources",
+      "historical_seed": true,
+      "required_tools": [
+        "cargo",
+        "rustc",
+        "cc",
+        "python3",
+        "bash"
+      ],
+      "package": "kaban-index",
+      "binary": "cli",
+      "workspace": "root"
+    },
+    {
+      "id": "subcheck.cli_index_required_without_isolating_tier_is_exit_8",
+      "group": "qualification",
+      "parent": "cli_index_required_without_isolating_tier_is_exit_8",
+      "source": "crates/kaban-index/tests/cli.rs:2049",
+      "predicate": {
+        "isolation_tier": "none"
+      },
+      "counterpart_ids": [
+        "subcheck.cli_index_required_without_isolating_tier_is_exit_8"
+      ],
+      "marker_pattern": "NOT RUN:\\s*cli_index_required_without_isolating_tier_is_exit_8",
+      "historical_seed": false,
+      "required_tools": [
+        "cargo",
+        "rustc",
+        "cc",
+        "python3",
+        "bash"
+      ],
+      "package": "kaban-index",
+      "binary": "cli",
+      "workspace": "root"
+    },
+    {
+      "id": "subcheck.index_go_drivers_real",
+      "group": "qualification",
+      "parent": "index_go_drivers_real",
+      "source": "crates/kaban-index/tests/cli.rs:3320",
+      "predicate": {
+        "scip_go_reachable": true
+      },
+      "counterpart_ids": [
+        "subcheck.index_go_drivers_real"
+      ],
+      "marker_pattern": "NOT RUN:\\s*index_go_drivers_real",
+      "historical_seed": false,
+      "required_tools": [
+        "cargo",
+        "rustc",
+        "cc",
+        "python3",
+        "bash",
+        "scip-go"
+      ],
+      "package": "kaban-index",
+      "binary": "cli",
+      "workspace": "root"
+    },
+    {
+      "id": "subcheck.go_module_cache_is_an_input_on_every_tier",
+      "group": "qualification",
+      "parent": "go_module_cache_is_an_input_on_every_tier",
+      "source": "crates/kaban-index/tests/cli.rs:3614",
+      "predicate": {
+        "scip_go_reachable": true,
+        "go_version_succeeds": true
+      },
+      "counterpart_ids": [
+        "subcheck.go_module_cache_is_an_input_on_every_tier"
+      ],
+      "marker_pattern": "NOT RUN:\\s*go_module_cache_is_an_input_on_every_tier: no scip-go reachable",
+      "historical_seed": false,
+      "required_tools": [
+        "cargo",
+        "rustc",
+        "cc",
+        "python3",
+        "bash",
+        "go",
+        "scip-go"
+      ],
+      "package": "kaban-index",
+      "binary": "cli",
+      "workspace": "root"
+    },
+    {
+      "id": "subcheck.go_module_cache_is_an_input_on_every_tier.branch-3620",
+      "group": "qualification",
+      "parent": "go_module_cache_is_an_input_on_every_tier",
+      "source": "crates/kaban-index/tests/cli.rs:3620",
+      "predicate": {
+        "scip_go_reachable": true,
+        "go_version_succeeds": true
+      },
+      "counterpart_ids": [
+        "subcheck.go_module_cache_is_an_input_on_every_tier.branch-3620"
+      ],
+      "marker_pattern": "NOT RUN:\\s*go_module_cache_is_an_input_on_every_tier: no go on this host",
+      "historical_seed": false,
+      "required_tools": [
+        "cargo",
+        "rustc",
+        "cc",
+        "python3",
+        "bash",
+        "go",
+        "scip-go"
+      ],
+      "package": "kaban-index",
+      "binary": "cli",
+      "workspace": "root"
+    },
+    {
+      "id": "subcheck.go_directive_above_the_toolchain_is_refused_in_plain_words",
+      "group": "qualification",
+      "parent": "go_directive_above_the_toolchain_is_refused_in_plain_words",
+      "source": "crates/kaban-index/tests/cli.rs:3755",
+      "predicate": {
+        "go_version_succeeds": true,
+        "go_version_parseable": true
+      },
+      "counterpart_ids": [
+        "subcheck.go_directive_above_the_toolchain_is_refused_in_plain_words"
+      ],
+      "marker_pattern": "NOT RUN:\\s*go_directive_above_the_toolchain_is_refused_in_plain_words",
+      "historical_seed": false,
+      "required_tools": [
+        "cargo",
+        "rustc",
+        "cc",
+        "python3",
+        "bash",
+        "go"
+      ],
+      "package": "kaban-index",
+      "binary": "cli",
+      "workspace": "root"
+    },
+    {
+      "id": "subcheck.module_cache_toolchain_is_admitted_for_a_newer_directive",
+      "group": "qualification",
+      "parent": "module_cache_toolchain_is_admitted_for_a_newer_directive",
+      "source": "crates/kaban-index/tests/cli.rs:3894",
+      "predicate": {
+        "go_version_succeeds": true,
+        "go_version_parseable": true
+      },
+      "counterpart_ids": [
+        "subcheck.module_cache_toolchain_is_admitted_for_a_newer_directive"
+      ],
+      "marker_pattern": "NOT RUN:\\s*module_cache_toolchain_is_admitted_for_a_newer_directive",
+      "historical_seed": false,
+      "required_tools": [
+        "cargo",
+        "rustc",
+        "cc",
+        "python3",
+        "bash",
+        "go"
+      ],
+      "package": "kaban-index",
+      "binary": "cli",
+      "workspace": "root"
+    },
+    {
+      "id": "subcheck.an_unreadable_go_mod_is_said_in_plain_words",
+      "group": "qualification",
+      "parent": "an_unreadable_go_mod_is_said_in_plain_words",
+      "source": "crates/kaban-index/tests/cli.rs:4041",
+      "predicate": {
+        "go_version_succeeds": true,
+        "go_version_parseable": true
+      },
+      "counterpart_ids": [
+        "subcheck.an_unreadable_go_mod_is_said_in_plain_words"
+      ],
+      "marker_pattern": "NOT RUN:\\s*an_unreadable_go_mod_is_said_in_plain_words",
+      "historical_seed": false,
+      "required_tools": [
+        "cargo",
+        "rustc",
+        "cc",
+        "python3",
+        "bash",
+        "go"
+      ],
+      "package": "kaban-index",
+      "binary": "cli",
+      "workspace": "root"
+    },
+    {
+      "id": "subcheck.a_cached_go_replaced_between_the_two_runs_refuses_the_second",
+      "group": "qualification",
+      "parent": "a_cached_go_replaced_between_the_two_runs_refuses_the_second",
+      "source": "crates/kaban-index/tests/cli.rs:4111",
+      "predicate": {
+        "go_version_succeeds": true,
+        "go_version_parseable": true
+      },
+      "counterpart_ids": [
+        "subcheck.a_cached_go_replaced_between_the_two_runs_refuses_the_second"
+      ],
+      "marker_pattern": "NOT RUN:\\s*a_cached_go_replaced_between_the_two_runs_refuses_the_second",
+      "historical_seed": false,
+      "required_tools": [
+        "cargo",
+        "rustc",
+        "cc",
+        "python3",
+        "bash",
+        "go"
+      ],
+      "package": "kaban-index",
+      "binary": "cli",
+      "workspace": "root"
+    },
+    {
+      "id": "subcheck.a_cached_toolchain_with_a_helper_linked_into_the_checkout_is_refused",
+      "group": "qualification",
+      "parent": "a_cached_toolchain_with_a_helper_linked_into_the_checkout_is_refused",
+      "source": "crates/kaban-index/tests/cli.rs:4189",
+      "predicate": {
+        "go_version_succeeds": true,
+        "go_version_parseable": true
+      },
+      "counterpart_ids": [
+        "subcheck.a_cached_toolchain_with_a_helper_linked_into_the_checkout_is_refused"
+      ],
+      "marker_pattern": "NOT RUN:\\s*a_cached_toolchain_with_a_helper_linked_into_the_checkout_is_refused",
+      "historical_seed": false,
+      "required_tools": [
+        "cargo",
+        "rustc",
+        "cc",
+        "python3",
+        "bash",
+        "go"
+      ],
+      "package": "kaban-index",
+      "binary": "cli",
+      "workspace": "root"
+    },
+    {
+      "id": "subcheck.partial_never_masks_an_isolation_refusal",
+      "group": "qualification",
+      "parent": "partial_never_masks_an_isolation_refusal",
+      "source": "crates/kaban-index/tests/cli.rs:4361",
+      "predicate": {
+        "os": "linux",
+        "namespaces_available": true,
+        "isolation_tier": "namespaces"
+      },
+      "counterpart_ids": [
+        "subcheck.partial_never_masks_an_isolation_refusal"
+      ],
+      "marker_pattern": "NOT RUN:\\s*partial_never_masks_an_isolation_refusal",
+      "historical_seed": true,
+      "required_tools": [
+        "cargo",
+        "rustc",
+        "cc",
+        "python3",
+        "bash"
+      ],
+      "package": "kaban-index",
+      "binary": "cli",
+      "workspace": "root"
+    },
+    {
+      "id": "subcheck.toolchain_roots_view_half",
+      "group": "qualification",
+      "parent": "toolchain_roots_are_narrow_and_repository_local_tools_are_refused",
+      "source": "crates/kaban-index/tests/cli.rs:4646",
+      "predicate": {
+        "os": "linux",
+        "namespaces_available": true,
+        "isolation_tier": "namespaces"
+      },
+      "counterpart_ids": [
+        "subcheck.toolchain_roots_view_half"
+      ],
+      "marker_pattern": "NOT RUN:\\s*toolchain_roots_are_narrow\\ \\(view\\ half\\)",
+      "historical_seed": true,
+      "required_tools": [
+        "cargo",
+        "rustc",
+        "cc",
+        "python3",
+        "bash"
+      ],
+      "package": "kaban-index",
+      "binary": "cli",
+      "workspace": "root"
+    },
+    {
+      "id": "subcheck.doctor_inside_half",
+      "group": "qualification",
+      "parent": "doctor_probes_only_admitted_tools_inside_isolation",
+      "source": "crates/kaban-index/tests/cli.rs:4817",
+      "predicate": {
+        "os": "linux",
+        "namespaces_available": true,
+        "isolation_tier": "namespaces"
+      },
+      "counterpart_ids": [
+        "subcheck.doctor_inside_half"
+      ],
+      "marker_pattern": "NOT RUN:\\s*doctor_probes_only_admitted_tools_inside_isolation\\ \\(inside\\ half\\)",
+      "historical_seed": true,
+      "required_tools": [
+        "cargo",
+        "rustc",
+        "cc",
+        "python3",
+        "bash"
+      ],
+      "package": "kaban-index",
+      "binary": "cli",
+      "workspace": "root"
+    },
+    {
+      "id": "subcheck.cgo_defaults_to_disabled_under_namespaces_and_is_reported",
+      "group": "qualification",
+      "parent": "cgo_defaults_to_disabled_under_namespaces_and_is_reported",
+      "source": "crates/kaban-index/tests/cli.rs:5123",
+      "predicate": {
+        "os": "linux",
+        "namespaces_available": true,
+        "isolation_tier": "namespaces"
+      },
+      "counterpart_ids": [
+        "subcheck.cgo_defaults_to_disabled_under_namespaces_and_is_reported"
+      ],
+      "marker_pattern": "NOT RUN:\\s*cgo_defaults_to_disabled_under_namespaces_and_is_reported",
+      "historical_seed": true,
+      "required_tools": [
+        "cargo",
+        "rustc",
+        "cc",
+        "python3",
+        "bash"
+      ],
+      "package": "kaban-index",
+      "binary": "cli",
+      "workspace": "root"
+    },
+    {
+      "id": "subcheck.ns_checkout_is_readonly",
+      "group": "qualification",
+      "parent": "ns_checkout_is_readonly",
+      "source": "crates/kaban-index/tests/namespaces.rs:98",
+      "predicate": {
+        "os": "linux",
+        "namespaces_available": true,
+        "isolation_tier": "namespaces"
+      },
+      "counterpart_ids": [
+        "subcheck.ns_checkout_is_readonly"
+      ],
+      "marker_pattern": "NOT RUN:\\s*ns_checkout_is_readonly(?=:|\\s|$)",
+      "historical_seed": true,
+      "required_tools": [
+        "cargo",
+        "rustc",
+        "cc",
+        "python3",
+        "bash"
+      ],
+      "package": "kaban-index",
+      "binary": "namespaces",
+      "workspace": "root"
+    },
+    {
+      "id": "subcheck.ns_view_only_listed_paths",
+      "group": "qualification",
+      "parent": "ns_view_only_listed_paths",
+      "source": "crates/kaban-index/tests/namespaces.rs:98",
+      "predicate": {
+        "os": "linux",
+        "namespaces_available": true,
+        "isolation_tier": "namespaces"
+      },
+      "counterpart_ids": [
+        "subcheck.ns_view_only_listed_paths"
+      ],
+      "marker_pattern": "NOT RUN:\\s*ns_view_only_listed_paths(?=:|\\s|$)",
+      "historical_seed": true,
+      "required_tools": [
+        "cargo",
+        "rustc",
+        "cc",
+        "python3",
+        "bash"
+      ],
+      "package": "kaban-index",
+      "binary": "namespaces",
+      "workspace": "root"
+    },
+    {
+      "id": "subcheck.ns_usr_include_is_readonly",
+      "group": "qualification",
+      "parent": "ns_usr_include_is_readonly",
+      "source": "crates/kaban-index/tests/namespaces.rs:98",
+      "predicate": {
+        "os": "linux",
+        "namespaces_available": true,
+        "isolation_tier": "namespaces",
+        "usr_include_directory": true
+      },
+      "counterpart_ids": [
+        "subcheck.ns_usr_include_is_readonly"
+      ],
+      "marker_pattern": "NOT RUN:\\s*ns_usr_include_is_readonly(?=:|\\s|$): the namespaces tier is unavailable",
+      "historical_seed": true,
+      "required_tools": [
+        "cargo",
+        "rustc",
+        "cc",
+        "python3",
+        "bash"
+      ],
+      "package": "kaban-index",
+      "binary": "namespaces",
+      "workspace": "root"
+    },
+    {
+      "id": "subcheck.ns_helper_single_invocation",
+      "group": "qualification",
+      "parent": "ns_helper_single_invocation",
+      "source": "crates/kaban-index/tests/namespaces.rs:98",
+      "predicate": {
+        "os": "linux",
+        "namespaces_available": true,
+        "isolation_tier": "namespaces"
+      },
+      "counterpart_ids": [
+        "subcheck.ns_helper_single_invocation"
+      ],
+      "marker_pattern": "NOT RUN:\\s*ns_helper_single_invocation(?=:|\\s|$)",
+      "historical_seed": true,
+      "required_tools": [
+        "cargo",
+        "rustc",
+        "cc",
+        "python3",
+        "bash"
+      ],
+      "package": "kaban-index",
+      "binary": "namespaces",
+      "workspace": "root"
+    },
+    {
+      "id": "subcheck.ns_helper_closes_wrapper_handle",
+      "group": "qualification",
+      "parent": "ns_helper_closes_wrapper_handle",
+      "source": "crates/kaban-index/tests/namespaces.rs:98",
+      "predicate": {
+        "os": "linux",
+        "namespaces_available": true,
+        "isolation_tier": "namespaces"
+      },
+      "counterpart_ids": [
+        "subcheck.ns_helper_closes_wrapper_handle"
+      ],
+      "marker_pattern": "NOT RUN:\\s*ns_helper_closes_wrapper_handle(?=:|\\s|$)",
+      "historical_seed": true,
+      "required_tools": [
+        "cargo",
+        "rustc",
+        "cc",
+        "python3",
+        "bash"
+      ],
+      "package": "kaban-index",
+      "binary": "namespaces",
+      "workspace": "root"
+    },
+    {
+      "id": "subcheck.ns_tcp_connect_unreachable",
+      "group": "qualification",
+      "parent": "ns_tcp_connect_unreachable",
+      "source": "crates/kaban-index/tests/namespaces.rs:98",
+      "predicate": {
+        "os": "linux",
+        "namespaces_available": true,
+        "isolation_tier": "namespaces"
+      },
+      "counterpart_ids": [
+        "subcheck.ns_tcp_connect_unreachable"
+      ],
+      "marker_pattern": "NOT RUN:\\s*ns_tcp_connect_unreachable(?=:|\\s|$)",
+      "historical_seed": true,
+      "required_tools": [
+        "cargo",
+        "rustc",
+        "cc",
+        "python3",
+        "bash"
+      ],
+      "package": "kaban-index",
+      "binary": "namespaces",
+      "workspace": "root"
+    },
+    {
+      "id": "subcheck.ns_selfcheck_mismatch_refuses",
+      "group": "qualification",
+      "parent": "ns_selfcheck_mismatch_refuses",
+      "source": "crates/kaban-index/tests/namespaces.rs:98",
+      "predicate": {
+        "os": "linux",
+        "namespaces_available": true,
+        "isolation_tier": "namespaces"
+      },
+      "counterpart_ids": [
+        "subcheck.ns_selfcheck_mismatch_refuses"
+      ],
+      "marker_pattern": "NOT RUN:\\s*ns_selfcheck_mismatch_refuses(?=:|\\s|$)",
+      "historical_seed": true,
+      "required_tools": [
+        "cargo",
+        "rustc",
+        "cc",
+        "python3",
+        "bash"
+      ],
+      "package": "kaban-index",
+      "binary": "namespaces",
+      "workspace": "root"
+    },
+    {
+      "id": "subcheck.caches_shared_ro_in_namespaces",
+      "group": "qualification",
+      "parent": "caches_shared_ro_in_namespaces",
+      "source": "crates/kaban-index/tests/namespaces.rs:98",
+      "predicate": {
+        "os": "linux",
+        "namespaces_available": true,
+        "isolation_tier": "namespaces"
+      },
+      "counterpart_ids": [
+        "subcheck.caches_shared_ro_in_namespaces"
+      ],
+      "marker_pattern": "NOT RUN:\\s*caches_shared_ro_in_namespaces(?=:|\\s|$)",
+      "historical_seed": true,
+      "required_tools": [
+        "cargo",
+        "rustc",
+        "cc",
+        "python3",
+        "bash"
+      ],
+      "package": "kaban-index",
+      "binary": "namespaces",
+      "workspace": "root"
+    },
+    {
+      "id": "subcheck.ns_indexer_succeeds_with_ro_cache",
+      "group": "qualification",
+      "parent": "ns_indexer_succeeds_with_ro_cache",
+      "source": "crates/kaban-index/tests/namespaces.rs:98",
+      "predicate": {
+        "os": "linux",
+        "namespaces_available": true,
+        "isolation_tier": "namespaces"
+      },
+      "counterpart_ids": [
+        "subcheck.ns_indexer_succeeds_with_ro_cache"
+      ],
+      "marker_pattern": "NOT RUN:\\s*ns_indexer_succeeds_with_ro_cache(?=:|\\s|$)",
+      "historical_seed": true,
+      "required_tools": [
+        "cargo",
+        "rustc",
+        "cc",
+        "python3",
+        "bash"
+      ],
+      "package": "kaban-index",
+      "binary": "namespaces",
+      "workspace": "root"
+    },
+    {
+      "id": "subcheck.caches_dedicated_when_configured",
+      "group": "qualification",
+      "parent": "caches_dedicated_when_configured",
+      "source": "crates/kaban-index/tests/namespaces.rs:98",
+      "predicate": {
+        "os": "linux",
+        "namespaces_available": true,
+        "isolation_tier": "namespaces"
+      },
+      "counterpart_ids": [
+        "subcheck.caches_dedicated_when_configured"
+      ],
+      "marker_pattern": "NOT RUN:\\s*caches_dedicated_when_configured(?=:|\\s|$)",
+      "historical_seed": true,
+      "required_tools": [
+        "cargo",
+        "rustc",
+        "cc",
+        "python3",
+        "bash"
+      ],
+      "package": "kaban-index",
+      "binary": "namespaces",
+      "workspace": "root"
+    },
+    {
+      "id": "subcheck.ns_indexer_cannot_remount_or_mount_after_privilege_drop",
+      "group": "qualification",
+      "parent": "ns_indexer_cannot_remount_or_mount_after_privilege_drop",
+      "source": "crates/kaban-index/tests/namespaces.rs:98",
+      "predicate": {
+        "os": "linux",
+        "namespaces_available": true,
+        "isolation_tier": "namespaces"
+      },
+      "counterpart_ids": [
+        "subcheck.ns_indexer_cannot_remount_or_mount_after_privilege_drop"
+      ],
+      "marker_pattern": "NOT RUN:\\s*ns_indexer_cannot_remount_or_mount_after_privilege_drop(?=:|\\s|$)",
+      "historical_seed": true,
+      "required_tools": [
+        "cargo",
+        "rustc",
+        "cc",
+        "python3",
+        "bash"
+      ],
+      "package": "kaban-index",
+      "binary": "namespaces",
+      "workspace": "root"
+    },
+    {
+      "id": "subcheck.ns_usr_include_is_readonly.branch-302",
+      "group": "qualification",
+      "parent": "ns_usr_include_is_readonly",
+      "source": "crates/kaban-index/tests/namespaces.rs:302",
+      "predicate": {
+        "os": "linux",
+        "namespaces_available": true,
+        "isolation_tier": "namespaces",
+        "usr_include_directory": true
+      },
+      "counterpart_ids": [
+        "subcheck.ns_usr_include_is_readonly.branch-302"
+      ],
+      "marker_pattern": "NOT RUN:\\s*ns_usr_include_is_readonly: no /usr/include",
+      "historical_seed": false,
+      "required_tools": [
+        "cargo",
+        "rustc",
+        "cc",
+        "python3",
+        "bash"
+      ],
+      "package": "kaban-index",
+      "binary": "namespaces",
+      "workspace": "root"
+    },
+    {
+      "id": "subcheck.runner_quota_file_kills",
+      "group": "qualification",
+      "parent": "runner_quota_file_kills",
+      "source": "crates/kaban-index/tests/runner.rs:570",
+      "predicate": {
+        "tmp_free_bytes_min": 2500000000
+      },
+      "counterpart_ids": [
+        "subcheck.runner_quota_file_kills"
+      ],
+      "marker_pattern": "runner_quota_file_kills NOT RUN:",
+      "historical_seed": false,
+      "required_tools": [
+        "cargo",
+        "rustc",
+        "cc",
+        "python3",
+        "bash"
+      ],
+      "package": "kaban-index",
+      "binary": "runner",
+      "workspace": "root"
+    },
+    {
+      "id": "subcheck.host_registry_is_an_input_of_the_rust_run",
+      "group": "qualification",
+      "parent": "host_registry_is_an_input_of_the_rust_run_on_the_selected_tier",
+      "source": "crates/kaban-index/tests/rust_admission.rs:314",
+      "predicate": {
+        "os": "linux",
+        "namespaces_available": true,
+        "isolation_tier": "namespaces"
+      },
+      "counterpart_ids": [
+        "subcheck.host_registry_is_an_input_of_the_rust_run"
+      ],
+      "marker_pattern": "NOT RUN:\\s*host_registry_is_an_input_of_the_rust_run",
+      "historical_seed": true,
+      "required_tools": [
+        "cargo",
+        "rustc",
+        "cc",
+        "python3",
+        "bash"
+      ],
+      "package": "kaban-index",
+      "binary": "rust_admission",
+      "workspace": "root"
+    },
+    {
+      "id": "subcheck.checkout_cc_on_selected_tier",
+      "group": "qualification",
+      "parent": "checkout_cc_on_path_is_never_the_linker_on_the_selected_tier",
+      "source": "crates/kaban-index/tests/rust_admission.rs:536",
+      "predicate": {
+        "os": "linux",
+        "namespaces_available": true,
+        "isolation_tier": "namespaces"
+      },
+      "counterpart_ids": [
+        "subcheck.checkout_cc_on_selected_tier"
+      ],
+      "marker_pattern": "NOT RUN:\\s*checkout\\ cc\\ on\\ the\\ selected\\ tier",
+      "historical_seed": true,
+      "required_tools": [
+        "cargo",
+        "rustc",
+        "cc",
+        "python3",
+        "bash"
+      ],
+      "package": "kaban-index",
+      "binary": "rust_admission",
+      "workspace": "root"
+    },
+    {
+      "id": "subcheck.linker_outside_usr_bin_is_refused_before_any_probe",
+      "group": "qualification",
+      "parent": "linker_outside_usr_bin_is_refused_before_any_probe",
+      "source": "crates/kaban-index/tests/rust_admission.rs:638",
+      "predicate": {
+        "system_cc_resolvable": true
+      },
+      "counterpart_ids": [
+        "subcheck.linker_outside_usr_bin_is_refused_before_any_probe"
+      ],
+      "marker_pattern": "NOT RUN:\\s*resolvable\\ system\\ compiler",
+      "historical_seed": false,
+      "required_tools": [
+        "cargo",
+        "rustc",
+        "cc",
+        "python3",
+        "bash"
+      ],
+      "package": "kaban-index",
+      "binary": "rust_admission",
+      "workspace": "root"
+    },
+    {
+      "id": "subcheck.linker_helpers_are_admitted_narrowly_and_under_the_same_forbidden_roots",
+      "group": "qualification",
+      "parent": "linker_helpers_are_admitted_narrowly_and_under_the_same_forbidden_roots",
+      "source": "crates/kaban-index/tests/rust_admission.rs:738",
+      "predicate": {
+        "system_cc_resolvable": true
+      },
+      "counterpart_ids": [
+        "subcheck.linker_helpers_are_admitted_narrowly_and_under_the_same_forbidden_roots"
+      ],
+      "marker_pattern": "NOT RUN:\\s*linker\\ helpers",
+      "historical_seed": false,
+      "required_tools": [
+        "cargo",
+        "rustc",
+        "cc",
+        "python3",
+        "bash"
+      ],
+      "package": "kaban-index",
+      "binary": "rust_admission",
+      "workspace": "root"
+    },
+    {
+      "id": "subcheck.linker_helper_directory_is_one_gcc_leaf",
+      "group": "qualification",
+      "parent": "linker_helper_directory_is_one_gcc_leaf",
+      "source": "crates/kaban-index/tests/rust_admission.rs:804",
+      "predicate": {
+        "system_cc_resolvable": true
+      },
+      "counterpart_ids": [
+        "subcheck.linker_helper_directory_is_one_gcc_leaf"
+      ],
+      "marker_pattern": "NOT RUN:\\s*linker\\ helper\\ directory",
+      "historical_seed": false,
+      "required_tools": [
+        "cargo",
+        "rustc",
+        "cc",
+        "python3",
+        "bash"
+      ],
+      "package": "kaban-index",
+      "binary": "rust_admission",
+      "workspace": "root"
+    },
+    {
+      "id": "subcheck.linker_helper_directory_is_one_gcc_leaf.branch-821",
+      "group": "qualification",
+      "parent": "linker_helper_directory_is_one_gcc_leaf",
+      "source": "crates/kaban-index/tests/rust_admission.rs:821",
+      "predicate": {
+        "system_cc_resolvable": true,
+        "usr_lib_os_release_file": true
+      },
+      "counterpart_ids": [
+        "subcheck.linker_helper_directory_is_one_gcc_leaf.branch-821"
+      ],
+      "marker_pattern": "NOT RUN:\\s*helper\\ directly\\ under\\ /usr/lib",
+      "historical_seed": false,
+      "required_tools": [
+        "cargo",
+        "rustc",
+        "cc",
+        "python3",
+        "bash"
+      ],
+      "package": "kaban-index",
+      "binary": "rust_admission",
+      "workspace": "root"
+    },
+    {
+      "id": "subcheck.linker_helper_directory_is_one_gcc_leaf.branch-835",
+      "group": "qualification",
+      "parent": "linker_helper_directory_is_one_gcc_leaf",
+      "source": "crates/kaban-index/tests/rust_admission.rs:835",
+      "predicate": {
+        "system_cc_resolvable": true,
+        "crt1_parent_one_level_below_usr_lib": true
+      },
+      "counterpart_ids": [
+        "subcheck.linker_helper_directory_is_one_gcc_leaf.branch-835"
+      ],
+      "marker_pattern": "NOT RUN:\\s*helper\\ one\\ level\\ below\\ /usr/lib",
+      "historical_seed": false,
+      "required_tools": [
+        "cargo",
+        "rustc",
+        "cc",
+        "python3",
+        "bash"
+      ],
+      "package": "kaban-index",
+      "binary": "rust_admission",
+      "workspace": "root"
+    },
+    {
+      "id": "subcheck.go-module-cache-namespace-comparison",
+      "group": "qualification",
+      "source": "crates/kaban-index/tests/cli.rs:3674",
+      "parent": "go_module_cache_is_an_input_on_every_tier",
+      "predicate": {
+        "os": "linux",
+        "namespaces_available": true,
+        "isolation_tier": "namespaces",
+        "scip_go_reachable": true,
+        "go_version_succeeds": true
+      },
+      "counterpart_ids": [
+        "subcheck.go-module-cache-namespace-comparison"
+      ],
+      "marker_pattern": "go_module_cache_is_an_input_on_every_tier: no namespaces tier on this host; the tier comparison did not run",
+      "historical_seed": false,
+      "literal": "\"go_module_cache_is_an_input_on_every_tier: no namespaces tier on this host; the tier comparison did not run\"",
+      "required_tools": [
+        "cargo",
+        "rustc",
+        "cc",
+        "python3",
+        "bash",
+        "go",
+        "scip-go"
+      ],
+      "package": "kaban-index",
+      "binary": "cli",
+      "workspace": "root"
+    },
+    {
+      "id": "subcheck.rust_real_producer_cli_acceptance.inputs-producer",
+      "group": "qualification",
+      "parent": "rust_real_producer_cli_acceptance",
+      "source": "crates/kaban-index/tests/cli.rs:448",
+      "predicate": {
+        "rust_producer_executable": true,
+        "rust_sysroot_rustc_executable": true
+      },
+      "counterpart_ids": [
+        "subcheck.rust_real_producer_cli_acceptance.inputs-producer"
+      ],
+      "marker_pattern": "NOT RUN:\\s*(?:set KABAN_TEST_RUST_PRODUCER to [^\\n]+|KABAN_TEST_RUST_PRODUCER=[^\\n]+ is not an executable)",
+      "historical_seed": false,
+      "context_required": true,
+      "marker_family": "rust-inputs-producer",
+      "source_sites": [
+        443,
+        448
+      ],
+      "required_tools": [
+        "cargo",
+        "rustc",
+        "cc",
+        "python3",
+        "bash",
+        "rust-producer",
+        "rust-sysroot"
+      ],
+      "package": "kaban-index",
+      "binary": "cli",
+      "workspace": "root"
+    },
+    {
+      "id": "subcheck.rust_real_producer_cli_acceptance.inputs-sysroot",
+      "group": "qualification",
+      "parent": "rust_real_producer_cli_acceptance",
+      "source": "crates/kaban-index/tests/cli.rs:452",
+      "predicate": {
+        "rust_producer_executable": true,
+        "rust_sysroot_rustc_executable": true
+      },
+      "counterpart_ids": [
+        "subcheck.rust_real_producer_cli_acceptance.inputs-sysroot"
+      ],
+      "marker_pattern": "NOT RUN:\\s*(?:set KABAN_TEST_RUST_SYSROOT to [^\\n]+|KABAN_TEST_RUST_SYSROOT=[^\\n]+ is not an executable)",
+      "historical_seed": false,
+      "context_required": true,
+      "marker_family": "rust-inputs-sysroot",
+      "source_sites": [
+        443,
+        452
+      ],
+      "required_tools": [
+        "cargo",
+        "rustc",
+        "cc",
+        "python3",
+        "bash",
+        "rust-producer",
+        "rust-sysroot"
+      ],
+      "package": "kaban-index",
+      "binary": "cli",
+      "workspace": "root"
+    },
+    {
+      "id": "subcheck.rust_real_producer_workspace_on_selected_tier.inputs-producer",
+      "group": "qualification",
+      "parent": "rust_real_producer_workspace_on_selected_tier",
+      "source": "crates/kaban-index/tests/cli.rs:448",
+      "predicate": {
+        "rust_producer_executable": true,
+        "rust_sysroot_rustc_executable": true
+      },
+      "counterpart_ids": [
+        "subcheck.rust_real_producer_workspace_on_selected_tier.inputs-producer"
+      ],
+      "marker_pattern": "NOT RUN:\\s*(?:set KABAN_TEST_RUST_PRODUCER to [^\\n]+|KABAN_TEST_RUST_PRODUCER=[^\\n]+ is not an executable)",
+      "historical_seed": false,
+      "context_required": true,
+      "marker_family": "rust-inputs-producer",
+      "source_sites": [
+        443,
+        448
+      ],
+      "required_tools": [
+        "cargo",
+        "rustc",
+        "cc",
+        "python3",
+        "bash",
+        "rust-producer",
+        "rust-sysroot"
+      ],
+      "package": "kaban-index",
+      "binary": "cli",
+      "workspace": "root"
+    },
+    {
+      "id": "subcheck.rust_real_producer_workspace_on_selected_tier.inputs-sysroot",
+      "group": "qualification",
+      "parent": "rust_real_producer_workspace_on_selected_tier",
+      "source": "crates/kaban-index/tests/cli.rs:452",
+      "predicate": {
+        "rust_producer_executable": true,
+        "rust_sysroot_rustc_executable": true
+      },
+      "counterpart_ids": [
+        "subcheck.rust_real_producer_workspace_on_selected_tier.inputs-sysroot"
+      ],
+      "marker_pattern": "NOT RUN:\\s*(?:set KABAN_TEST_RUST_SYSROOT to [^\\n]+|KABAN_TEST_RUST_SYSROOT=[^\\n]+ is not an executable)",
+      "historical_seed": false,
+      "context_required": true,
+      "marker_family": "rust-inputs-sysroot",
+      "source_sites": [
+        443,
+        452
+      ],
+      "required_tools": [
+        "cargo",
+        "rustc",
+        "cc",
+        "python3",
+        "bash",
+        "rust-producer",
+        "rust-sysroot"
+      ],
+      "package": "kaban-index",
+      "binary": "cli",
+      "workspace": "root"
+    }
+  ],
+  "source_registrations": {},
+  "emitters": [
+    {
+      "source": "crates/kaban/tests/acceptance_north_star.rs",
+      "line": 524,
+      "text_sha256": "a33ea17cd4d6dfd6e78793cab52f66d0a7c9ef2dbf1fb16d27d20a74bd9fc605",
+      "text": "acceptance_north_star_go: fixture-derived (committed go-drivers/index.scip, VERSIONS row 1); scip-go NOT RUN",
+      "parent": "run_go",
+      "informational": true,
+      "subcheck_ids": []
+    },
+    {
+      "source": "crates/kaban/tests/acceptance_north_star.rs",
+      "line": 549,
+      "text_sha256": "f1fb215c3a5b006cbd9540bff641c329db24d73fe22e85277d2f03a193abf3f6",
+      "text": "acceptance_north_star_ts: fixture-derived (committed ts-drivers/index.scip, VERSIONS row 3, no scripted history: one commit of repo/); scip-typescript NOT RUN",
+      "parent": "run_ts",
+      "informational": true,
+      "subcheck_ids": []
+    },
+    {
+      "source": "crates/kaban/tests/acceptance_north_star.rs",
+      "line": 894,
+      "text_sha256": "919fc489cf28a479ae523427cb750133a976abb33a71946825e16c54dc49ac33",
+      "text": "anchor_stale_after_rename: fixture-derived (C3 snapshot = committed index minus MemDriver# rows); scip-go NOT RUN",
+      "parent": "run_rename",
+      "informational": true,
+      "subcheck_ids": []
+    },
+    {
+      "source": "crates/kaban/tests/mcp_code_warm.rs",
+      "line": 143,
+      "text_sha256": "e42da710025ac2d3d8ad4174cb42df8384b7d6c689df88b555cf0739c9e9ffe8",
+      "text": "NOT RUN: KABAN_TEST_GO_REPO or KABAN_TEST_GO_HOME is unset or not a directory",
+      "parent": "first_code_call_after_warm_up_is_under_fifty_ms",
+      "informational": false,
+      "subcheck_ids": [
+        "subcheck.first_code_call_after_warm_up_is_under_fifty_ms"
+      ]
+    },
+    {
+      "source": "crates/kaban/tests/mcp_rust_acceptance.rs",
+      "line": 61,
+      "text_sha256": "bb2cf7e4156a28d4bbf7b188e87418bd57f1cedbeec791f1a5679a09c3737643",
+      "text": "NOT RUN: KABAN_TEST_RUST_PRODUCER is unset or not the installed kaban-rust-scip",
+      "parent": "inputs",
+      "informational": false,
+      "subcheck_ids": [
+        "subcheck.inputs"
+      ]
+    },
+    {
+      "source": "crates/kaban/tests/mcp_rust_acceptance.rs",
+      "line": 67,
+      "text_sha256": "41b330e0ac561f55d30fef4ee16a7af5cade4681082a855c4b75bf604c0158be",
+      "text": "NOT RUN: KABAN_TEST_RUST_SYSROOT is unset or not the real 1.99.0 toolchain root",
+      "parent": "inputs",
+      "informational": false,
+      "subcheck_ids": [
+        "subcheck.inputs.branch-67"
+      ]
+    },
+    {
+      "source": "crates/kaban/tests/mcp_rust_acceptance.rs",
+      "line": 77,
+      "text_sha256": "a461f0340e53de17d7dbf3c5d8c810ae67e23499d9373afd6fc463a780dc9870",
+      "text": "NOT RUN: no kaban-index binary at {} (build it, or set KABAN_TEST_INDEX_BIN)",
+      "parent": "inputs",
+      "informational": false,
+      "subcheck_ids": [
+        "subcheck.inputs.branch-77"
+      ]
+    },
+    {
+      "source": "crates/kaban-index/tests/cli.rs",
+      "line": 443,
+      "text_sha256": "a5c7183b017fc3ac68c6bcb80dbb61aa06bc77e86b5025e093dab1befda40152",
+      "text": "NOT RUN: {var}={} is not an executable",
+      "parent": "rust_real_inputs",
+      "informational": false,
+      "subcheck_ids": [
+        "subcheck.rust_real_producer_cli_acceptance.inputs-producer",
+        "subcheck.rust_real_producer_workspace_on_selected_tier.inputs-producer",
+        "subcheck.rust_real_producer_cli_acceptance.inputs-sysroot",
+        "subcheck.rust_real_producer_workspace_on_selected_tier.inputs-sysroot"
+      ],
+      "variants": [
+        {
+          "text": "NOT RUN: KABAN_TEST_RUST_PRODUCER=/example/tool is not an executable",
+          "subcheck_ids": [
+            "subcheck.rust_real_producer_cli_acceptance.inputs-producer",
+            "subcheck.rust_real_producer_workspace_on_selected_tier.inputs-producer"
+          ]
+        },
+        {
+          "text": "NOT RUN: KABAN_TEST_RUST_SYSROOT=/example/tool is not an executable",
+          "subcheck_ids": [
+            "subcheck.rust_real_producer_cli_acceptance.inputs-sysroot",
+            "subcheck.rust_real_producer_workspace_on_selected_tier.inputs-sysroot"
+          ]
+        }
+      ]
+    },
+    {
+      "source": "crates/kaban-index/tests/cli.rs",
+      "line": 448,
+      "text_sha256": "fd537ff5322ff740774de0d60675e67275b7c9b0022ff4e45874f0b58b5fbc8d",
+      "text": "NOT RUN: set KABAN_TEST_RUST_PRODUCER to the installed kaban-rust-scip",
+      "parent": "rust_real_inputs",
+      "informational": false,
+      "subcheck_ids": [
+        "subcheck.rust_real_producer_cli_acceptance.inputs-producer",
+        "subcheck.rust_real_producer_workspace_on_selected_tier.inputs-producer"
+      ]
+    },
+    {
+      "source": "crates/kaban-index/tests/cli.rs",
+      "line": 452,
+      "text_sha256": "1028556ed1656c8c7f837b9eba86953027c8f63c6898abf4394df763b8e73b74",
+      "text": "NOT RUN: set KABAN_TEST_RUST_SYSROOT to the real 1.99.0 toolchain root",
+      "parent": "rust_real_inputs",
+      "informational": false,
+      "subcheck_ids": [
+        "subcheck.rust_real_producer_cli_acceptance.inputs-sysroot",
+        "subcheck.rust_real_producer_workspace_on_selected_tier.inputs-sysroot"
+      ]
+    },
+    {
+      "source": "crates/kaban-index/tests/cli.rs",
+      "line": 1158,
+      "text_sha256": "1f58af5a5546391ef26be0d8036a23aba8b2971c4ab8ac022d279a76ce7a27c8",
+      "text": "NOT RUN: required-unavailable Rust probes: isolating tier available",
+      "parent": "rust_required_unavailable_never_runs_native_producer_probes",
+      "informational": false,
+      "subcheck_ids": [
+        "subcheck.required_unavailable_rust_probes"
+      ]
+    },
+    {
+      "source": "crates/kaban-index/tests/cli.rs",
+      "line": 1226,
+      "text_sha256": "baba39615738e8be497ad05142030a9c08d02800d6f5b1c67aca404a5bdda541",
+      "text": "NOT RUN: Rust namespace probe resources: namespaces unavailable",
+      "parent": "rust_probes_refuse_unavailable_isolation_and_use_namespace_resources",
+      "informational": false,
+      "subcheck_ids": [
+        "subcheck.rust_namespace_probe_resources"
+      ]
+    },
+    {
+      "source": "crates/kaban-index/tests/cli.rs",
+      "line": 2049,
+      "text_sha256": "5fcaea1824027d97d86fb568c6df0693630680184fc478215c4f0221c21bbb8b",
+      "text": "NOT RUN: cli_index_required_without_isolating_tier_is_exit_8: the {selected} tier is available on this host; exit 8 is pinned by SelectError::exit_code and the CG4.4 negative path",
+      "parent": "cli_index_required_without_isolating_tier_is_exit_8",
+      "informational": false,
+      "subcheck_ids": [
+        "subcheck.cli_index_required_without_isolating_tier_is_exit_8"
+      ]
+    },
+    {
+      "source": "crates/kaban-index/tests/cli.rs",
+      "line": 3320,
+      "text_sha256": "242d55f78c5855bbfc8c0f44376305bd6eb55628d83bf090d4186304a7e05163",
+      "text": "NOT RUN: index_go_drivers_real: no scip-go reachable (SCIP_GO, ~/go/bin/scip-go, PATH)",
+      "parent": "index_go_drivers_real",
+      "informational": false,
+      "subcheck_ids": [
+        "subcheck.index_go_drivers_real"
+      ]
+    },
+    {
+      "source": "crates/kaban-index/tests/cli.rs",
+      "line": 3614,
+      "text_sha256": "3ed26c8103c2bb15d9dc802cef77f0aaf9022242e84a00b02c11c789265c5805",
+      "text": "NOT RUN: go_module_cache_is_an_input_on_every_tier: no scip-go reachable",
+      "parent": "go_module_cache_is_an_input_on_every_tier",
+      "informational": false,
+      "subcheck_ids": [
+        "subcheck.go_module_cache_is_an_input_on_every_tier"
+      ]
+    },
+    {
+      "source": "crates/kaban-index/tests/cli.rs",
+      "line": 3620,
+      "text_sha256": "016f7bebefe58bbc987e982fa6cb6cefe9b08b210fe0afdfc15d073f5f6a373d",
+      "text": "NOT RUN: go_module_cache_is_an_input_on_every_tier: no go on this host",
+      "parent": "go_module_cache_is_an_input_on_every_tier",
+      "informational": false,
+      "subcheck_ids": [
+        "subcheck.go_module_cache_is_an_input_on_every_tier.branch-3620"
+      ]
+    },
+    {
+      "source": "crates/kaban-index/tests/cli.rs",
+      "line": 3755,
+      "text_sha256": "29b13871d7dabc3b8be3ebc87634cc34ea194b4f9f27ba777d348c591835a6ea",
+      "text": "NOT RUN: go_directive_above_the_toolchain_is_refused_in_plain_words: no go",
+      "parent": "go_directive_above_the_toolchain_is_refused_in_plain_words",
+      "informational": false,
+      "subcheck_ids": [
+        "subcheck.go_directive_above_the_toolchain_is_refused_in_plain_words"
+      ]
+    },
+    {
+      "source": "crates/kaban-index/tests/cli.rs",
+      "line": 3894,
+      "text_sha256": "c25c8c6646415966f8db35ab66ade465b780080a06138d6798c5fa166ba206bd",
+      "text": "NOT RUN: module_cache_toolchain_is_admitted_for_a_newer_directive: no go",
+      "parent": "module_cache_toolchain_is_admitted_for_a_newer_directive",
+      "informational": false,
+      "subcheck_ids": [
+        "subcheck.module_cache_toolchain_is_admitted_for_a_newer_directive"
+      ]
+    },
+    {
+      "source": "crates/kaban-index/tests/cli.rs",
+      "line": 4041,
+      "text_sha256": "8477d75cd86690c7203d71739619345744def7e381001bbeb88a0272b3031fdb",
+      "text": "NOT RUN: an_unreadable_go_mod_is_said_in_plain_words: no go",
+      "parent": "an_unreadable_go_mod_is_said_in_plain_words",
+      "informational": false,
+      "subcheck_ids": [
+        "subcheck.an_unreadable_go_mod_is_said_in_plain_words"
+      ]
+    },
+    {
+      "source": "crates/kaban-index/tests/cli.rs",
+      "line": 4111,
+      "text_sha256": "923f847a64048c73fb9331b6dbf0926d037518cfa7a139a2ff6988c3458b472f",
+      "text": "NOT RUN: a_cached_go_replaced_between_the_two_runs_refuses_the_second: no go",
+      "parent": "a_cached_go_replaced_between_the_two_runs_refuses_the_second",
+      "informational": false,
+      "subcheck_ids": [
+        "subcheck.a_cached_go_replaced_between_the_two_runs_refuses_the_second"
+      ]
+    },
+    {
+      "source": "crates/kaban-index/tests/cli.rs",
+      "line": 4189,
+      "text_sha256": "3bcd93b6b7438c4d185bd404872be7363a7c99c0adc10aecca521f73eb35dc85",
+      "text": "NOT RUN: a_cached_toolchain_with_a_helper_linked_into_the_checkout_is_refused: no go",
+      "parent": "a_cached_toolchain_with_a_helper_linked_into_the_checkout_is_refused",
+      "informational": false,
+      "subcheck_ids": [
+        "subcheck.a_cached_toolchain_with_a_helper_linked_into_the_checkout_is_refused"
+      ]
+    },
+    {
+      "source": "crates/kaban-index/tests/cli.rs",
+      "line": 4361,
+      "text_sha256": "c7594ba0772985e1f64063722d79cfd7242a2aef5b7b595827acc3a6f843107c",
+      "text": "NOT RUN: partial_never_masks_an_isolation_refusal: the namespaces tier is unavailable on this host",
+      "parent": "partial_never_masks_an_isolation_refusal",
+      "informational": false,
+      "subcheck_ids": [
+        "subcheck.partial_never_masks_an_isolation_refusal"
+      ]
+    },
+    {
+      "source": "crates/kaban-index/tests/cli.rs",
+      "line": 4646,
+      "text_sha256": "4597e445cf89bf88f76a7159c62b5f59da32ed701122e6579823ddb6c6de17f8",
+      "text": "NOT RUN: toolchain_roots_are_narrow (view half): the namespaces tier is unavailable on this host",
+      "parent": "toolchain_roots_are_narrow_and_repository_local_tools_are_refused",
+      "informational": false,
+      "subcheck_ids": [
+        "subcheck.toolchain_roots_view_half"
+      ]
+    },
+    {
+      "source": "crates/kaban-index/tests/cli.rs",
+      "line": 4817,
+      "text_sha256": "d68406b5572daac6a0aceaa42436fcf3f48a1722e866ea4d1151531c9e3f877f",
+      "text": "NOT RUN: doctor_probes_only_admitted_tools_inside_isolation (inside half): no isolating tier",
+      "parent": "doctor_probes_only_admitted_tools_inside_isolation",
+      "informational": false,
+      "subcheck_ids": [
+        "subcheck.doctor_inside_half"
+      ]
+    },
+    {
+      "source": "crates/kaban-index/tests/cli.rs",
+      "line": 5123,
+      "text_sha256": "581b677dd2482131e8e0f9344777e50e349f239928cba6911d8cbbe7923b8372",
+      "text": "NOT RUN: cgo_defaults_to_disabled_under_namespaces_and_is_reported: the namespaces tier is unavailable on this host",
+      "parent": "cgo_defaults_to_disabled_under_namespaces_and_is_reported",
+      "informational": false,
+      "subcheck_ids": [
+        "subcheck.cgo_defaults_to_disabled_under_namespaces_and_is_reported"
+      ]
+    },
+    {
+      "source": "crates/kaban-index/tests/namespaces.rs",
+      "line": 98,
+      "text_sha256": "93f26923bc26b8a0083a3340d0222b2fd2d0c1061aba3f6cdad0ff15960a559a",
+      "text": "NOT RUN: {test}: the namespaces tier is unavailable on this host ({})",
+      "parent": "available",
+      "informational": false,
+      "subcheck_ids": [
+        "subcheck.ns_checkout_is_readonly",
+        "subcheck.ns_view_only_listed_paths",
+        "subcheck.ns_usr_include_is_readonly",
+        "subcheck.ns_helper_single_invocation",
+        "subcheck.ns_helper_closes_wrapper_handle",
+        "subcheck.ns_tcp_connect_unreachable",
+        "subcheck.ns_selfcheck_mismatch_refuses",
+        "subcheck.caches_shared_ro_in_namespaces",
+        "subcheck.ns_indexer_succeeds_with_ro_cache",
+        "subcheck.caches_dedicated_when_configured",
+        "subcheck.ns_indexer_cannot_remount_or_mount_after_privilege_drop"
+      ]
+    },
+    {
+      "source": "crates/kaban-index/tests/namespaces.rs",
+      "line": 302,
+      "text_sha256": "e176024703607fd0e672273f2c0624d1d0128e027098c99df519e82ba3873b76",
+      "text": "NOT RUN: ns_usr_include_is_readonly: no /usr/include on this host",
+      "parent": "ns_usr_include_is_readonly",
+      "informational": false,
+      "subcheck_ids": [
+        "subcheck.ns_usr_include_is_readonly.branch-302"
+      ]
+    },
+    {
+      "source": "crates/kaban-index/tests/runner.rs",
+      "line": 570,
+      "text_sha256": "6b8044add01bd3fd1d02b01ea76941a7002b051fe0d3720feac3b672b85560d6",
+      "text": "runner_quota_file_kills NOT RUN: /tmp has {avail} bytes available",
+      "parent": "runner_quota_file_kills",
+      "informational": false,
+      "subcheck_ids": [
+        "subcheck.runner_quota_file_kills"
+      ]
+    },
+    {
+      "source": "crates/kaban-index/tests/rust_admission.rs",
+      "line": 314,
+      "text_sha256": "8c0bc77f626e121196d87385b924585f7166268f2f15e8f2717fe364d66e1652",
+      "text": "NOT RUN: host_registry_is_an_input_of_the_rust_run: no isolating tier here",
+      "parent": "host_registry_is_an_input_of_the_rust_run",
+      "informational": false,
+      "subcheck_ids": [
+        "subcheck.host_registry_is_an_input_of_the_rust_run"
+      ]
+    },
+    {
+      "source": "crates/kaban-index/tests/rust_admission.rs",
+      "line": 536,
+      "text_sha256": "1280fb96528160bbe64e3be58c493409b5f48b93832acf391a438dd67ec9f173",
+      "text": "NOT RUN: checkout cc on the selected tier: namespaces unavailable",
+      "parent": "checkout_cc_on_path_is_never_the_linker_on_the_selected_tier",
+      "informational": false,
+      "subcheck_ids": [
+        "subcheck.checkout_cc_on_selected_tier"
+      ]
+    },
+    {
+      "source": "crates/kaban-index/tests/rust_admission.rs",
+      "line": 638,
+      "text_sha256": "a2f2d71a3c526ba28e565ff7ac28a1ae47f90a3205988f5caf5fa23b2f8d5c76",
+      "text": "NOT RUN: resolvable system compiler: /usr/bin/cc absent",
+      "parent": "linker_outside_usr_bin_is_refused_before_any_probe",
+      "informational": false,
+      "subcheck_ids": [
+        "subcheck.linker_outside_usr_bin_is_refused_before_any_probe"
+      ]
+    },
+    {
+      "source": "crates/kaban-index/tests/rust_admission.rs",
+      "line": 738,
+      "text_sha256": "b6c9dda60881f419a4ef9e2ec11ae30f35d57adc6624f4896d6f448fa6d034a0",
+      "text": "NOT RUN: linker helpers: /usr/bin/cc absent",
+      "parent": "linker_helpers_are_admitted_narrowly_and_under_the_same_forbidden_roots",
+      "informational": false,
+      "subcheck_ids": [
+        "subcheck.linker_helpers_are_admitted_narrowly_and_under_the_same_forbidden_roots"
+      ]
+    },
+    {
+      "source": "crates/kaban-index/tests/rust_admission.rs",
+      "line": 804,
+      "text_sha256": "cd560bf1d7ebdb7a9638b5bf0bab06397196c382113350a85a88ebded098048d",
+      "text": "NOT RUN: linker helper directory: /usr/bin/cc absent",
+      "parent": "linker_helper_directory_is_one_gcc_leaf",
+      "informational": false,
+      "subcheck_ids": [
+        "subcheck.linker_helper_directory_is_one_gcc_leaf"
+      ]
+    },
+    {
+      "source": "crates/kaban-index/tests/rust_admission.rs",
+      "line": 821,
+      "text_sha256": "df71ab8d9487e06191f69e3575890594e740e678a826e3b97adc70dddf8cfd7b",
+      "text": "NOT RUN: helper directly under /usr/lib: /usr/lib/os-release absent",
+      "parent": "linker_helper_directory_is_one_gcc_leaf",
+      "informational": false,
+      "subcheck_ids": [
+        "subcheck.linker_helper_directory_is_one_gcc_leaf.branch-821"
+      ]
+    },
+    {
+      "source": "crates/kaban-index/tests/rust_admission.rs",
+      "line": 835,
+      "text_sha256": "a655ca5aa89395befce7c7632f1b4973022e0ad88daf917f34444559a03eff8c",
+      "text": "NOT RUN: helper one level below /usr/lib: crt1.o at {}",
+      "parent": "linker_helper_directory_is_one_gcc_leaf",
+      "informational": false,
+      "subcheck_ids": [
+        "subcheck.linker_helper_directory_is_one_gcc_leaf.branch-835"
+      ]
+    }
+  ],
+  "unmarked_subchecks": [
+    {
+      "id": "subcheck.go-module-cache-namespace-comparison",
+      "group": "qualification",
+      "source": "crates/kaban-index/tests/cli.rs:3674",
+      "parent": "go_module_cache_is_an_input_on_every_tier",
+      "predicate": {
+        "os": "linux",
+        "namespaces_available": true,
+        "isolation_tier": "namespaces",
+        "scip_go_reachable": true,
+        "go_version_succeeds": true
+      },
+      "counterpart_ids": [
+        "subcheck.go-module-cache-namespace-comparison"
+      ],
+      "marker_pattern": "go_module_cache_is_an_input_on_every_tier: no namespaces tier on this host; the tier comparison did not run",
+      "historical_seed": false,
+      "literal": "\"go_module_cache_is_an_input_on_every_tier: no namespaces tier on this host; the tier comparison did not run\"",
+      "required_tools": [
+        "cargo",
+        "rustc",
+        "cc",
+        "python3",
+        "bash",
+        "go",
+        "scip-go"
+      ],
+      "package": "kaban-index",
+      "binary": "cli",
+      "workspace": "root"
+    }
+  ],
+  "doctests": {
+    "kaban-api": "root",
+    "kaban-codegraph": "root",
+    "kaban-core": "root",
+    "kaban-index": "root",
+    "kaban-index-tantivy": "root",
+    "kaban-ingest": "root",
+    "kaban-policy": "root",
+    "kaban-store-sqlite": "root",
+    "kaban-ingest+pdf": "root",
+    "kaban-rust-scip": "producer"
+  },
+  "scope_rules": {
+    "kaban-core": "unit",
+    "kaban-policy": "unit",
+    "kaban-store-sqlite": "component",
+    "kaban-ingest": "component",
+    "kaban-index-tantivy": "component",
+    "kaban-codegraph": "component",
+    "kaban-api": "integration",
+    "kaban-index": "integration",
+    "kaban": "end-to-end",
+    "kaban-rust-scip": "component"
+  },
+  "feature_matrix": {
+    "kaban": {
+      "default": [
+        "ingest",
+        "code-graph",
+        "text-index-tantivy"
+      ],
+      "optional": [
+        "bench"
+      ],
+      "mandatory_storage": "Tantivy, including no-default builds"
+    },
+    "kaban-ingest": {
+      "default": [
+        "md"
+      ],
+      "optional": [
+        "pdf",
+        "md-splitter"
+      ],
+      "empty_deferred": [
+        "pdf-minimal",
+        "html",
+        "sheets",
+        "docx",
+        "watch"
+      ],
+      "required_features": {
+        "gen_pdf_fixtures": [
+          "pdf"
+        ],
+        "golden_pdf": [
+          "pdf"
+        ],
+        "bench_d9": [
+          "pdf"
+        ],
+        "chunk": [
+          "md"
+        ],
+        "canary": [
+          "md"
+        ],
+        "derived_sanitization": [
+          "md"
+        ],
+        "extract": [
+          "md"
+        ]
+      }
+    },
+    "test_only": {
+      "kaban-codegraph": [
+        "instrumented",
+        "test-support"
+      ],
+      "kaban-core": [
+        "test-fake"
+      ],
+      "kaban-store-sqlite": [
+        "text-index-override"
+      ]
+    }
+  },
+  "manual_helpers": [
+    {
+      "source": "scripts/hooks-live/test-capture.sh",
+      "owner": "hooks",
+      "profiles": [
+        "manual-hook-integration"
+      ],
+      "reason": "manual live-editor integration; not Python unittest or ordinary Rust suite"
+    },
+    {
+      "source": "scripts/hooks-live/test-out-fence.sh",
+      "owner": "hooks",
+      "profiles": [
+        "manual-hook-integration"
+      ],
+      "reason": "manual live-editor integration; not Python unittest or ordinary Rust suite"
+    },
+    {
+      "source": "scripts/hooks-live/test-pi-extension.mjs",
+      "owner": "hooks",
+      "profiles": [
+        "manual-hook-integration"
+      ],
+      "reason": "manual live-editor integration; not Python unittest or ordinary Rust suite"
+    },
+    {
+      "source": "scripts/hooks-live/test-pi-extension.sh",
+      "owner": "hooks",
+      "profiles": [
+        "manual-hook-integration"
+      ],
+      "reason": "manual live-editor integration; not Python unittest or ordinary Rust suite"
+    },
+    {
+      "source": "scripts/hooks-live/test-stop-sync.sh",
+      "owner": "hooks",
+      "profiles": [
+        "manual-hook-integration"
+      ],
+      "reason": "manual live-editor integration; not Python unittest or ordinary Rust suite"
+    }
+  ],
+  "ignored_rules": {
+    "rust_actual_cli_publication_query": {
+      "purpose": "real-producer",
+      "owner": "qualification",
+      "profiles": [
+        "qualification",
+        "release"
+      ],
+      "explanation": "real-producer; ignore does not itself authorize execution",
+      "mutating": false
+    },
+    "rust_real_producer_cli_acceptance": {
+      "purpose": "real-producer",
+      "owner": "qualification",
+      "profiles": [
+        "qualification",
+        "release"
+      ],
+      "explanation": "real-producer; ignore does not itself authorize execution",
+      "mutating": false
+    },
+    "rust_real_producer_workspace_on_selected_tier": {
+      "purpose": "real-producer",
+      "owner": "qualification",
+      "profiles": [
+        "qualification",
+        "release"
+      ],
+      "explanation": "real-producer; ignore does not itself authorize execution",
+      "mutating": false
+    },
+    "rust_actual_producer_runner_publication_query": {
+      "purpose": "real-producer",
+      "owner": "qualification",
+      "profiles": [
+        "qualification",
+        "release"
+      ],
+      "explanation": "real-producer; ignore does not itself authorize execution",
+      "mutating": false
+    },
+    "rust_snapshot_public_queries_through_the_mcp_server": {
+      "purpose": "real-producer",
+      "owner": "qualification",
+      "profiles": [
+        "qualification",
+        "release"
+      ],
+      "explanation": "real-producer; ignore does not itself authorize execution",
+      "mutating": false
+    },
+    "a_shadow_backend_first_on_the_child_path_never_executes": {
+      "purpose": "real-producer",
+      "owner": "qualification",
+      "profiles": [
+        "qualification",
+        "release"
+      ],
+      "explanation": "real-producer; ignore does not itself authorize execution",
+      "mutating": false
+    },
+    "first_code_call_after_warm_up_is_under_fifty_ms": {
+      "purpose": "performance",
+      "owner": "qualification",
+      "profiles": [
+        "qualification",
+        "release"
+      ],
+      "explanation": "performance; ignore does not itself authorize execution",
+      "mutating": false
+    },
+    "multi_process_eight_writers_and_three_lease_contenders_share_one_database": {
+      "purpose": "process",
+      "owner": "qualification",
+      "profiles": [
+        "qualification",
+        "release"
+      ],
+      "explanation": "process; ignore does not itself authorize execution",
+      "mutating": false
+    },
+    "multi_process_two_processes_share_one_database_and_a_lone_cli_writer_progresses": {
+      "purpose": "process",
+      "owner": "qualification",
+      "profiles": [
+        "qualification",
+        "release"
+      ],
+      "explanation": "process; ignore does not itself authorize execution",
+      "mutating": false
+    },
+    "multi_process_tantivy_mode_b_polls_takes_over_and_blocks_on_a_stopped_holder": {
+      "purpose": "process",
+      "owner": "qualification",
+      "profiles": [
+        "qualification",
+        "release"
+      ],
+      "explanation": "process; ignore does not itself authorize execution",
+      "mutating": false
+    },
+    "multi_process_eight_syncs_race_a_tombstone_against_live_content": {
+      "purpose": "process",
+      "owner": "qualification",
+      "profiles": [
+        "qualification",
+        "release"
+      ],
+      "explanation": "process; ignore does not itself authorize execution",
+      "mutating": false
+    },
+    "multi_process_attach_eight_readers_share_one_store_and_snapshot": {
+      "purpose": "process",
+      "owner": "qualification",
+      "profiles": [
+        "qualification",
+        "release"
+      ],
+      "explanation": "process; ignore does not itself authorize execution",
+      "mutating": false
+    },
+    "multi_process_stopped_holder_blocks_publication_until_it_exits": {
+      "purpose": "process",
+      "owner": "qualification",
+      "profiles": [
+        "qualification",
+        "release"
+      ],
+      "explanation": "process; ignore does not itself authorize execution",
+      "mutating": false
+    },
+    "one_thousand_records_through_ontology_structured_claim_gazetteer_and_er": {
+      "purpose": "scale",
+      "owner": "qualification",
+      "profiles": [
+        "qualification",
+        "release"
+      ],
+      "explanation": "scale; ignore does not itself authorize execution",
+      "mutating": false
+    },
+    "one_thousand_records_across_two_ontologies_and_six_hundred_discovered_labels": {
+      "purpose": "scale",
+      "owner": "qualification",
+      "profiles": [
+        "qualification",
+        "release"
+      ],
+      "explanation": "scale; ignore does not itself authorize execution",
+      "mutating": false
+    },
+    "one_thousand_records_five_thousand_assertions_and_two_hundred_er_pairs": {
+      "purpose": "scale",
+      "owner": "qualification",
+      "profiles": [
+        "qualification",
+        "release"
+      ],
+      "explanation": "scale; ignore does not itself authorize execution",
+      "mutating": false
+    },
+    "tool_code_tests_for_reference_form_ts_drivers": {
+      "purpose": "deferred-fixture",
+      "owner": "qualification",
+      "profiles": [
+        "qualification",
+        "release"
+      ],
+      "explanation": "deferred-fixture; ignore does not itself authorize execution",
+      "mutating": false
+    },
+    "regen_goldens": {
+      "purpose": "maintenance",
+      "owner": "maintenance",
+      "profiles": [
+        "explicit-manual"
+      ],
+      "explanation": "maintenance; ignore does not itself authorize execution",
+      "mutating": true
+    },
+    "regen_synthetic_fixtures": {
+      "purpose": "maintenance",
+      "owner": "maintenance",
+      "profiles": [
+        "explicit-manual"
+      ],
+      "explanation": "maintenance; ignore does not itself authorize execution",
+      "mutating": true
+    },
+    "train_dictionary": {
+      "purpose": "maintenance",
+      "owner": "maintenance",
+      "profiles": [
+        "explicit-manual"
+      ],
+      "explanation": "maintenance; ignore does not itself authorize execution",
+      "mutating": true
+    },
+    "d9_campaign_small_warm_and_large_corpora_on_the_campaign_binary": {
+      "purpose": "explicit-benchmark",
+      "owner": "explicit-benchmark",
+      "profiles": [
+        "explicit-manual"
+      ],
+      "explanation": "explicit-benchmark; ignore does not itself authorize execution",
+      "mutating": false
+    },
+    "pack_holder_role": {
+      "purpose": "parent-exercised-child-role",
+      "owner": "parent-exercised-child-role",
+      "profiles": [
+        "ordinary-parent-test"
+      ],
+      "explanation": "parent-exercised-child-role; ignore does not itself authorize execution",
+      "mutating": false
+    },
+    "search_barrier_holder_role": {
+      "purpose": "parent-exercised-child-role",
+      "owner": "parent-exercised-child-role",
+      "profiles": [
+        "ordinary-parent-test"
+      ],
+      "explanation": "parent-exercised-child-role; ignore does not itself authorize execution",
+      "mutating": false
+    },
+    "a_handle_child_cleans_an_inherited_high_descriptor": {
+      "purpose": "parent-exercised-child-role",
+      "owner": "parent-exercised-child-role",
+      "profiles": [
+        "ordinary-parent-test"
+      ],
+      "explanation": "parent-exercised-child-role; ignore does not itself authorize execution",
+      "mutating": false
+    },
+    "a_handle_child_in_a_clean_process_inherits_exactly_the_standard_descriptors": {
+      "purpose": "parent-exercised-child-role",
+      "owner": "parent-exercised-child-role",
+      "profiles": [
+        "ordinary-parent-test"
+      ],
+      "explanation": "parent-exercised-child-role; ignore does not itself authorize execution",
+      "mutating": false
+    },
+    "opener_role": {
+      "purpose": "parent-exercised-child-role",
+      "owner": "parent-exercised-child-role",
+      "profiles": [
+        "ordinary-parent-test"
+      ],
+      "explanation": "parent-exercised-child-role; ignore does not itself authorize execution",
+      "mutating": false
+    },
+    "multi_process_reader_role": {
+      "purpose": "parent-exercised-child-role",
+      "owner": "parent-exercised-child-role",
+      "profiles": [
+        "ordinary-parent-test"
+      ],
+      "explanation": "parent-exercised-child-role; ignore does not itself authorize execution",
+      "mutating": false
+    },
+    "multi_process_holder_role": {
+      "purpose": "parent-exercised-child-role",
+      "owner": "parent-exercised-child-role",
+      "profiles": [
+        "ordinary-parent-test"
+      ],
+      "explanation": "parent-exercised-child-role; ignore does not itself authorize execution",
+      "mutating": false
+    }
+  },
+  "marker_occurrences": [
+    {
+      "source": "crates/kaban/tests/acceptance_north_star.rs",
+      "line": 10,
+      "sha256": "d249dd5b57557add900c4a3ba14079ddcb7e87bc84dd8627c1665023a9048a39",
+      "classification": "source-comment"
+    },
+    {
+      "source": "crates/kaban/tests/acceptance_north_star.rs",
+      "line": 25,
+      "sha256": "7a94f596ca779dcf465b862f4c53c43de2c7487a369e6d57e53d562cd6c2db5a",
+      "classification": "source-comment"
+    },
+    {
+      "source": "crates/kaban/tests/acceptance_north_star.rs",
+      "line": 524,
+      "sha256": "bafdf5163b86b619c5b5e93bf74c9bdde7d489b46d1de90b808d8c0381f60e58",
+      "classification": "informational"
+    },
+    {
+      "source": "crates/kaban/tests/acceptance_north_star.rs",
+      "line": 549,
+      "sha256": "77d80163189f08d69a46034780c285419bd570a5ea1702589255ab8368e6a142",
+      "classification": "informational"
+    },
+    {
+      "source": "crates/kaban/tests/acceptance_north_star.rs",
+      "line": 894,
+      "sha256": "2437a911deef8e946047b009cbaa8e04af077c4b969395802e34d6301cdec9d4",
+      "classification": "informational"
+    },
+    {
+      "source": "crates/kaban/tests/mcp_code_warm.rs",
+      "line": 14,
+      "sha256": "0cf3478c0133bc21694ae87048c5e2f31a17bb17be9ef8f0c68cb23f9fbdf408",
+      "classification": "source-comment"
+    },
+    {
+      "source": "crates/kaban/tests/mcp_code_warm.rs",
+      "line": 143,
+      "sha256": "461d16c37bd3ab5998ead9a0c6391c5b2a78fddd457eefdcdb6bc144e2f0f0ea",
+      "classification": "mandatory"
+    },
+    {
+      "source": "crates/kaban/tests/mcp_rust_acceptance.rs",
+      "line": 5,
+      "sha256": "041f6fa27439cc13c5f9be878832d2f4cd08482aa50b4a000187a60917e2419f",
+      "classification": "source-comment"
+    },
+    {
+      "source": "crates/kaban/tests/mcp_rust_acceptance.rs",
+      "line": 19,
+      "sha256": "d78069e0cf887b73057956de8a2060aa6f38fe534ab94908557bf331dd4dc9f5",
+      "classification": "source-comment"
+    },
+    {
+      "source": "crates/kaban/tests/mcp_rust_acceptance.rs",
+      "line": 61,
+      "sha256": "a6e06c5f3f04d98cca660b2b3d44635c3bfcfe57c19ca46abd7e9051f0cada45",
+      "classification": "mandatory"
+    },
+    {
+      "source": "crates/kaban/tests/mcp_rust_acceptance.rs",
+      "line": 67,
+      "sha256": "cb45f71df716d1d590e121a731bc17a4610651074b346df1e4e0a8d839be92ae",
+      "classification": "mandatory"
+    },
+    {
+      "source": "crates/kaban/tests/mcp_rust_acceptance.rs",
+      "line": 77,
+      "sha256": "130d10cb2f19d2f115c28cb28b629b6bf7cdd7a2f3db49d29096169417d70ee7",
+      "classification": "mandatory"
+    },
+    {
+      "source": "crates/kaban-index/tests/cli.rs",
+      "line": 11,
+      "sha256": "ee36dd844cb9ead1aa693b57c84ba5cf31fae19e11bd6f4c802c7ecf1daedd51",
+      "classification": "source-comment"
+    },
+    {
+      "source": "crates/kaban-index/tests/cli.rs",
+      "line": 14,
+      "sha256": "5c9fcd3bb3e8afb38323cec32d574daac9104b457b04e08441a56fab40aaeb16",
+      "classification": "source-comment"
+    },
+    {
+      "source": "crates/kaban-index/tests/cli.rs",
+      "line": 430,
+      "sha256": "edf3a4ae98564e70afa0ff1c2062a7aec7c04c875c59603e0602e67c0dcb1b55",
+      "classification": "source-comment"
+    },
+    {
+      "source": "crates/kaban-index/tests/cli.rs",
+      "line": 443,
+      "sha256": "66c33c01617abaa2d344b843d7e1ca312d8c4f335d56b0cd965a225a146ce0a3",
+      "classification": "mandatory"
+    },
+    {
+      "source": "crates/kaban-index/tests/cli.rs",
+      "line": 448,
+      "sha256": "abb0231dceb765e981748814765109e562d1323f2cff6b18d3440c1a80ccda9b",
+      "classification": "mandatory"
+    },
+    {
+      "source": "crates/kaban-index/tests/cli.rs",
+      "line": 452,
+      "sha256": "2a001a9dc2b87152928faee2634b8b8e84c1f1ba1b6a6c7dbe003f6fe8792e96",
+      "classification": "mandatory"
+    },
+    {
+      "source": "crates/kaban-index/tests/cli.rs",
+      "line": 1158,
+      "sha256": "9ad12a2ed1a9233f059b8a8d177c30efc45a8c0cc81255942cd8e96e30cf8b97",
+      "classification": "mandatory"
+    },
+    {
+      "source": "crates/kaban-index/tests/cli.rs",
+      "line": 1226,
+      "sha256": "b32d5938dc4254dc9acc3211dae6eb1070e517f0bf1682885b70bbe5d3e28399",
+      "classification": "mandatory"
+    },
+    {
+      "source": "crates/kaban-index/tests/cli.rs",
+      "line": 2049,
+      "sha256": "f24603f57c6845faccaa1da0b961236b7acfb6e3fd53db0db2134f72342cb93f",
+      "classification": "mandatory"
+    },
+    {
+      "source": "crates/kaban-index/tests/cli.rs",
+      "line": 3320,
+      "sha256": "1d25e418268dffbb1e52312c14cc676ab7edb8b4457a63bfa6f416c6e808adb3",
+      "classification": "mandatory"
+    },
+    {
+      "source": "crates/kaban-index/tests/cli.rs",
+      "line": 3614,
+      "sha256": "0cdaabc42488b26f2977f054e5f823731b2758938cadfc76341578518c3af90a",
+      "classification": "mandatory"
+    },
+    {
+      "source": "crates/kaban-index/tests/cli.rs",
+      "line": 3620,
+      "sha256": "75bedb0f662d89ed93f48e7c17e7a249ed3186a88009b3b6c7f5160f08c76e33",
+      "classification": "mandatory"
+    },
+    {
+      "source": "crates/kaban-index/tests/cli.rs",
+      "line": 3755,
+      "sha256": "6d3153db5a0418ad4d6b2f52442e84667fccdca9c19b3d8071486cc27c470022",
+      "classification": "mandatory"
+    },
+    {
+      "source": "crates/kaban-index/tests/cli.rs",
+      "line": 3894,
+      "sha256": "bd901a28d8b7938b8027410a7d8434c04d361ac5fb289538a1e7ed0d65cf28e8",
+      "classification": "mandatory"
+    },
+    {
+      "source": "crates/kaban-index/tests/cli.rs",
+      "line": 4041,
+      "sha256": "7325fa95ab854625f023a0ee5c4cb5dcb9ee7e3b094ab3d1b83d5f0d5de929b8",
+      "classification": "mandatory"
+    },
+    {
+      "source": "crates/kaban-index/tests/cli.rs",
+      "line": 4111,
+      "sha256": "dfe92d1f4976788bff43fa034d9e67b4b49dab07d41ed83fe6d4be17cb2f6deb",
+      "classification": "mandatory"
+    },
+    {
+      "source": "crates/kaban-index/tests/cli.rs",
+      "line": 4189,
+      "sha256": "8d3ef0bccef1702b7bfa9e0d9fbe76ed6e842bf27eec6107e503c91b9f7c7474",
+      "classification": "mandatory"
+    },
+    {
+      "source": "crates/kaban-index/tests/cli.rs",
+      "line": 4361,
+      "sha256": "1e47b25dcb94d84e129031c80c650ccf4847a7db5a2f1688ea8de91884ce1049",
+      "classification": "mandatory"
+    },
+    {
+      "source": "crates/kaban-index/tests/cli.rs",
+      "line": 4646,
+      "sha256": "9a493ca30ab4d566cd807cd9fb84d6a6badefa08b39013d8ef8ecb6161b93e7d",
+      "classification": "mandatory"
+    },
+    {
+      "source": "crates/kaban-index/tests/cli.rs",
+      "line": 4817,
+      "sha256": "724ffd3ad0ffee800e141a5a0143eb96179bffe42176df1f43b93951bbee5879",
+      "classification": "mandatory"
+    },
+    {
+      "source": "crates/kaban-index/tests/cli.rs",
+      "line": 5123,
+      "sha256": "28ee0d99d84f32150796d9ac7525924ec69fe222e7ea40815a5a9ec13f0379e1",
+      "classification": "mandatory"
+    },
+    {
+      "source": "crates/kaban-index/tests/namespaces.rs",
+      "line": 5,
+      "sha256": "9e35328cecc5b6d9c20efb37b6d11b0e9c282d1af09e8ea88519b3b4cd5c19c7",
+      "classification": "source-comment"
+    },
+    {
+      "source": "crates/kaban-index/tests/namespaces.rs",
+      "line": 10,
+      "sha256": "a551bfdac8898d949cac6b9dd7787bfe5f81ed37a7b80b20256812a308bec80d",
+      "classification": "source-comment"
+    },
+    {
+      "source": "crates/kaban-index/tests/namespaces.rs",
+      "line": 98,
+      "sha256": "496c09c9389a906f2f58f6f6696890587a16bf0fc76dc375543ce5a7b6345fe1",
+      "classification": "mandatory"
+    },
+    {
+      "source": "crates/kaban-index/tests/namespaces.rs",
+      "line": 302,
+      "sha256": "0d3b19595b69b8786fb3312950ed9b0a4687a520042b14d1ddd3479b62593563",
+      "classification": "mandatory"
+    },
+    {
+      "source": "crates/kaban-index/tests/runner.rs",
+      "line": 570,
+      "sha256": "30ed86f837063e2318df00dcd69cb4363f8624c9b47743385670b2f757fc8ec0",
+      "classification": "mandatory"
+    },
+    {
+      "source": "crates/kaban-index/tests/rust_admission.rs",
+      "line": 11,
+      "sha256": "9ea0abcf2ffe3925f1eae376abe5f8ad9c1b65f7fe870e9fc2f294759f9843f3",
+      "classification": "source-comment"
+    },
+    {
+      "source": "crates/kaban-index/tests/rust_admission.rs",
+      "line": 314,
+      "sha256": "de7f5c0e8b4651f233c9be4ee5495155b244425fabad8ba61df6d9592d1147d1",
+      "classification": "mandatory"
+    },
+    {
+      "source": "crates/kaban-index/tests/rust_admission.rs",
+      "line": 536,
+      "sha256": "0962038783c08734afea73a7c93467532f6e32a225ef9dc53a51e6971ccf3763",
+      "classification": "mandatory"
+    },
+    {
+      "source": "crates/kaban-index/tests/rust_admission.rs",
+      "line": 638,
+      "sha256": "33b6c8b164f1c13107a2cf0119911aa2f80aa7b2194530ab8145dc5c88451456",
+      "classification": "mandatory"
+    },
+    {
+      "source": "crates/kaban-index/tests/rust_admission.rs",
+      "line": 738,
+      "sha256": "bc7c54144d139fcbd68b48c9e923919f2eca6ddeeadad455227420de6d0283ee",
+      "classification": "mandatory"
+    },
+    {
+      "source": "crates/kaban-index/tests/rust_admission.rs",
+      "line": 804,
+      "sha256": "40093582b2ae3b64dc863bb3c05d4c3b0d68a584da624b98a9673765e5084050",
+      "classification": "mandatory"
+    },
+    {
+      "source": "crates/kaban-index/tests/rust_admission.rs",
+      "line": 821,
+      "sha256": "1c4f6a4295b6a4bf197f467bbe37f47df96036a0691856b43028ca7e98fb989b",
+      "classification": "mandatory"
+    },
+    {
+      "source": "crates/kaban-index/tests/rust_admission.rs",
+      "line": 835,
+      "sha256": "5d344b0ab35f8b4023902338bb8dfee45da6cef81f6d95f1691fe00d5ccfd509",
+      "classification": "mandatory"
+    }
+  ],
+  "impact": {
+    "workspace_dependencies": {
+      "kaban-core": [],
+      "kaban-policy": [
+        "kaban-core"
+      ],
+      "kaban-store-sqlite": [
+        "kaban-codegraph",
+        "kaban-core",
+        "kaban-index-tantivy",
+        "kaban-policy",
+        "kaban-store-sqlite"
+      ],
+      "kaban-index-tantivy": [
+        "kaban-core",
+        "kaban-store-sqlite"
+      ],
+      "kaban-codegraph": [
+        "kaban-codegraph",
+        "kaban-core"
+      ],
+      "kaban-api": [
+        "kaban-codegraph",
+        "kaban-core",
+        "kaban-index",
+        "kaban-policy",
+        "kaban-store-sqlite"
+      ],
+      "kaban-index": [
+        "kaban-codegraph",
+        "kaban-core",
+        "kaban-policy"
+      ],
+      "kaban": [
+        "kaban-api",
+        "kaban-codegraph",
+        "kaban-core",
+        "kaban-index",
+        "kaban-index-tantivy",
+        "kaban-ingest",
+        "kaban-policy",
+        "kaban-store-sqlite"
+      ],
+      "kaban-ingest": [
+        "kaban-api",
+        "kaban-core",
+        "kaban-policy",
+        "kaban-store-sqlite"
+      ]
+    },
+    "producer_roots": [
+      "kaban-codegraph",
+      "kaban-index"
+    ],
+    "reader_crates": [
+      "kaban"
+    ],
+    "sensitive_crates": [
+      "kaban",
+      "kaban-codegraph",
+      "kaban-core",
+      "kaban-index",
+      "kaban-policy"
+    ],
+    "known_crates": [
+      "kaban",
+      "kaban-api",
+      "kaban-codegraph",
+      "kaban-core",
+      "kaban-index",
+      "kaban-index-tantivy",
+      "kaban-ingest",
+      "kaban-policy",
+      "kaban-store-sqlite"
+    ],
+    "identity": "source-bound root Cargo metadata at baseline; all manifest/lock changes choose broad and require refreshed dependency inputs"
+  },
+  "dynamic_helpers": [
+    {
+      "source": "crates/kaban-index/tests/namespaces.rs",
+      "helper": "available",
+      "body_sha256": "2dd1ed3bd622f492cb440a4eb5e9570e5c921233fcd46c9ef854595c7d39140a",
+      "calls": [
+        {
+          "parent": "ns_checkout_is_readonly",
+          "arguments": [
+            "ns_checkout_is_readonly"
+          ]
+        },
+        {
+          "parent": "ns_view_only_listed_paths",
+          "arguments": [
+            "ns_view_only_listed_paths"
+          ]
+        },
+        {
+          "parent": "ns_usr_include_is_readonly",
+          "arguments": [
+            "ns_usr_include_is_readonly"
+          ]
+        },
+        {
+          "parent": "ns_helper_single_invocation",
+          "arguments": [
+            "ns_helper_single_invocation"
+          ]
+        },
+        {
+          "parent": "ns_helper_closes_wrapper_handle",
+          "arguments": [
+            "ns_helper_closes_wrapper_handle"
+          ]
+        },
+        {
+          "parent": "ns_tcp_connect_unreachable",
+          "arguments": [
+            "ns_tcp_connect_unreachable"
+          ]
+        },
+        {
+          "parent": "ns_selfcheck_mismatch_refuses",
+          "arguments": [
+            "ns_selfcheck_mismatch_refuses"
+          ]
+        },
+        {
+          "parent": "caches_shared_ro_in_namespaces",
+          "arguments": [
+            "caches_shared_ro_in_namespaces"
+          ]
+        },
+        {
+          "parent": "ns_indexer_succeeds_with_ro_cache",
+          "arguments": [
+            "ns_indexer_succeeds_with_ro_cache"
+          ]
+        },
+        {
+          "parent": "caches_dedicated_when_configured",
+          "arguments": [
+            "caches_dedicated_when_configured"
+          ]
+        },
+        {
+          "parent": "ns_indexer_cannot_remount_or_mount_after_privilege_drop",
+          "arguments": [
+            "ns_indexer_cannot_remount_or_mount_after_privilege_drop"
+          ]
+        }
+      ]
+    },
+    {
+      "source": "crates/kaban-index/tests/cli.rs",
+      "helper": "rust_real_inputs",
+      "body_sha256": "34f835f9b0971a907d0aae31cf67dc1cdd7692186d3fadae678ed375ed1c5a3a",
+      "calls": [
+        {
+          "parent": "rust_real_producer_cli_acceptance",
+          "arguments": []
+        },
+        {
+          "parent": "rust_real_producer_workspace_on_selected_tier",
+          "arguments": []
+        }
+      ],
+      "internal_probes": {
+        "callee": "executable",
+        "arguments": [
+          [
+            "KABAN_TEST_RUST_PRODUCER",
+            ""
+          ],
+          [
+            "KABAN_TEST_RUST_SYSROOT",
+            "bin/rustc"
+          ]
+        ]
+      }
+    },
+    {
+      "source": "crates/kaban-index/tests/rust_admission.rs",
+      "helper": "host_registry_is_an_input_of_the_rust_run",
+      "body_sha256": "11dc6ea4edad315184773bc2f3a00d28eeee4902e6984d8c07f618594ff1f350",
+      "calls": [
+        {
+          "parent": "host_registry_is_an_input_of_the_rust_run_on_the_none_tier",
+          "arguments": [
+            true
+          ]
+        },
+        {
+          "parent": "host_registry_is_an_input_of_the_rust_run_on_the_selected_tier",
+          "arguments": [
+            false
+          ]
+        }
+      ]
+    },
+    {
+      "source": "crates/kaban/tests/mcp_rust_acceptance.rs",
+      "helper": "inputs",
+      "body_sha256": "e021794d3f079e60fe0d208da77905c142102653220f6702ca03dde9d1278339",
+      "calls": [
+        {
+          "parent": "rust_snapshot_public_queries_through_the_mcp_server",
+          "arguments": []
+        }
+      ]
+    }
+  ],
+  "case_scope_rules": [
+    {
+      "source": "crates/kaban/tests/bench_recall.rs",
+      "scope": "unit",
+      "reason": "audited pure fixture/identity/calculation/API-type assertions"
+    },
+    {
+      "source": "crates/kaban/src/bench/corpus.rs",
+      "scope": "unit",
+      "reason": "audited pure fixture/identity/calculation/API-type assertions"
+    },
+    {
+      "source": "crates/kaban-store-sqlite/tests/reconcile_props.rs",
+      "scope": "unit",
+      "reason": "audited pure fixture/identity/calculation/API-type assertions"
+    },
+    {
+      "source": "crates/kaban-codegraph/tests/grammar.rs",
+      "scope": "unit",
+      "reason": "audited pure fixture/identity/calculation/API-type assertions"
+    },
+    {
+      "source": "tools/kaban-rust-scip/tests/identity.rs",
+      "scope": "unit",
+      "reason": "audited pure fixture/identity/calculation/API-type assertions"
+    },
+    {
+      "source": "tools/kaban-rust-scip/tests/candidate_api.rs",
+      "scope": "unit",
+      "reason": "audited pure fixture/identity/calculation/API-type assertions"
+    },
+    {
+      "source": "crates/kaban-policy/src/contain.rs",
+      "scope": "component",
+      "reason": "real filesystem containment and symlink/FIFO admission"
+    },
+    {
+      "source": "crates/kaban-core/tests/process.rs",
+      "scope": "integration",
+      "reason": "public process/isolation runner with real operating-system boundary"
+    },
+    {
+      "source": "crates/kaban-index/tests/runner.rs",
+      "scope": "integration",
+      "reason": "public process/isolation runner with real operating-system boundary"
+    },
+    {
+      "source": "crates/kaban-index/tests/namespaces.rs",
+      "scope": "integration",
+      "reason": "public process/isolation runner with real operating-system boundary"
+    },
+    {
+      "source": "crates/kaban/tests/lints.rs",
+      "scope": "component",
+      "reason": "audited repository source-policy assertions",
+      "techniques": [
+        "static-source-inspection"
+      ]
+    },
+    {
+      "source": "crates/kaban/tests/sql_boundary.rs",
+      "scope": "component",
+      "reason": "audited repository source-policy assertions",
+      "techniques": [
+        "static-source-inspection"
+      ]
+    },
+    {
+      "source": "crates/kaban/tests/never_list.rs",
+      "scope": "integration",
+      "reason": "Cargo dependency graph subprocess and policy checks",
+      "techniques": [
+        "dependency-graph-inspection"
+      ]
+    },
+    {
+      "source": "crates/kaban/tests/never_list.rs",
+      "scope": "unit",
+      "reason": "in-memory negative policy/parser assertions",
+      "cases": [
+        "checks_reject_injected_packages"
+      ]
+    },
+    {
+      "source": "crates/kaban/tests/never_list.rs",
+      "scope": "component",
+      "reason": "direct production tool-schema contract",
+      "cases": [
+        "ingest_claim_is_a_registered_tool"
+      ]
+    },
+    {
+      "source": "crates/kaban-ingest/tests/gazetteer.rs",
+      "scope": "integration",
+      "reason": "fixture helpers compose actual SQLite, KabanApi and ingestor"
+    },
+    {
+      "source": "tools/kaban-rust-scip/tests/admission.rs",
+      "scope": "end-to-end",
+      "reason": "audited producer public binary invocation/refusal assertions"
+    },
+    {
+      "source": "tools/kaban-rust-scip/tests/backend.rs",
+      "scope": "end-to-end",
+      "reason": "audited producer public binary invocation/refusal assertions"
+    }
+  ]
+}
