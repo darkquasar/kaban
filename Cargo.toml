@@ -18,7 +18,7 @@ edition = "2024"
 rust-version = "1.99"   # MSRV = pinned toolchain (OD-8, R0-3); bump together with rust-toolchain.toml
 license = "Apache-2.0"
 authors = ["kaban authors"]
-repository = "https://github.com/darkquasar/kaban4"
+repository = "https://github.com/darkquasar/kaban"
 
 [workspace.dependencies]
 # internal crates
