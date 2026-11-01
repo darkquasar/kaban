@@ -11,5 +11,33 @@ python.compile = false
 
 # Rust is authoritative in the two rust-toolchain.toml files, not duplicated here.
 [tasks.ci]
-description = "Comprehensive Rust gates; helpers and standalone producer are separate"
+description = "Comprehensive gates including helpers; standalone producer is separate"
 run = "bash scripts/ci/ci.sh"
+
+[tasks.core]
+description = "Quality, helpers and functional checks; no release builds"
+run = "bash scripts/ci/ci.sh quality && bash scripts/ci/ci.sh helpers && bash scripts/ci/ci.sh functional"
+
+[tasks.quality]
+description = "Formatting, Clippy, deny and dependency boundaries"
+run = "bash scripts/ci/ci.sh quality"
+
+[tasks.helpers]
+description = "Python helper tests and shell syntax"
+run = "bash scripts/ci/ci.sh helpers"
+
+[tasks.functional]
+description = "Nextest suites and library doctests"
+run = "bash scripts/ci/ci.sh functional"
+
+[tasks.producer]
+description = "Standalone Rust SCIP producer under its own toolchain"
+run = "bash scripts/ci/ci.sh producer"
+
+[tasks.gnu]
+description = "GNU release, smoke and size gates"
+run = "bash scripts/ci/ci.sh gnu"
+
+[tasks.musl]
+description = "Native musl build and size gates"
+run = "bash scripts/ci/ci.sh musl"

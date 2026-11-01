@@ -6,19 +6,21 @@ them from the repository root (for example `bash scripts/ci/ci.sh`).
 
 | Folder | What it holds |
 |---|---|
-| `ci/` | `ci.sh` checks prerequisites, then runs the Rust gates in order (fmt, clippy, nextest, deny, release build, MCP smoke, size checks). `deps_allowlist.sh` and `clean-room.sh` are gates it or a release calls. |
+| `ci/` | `ci.sh` dispatches quality, helpers, functional, producer, GNU and musl groups after scoped prerequisites; no argument runs comprehensive checks (producer separately). `deps_allowlist.sh` and `clean-room.sh` are gates it or a release calls. |
 | `mcp/` | `mcp_smoke.py` drives the MCP stdio server end to end; `mcp_catalog.py` checks the tool catalog. |
 | `dev/` | Local helpers: `run-kaban.sh` (runs `bin/kaban` with a repo-local home), `cargo-slot.sh` (bounds parallel Cargo jobs), `lane-target.sh`/`lane-gate.sh` (isolated target dirs for parallel work), `regen_fixtures.sh`. |
 | `hooks-live/` | Containerized harness that captures real host-hook events from Claude Code, Codex and pi. |
 
 See [CI commands and setup](../docs/developer/CI.md) for focused Cargo checks,
-`mise run ci`, the separate helper commands and scope limits. `bash ci/ci.sh --help`
-(from this directory) needs no tool setup. Group task names arrive in T2.
+`mise run core`, `mise run ci`, explicit group commands and scope limits. `bash ci/ci.sh --help`
+(from this directory) needs no tool setup. Each group has a matching mise task. `core` composes quality + helpers + functional;
+`ci` includes GNU/musl artifacts and helpers. Run `bash ci/ci.sh producer` explicitly
+when applicable; it uses the producer workspace/toolchain and a private target.
 
 Prerequisites: bash, pinned Python (3.11+ with `sqlite3`/FTS5), Node, jq, GNU
 coreutils/sed, and for comprehensive gates native Linux, a C compiler, musl linker/
 target and strace. Cargo/Rust versions come from `rust-toolchain.toml`; nextest,
-deny, Python and Node come from `mise.toml`. Missing nextest/deny or wrong pinned
+deny, Python and Node come from `mise.toml`. Missing required nextest/deny or wrong pinned
 versions exit 3 before compilation; there is no fallback test suite. The small
 `ci/preflight.py` checks effective tools without replacing product trust checks.
 
