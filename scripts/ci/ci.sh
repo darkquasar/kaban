@@ -1,20 +1,34 @@
 #!/usr/bin/env bash
-# E3 gates (core-plan.md §4) in order, from the workspace root.
-#   exit 0  every gate ran and passed
-#   exit 3  every gate that could run passed, but a gate was skipped: an optional tool was
-#           absent ("not-run: <tool> absent"), CI_SKIP_SMOKE=1 skipped the smoke, the host's musl
-#           target is absent ("not-run: musl target absent", G1-N4) or `mandatory_skips` counted a
-#           test that printed its `NOT RUN:` marker (stage1-plan CG10.3). "incomplete" is printed;
-#           CI must never treat exit 3 as a pass (review R0-2).
-#   other   the first failing gate's exit code (the script stops there)
-# Usage: bash scripts/ci/ci.sh            (CI_SKIP_SMOKE=1 skips only the MCP smoke, never the release
-#                                      build or the size gate, and forces exit 3;
-#                                      CARGO=<path> substitutes the cargo executable, e.g. a test shim;
-#                                      KABAN_SIZE_TABLE=1 adds the per-feature size table, three more
-#                                      release builds, run by the coordinator at lane boundaries)
+# Comprehensive Rust gates from the workspace root. See --help and docs/developer/CI.md.
+# Exit 0: all selected gates passed; 3: incomplete; other: first failing child's status.
 set -u
 kaban_ci_dir=$(cd "$(dirname "$0")" && pwd -P) || exit
 cd "$kaban_ci_dir/../.." || exit
+
+if [ "$#" -eq 1 ] && [ "$1" = "--help" ]; then
+  cat <<'HELP'
+Usage: bash scripts/ci/ci.sh [--help]
+Runs prerequisite checks, fmt, three Clippy variants, workspace/PDF/no-default
+nextest suites, deny, dependency boundaries, release builds, MCP smoke and sizes.
+Requires pinned tools (mise.toml / rust-toolchain.toml), Linux and native musl.
+Missing/wrong required tools stop before compilation (exit 3); child failures retain
+their status. Mandatory skipped work and size misses remain incomplete (exit 3).
+CARGO=<executable> selects Cargo, including paths with spaces.
+CI_SKIP_SMOKE=1 skips only smoke and forces incomplete; KABAN_SIZE_TABLE=1 adds
+optional feature builds. CARGO_TARGET_DIR selects the build output directory.
+Helper/catalog/shell checks run separately until T2; see docs/developer/CI.md.
+Standalone producer qualification is a separate scope; this command does not run it.
+HELP
+  exit 0
+fi
+if [ "$#" -ne 0 ]; then
+  echo "Usage: bash scripts/ci/ci.sh [--help]" >&2
+  exit 2
+fi
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "not-run: python3 absent; install the Python version in mise.toml; exit 3" >&2
+  exit 3
+fi
 
 # Hosted runners may pass non-CLOEXEC descriptors (including fd 142) to the job.
 # Start the gates with only their standard streams; keep the parent's streams,
@@ -58,10 +72,27 @@ step() {
   fi
 }
 
-have_cargo_subcommand() {
-  # CI colors human-facing Cargo output; command names here must remain plain text.
-  CARGO_TERM_COLOR=never "${CARGO:-cargo}" --list 2>/dev/null | awk '{print $1}' | grep -qx "$1"
-}
+if ! command -v "${CARGO-cargo}" >/dev/null 2>&1; then
+  echo "not-run: CARGO=${CARGO-cargo} absent or not executable; select the pinned Cargo; exit 3" >&2
+  exit 3
+fi
+# CI colours human-facing output; discovery alone needs plain command names.
+kaban_cargo_commands=$(CARGO_TERM_COLOR=never RUSTUP_AUTO_INSTALL=0 "${CARGO:-cargo}" --list)
+kaban_discovery_status=$?
+if [ "$kaban_discovery_status" -ne 0 ]; then
+  printf '%s\n' "$kaban_cargo_commands"
+  echo "FAILED (exit $kaban_discovery_status): Cargo command discovery" >&2
+  exit "$kaban_discovery_status"
+fi
+for tool in nextest deny; do
+  if ! printf '%s\n' "$kaban_cargo_commands" | awk '{print $1}' | grep -qx "$tool"; then
+    echo "not-run: cargo-$tool absent; install the version pinned in mise.toml" >&2
+    echo "RESULT: incomplete (required tool absent); exit 3" >&2
+    exit 3
+  fi
+done
+
+step python3 "$kaban_ci_dir/preflight.py"
 
 step "${CARGO:-cargo}" fmt --all --check
 step "${CARGO:-cargo}" clippy --workspace --all-targets --all-features -- -D warnings
@@ -95,32 +126,18 @@ mandatory_skips() {
   return 0
 }
 
-if have_cargo_subcommand nextest; then
-  step nextest_workspace
-  mandatory_skips
-  # `pdf` is opt-in for 3.0.0 (OWN-70, DI2.1b): the workspace run above skips the `golden_pdf`
-  # binary (`required-features = ["pdf"]`), so the PDF tests stay in the gate through this one
-  # feature-enabled run of the ingest crate
-  step "${CARGO:-cargo}" nextest run -p kaban-ingest --features pdf
-  # the feature-off binary (no `ingest`, no `code-graph`) keeps its own test set green
-  # (stage1-plan CG7.3): the ingest and code-graph test binaries are `cfg`-gated out, the
-  # catalog test subtracts the gated tools, and nothing else may depend on a feature
-  step "${CARGO:-cargo}" nextest run -p kaban --no-default-features
-else
-  echo "not-run: cargo-nextest absent (OD-12); falling back to cargo test --workspace"
-  echo "not-run: mandatory_skips (counted over the nextest output only)"
-  missing=1
-  step "${CARGO:-cargo}" test --workspace
-  step "${CARGO:-cargo}" test -p kaban-ingest --features pdf
-  step "${CARGO:-cargo}" test -p kaban --no-default-features
-fi
+step nextest_workspace
+mandatory_skips
+# `pdf` is opt-in for 3.0.0 (OWN-70, DI2.1b): the workspace run above skips the `golden_pdf`
+# binary (`required-features = ["pdf"]`), so the PDF tests stay in the gate through this one
+# feature-enabled run of the ingest crate
+step "${CARGO:-cargo}" nextest run -p kaban-ingest --features pdf
+# the feature-off binary (no `ingest`, no `code-graph`) keeps its own test set green
+# (stage1-plan CG7.3): the ingest and code-graph test binaries are `cfg`-gated out, the
+# catalog test subtracts the gated tools, and nothing else may depend on a feature
+step "${CARGO:-cargo}" nextest run -p kaban --no-default-features
 
-if have_cargo_subcommand deny; then
-  step "${CARGO:-cargo}" deny check
-else
-  echo "not-run: cargo-deny absent (OD-12)"
-  missing=1
-fi
+step "${CARGO:-cargo}" deny check
 
 # store-boundary dependency check (engine-spec EN-E10a hygiene, engine-plan E1.0, SO-5):
 #   kaban-api and kaban-ingest declare no direct normal `rusqlite` dependency (dev-only is fine),
@@ -321,7 +338,7 @@ else
 fi
 
 if [ $missing -ne 0 ]; then
-  echo "RESULT: incomplete (a gate was skipped or a measured G1-N4 miss was reported: optional tool absent, CI_SKIP_SMOKE=1, musl target absent, mandatory_skips non-zero, or an N4 MISS line above); exit 3"
+  echo "RESULT: incomplete (a gate was skipped or a measured G1-N4 miss was reported: CI_SKIP_SMOKE=1, musl target absent, mandatory_skips non-zero, or an N4 MISS line above); exit 3"
   exit 3
 fi
 echo "RESULT: all gates passed"
