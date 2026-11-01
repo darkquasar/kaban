@@ -15,7 +15,7 @@ BASH = shutil.which("bash")
 
 
 class CiToolSelection(unittest.TestCase):
-    def run_gate(self, *, tools=("nextest", "deny"), fail="nextest", color="always", inherited_fd=False, versions=None, cargo_override=None, args=(), missing_tool=None, target_present=True, marker="", runner_fail="", helper_fail=False, smoke_skip=False, size_table=False):
+    def run_gate(self, *, tools=("nextest", "deny"), fail="nextest", color="always", inherited_fd=False, versions=None, cargo_override=None, args=(), missing_tool=None, target_present=True, marker="", runner_fail="", helper_fail=False, smoke_skip=False, size_table=False, artifact_scenario="", artifact_sizes=None, repeats=1):
         with tempfile.TemporaryDirectory(prefix="kaban-ci-tools-") as scratch:
             root = Path(scratch)
             script = root / "scripts/ci/ci.sh"
@@ -40,12 +40,15 @@ class CiToolSelection(unittest.TestCase):
                 'import unittest\nclass Helpers(unittest.TestCase):\n    def test_helper(self):\n        self.assertTrue(' + str(not helper_fail) + ')\n')
             (root / "scripts/mcp").mkdir()
             (root / "scripts/mcp/test_mcp_catalog.py").write_text('import unittest\nclass Catalog(unittest.TestCase):\n    def test_catalog(self): pass\n')
-            (root / "scripts/mcp/mcp_smoke.py").write_text('print("smoke fixture")\n')
+            (root / "scripts/mcp/mcp_smoke.py").write_text(
+                'import sys\nfrom pathlib import Path\ndata=Path(sys.argv[1]).read_bytes()\n'
+                'print("smoke fixture: " + data[:24].decode())\n'
+                'sys.exit(0 if data.startswith(b"default") else 51)\n')
             (root / "hooks").mkdir()
             for package, features in (("kaban", "code-graph"), ("kaban-ingest", "pdf"), ("kaban-index", "")):
                 directory = root / "crates" / package
                 directory.mkdir(parents=True)
-                (directory / "Cargo.toml").write_text(features + ' = []\n')
+                (directory / "Cargo.toml").write_text(features + ' = []\n' + ('md-splitter = []\n' if package == 'kaban-ingest' else ''))
             bin_dir = root / "bin"
             bin_dir.mkdir()
             (bin_dir / "python3").symlink_to(sys.executable)
@@ -57,7 +60,11 @@ class CiToolSelection(unittest.TestCase):
                 "if tool == 'uname': print('x86_64' if '-m' in sys.argv else 'Linux')\n"
                 "elif tool == 'rustc' and '--print' in sys.argv: print(str(Path(os.environ['TARGET_LIB']).parents[3]) if 'sysroot' in sys.argv else os.environ['TARGET_LIB'])\n"
                 "elif tool == 'rustc': print(json.loads(os.environ['VERSIONS']).get('rustc', 'rustc ' + ('1.91.0' if Path.cwd().name == 'kaban-rust-scip' else '1.90.0') + ' (fixture)'))\n"
-                "elif tool == 'stat': print(Path(sys.argv[-1]).stat().st_size)\n"
+                "elif tool == 'stat':\n"
+                "    p=Path(sys.argv[-1]); print(p.stat().st_size)\n"
+                "    if '/default/' in str(p):\n"
+                "        if os.environ['ARTIFACT_SCENARIO'] == 'corrupt-stage': p.write_bytes(b'wrong'.ljust(p.stat().st_size, b'.'))\n"
+                "        elif os.environ['ARTIFACT_SCENARIO'] == 'missing-stage': p.unlink()\n"
                 "elif tool == 'node': print(json.loads(os.environ['VERSIONS']).get('node', 'v22.0.0'))\n"
                 "else: print(tool + ' fixture')\n")
             helper.chmod(0o700)
@@ -114,7 +121,24 @@ class CiToolSelection(unittest.TestCase):
                 "    target = Path(os.environ.get('CARGO_TARGET_DIR', 'target'))\n"
                 "    if '--target' in args: target /= args[args.index('--target') + 1]\n"
                 "    (target / 'release').mkdir(parents=True, exist_ok=True)\n"
-                "    for name in ('kaban', 'kaban-index'): (target / 'release' / name).write_bytes(b'fixture')\n"
+                "    config = 'default'\n"
+                "    if '--target' in args: config = 'musl'\n"
+                "    elif 'kaban-index' in args: config = 'index'\n"
+                "    elif '--no-default-features' in args: config = 'graph-off' if '--features' in args else 'no-default'\n"
+                "    elif '--features' in args: config = {'code-graph': 'graph-on', 'kaban-ingest/pdf': 'pdf', 'kaban-ingest/md-splitter': 'md-splitter'}[args[args.index('--features')+1]]\n"
+                "    names = ('kaban', 'kaban-index') if config in ('default', 'musl') else ('kaban-index',) if config == 'index' else ('kaban',)\n"
+                "    for name in names:\n"
+                "        binary=target / 'release' / name\n"
+                "        if config == 'graph-on' and os.environ['ARTIFACT_SCENARIO'] == 'missing-output':\n"
+                "            binary.unlink(missing_ok=True); continue\n"
+                "        cache=target / 'release/deps' / (name + '-' + config); cache.parent.mkdir(exist_ok=True)\n"
+                "        if not cache.exists():\n"
+                "            cache.write_bytes(config.encode().ljust(64,b'.')); cache.chmod(0o700)\n"
+                "            size=json.loads(os.environ['ARTIFACT_SIZES']).get(config + '/' + name)\n"
+                "            if size is not None:\n"
+                "                with cache.open('r+b') as stream: stream.truncate(size)\n"
+                "        else: print('Fresh ' + name + ' (' + config + ')')\n"
+                "        binary.unlink(missing_ok=True); os.link(cache, binary)\n"
                 "elif args[0] not in ('fmt', 'clippy', 'nextest', 'deny', 'fetch'):\n"
                 "    sys.exit(97)\n"
             )
@@ -122,36 +146,123 @@ class CiToolSelection(unittest.TestCase):
             command = [BASH, str(script), *args]
             if inherited_fd:
                 command = [BASH, "-c", 'exec 142>/dev/null\nexec "$@"', "bash", *command]
-            result = subprocess.run(
-                command,
-                env={
-                    **os.environ,
-                    "BASH_ENV": os.devnull,
-                    "CARGO": str(cargo) if cargo_override is None else cargo_override,
-                    "PATH": str(bin_dir) + os.pathsep + "/usr/bin:/bin",
-                    "TARGET_LIB": str(root / "sysroot/lib/rustlib/x86_64-unknown-linux-musl/lib"),
-                    "VERSIONS": json.dumps(versions or {}),
-                    "CARGO_TERM_COLOR": color,
-                    "RUSTC": str(bin_dir / "rustc"),
-                    "SCIP_GO": str(bin_dir / "scip-go"),
-                    "CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER": str(bin_dir / "musl-gcc"),
-                    "CALLS": str(calls),
-                    "TOOLS": ",".join(tools),
-                    "FAIL": fail,
-                    "MARKER": marker,
-                    "RUNNER_FAIL": runner_fail,
-                    "CI_SKIP_SMOKE": "1" if smoke_skip else "0",
-                    "KABAN_SIZE_TABLE": "1" if size_table else "0",
-                    "CARGO_TARGET_DIR": str(root / "private target"),
-                    "CHECK_FD": "1" if inherited_fd else "0",
-                    "PRESERVED_VALUE": "retained environment",
-                },
-                input="retained standard input\n" if inherited_fd else None,
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
+            runs = []
+            for _ in range(repeats):
+                result = subprocess.run(
+                    command,
+                    env={
+                        **os.environ,
+                        "BASH_ENV": os.devnull,
+                        "CARGO": str(cargo) if cargo_override is None else cargo_override,
+                        "PATH": str(bin_dir) + os.pathsep + "/usr/bin:/bin",
+                        "TARGET_LIB": str(root / "sysroot/lib/rustlib/x86_64-unknown-linux-musl/lib"),
+                        "VERSIONS": json.dumps(versions or {}),
+                        "CARGO_TERM_COLOR": color,
+                        "RUSTC": str(bin_dir / "rustc"),
+                        "SCIP_GO": str(bin_dir / "scip-go"),
+                        "CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER": str(bin_dir / "musl-gcc"),
+                        "CALLS": str(calls),
+                        "TOOLS": ",".join(tools),
+                        "FAIL": fail,
+                        "MARKER": marker,
+                        "RUNNER_FAIL": runner_fail,
+                        "CI_SKIP_SMOKE": "1" if smoke_skip else "0",
+                        "KABAN_SIZE_TABLE": "1" if size_table else "0",
+                        "ARTIFACT_SCENARIO": artifact_scenario,
+                        "ARTIFACT_SIZES": json.dumps(artifact_sizes or {}),
+                        "CARGO_TARGET_DIR": str(root / "private target"),
+                        "CHECK_FD": "1" if inherited_fd else "0",
+                        "PRESERVED_VALUE": "retained environment",
+                    },
+                    input="retained standard input\n" if inherited_fd else None,
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                runs.append(result)
+            result.run_codes = [run.returncode for run in runs]
+            binary = root / "private target/release/kaban"
+            result.final_kaban = binary.read_bytes()[:64] if binary.exists() else None
+            index_binary = binary.with_name("kaban-index")
+            result.final_index = index_binary.read_bytes()[:64] if index_binary.exists() else None
+            result.cached_payloads = {path.name: path.read_bytes()[:64] for path in (root / "private target/release/deps").glob("*")}
+            configs = [path for run in (root / "private target").glob("ci-artifacts.*") for path in run.iterdir() if path.is_dir()]
+            result.staged_configs = sorted(path.name for path in configs)
+            result.staged_commands = {path.name: (path / "cargo-args.txt").read_text().splitlines()[1:] for path in configs}
+            result.staged_payloads = {path.name + "/" + binary.name: binary.read_bytes()[:64]
+                                      for path in configs for binary in path.iterdir()
+                                      if binary.name in ("kaban", "kaban-index")}
             return result, [json.loads(line) for line in (calls.read_text().splitlines() if calls.exists() else [])]
+
+    def test_gnu_builds_default_once_and_restores_exact_bytes_after_optional_variants(self):
+        result, calls = self.run_gate(args=("gnu",), fail="", size_table=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(calls.count(["build", "--release"]), 1, calls)
+        self.assertEqual(result.final_kaban, b"default".ljust(64, b"."))
+        self.assertIn("smoke fixture: default", result.stdout)
+        self.assertEqual(result.staged_configs, ["default", "gnu-index", "graph-off", "graph-on", "md-splitter", "no-default", "pdf"])
+        self.assertIn("sha256=", result.stdout)
+        self.assertEqual(result.cached_payloads["kaban-pdf"], b"pdf".ljust(64, b"."))
+        self.assertEqual(result.final_index, b"default".ljust(64, b"."))
+
+    def test_warm_artifact_reuse_keeps_cached_variants_and_size_miss(self):
+        result, _ = self.run_gate(args=("gnu",), fail="", repeats=2,
+                                  artifact_sizes={"default/kaban": 200, "graph-on/kaban": 900164})
+        self.assertEqual(result.run_codes, [3, 3], result.stdout + result.stderr)
+        self.assertIn("Fresh kaban (graph-off)", result.stdout)
+        self.assertEqual(result.staged_payloads["graph-off/kaban"], b"graph-off".ljust(64, b"."))
+        self.assertEqual(result.cached_payloads["kaban-graph-off"], b"graph-off".ljust(64, b"."))
+        self.assertEqual(result.final_kaban, b"default".ljust(64, b"."))
+        self.assertEqual(result.final_index, b"default".ljust(64, b"."))
+
+    def test_artifact_consumers_reject_missing_or_corrupt_bytes_and_preserve_child_failure(self):
+        for scenario in ("corrupt-stage", "missing-stage", "missing-output"):
+            with self.subTest(scenario=scenario):
+                result, _ = self.run_gate(args=("gnu",), fail="", artifact_scenario=scenario)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                if scenario == "missing-output":
+                    self.assertIn("cp:", result.stderr)
+                    self.assertNotIn("size: kaban(code-graph on)", result.stdout)
+                else:
+                    self.assertNotIn("smoke fixture:", result.stdout)
+        failed, calls = self.run_gate(args=("gnu",), fail="build")
+        self.assertEqual(failed.returncode, 37, failed.stdout + failed.stderr)
+        self.assertNotIn("smoke fixture:", failed.stdout)
+        self.assertEqual(sum(c[0] == "build" for c in calls), 1)
+
+    def test_artifact_configuration_bytes_and_arguments_stay_distinct(self):
+        result, calls = self.run_gate(fail="", size_table=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        expected = {
+            "default": ["build", "--release"],
+            "gnu-index": ["build", "--release", "-p", "kaban-index"],
+            "graph-on": ["build", "--release", "-p", "kaban", "--features", "code-graph"],
+            "graph-off": ["build", "--release", "-p", "kaban", "--no-default-features", "--features", "ingest,text-index-tantivy"],
+            "no-default": ["build", "--release", "-p", "kaban", "--no-default-features"],
+            "md-splitter": ["build", "--release", "-p", "kaban", "--features", "kaban-ingest/md-splitter"],
+            "pdf": ["build", "--release", "-p", "kaban", "--features", "kaban-ingest/pdf"],
+            "musl": ["build", "--release", "--target", "x86_64-unknown-linux-musl", "-p", "kaban", "-p", "kaban-index"],
+        }
+        self.assertEqual(result.staged_commands, expected)
+        self.assertEqual([c for c in calls if c[0] == "build"], list(expected.values()))
+        for name, binary, contents in (("default", "kaban", "default"), ("gnu-index", "kaban-index", "index"),
+                                       ("graph-on", "kaban", "graph-on"), ("graph-off", "kaban", "graph-off"),
+                                       ("musl", "kaban-index", "musl")):
+            self.assertEqual(result.staged_payloads[name + "/" + binary], contents.encode().ljust(64, b"."))
+        self.assertEqual(result.final_kaban, b"default".ljust(64, b"."))
+        self.assertIn("smoke fixture: default", result.stdout)
+
+    def test_artifact_strict_budgets_keep_failure_and_incomplete_semantics(self):
+        for group, table, sizes, code, diagnostic in (
+            ("gnu", False, {"default/kaban": 25 * 1024 * 1024}, 1, "FAILED: binary size"),
+            ("gnu", True, {"no-default/kaban": 17 * 1024 * 1024}, 1, "FAILED: --no-default-features"),
+            ("gnu", False, {"graph-on/kaban": 900064}, 3, "N4 MISS"),
+            ("musl", False, {"musl/kaban-index": 8000000}, 3, "N4 MISS"),
+        ):
+            with self.subTest(group=group, sizes=sizes):
+                result, _ = self.run_gate(args=(group,), fail="", size_table=table, artifact_sizes=sizes)
+                self.assertEqual(result.returncode, code, result.stdout + result.stderr)
+                self.assertIn(diagnostic, result.stdout + result.stderr)
 
     def test_functional_runs_exact_suites_and_library_docs_without_artifacts(self):
         result, calls = self.run_gate(args=("functional",), tools=("nextest",), fail="", missing_tool="musl-gcc")

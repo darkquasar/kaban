@@ -307,154 +307,150 @@ quality() {
   fi
 }
 
+# Each artifact configuration is copied once into this invocation's private directory.
+kaban_artifacts=
+build_artifacts() {
+  local config=$1 output=$2 binaries=$3 binary path digest
+  shift 3
+  if [ -z "$kaban_artifacts" ]; then
+    case "$kaban_target_dir" in /*) ;; *) kaban_target_dir="$PWD/$kaban_target_dir" ;; esac
+    mkdir -p "$kaban_target_dir" || return $?
+    kaban_artifacts=$(mktemp -d "$kaban_target_dir/ci-artifacts.XXXXXX") || return $?
+    echo "artifacts: $kaban_artifacts"
+  fi
+  mkdir "$kaban_artifacts/$config" || return $?
+  printf '%s\n' "${CARGO:-cargo}" "$@" > "$kaban_artifacts/$config/cargo-args.txt" || return $?
+  step "${CARGO:-cargo}" "$@"
+  for binary in $binaries; do
+    path="$kaban_artifacts/$config/$binary"
+    cp "$kaban_target_dir/$output/$binary" "$path" || return $?
+    digest=$(python3 -c 'import hashlib, sys
+with open(sys.argv[1], "rb") as stream:
+    print(hashlib.file_digest(stream, "sha256").hexdigest())' "$path") || return $?
+    printf '%s\n' "$digest" > "$path.sha256" || return $?
+    echo "artifact: $config/$binary sha256=$digest"
+  done
+}
+
+artifact_file() {
+  local path="$kaban_artifacts/$1/$2" expected digest
+  if [ ! -f "$path" ] || [ ! -x "$path" ]; then
+    echo "FAILED: missing/non-executable staged artifact $path" >&2
+    return 1
+  fi
+  expected=$(cat "$path.sha256") || return $?
+  digest=$(python3 -c 'import hashlib, sys
+with open(sys.argv[1], "rb") as stream:
+    print(hashlib.file_digest(stream, "sha256").hexdigest())' "$path") || return $?
+  if [ "$digest" != "$expected" ]; then
+    echo "FAILED: staged artifact checksum mismatch: $path" >&2
+    return 1
+  fi
+  printf '%s\n' "$path"
+}
+
+artifact_size() {
+  local path
+  path=$(artifact_file "$@") || return $?
+  stat -c '%s' "$path"
+}
+
 gnu() {
-  # release build and size gate are mandatory (core-spec N1); only the smoke can be skipped
-  step "${CARGO:-cargo}" build --release
-  size=$(stat -c '%s' "${kaban_target_dir}/release/kaban")
+  local size default_binary on off delta index_size table_size binaries=kaban binary restored
+  if [ -f crates/kaban-index/Cargo.toml ]; then binaries='kaban kaban-index'; fi
+  step build_artifacts default release "$binaries" build --release
+  size=$(artifact_size default kaban) || return $?
   echo "release binary: ${size} bytes"
   if [ "$size" -ge "$MAX_BINARY_BYTES" ]; then
     echo "FAILED: binary size ${size} >= ${MAX_BINARY_BYTES} (N1)" >&2
-    exit 1
+    return 1
   fi
   if [ "${CI_SKIP_SMOKE:-0}" = "1" ]; then
     echo "not-run: MCP smoke skipped by CI_SKIP_SMOKE=1"
     missing=1
-  elif command -v python3 >/dev/null 2>&1; then
-    smoke_db="$(mktemp -d)/smoke.db"
-    step python3 scripts/mcp/mcp_smoke.py "${kaban_target_dir}/release/kaban" "$smoke_db" examples/policy.yaml
   else
-    echo "not-run: python3 absent (smoke)"
-    missing=1
+    default_binary=$(artifact_file default kaban) || return $?
+    smoke_db="$(mktemp -d)/smoke.db"
+    step python3 scripts/mcp/mcp_smoke.py "$default_binary" "$smoke_db" examples/policy.yaml
   fi
 
-  # v4 binary sizes (stage1-spec G1-N4; stage1-plan CG2.4, CG7.3, §18). Enforced from CG7.3:
-  # `kaban(code-graph on) - kaban(code-graph off) < 900,000 B` (OWN-86 (4)), where "off" is
-  # `--no-default-features --features ingest,text-index-tantivy` (the one feature toggled; the docs
-  # extractors and the Tantivy adapter stay in, so the pair measures the code-graph reader delta and
-  # not the ingest crate's or Tantivy's), and the
-  # default `kaban` build stays under the 25 MiB N1 gate already applied above (OWN-64, OWN-112, OWN-B; the plan's
-  # 12,000,000 B figure predates the docs extractors). `kaban-index` is printed for the GNU build
-  # here and gated on the musl release in `musl_release` below (`< 8,000,000 B`, G1-N4, owner decision 2026-10-26). A missing
-  # crate prints `skipped: ...`. The pair rebuilds the default kaban binary last so
-  # target/release/kaban stays the default build.
-  MAX_CODE_GRAPH_DELTA_BYTES=900000
-  binary_sizes() {
-    local size on off delta
-    size=$(stat -c '%s' "${kaban_target_dir}/release/kaban") || return 1
-    echo "size: kaban ${size} (gate: < ${MAX_BINARY_BYTES}, applied above)"
-    if [ -f crates/kaban-index/Cargo.toml ]; then
-      "${CARGO:-cargo}" build --release -p kaban-index || return 1
-      size=$(stat -c '%s' "${kaban_target_dir}/release/kaban-index") || return 1
-      echo "size: kaban-index ${size} (gnu, informational; the musl release below carries the G1-N4 gate)"
-    else
-      echo "skipped: kaban-index not yet present"
+  echo "size: kaban ${size} (gate: < ${MAX_BINARY_BYTES}, applied above)"
+  # Keep the package build: workspace/package feature equivalence is not established.
+  if [ -f crates/kaban-index/Cargo.toml ]; then
+    step build_artifacts gnu-index release kaban-index build --release -p kaban-index
+    index_size=$(artifact_size gnu-index kaban-index) || return $?
+    echo "size: kaban-index ${index_size} (gnu, informational; musl carries the G1-N4 gate)"
+  else
+    echo "skipped: kaban-index not yet present"
+  fi
+  if grep -Eq '^code-graph *=' crates/kaban/Cargo.toml; then
+    # Historical workspace/default and explicit graph-on bytes differed; keep both builds.
+    step build_artifacts graph-on release kaban build --release -p kaban --features code-graph
+    on=$(artifact_size graph-on kaban) || return $?
+    echo "size: kaban(code-graph on) ${on}"
+    step build_artifacts graph-off release kaban build --release -p kaban --no-default-features --features ingest,text-index-tantivy
+    off=$(artifact_size graph-off kaban) || return $?
+    echo "size: kaban(code-graph off) ${off}"
+    delta=$((on - off))
+    echo "size: kaban(code-graph on) - kaban(code-graph off) ${delta} (gate: < 900000)"
+    if [ "$delta" -ge 900000 ]; then
+      echo "N4 MISS (reported, OWN-13; budget set by OWN-86 (4)): code-graph size delta ${delta} >= 900000 (G1-N4)" >&2
+      missing=1
     fi
-    if grep -Eq '^code-graph *=' crates/kaban/Cargo.toml; then
-      "${CARGO:-cargo}" build --release -p kaban --features code-graph || return 1
-      on=$(stat -c '%s' "${kaban_target_dir}/release/kaban") || return 1
-      echo "size: kaban(code-graph on) ${on}"
-      "${CARGO:-cargo}" build --release -p kaban --no-default-features --features ingest,text-index-tantivy || return 1
-      off=$(stat -c '%s' "${kaban_target_dir}/release/kaban") || return 1
-      echo "size: kaban(code-graph off) ${off}"
-      delta=$((on - off))
-      echo "size: kaban(code-graph on) - kaban(code-graph off) ${delta} (gate: < ${MAX_CODE_GRAPH_DELTA_BYTES})"
-      "${CARGO:-cargo}" build --release || return 1
-      if [ "$delta" -ge "$MAX_CODE_GRAPH_DELTA_BYTES" ]; then
-        # a measured miss is reported, never worked around (OWN-13): the figure goes to PROGRESS and the owner
-        # decides between the budget and a size lane; the stage is not complete until then (exit 3)
-        echo "N4 MISS (reported, OWN-13; budget set by OWN-86 (4)): code-graph size delta ${delta} >= ${MAX_CODE_GRAPH_DELTA_BYTES} (G1-N4)" >&2
-        missing=1
-      fi
-    else
-      echo "skipped: kaban code-graph on/off pair not yet present"
-    fi
-  }
-  step binary_sizes
+  else
+    echo "skipped: kaban code-graph on/off pair not yet present"
+  fi
 
-  # per-feature size table (core-spec N1, OWN-110, spec 05 OWN-Q): `--no-default-features` gated at 17 MiB,
-  # `kaban-ingest/md-splitter` and `kaban-ingest/pdf` informational (icu segmenter data; `pdf_oxide`,
-  # OWN-70); the default build is rebuilt last so target/release/kaban stays the default build.
-  # Three extra release builds, so it runs
-  # only with KABAN_SIZE_TABLE=1 (coordinator, lane and milestone boundaries); skipping it does
-  # not mark the run incomplete.
-  size_table() {
-    local size
-    echo "size-table: kaban(default) ${1} (gate: < ${MAX_BINARY_BYTES})"
-    "${CARGO:-cargo}" build --release -p kaban --no-default-features || return 1
-    size=$(stat -c '%s' "${kaban_target_dir}/release/kaban") || return 1
-    echo "size-table: kaban(--no-default-features) ${size} (gate: < ${MAX_NO_DEFAULT_BYTES})"
-    if [ "$size" -ge "$MAX_NO_DEFAULT_BYTES" ]; then
-      echo "FAILED: --no-default-features binary size ${size} >= ${MAX_NO_DEFAULT_BYTES} (N1)" >&2
+  if [ "${KABAN_SIZE_TABLE:-0}" = "1" ]; then
+    echo "size-table: kaban(default) ${size} (gate: < ${MAX_BINARY_BYTES})"
+    step build_artifacts no-default release kaban build --release -p kaban --no-default-features
+    table_size=$(artifact_size no-default kaban) || return $?
+    echo "size-table: kaban(--no-default-features) ${table_size} (gate: < ${MAX_NO_DEFAULT_BYTES})"
+    if [ "$table_size" -ge "$MAX_NO_DEFAULT_BYTES" ]; then
+      echo "FAILED: --no-default-features binary size ${table_size} >= ${MAX_NO_DEFAULT_BYTES} (N1)" >&2
       return 1
     fi
     if grep -Eq '^md-splitter *=' crates/kaban-ingest/Cargo.toml; then
-      "${CARGO:-cargo}" build --release -p kaban --features kaban-ingest/md-splitter || return 1
-      size=$(stat -c '%s' "${kaban_target_dir}/release/kaban") || return 1
-      echo "size-table: kaban(md-splitter) ${size} (gate: informational)"
+      step build_artifacts md-splitter release kaban build --release -p kaban --features kaban-ingest/md-splitter
+      table_size=$(artifact_size md-splitter kaban) || return $?
+      echo "size-table: kaban(md-splitter) ${table_size} (gate: informational)"
     else
       echo "skipped: md-splitter feature not present"
     fi
-    # `pdf` is opt-in for 3.0.0 (OWN-70, DI2.1b): the PDF-capable build is measured here and
-    # printed informationally; the N1 gates above are unchanged
     if grep -Eq '^pdf *=' crates/kaban-ingest/Cargo.toml; then
-      "${CARGO:-cargo}" build --release -p kaban --features kaban-ingest/pdf || return 1
-      size=$(stat -c '%s' "${kaban_target_dir}/release/kaban") || return 1
-      echo "size-table: kaban(--features kaban-ingest/pdf) ${size} (gate: informational)"
+      step build_artifacts pdf release kaban build --release -p kaban --features kaban-ingest/pdf
+      table_size=$(artifact_size pdf kaban) || return $?
+      echo "size-table: kaban(--features kaban-ingest/pdf) ${table_size} (gate: informational)"
     else
       echo "skipped: pdf feature not present"
     fi
-    "${CARGO:-cargo}" build --release || return 1
-    size=$(stat -c '%s' "${kaban_target_dir}/release/kaban") || return 1
-    if [ "$size" != "$1" ]; then
-      echo "FAILED: default rebuild size ${size} differs from the gated build ${1}" >&2
-      return 1
-    fi
-  }
-  if [ "${KABAN_SIZE_TABLE:-0}" = "1" ]; then
-    step size_table "$size"
   else
     echo "skipped: size table (KABAN_SIZE_TABLE=1 enables it)"
   fi
+  # Cargo may hardlink release binaries to cached deps outputs. Replace the path
+  # instead of writing through that inode, preserving both cached variants and modes.
+  for binary in $binaries; do
+    default_binary=$(artifact_file default "$binary") || return $?
+    restored=$(mktemp "$kaban_target_dir/release/.$binary-restore.XXXXXX") || return $?
+    cp -p "$default_binary" "$restored" || return $?
+    mv -f "$restored" "$kaban_target_dir/release/$binary" || return $?
+    cmp -s "$default_binary" "$kaban_target_dir/release/$binary" || return $?
+    echo "restored: default $binary from staged bytes (no rebuild)"
+  done
 }
 
 musl() {
-  # musl release of both binaries (stage1-spec §8.4, G1-N4; stage1-plan CG10.3): the host's musl
-  # triple only (`.cargo/config.toml` names `musl-gcc` as the linker of both musl targets, and a
-  # box has the linker of its own architecture; an installed foreign target has std but no linker,
-  # so the installed list is never iterated). The target is installed when `rustup target list
-  # --installed` names it, or, without rustup on PATH, when the sysroot has `lib/rustlib/<triple>`.
-  # `kaban-index` musl `< 8,000,000 B` is binding (owner decision 2026-10-26) (N4 is a musl budget); the `kaban` musl size is
-  # informational (N1 is the default gnu gate above). An absent target prints `not-run: musl target
-  # absent` and the stage is not complete (exit 3).
-  MAX_INDEX_MUSL_BYTES=8000000
-  musl_target_installed() {
-    if command -v rustup >/dev/null 2>&1; then
-      rustup target list --installed 2>/dev/null | grep -qx "$1"
-    else
-      [ -d "$(rustc --print sysroot 2>/dev/null)/lib/rustlib/$1" ]
-    fi
-  }
-  musl_release() {
-    local t size_index size_kaban
-    t="$(uname -m)-unknown-linux-musl"
-    if ! musl_target_installed "$t"; then
-      echo "not-run: musl target absent (${t}; the G1-N4 budget is a musl budget, so the stage is not complete)"
-      missing=1
-      return 0
-    fi
-    "${CARGO:-cargo}" build --release --target "$t" -p kaban -p kaban-index || return 1
-    size_index=$(stat -c '%s' "${kaban_target_dir}/$t/release/kaban-index") || return 1
-    size_kaban=$(stat -c '%s' "${kaban_target_dir}/$t/release/kaban") || return 1
-    echo "size: kaban-index (musl ${t}) ${size_index} (gate: < ${MAX_INDEX_MUSL_BYTES}, G1-N4)"
-    echo "size: kaban (musl ${t}) ${size_kaban} (informational; N1 is the default gnu gate above)"
-    if [ "$size_index" -ge "$MAX_INDEX_MUSL_BYTES" ]; then
-      # a miss is reported, never worked around (OWN-13): the figure goes to PROGRESS and the owner
-      # decides between the budget and a size lane; the stage is not complete until then (exit 3)
-      echo "N4 MISS (reported, OWN-13; budget set by owner decision 2026-10-26): kaban-index musl size ${size_index} >= ${MAX_INDEX_MUSL_BYTES} (G1-N4)" >&2
-      missing=1
-    fi
-  }
-  step musl_release
+  local target size_index size_kaban
+  target="$(uname -m)-unknown-linux-musl"
+  step build_artifacts musl "$target/release" 'kaban kaban-index' build --release --target "$target" -p kaban -p kaban-index
+  size_index=$(artifact_size musl kaban-index) || return $?
+  size_kaban=$(artifact_size musl kaban) || return $?
+  echo "size: kaban-index (musl ${target}) ${size_index} (gate: < 8000000, G1-N4)"
+  echo "size: kaban (musl ${target}) ${size_kaban} (informational; N1 is the default gnu gate)"
+  if [ "$size_index" -ge 8000000 ]; then
+    echo "N4 MISS (reported, OWN-13; budget set by owner decision 2026-10-26): kaban-index musl size ${size_index} >= 8000000 (G1-N4)" >&2
+    missing=1
+  fi
 }
 
 if [ "$kaban_group" = producer ]; then

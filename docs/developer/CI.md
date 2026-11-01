@@ -184,11 +184,54 @@ All existing product assertions, Tantivy coverage and budgets remain:
 | Graph on/off delta | <900,000 bytes |
 | Native musl index | <8,000,000 bytes |
 
-GNU index and musl Kaban sizes remain informational. Existing rebuilds are retained
-until T3 can establish equivalent outputs and reuse them safely. Actual product-suite execution and new producer/doctest baselines are deferred to
-composed verification C; fixture dispatch checks do not qualify those suites. No
-speedup is claimed by this reduction. Weekly broad qualification and release automation remain
-deferred; there is no cross-run evidence handoff or new publication pipeline.
+GNU index and musl Kaban sizes remain informational. Actual product-suite execution
+and new producer/doctest baselines are deferred to composed verification C; fixture
+dispatch checks do not qualify those suites. Weekly broad qualification and release
+automation remain deferred; there is no cross-run evidence handoff or new publication
+pipeline.
+
+## Build outputs and reuse
+
+Each GNU/musl invocation creates `ci-artifacts.<random>` beneath its effective
+`CARGO_TARGET_DIR` (default `target`). The directory is private to that invocation;
+`all` shares it across its GNU and musl groups. Each configuration has copied
+binaries, SHA-256 sidecars and a `cargo-args.txt` recording the executable and each
+Cargo argument on its own line. Paths and checksums are printed in the ordinary log.
+Outputs are retained for inspection; no prior run's staged files are reused.
+After inspection, these disposable `ci-artifacts.*` directories beneath the effective
+target directory can be removed manually. T5 cache configuration must exclude them;
+this task adds no automatic pruning or cache changes.
+
+```text
++-------------+  copy + hash =>  +------------------+  verify =>  +--------------+
+| Cargo build | ==============> | staged binaries  | ==========> | smoke / size |
++-------------+                 +------------------+             +--------------+
+```
+
+| Configuration | Consumers / reuse |
+| --- | --- |
+| Workspace default | Default Kaban's <25 MiB guard and full GNU MCP smoke use its verified staged copy; workspace index is also saved. |
+| GNU index package | Separate build retained: effective workspace/package equivalence has not been established. Its size stays informational. |
+| Explicit graph-on | Kept distinct from workspace default; historical bytes differed. Paired with graph-off for the strict <900,000-byte delta. |
+| Graph-off | Retains `--no-default-features --features ingest,text-index-tantivy`; Tantivy stays selected. |
+| Optional no-default / md-splitter / PDF | Separate staged copies; no-default stays strictly <17 MiB, other table entries informational. |
+| Native musl | Separate explicit-target Kaban/index build; index stays strictly <8,000,000 bytes. No musl runtime/smoke claim. |
+
+Before each size/smoke consumer, the script checks that its staged binary exists,
+is executable and matches its saved SHA-256. Missing or changed bytes fail the
+selected group. After variant work, GNU restores the verified workspace-default
+Kaban and index copies to their release paths. It copies each to a temporary sibling
+and renames it into place, then compares the bytes. Replacing the path preserves
+Cargo's hardlinked cached variant outputs; writing through an existing output inode
+would corrupt those cached bytes. Executable permissions are preserved.
+With the optional table enabled, this removes the two former default restore
+builds; without the table it removes one. All distinct feature/target builds stay.
+
+T3 fixture tests show the intended build calls and exact byte restoration, including
+same-size but different configuration contents. Actual build logs/checksums during
+C must establish real reuse and elapsed effects. No numeric speedup or Linux smoke
+qualification is inferred here; missing applicable strace still prevents a full
+smoke success claim.
 
 ## M1.5 retain/remove map and rollback
 
