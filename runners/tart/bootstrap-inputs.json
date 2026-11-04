@@ -1,0 +1,12 @@
+{
+  "mise": {
+    "url": "https://github.com/jdx/mise/releases/download/v2026.10.24/mise-v2026.10.24-linux-arm64",
+    "sha256": "ae1151a87d70146119f68f7378001a12f09d2a38853087ed6139b7527a55f148",
+    "checksum_url": "https://github.com/jdx/mise/releases/download/v2026.10.24/SHASUMS256.txt"
+  },
+  "rustup": {
+    "url": "https://static.rust-lang.org/rustup/archive/1.28.2/aarch64-unknown-linux-gnu/rustup-init",
+    "sha256": "e3853c5a252fca15252d07cb23a1bdd9377a8c6f3efa01531109281ae47f841c",
+    "checksum_url": "https://static.rust-lang.org/rustup/archive/1.28.2/aarch64-unknown-linux-gnu/rustup-init.sha256"
+  }
+}

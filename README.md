@@ -96,5 +96,9 @@ document ingestion, code-graph reading and the explicit indexer. Start with
 [the current delivery protocol](../specs/kaban/specs/00-project/PROTOCOL.md) for contribution gates,
 and `docs/developer/rust-style/` for local Rust conventions.
 
+For CI commands, see [developer CI](docs/developer/CI.md). The
+[Tart runner image](runners/tart/README.md) contains the Packer recipe and setup
+inputs for a local Linux ARM64 environment on Apple silicon.
+
 Apache-2.0 for Kaban; see [LICENSE](LICENSE), [NOTICE](NOTICE) and
 [third-party sources and redistribution gaps](docs/developer/THIRD_PARTY.md).

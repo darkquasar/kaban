@@ -144,7 +144,7 @@ checks need a suitable native Linux environment.
 
 ## Capability assessment and remaining gap
 
-The 2026-11-04 T4 assessment is a bounded blocker report, not Linux runtime
+The initial 2026-11-04 T4 assessment is a bounded blocker report, not Linux runtime
 qualification. The available local host is Darwin ARM64 with Rust/Cargo 1.99.0
 and Python 3.14.6. The actual comprehensive command, under `cargo-slot.sh`, stops
 before compilation with exit 3 because cargo-nextest is absent, its first reported
@@ -179,24 +179,22 @@ The Go module-cache tier comparison returns without a mandatory marker when
 namespaces are unavailable; its output must demonstrate that the comparison
 actually ran. The historical 18-marker count does not include that unmarked gap.
 
-T5-E is the separate bounded environment comparison. Assess **Tart first**, then
-Docker Sandbox, another lightweight Linux VM candidate, act and GitHub Agentic
-Workflows/NVX. The 2026-11-04 owner instruction changes that future evaluation
-order only. Linux guest suitability, architecture, namespace behavior, filesystem
-semantics and local GitHub-runner simulation or repository-connected execution
-are questions for that assessment. No Tart inspection/evaluation, VM creation,
-runner registration, environment repair or workflow activation occurred here.
+The subsequent T5-E assessment selected Tart/Packer as the practical local
+environment. A stock Ubuntu22.04 ARM64 tools-only image passed all13 namespace
+integration tests plus the selected doctor CLI test, which selected namespaces.
+Those runs had no mandatory NOT RUN markers. The remaining CLI/Rust-admission,
+unavailable-tier, producer/doctest and artifact checks are separate qualification
+work under C. This subset does not discharge OD-4 or the historical musl size miss.
+Ubuntu24.04 investigation is explicitly deferred; no guest/host security policy
+was changed. Other provider comparisons are deferred too.
 
-The next environment choice belongs to T5-E (Tart first); OD-4 remains unresolved.
-Once a Linux environment with pinned tools is admitted, start with
-`probe_only_reports_availability` and `cli_doctor_lists_tiers`. If namespaces work,
-run `ns_selfcheck_mismatch_refuses`; the two unavailable-tier checks in the table
-need an admitted unavailable arrangement. Actual producer/doctest baselines also
-remain necessary. This small probe set diagnoses capability; it does not replace
-the remaining assertions. A proposed arrangement for complementary branches needs
-its own concrete scope before implementation; do not add a counterpart engine or
-modify host policy.
-The separate historical musl-index size miss also remains unresolved.
+The versioned [Tart runner setup](../../runners/tart/README.md) contains the actual
+Packer recipe, provisioner, checksum-pinned bootstraps and input staging tool.
+Use the existing pins/installers and fresh clones with private targets. These
+ARM64 observations do not establish current GitHub x86_64 behavior or service
+semantics. No runner was registered and no workflow activated by this assessment.
+Complementary unavailable-tier evidence still needs a concrete admitted arrangement;
+do not suppress markers or introduce a generic counterpart engine.
 
 ## Native CI jobs
 
