@@ -15,7 +15,7 @@ BASH = shutil.which("bash")
 
 
 class CiToolSelection(unittest.TestCase):
-    def run_gate(self, *, tools=("nextest", "deny"), fail="nextest", color="always", inherited_fd=False, versions=None, cargo_override=None, args=(), missing_tool=None, target_present=True, marker="", runner_fail="", helper_fail=False, smoke_skip=False, size_table=False, artifact_scenario="", artifact_sizes=None, repeats=1):
+    def run_gate(self, *, tools=("nextest", "deny"), fail="nextest", color="always", inherited_fd=False, versions=None, cargo_override=None, args=(), missing_tool=None, target_present=True, marker="", runner_fail="", helper_fail=False, smoke_skip=False, size_table=False, artifact_scenario="", artifact_sizes=None, repeats=1, artifact_root=False, summary=False):
         with tempfile.TemporaryDirectory(prefix="kaban-ci-tools-") as scratch:
             root = Path(scratch)
             script = root / "scripts/ci/ci.sh"
@@ -171,6 +171,8 @@ class CiToolSelection(unittest.TestCase):
                         "ARTIFACT_SCENARIO": artifact_scenario,
                         "ARTIFACT_SIZES": json.dumps(artifact_sizes or {}),
                         "CARGO_TARGET_DIR": str(root / "private target"),
+                        "KABAN_CI_ARTIFACT_DIR": str(root / "outside cache") if artifact_root else "",
+                        "GITHUB_STEP_SUMMARY": str(root / "summary") if summary else os.devnull,
                         "CHECK_FD": "1" if inherited_fd else "0",
                         "PRESERVED_VALUE": "retained environment",
                     },
@@ -180,19 +182,38 @@ class CiToolSelection(unittest.TestCase):
                     timeout=10,
                 )
                 runs.append(result)
+            result.summary = (root / "summary").read_text() if (root / "summary").exists() else ""
+            result.stages_in_target = bool(list((root / "private target").glob("ci-artifacts.*")))
             result.run_codes = [run.returncode for run in runs]
             binary = root / "private target/release/kaban"
             result.final_kaban = binary.read_bytes()[:64] if binary.exists() else None
             index_binary = binary.with_name("kaban-index")
             result.final_index = index_binary.read_bytes()[:64] if index_binary.exists() else None
             result.cached_payloads = {path.name: path.read_bytes()[:64] for path in (root / "private target/release/deps").glob("*")}
-            configs = [path for run in (root / "private target").glob("ci-artifacts.*") for path in run.iterdir() if path.is_dir()]
+            configs = [path for run in (root / ("outside cache" if artifact_root else "private target")).glob("ci-artifacts.*") for path in run.iterdir() if path.is_dir()]
             result.staged_configs = sorted(path.name for path in configs)
             result.staged_commands = {path.name: (path / "cargo-args.txt").read_text().splitlines()[1:] for path in configs}
             result.staged_payloads = {path.name + "/" + binary.name: binary.read_bytes()[:64]
                                       for path in configs for binary in path.iterdir()
                                       if binary.name in ("kaban", "kaban-index")}
             return result, [json.loads(line) for line in (calls.read_text().splitlines() if calls.exists() else [])]
+
+    def test_artifacts_can_stage_outside_cached_target_without_changing_consumers(self):
+        result, calls = self.run_gate(args=("gnu",), fail="", artifact_root=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(result.stages_in_target)
+        self.assertEqual(result.staged_payloads["default/kaban"], result.final_kaban)
+        self.assertIn("smoke fixture: default", result.stdout)
+        self.assertEqual(calls.count(["build", "--release"]), 1)
+
+    def test_hosted_group_summary_keeps_incomplete_and_failure_status(self):
+        for marker, fail, expected, verdict in (("", "", 0, "PASS"),
+                ("workspace", "", 3, "INCOMPLETE"), ("workspace", "workspace", 37, "FAILED")):
+            with self.subTest(marker=marker, fail=fail):
+                result, _ = self.run_gate(args=("functional",), fail="", marker=marker,
+                                          runner_fail=fail, summary=True)
+                self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
+                self.assertEqual(result.summary, f"Group `functional`: {verdict} (exit {expected})\n")
 
     def test_gnu_builds_default_once_and_restores_exact_bytes_after_optional_variants(self):
         result, calls = self.run_gate(args=("gnu",), fail="", size_table=True)
@@ -443,6 +464,39 @@ class CiToolSelection(unittest.TestCase):
         result, calls = self.run_gate(versions={"nextest": "\x1b[32mcargo-nextest 0.9.100\x1b[0m"})
         self.assertEqual(result.returncode, 37, result.stdout + result.stderr)
         self.assertIn(["fmt", "--all", "--check"], calls)
+
+
+class CleanRoomResults(unittest.TestCase):
+    def test_incomplete_child_stays_incomplete_unless_another_step_failed(self):
+        for ci_status, clean_status, expected, verdict in (
+            (3, 0, 3, "INCOMPLETE"), (3, 1, 1, "FAIL"), (1, 0, 1, "FAIL"), (0, 0, 0, "PASS")
+        ):
+            with self.subTest(ci=ci_status, clean=clean_status), tempfile.TemporaryDirectory() as scratch:
+                root = Path(scratch)
+                ci = root / "scripts/ci"
+                ci.mkdir(parents=True)
+                shutil.copyfile(ROOT / "scripts/ci/clean-room.sh", ci / "clean-room.sh")
+                (ci / "ci.sh").write_text(f"exit {ci_status}\n")
+                (root / "crates/fixture/src").mkdir(parents=True)
+                (root / "crates/fixture/src/lib.rs").touch()
+                (root / "crates/kaban/src").mkdir(parents=True)
+                bin_dir = root / "bin"
+                bin_dir.mkdir()
+                for name, body in {
+                    "cargo": f'if [ "$1" = clean ]; then exit {clean_status}; fi\nexit 0\n',
+                    "flock": 'shift 2\nexec "$@"\n',
+                    "git": 'echo fixture-head\n',
+                }.items():
+                    tool = bin_dir / name
+                    tool.write_text("#!/bin/sh\n" + body)
+                    tool.chmod(0o700)
+                env = {**os.environ, "CARGO": str(bin_dir / "cargo"),
+                       "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"]}
+                result = subprocess.run([BASH, str(ci / "clean-room.sh"), "fixture", str(root / "logs")],
+                                        env=env, text=True, capture_output=True)
+                summary = (root / "logs/fixture-summary.log").read_text()
+                self.assertEqual(result.returncode, expected, summary + result.stderr)
+                self.assertIn("result " + verdict, summary)
 
 if __name__ == "__main__":
     unittest.main()

@@ -20,6 +20,7 @@ Missing/wrong required tools stop before compilation (exit 3); child failures re
 their status. Mandatory runtime markers and size misses remain incomplete (exit 3).
 CARGO=<executable> selects Cargo, including paths with spaces; no toolchain override.
 CARGO_TARGET_DIR selects build output; producer uses its private producer/ subdirectory.
+KABAN_CI_ARTIFACT_DIR optionally stages run-local copies outside the cached target.
 CI_SKIP_SMOKE=1 skips only smoke and forces GNU/all incomplete; KABAN_SIZE_TABLE=1
 adds optional GNU feature builds. Artifact groups require Linux and GNU utilities.
 HELP
@@ -34,6 +35,18 @@ case "$kaban_group" in
   all|quality|helpers|functional|producer|gnu|musl) ;;
   *) echo "Unknown group: $kaban_group; see --help" >&2; exit 2 ;;
 esac
+# Native hosted step summaries retain incomplete status even though Actions marks
+# every nonzero child as failure. Preserve the original exit if summary I/O fails.
+ci_summary() {
+  local rc=$?
+  if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+    local verdict=FAILED
+    case "$rc" in 0) verdict=PASS ;; 3) verdict=INCOMPLETE ;; esac
+    printf 'Group `%s`: %s (exit %s)\n' "$kaban_group" "$verdict" "$rc" >> "$GITHUB_STEP_SUMMARY" || :
+  fi
+}
+trap ci_summary EXIT
+
 if ! command -v python3 >/dev/null 2>&1; then
   echo "not-run: python3 absent; install the Python version in mise.toml; exit 3" >&2
   exit 3
@@ -310,12 +323,14 @@ quality() {
 # Each artifact configuration is copied once into this invocation's private directory.
 kaban_artifacts=
 build_artifacts() {
-  local config=$1 output=$2 binaries=$3 binary path digest
+  local config=$1 output=$2 binaries=$3 binary path digest artifact_root
   shift 3
   if [ -z "$kaban_artifacts" ]; then
     case "$kaban_target_dir" in /*) ;; *) kaban_target_dir="$PWD/$kaban_target_dir" ;; esac
     mkdir -p "$kaban_target_dir" || return $?
-    kaban_artifacts=$(mktemp -d "$kaban_target_dir/ci-artifacts.XXXXXX") || return $?
+    artifact_root=${KABAN_CI_ARTIFACT_DIR:-$kaban_target_dir}
+    mkdir -p "$artifact_root" || return $?
+    kaban_artifacts=$(mktemp -d "$artifact_root/ci-artifacts.XXXXXX") || return $?
     echo "artifacts: $kaban_artifacts"
   fi
   mkdir "$kaban_artifacts/$config" || return $?

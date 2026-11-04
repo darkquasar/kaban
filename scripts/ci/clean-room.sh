@@ -16,12 +16,23 @@ export CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-2} CARGO_PROFILE
 S=$L/$label-summary.log
 echo "start $(date -u +%T) head $(git rev-parse --short HEAD) $(df -h . | tail -1)" > "$S"
 fail=0
-cargo clean -p kaban -p kaban-api -p kaban-codegraph -p kaban-core -p kaban-index -p kaban-ingest -p kaban-policy -p kaban-store-sqlite > "$L/$label-clean.log" 2>&1; rc=$?; echo "clean exit $rc" >> "$S"; [ "$rc" -eq 0 ] || fail=1
+incomplete=0
+"${CARGO:-cargo}" clean -p kaban -p kaban-api -p kaban-codegraph -p kaban-core -p kaban-index -p kaban-ingest -p kaban-policy -p kaban-store-sqlite > "$L/$label-clean.log" 2>&1; rc=$?; echo "clean exit $rc" >> "$S"; [ "$rc" -eq 0 ] || fail=1
 touch crates/*/src/lib.rs crates/kaban/src/main.rs
-cargo nextest run --workspace --offline --run-ignored only -E 'test(multi_process)' > "$L/$label-multiproc.log" 2>&1; rc=$?; echo "multiproc exit $rc $(grep -E 'Summary' "$L/$label-multiproc.log" | tail -1)" >> "$S"; [ "$rc" -eq 0 ] || fail=1
-# ci.sh exit 3 means every gate that could run passed but a stage is not complete (an optional tool or target
-# absent, `mandatory_skips` non-zero, a reported N4 miss): recorded by name, not a red (PROTOCOL §4; OWN-13)
-flock -x /tmp/kaban-ci.lock env KABAN_SIZE_TABLE=1 bash scripts/ci/ci.sh > "$L/$label-ci.log" 2>&1; rc=$?; echo "ci exit $rc $(grep -E 'Summary|release binary|size-table|RESULT|not-run|N4 MISS|mandatory_skips' "$L/$label-ci.log" | tr '\n' ';')" >> "$S"; [ "$rc" -eq 0 ] || [ "$rc" -eq 3 ] || fail=1
-# the exit status is the wave's verdict (a red step is a red clean-room; session 16, astra velocity memo)
-echo "end $(date -u +%T) $(df -h . | tail -1) result $([ "$fail" -eq 0 ] && echo PASS || echo FAIL)" >> "$S"
-exit "$fail"
+"${CARGO:-cargo}" nextest run --workspace --offline --run-ignored only -E 'test(multi_process)' > "$L/$label-multiproc.log" 2>&1; rc=$?; echo "multiproc exit $rc $(grep -E 'Summary' "$L/$label-multiproc.log" | tail -1)" >> "$S"; [ "$rc" -eq 0 ] || fail=1
+# ci.sh exit 3 is incomplete, never a successful clean-room verdict.
+flock -x /tmp/kaban-ci.lock env KABAN_SIZE_TABLE=1 bash scripts/ci/ci.sh > "$L/$label-ci.log" 2>&1; rc=$?; echo "ci exit $rc $(grep -E 'Summary|release binary|size-table|RESULT|not-run|N4 MISS|mandatory_skips' "$L/$label-ci.log" | tr '\n' ';')" >> "$S"
+case "$rc" in
+  0) ;;
+  3) incomplete=1 ;;
+  *) fail=1 ;;
+esac
+if [ "$fail" -ne 0 ]; then
+  result=FAIL; status=1
+elif [ "$incomplete" -ne 0 ]; then
+  result=INCOMPLETE; status=3
+else
+  result=PASS; status=0
+fi
+echo "end $(date -u +%T) $(df -h . | tail -1) result $result" >> "$S"
+exit "$status"

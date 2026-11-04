@@ -121,7 +121,7 @@ only their selected tools. Rust groups need Python 3.11+ for authoritative TOML
 pins and check pinned Python/Cargo/Rust versions. Quality adds fmt/Clippy, deny
 and jq; functional adds nextest, pinned Node, Go/scip-go and cc. Producer probes
 its own toolchain and components, without nextest/deny or musl. Helpers need Python 3.11+
-with SQLite and Bash; they report an actionable exit 3 for an older Python
+with SQLite, Git and Bash; they report an actionable exit 3 for an older Python
 without requiring the exact mise pin. Artifact groups require native Linux/GNU utilities;
 musl checks its configured linker and installed target, and GNU smoke requires
 strace unless explicitly skipped. Comprehensive retains all these requirements.
@@ -142,13 +142,154 @@ still need adequate `/tmp` space; actual namespace and resource assertions remai
 in the suites. macOS can run focused commands and helpers; comprehensive GNU/musl
 checks need a suitable native Linux environment.
 
-The workflow has not yet migrated to mise provisioning. Its image/tool versions
-may fail these explicit pins until T5 updates setup. Such failure is visible;
-T2 does not claim hosted readiness or relax the required versions to match an image.
-The existing helper job still invokes its equivalent native checks. Until T5
-switches the gates job from `all` to independent groups, helpers also run there
-when prerequisite checks pass. This temporary duplication is a T5 migration input;
-switching the helper job to the group command belongs to that workflow scope.
+## Capability assessment and remaining gap
+
+The 2026-11-04 T4 assessment is a bounded blocker report, not Linux runtime
+qualification. The available local host is Darwin ARM64 with Rust/Cargo 1.99.0
+and Python 3.14.6. The actual comprehensive command, under `cargo-slot.sh`, stops
+before compilation with exit 3 because cargo-nextest is absent, its first reported
+prerequisite gap; later comprehensive prerequisites were not evaluated. The actual producer
+command also stops before compilation with exit 3: Python 3.14.6 differs from the
+3.12.16 pin. Mise, unshare and strace are absent from the inspected local PATH.
+No current product namespace, doctor or refusal test was executed by this assessment.
+
+The source requires Linux user, network, mount and PID namespaces through the
+trusted `unshare` wrapper and the product's in-run self-check. The namespace suite
+is Linux-only; passing macOS helpers or installing tool versions cannot qualify
+it. The following existing branches still need actual evidence for the candidate:
+
+| Required branch | Existing checks / missing evidence |
+| --- | --- |
+| Namespaces available | `tests/namespaces.rs`: read-only checkout/headers, restricted mounts/network, helper invocation/handle closure, self-check refusal, cache behavior and privilege-drop enforcement. All runtime assertions remain unproved here. |
+| Namespaced tool/resource view | `tests/cli.rs`: Rust probe resources, Go module-cache tier comparison, partial-result refusal, narrow toolchain roots, doctor inside-isolation probe and CGO default. The namespaced halves remain unproved here. |
+| Namespaced Rust admission | `tests/rust_admission.rs`: `host_registry_is_an_input_of_the_rust_run_on_the_selected_tier` and `checkout_cc_on_path_is_never_the_linker_on_the_selected_tier`. The host-registry input and refusal of a checkout compiler as linker remain unproved here. |
+| Isolation unavailable | `cli_index_required_without_isolating_tier_is_exit_8` and `rust_required_unavailable_never_runs_native_producer_probes` need a real unavailable tier: refusal/exit 8 and no native producer probe. A capable host may leave these branches NOT RUN instead. |
+
+Test paths above are relative to `crates/kaban-index/`. See the existing
+[namespace tests](../../crates/kaban-index/tests/namespaces.rs),
+[CLI tests](../../crates/kaban-index/tests/cli.rs) and
+[Rust admission tests](../../crates/kaban-index/tests/rust_admission.rs), plus the
+[required namespace flags](../../crates/kaban-index/src/isolate/namespaces.rs).
+The historical hosted observation below remains 18 missing namespace subchecks;
+it is not a fresh count or a claim about this candidate. This revision does not
+combine complementary results from different runs or suppress mandatory markers.
+Both capability branches need a concrete executable arrangement before complete
+readiness can be claimed; T4 may finish with this gap documented.
+The Go module-cache tier comparison returns without a mandatory marker when
+namespaces are unavailable; its output must demonstrate that the comparison
+actually ran. The historical 18-marker count does not include that unmarked gap.
+
+T5-E is the separate bounded environment comparison. Assess **Tart first**, then
+Docker Sandbox, another lightweight Linux VM candidate, act and GitHub Agentic
+Workflows/NVX. The 2026-11-04 owner instruction changes that future evaluation
+order only. Linux guest suitability, architecture, namespace behavior, filesystem
+semantics and local GitHub-runner simulation or repository-connected execution
+are questions for that assessment. No Tart inspection/evaluation, VM creation,
+runner registration, environment repair or workflow activation occurred here.
+
+The next environment choice belongs to T5-E (Tart first); OD-4 remains unresolved.
+Once a Linux environment with pinned tools is admitted, start with
+`probe_only_reports_availability` and `cli_doctor_lists_tiers`. If namespaces work,
+run `ns_selfcheck_mismatch_refuses`; the two unavailable-tier checks in the table
+need an admitted unavailable arrangement. Actual producer/doctest baselines also
+remain necessary. This small probe set diagnoses capability; it does not replace
+the remaining assertions. A proposed arrangement for complementary branches needs
+its own concrete scope before implementation; do not add a counterpart engine or
+modify host policy.
+The separate historical musl-index size miss also remains unresolved.
+
+## Native CI jobs
+
+The workflow checks PR merge candidates, main pushes, merge-group candidates and
+manual dispatches. Quality, functional, GNU and musl run as independent jobs after
+a small scope-selection job; helpers start independently. A selected producer job
+also runs independently under its own toolchain. Every job checks out the same
+native event candidate. None depends on quality, and a failed job does not cancel
+its siblings. Only a superseded PR run can cancel an earlier run of that PR;
+main, merge-group and manual runs have distinct run-based concurrency groups.
+No weekly schedule is active.
+
+```text
++----------------+  dispatch =>  +--------------------+  results =>  +------------------+
+| Selection [CI] | ============> | Native Rust groups | ===========> | Readiness [CI]   |
++----------------+               +--------------------+              +------------------+
+                                                                              ^
+                                                                      results |
+                                                                     +------------------+
+                                                                     | Helpers [CI]     |
+                                                                     +------------------+
+```
+
+`Rust gates (scripts/ci/ci.sh)` retains its required-status name as a short,
+always-evaluated readiness job. It requires successful selection, quality,
+functional, GNU, musl and helper jobs, plus producer when selected. Only a producer
+explicitly excluded by successful selection may be skipped. Missing, failed,
+cancelled or unexpectedly skipped work fails readiness. `Helper script unit tests`
+retains its name and invokes `ci.sh helpers` once. No hosted job invokes `all`.
+Exit 3 remains a failed hosted step; its summary explicitly says `INCOMPLETE`.
+A result from another candidate or run cannot replace a missing check.
+
+Producer is omitted only for a nonempty diff entirely beneath `docs/` or changing
+root README/license files. Tools, producer/protocol/fixture/driver paths,
+manifests/locks, setup and any other shared or unknown path select it. Unavailable
+base/diff data, empty diffs, manual runs and merge-group candidates select it.
+This is a conservative path rule, not a dependency model; ordinary root groups
+always run, including for documentation changes.
+
+All actions use immutable commit revisions. Mise 2026.10.24 provisions the selected
+locked tools without restoring or saving executable tool caches. Rust setup reads
+the owning toolchain file and installs fmt/Clippy; musl adds its native target.
+Functional/GNU preserve verified Go under `/usr/lib` and its `/usr/bin/go` alias,
+SCIP_GO and pinned Node ownership/modes. Language tools live under `/opt/kaban-mise`.
+These paths do not establish namespace qualification. Workflow permissions remain
+`contents: read`, and checkout does not persist credentials.
+
+Each Rust job has `target/ci-<group>`, a runner-local scratch directory and the
+existing heavy settings above; producer uses `target/ci-producer/producer`.
+Heavy jobs retain 90-minute timeouts; helpers and small orchestration jobs use 15.
+Setup, dependency restore, fetch, checks and post-save are native log phases;
+`ci.sh` prints each native command. Group summaries expose exit status and final
+resource/cache information. Compilation/tests within a group share its check step;
+its timing alone does not separate all compiler and test work.
+
+## Cache scopes and observation limits
+
+[The pinned Rust cache action](https://github.com/Swatinem/rust-cache/tree/d1527c8f67ef9af357290475d4af4b0fab8f12e0)
+keys dependencies by Rust/environment/manifests and lockfiles. Additional keys
+separate platform, architecture, group, mise inputs and the producer toolchain.
+The producer workspace maps to its actual private target. Cargo bin caching is
+disabled. Staged smoke/size artifacts use `KABAN_CI_ARTIFACT_DIR` under the runner's
+temporary directory, outside every cached target; local default staging is unchanged.
+
+Compatible group prefixes are shared across events, allowing a new PR to restore
+default-branch dependencies. [GitHub's native cache restrictions](https://docs.github.com/en/actions/reference/workflows-and-actions/dependency-caching#restrictions-for-accessing-a-cache)
+keep PR-written entries confined to that PR's merge ref; default-branch runs
+cannot restore them. Only push/manual runs on the default branch write entries
+in that trusted scope. PR runs may save in their own scope; merge-group and
+other-ref manual runs restore but do not save. Every group retains a separate
+key and target. No custom per-PR prefix forces all new PR builds cold.
+
+`cache-on-failure: true` permits dependency saves after a later check failure in
+an allowed save scope. The pinned action's post-step runs on success or that flag,
+then checks `save-if`. An exact cache hit, service availability/eviction, cleanup,
+job cancellation or a post-step error can prevent a save. The summary records
+permission to save; only the action's post-step log proves an actual save.
+Every hit still executes the selected group. Native job overlap, actual cache
+saves, footprint and elapsed gains await hosted observation during C; local
+fixtures and upstream action inspection do not establish those results.
+
+New producer/doctest obligations need actual execution baselines before workflow
+activation. Historical native discovery/doctest observations below are retained;
+ordinary producer execution is still unproved. T5's local producer probe stops
+incomplete before compilation because available Python 3.14 differs from the
+3.12.16 pin. No tool installation, full product campaign or assertion repair is
+part of this workflow edit. Keep publication/activation pending those baselines
+and retain any real failures. Linux capability and musl-size blockers remain open.
+
+`clean-room.sh` remains an explicit costly clean/reproducibility tool, outside
+routine validation. Its summary and exit are `INCOMPLETE`/3 when its CI child is
+incomplete, unless another step failed, which yields `FAIL`/1. Success is `PASS`/0.
+It invokes the same comprehensive `ci.sh`; no duplicate gate implementation exists.
 
 ## Preserved baseline and bounds
 
@@ -185,22 +326,23 @@ All existing product assertions, Tantivy coverage and budgets remain:
 | Native musl index | <8,000,000 bytes |
 
 GNU index and musl Kaban sizes remain informational. Actual product-suite execution
-and new producer/doctest baselines are deferred to composed verification C; fixture
-dispatch checks do not qualify those suites. Weekly broad qualification and release
+and current producer/doctest baselines remain required before activation and composed
+readiness; fixture dispatch checks do not qualify those suites. Weekly broad qualification and release
 automation remain deferred; there is no cross-run evidence handoff or new publication
 pipeline.
 
 ## Build outputs and reuse
 
-Each GNU/musl invocation creates `ci-artifacts.<random>` beneath its effective
-`CARGO_TARGET_DIR` (default `target`). The directory is private to that invocation;
+Each GNU/musl invocation creates `ci-artifacts.<random>` beneath
+`KABAN_CI_ARTIFACT_DIR` when set, otherwise its effective `CARGO_TARGET_DIR` (default
+`target`). The directory is private to that invocation;
 `all` shares it across its GNU and musl groups. Each configuration has copied
 binaries, SHA-256 sidecars and a `cargo-args.txt` recording the executable and each
 Cargo argument on its own line. Paths and checksums are printed in the ordinary log.
 Outputs are retained for inspection; no prior run's staged files are reused.
 After inspection, these disposable `ci-artifacts.*` directories beneath the effective
-target directory can be removed manually. T5 cache configuration must exclude them;
-this task adds no automatic pruning or cache changes.
+target directory can be removed manually. Hosted jobs stage them outside cached targets;
+local invocations add no automatic pruning.
 
 ```text
 +-------------+  copy + hash =>  +------------------+  verify =>  +--------------+
@@ -249,3 +391,8 @@ PR #3 revision `869fe1e9c30c17fb76a02a3c8bf559c4c82eabcc` (PR base
 `0557398e6917f254bfc545b72714f7d7f46ea346`) in a separately authorized checkout.
 Restoring that revision restores its known failures and unimplemented interfaces;
 it is not a route to qualification. No duplicate fallback engine is retained.
+
+For the pre-T5 orchestration, inspect accepted T3 revision
+`c2dd842f30e6924c4f4b40c51e077b161d7f110d` in a separately authorized checkout.
+Its workflow retains the known Python provisioning mismatch and duplicate helpers;
+rollback does not establish readiness. No second mutable comprehensive script is kept.

@@ -4,91 +4,416 @@ on:
   push:
     branches: [main]
   pull_request:
+  merge_group:
   workflow_dispatch:
 
+# Only superseded PR runs cancel. Main/queue/manual candidates retain their results.
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_DEV_STRIP: symbols
+  CARGO_INCREMENTAL: "0"
+  CARGO_BUILD_JOBS: "2"
+  # Keep language tools namespace-visible; never restore executable tool caches.
+  MISE_DATA_DIR: /opt/kaban-mise
 
 jobs:
-  gates:
-    name: Rust gates (scripts/ci/ci.sh)
+  selection:
+    name: Select producer scope
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    outputs:
+      producer: ${{ steps.scope.outputs.producer }}
+      cache-save: ${{ steps.scope.outputs.cache-save }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Select producer and cache scope
+        id: scope
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          python3 - <<'SCOPE'
+          import json, os, subprocess
+          from pathlib import Path
+          event = json.loads(Path(os.environ['GITHUB_EVENT_PATH']).read_text())
+          name, ref = os.environ['GITHUB_EVENT_NAME'], os.environ['GITHUB_REF']
+          # Only a wholly documentation-only diff excludes the producer. Anything
+          # unknown/shared (tools, protocol, fixtures, drivers, setup, locks) selects it.
+          selected, reason = True, 'shared or unknown impact'
+          base = (event.get('pull_request', {}).get('base', {}).get('sha') if name == 'pull_request'
+                  else event.get('before') if name == 'push' else None)
+          if base and base != '0' * 40:
+              diff = subprocess.run(['git', 'diff', '--no-renames', '--name-only', '-z', base, 'HEAD'],
+                                    capture_output=True)
+              if diff.returncode == 0:
+                  paths = diff.stdout.decode('utf-8', errors='replace').split('\0')[:-1]
+                  if paths and all(p.startswith('docs/') or p in ('README.md', 'LICENSE', 'LICENSE-MIT', 'LICENSE-APACHE') for p in paths):
+                      selected, reason = False, 'documentation-only diff'
+          trusted = (name in ('push', 'workflow_dispatch') and
+                     ref == 'refs/heads/' + os.environ['DEFAULT_BRANCH'])
+          # GitHub scopes PR writes to the merge ref; default-branch entries
+          # remain readable by PRs with the same compatible group key.
+          pr = name == 'pull_request' and isinstance(event.get('number'), int)
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
+              out.write(f'producer={str(selected).lower()}\ncache-save={str(trusted or pr).lower()}\n')
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as out:
+              out.write(f'Producer selected: {selected} ({reason}). Cache save permitted: {trusted or pr} (native ref scope).\n')
+          SCOPE
+
+  quality:
+    name: Quality gates
+    needs: selection
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     env:
-      # Hundreds of linked integration-test binaries must fit the hosted runner's disk.
-      CARGO_PROFILE_DEV_DEBUG: "0"
-      CARGO_PROFILE_DEV_STRIP: "symbols"
-      CARGO_INCREMENTAL: "0"
-      CARGO_BUILD_JOBS: "2"
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-quality
     steps:
-      - uses: actions/checkout@v4
-
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Prepare tool directory
+        run: sudo install -d -o "$(id -u)" -g "$(id -g)" -m 755 "$MISE_DATA_DIR"
+      - name: Install pinned tools (no executable cache)
+        uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4
+        with:
+          version: 2026.10.24
+          cache: false
+          install_args: --locked python aqua:EmbarkStudios/cargo-deny
       - name: Install system prerequisites
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends musl-tools jq sqlite3 python3
-
-      - name: Prepare trusted language tools
+          sudo apt-get install -y --no-install-recommends jq
+      - name: Prepare pinned Rust toolchain
         run: |
-          # The image's cached Node may be group/other-writable or owned by the
-          # image-builder user. Normalize that executable before Kaban admits it.
-          node_exe=$(readlink -f "$(command -v node)")
+          # Read the owning toolchain file; do not replace it with an image default.
+          channel=$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')
+          rustup toolchain install "$channel" --profile minimal --component rustfmt --component clippy
+          rustc --version && cargo --version
+      - name: Restore compatible Cargo dependencies
+        id: cargo-cache
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          prefix-key: ci-v1-quality
+          workspaces: . -> target/ci-quality
+          key: ${{ runner.os }}-${{ runner.arch }}-quality-${{ hashFiles('mise.toml', 'mise.lock', 'tools/kaban-rust-scip/rust-toolchain.toml') }}
+          cache-bin: false
+          cache-on-failure: true
+          save-if: ${{ needs.selection.outputs.cache-save }}
+      - name: Fetch locked dependencies
+        run: cargo fetch --locked
+      - name: Run quality checks
+        env:
+          KABAN_CI_ARTIFACT_DIR: ${{ runner.temp }}/ci-artifacts-quality
+        run: bash scripts/ci/ci.sh quality
+      - name: Resource and cache summary
+        if: ${{ always() }}
+        run: |
+          {
+            echo 'Group: quality; exact Cargo cache hit: ${{ steps.cargo-cache.outputs.cache-hit }}'
+            echo 'Cache save permitted: ${{ needs.selection.outputs.cache-save }}; see action post-step for actual save.'
+            free -h
+            df -h . "$RUNNER_TEMP"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  functional:
+    name: Functional gates
+    needs: selection
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-functional
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Prepare tool directory
+        run: sudo install -d -o "$(id -u)" -g "$(id -g)" -m 755 "$MISE_DATA_DIR"
+      - name: Install pinned tools (no executable cache)
+        uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4
+        with:
+          version: 2026.10.24
+          cache: false
+          install_args: --locked python node aqua:nextest-rs/nextest/cargo-nextest
+      - name: Install system prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends sqlite3 strace
+      - name: Prepare namespace-visible language tools
+        run: |
+          node_exe=$(mise which node)
           sudo chown root:root "$node_exe"
           sudo chmod go-w "$node_exe"
+          sudo ln -sfn "$node_exe" /usr/bin/node
           stat -Lc 'Node executable: mode=%a uid=%u gid=%g' "$node_exe"
-          # The namespace view already exposes /usr/lib read-only. Keep Go's
-          # root there so version probes can read it with a minimal fixture PATH.
           go_root=$(sudo bash scripts/ci/install-go.sh /usr/lib/kaban-ci-go-1.26.0)
           scip_go=$(bash scripts/ci/install-scip-go.sh "$RUNNER_TEMP/kaban-ci-tools")
           echo "$go_root/bin" >> "$GITHUB_PATH"
           echo "GOROOT=$go_root" >> "$GITHUB_ENV"
           echo "SCIP_GO=$scip_go" >> "$GITHUB_ENV"
-          # Some fixtures deliberately use only /usr/bin:/bin. Give those the same
-          # verified toolchain, rather than the image's writable cached executable.
           sudo ln -sfn "$go_root/bin/go" /usr/bin/go
-          stat -Lc 'Go executable: mode=%a uid=%u gid=%g' /usr/bin/go
           env -u GOROOT GOTOOLCHAIN=local /usr/bin/go version
-
-      # rust-toolchain.toml pins the channel, components and musl targets; rustup installs them.
-      - name: Install pinned Rust toolchain
-        run: rustup show active-toolchain || rustup toolchain install
-
-      - uses: Swatinem/rust-cache@v2
-
-      # Offline dependency inspections also traverse non-host target dependencies.
+      - name: Prepare pinned Rust toolchain
+        run: |
+          # Read the owning toolchain file; do not replace it with an image default.
+          channel=$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')
+          rustup toolchain install "$channel" --profile minimal --component rustfmt --component clippy
+          rustc --version && cargo --version
+      - name: Restore compatible Cargo dependencies
+        id: cargo-cache
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          prefix-key: ci-v1-functional
+          workspaces: . -> target/ci-functional
+          key: ${{ runner.os }}-${{ runner.arch }}-functional-${{ hashFiles('mise.toml', 'mise.lock', 'tools/kaban-rust-scip/rust-toolchain.toml') }}
+          cache-bin: false
+          cache-on-failure: true
+          save-if: ${{ needs.selection.outputs.cache-save }}
       - name: Fetch locked dependencies
         run: cargo fetch --locked
+      - name: Run functional checks
+        env:
+          KABAN_CI_ARTIFACT_DIR: ${{ runner.temp }}/ci-artifacts-functional
+        run: bash scripts/ci/ci.sh functional
+      - name: Resource and cache summary
+        if: ${{ always() }}
+        run: |
+          {
+            echo 'Group: functional; exact Cargo cache hit: ${{ steps.cargo-cache.outputs.cache-hit }}'
+            echo 'Cache save permitted: ${{ needs.selection.outputs.cache-save }}; see action post-step for actual save.'
+            free -h
+            df -h . "$RUNNER_TEMP"
+          } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Install cargo-nextest and cargo-deny
-        uses: taiki-e/install-action@v2
+  gnu:
+    name: Gnu gates
+    needs: selection
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-gnu
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          tool: cargo-nextest,cargo-deny
+          persist-credentials: false
+      - name: Prepare tool directory
+        run: sudo install -d -o "$(id -u)" -g "$(id -g)" -m 755 "$MISE_DATA_DIR"
+      - name: Install pinned tools (no executable cache)
+        uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4
+        with:
+          version: 2026.10.24
+          cache: false
+          install_args: --locked python node
+      - name: Install system prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends sqlite3 strace
+      - name: Prepare namespace-visible language tools
+        run: |
+          node_exe=$(mise which node)
+          sudo chown root:root "$node_exe"
+          sudo chmod go-w "$node_exe"
+          sudo ln -sfn "$node_exe" /usr/bin/node
+          stat -Lc 'Node executable: mode=%a uid=%u gid=%g' "$node_exe"
+          go_root=$(sudo bash scripts/ci/install-go.sh /usr/lib/kaban-ci-go-1.26.0)
+          scip_go=$(bash scripts/ci/install-scip-go.sh "$RUNNER_TEMP/kaban-ci-tools")
+          echo "$go_root/bin" >> "$GITHUB_PATH"
+          echo "GOROOT=$go_root" >> "$GITHUB_ENV"
+          echo "SCIP_GO=$scip_go" >> "$GITHUB_ENV"
+          sudo ln -sfn "$go_root/bin/go" /usr/bin/go
+          env -u GOROOT GOTOOLCHAIN=local /usr/bin/go version
+      - name: Prepare pinned Rust toolchain
+        run: |
+          # Read the owning toolchain file; do not replace it with an image default.
+          channel=$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')
+          rustup toolchain install "$channel" --profile minimal --component rustfmt --component clippy
+          rustc --version && cargo --version
+      - name: Restore compatible Cargo dependencies
+        id: cargo-cache
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          prefix-key: ci-v1-gnu
+          workspaces: . -> target/ci-gnu
+          key: ${{ runner.os }}-${{ runner.arch }}-gnu-${{ hashFiles('mise.toml', 'mise.lock', 'tools/kaban-rust-scip/rust-toolchain.toml') }}
+          cache-bin: false
+          cache-on-failure: true
+          save-if: ${{ needs.selection.outputs.cache-save }}
+      - name: Fetch locked dependencies
+        run: cargo fetch --locked
+      - name: Run gnu checks
+        env:
+          KABAN_CI_ARTIFACT_DIR: ${{ runner.temp }}/ci-artifacts-gnu
+        run: bash scripts/ci/ci.sh gnu
+      - name: Resource and cache summary
+        if: ${{ always() }}
+        run: |
+          {
+            echo 'Group: gnu; exact Cargo cache hit: ${{ steps.cargo-cache.outputs.cache-hit }}'
+            echo 'Cache save permitted: ${{ needs.selection.outputs.cache-save }}; see action post-step for actual save.'
+            free -h
+            df -h . "$RUNNER_TEMP"
+          } >> "$GITHUB_STEP_SUMMARY"
 
-      # Exit 3 means "a gate was skipped": ci.sh documents that CI must never treat it as a pass.
-      - name: Run gates
-        run: bash scripts/ci/ci.sh
+  musl:
+    name: Musl gates
+    needs: selection
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-musl
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Prepare tool directory
+        run: sudo install -d -o "$(id -u)" -g "$(id -g)" -m 755 "$MISE_DATA_DIR"
+      - name: Install pinned tools (no executable cache)
+        uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4
+        with:
+          version: 2026.10.24
+          cache: false
+          install_args: --locked python
+      - name: Install system prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends musl-tools
+      - name: Prepare pinned Rust toolchain
+        run: |
+          # Read the owning toolchain file; do not replace it with an image default.
+          channel=$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')
+          rustup toolchain install "$channel" --profile minimal --component rustfmt --component clippy
+          rustup target add --toolchain "$channel" "$(uname -m)-unknown-linux-musl"
+          rustc --version && cargo --version
+      - name: Restore compatible Cargo dependencies
+        id: cargo-cache
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          prefix-key: ci-v1-musl
+          workspaces: . -> target/ci-musl
+          key: ${{ runner.os }}-${{ runner.arch }}-musl-${{ hashFiles('mise.toml', 'mise.lock', 'tools/kaban-rust-scip/rust-toolchain.toml') }}
+          cache-bin: false
+          cache-on-failure: true
+          save-if: ${{ needs.selection.outputs.cache-save }}
+      - name: Fetch locked dependencies
+        run: cargo fetch --locked
+      - name: Run musl checks
+        env:
+          KABAN_CI_ARTIFACT_DIR: ${{ runner.temp }}/ci-artifacts-musl
+        run: bash scripts/ci/ci.sh musl
+      - name: Resource and cache summary
+        if: ${{ always() }}
+        run: |
+          {
+            echo 'Group: musl; exact Cargo cache hit: ${{ steps.cargo-cache.outputs.cache-hit }}'
+            echo 'Cache save permitted: ${{ needs.selection.outputs.cache-save }}; see action post-step for actual save.'
+            free -h
+            df -h . "$RUNNER_TEMP"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  producer:
+    name: Producer gates
+    needs: selection
+    if: ${{ needs.selection.outputs.producer == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-producer
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Prepare tool directory
+        run: sudo install -d -o "$(id -u)" -g "$(id -g)" -m 755 "$MISE_DATA_DIR"
+      - name: Install pinned tools (no executable cache)
+        uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4
+        with:
+          version: 2026.10.24
+          cache: false
+          install_args: --locked python
+      - name: Install system prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends pkg-config
+      - name: Prepare pinned Rust toolchain
+        run: |
+          # Read the owning toolchain file; do not replace it with an image default.
+          channel=$(python3 -c 'import tomllib; print(tomllib.load(open("tools/kaban-rust-scip/rust-toolchain.toml", "rb"))["toolchain"]["channel"])')
+          rustup toolchain install "$channel" --profile minimal --component rustfmt --component clippy
+          (cd tools/kaban-rust-scip && rustc --version && cargo --version)
+      - name: Restore compatible Cargo dependencies
+        id: cargo-cache
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          prefix-key: ci-v1-producer
+          workspaces: tools/kaban-rust-scip -> ../../target/ci-producer/producer
+          key: ${{ runner.os }}-${{ runner.arch }}-producer-${{ hashFiles('mise.toml', 'mise.lock', 'tools/kaban-rust-scip/rust-toolchain.toml') }}
+          cache-bin: false
+          cache-on-failure: true
+          save-if: ${{ needs.selection.outputs.cache-save }}
+      - name: Run producer checks
+        env:
+          KABAN_CI_ARTIFACT_DIR: ${{ runner.temp }}/ci-artifacts-producer
+        run: bash scripts/ci/ci.sh producer
+      - name: Resource and cache summary
+        if: ${{ always() }}
+        run: |
+          {
+            echo 'Group: producer; exact Cargo cache hit: ${{ steps.cargo-cache.outputs.cache-hit }}'
+            echo 'Cache save permitted: ${{ needs.selection.outputs.cache-save }}; see action post-step for actual save.'
+            free -h
+            df -h . "$RUNNER_TEMP"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   script-tests:
     name: Helper script unit tests
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          python-version: "3.12"
-      - name: MCP catalog helpers
-        working-directory: scripts/mcp
-        run: python3 -m unittest -v test_mcp_catalog
-      - name: Build helpers
-        run: python3 -m unittest discover -s scripts/tests -v
-      - name: Shell syntax
+          persist-credentials: false
+      - name: Prepare tool directory
+        run: sudo install -d -o "$(id -u)" -g "$(id -g)" -m 755 "$MISE_DATA_DIR"
+      - name: Install pinned helper Python
+        uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4
+        with:
+          version: 2026.10.24
+          cache: false
+          install_args: --locked python
+      - name: Run helper checks once
+        run: bash scripts/ci/ci.sh helpers
+
+  gates:
+    name: Rust gates (scripts/ci/ci.sh)
+    if: ${{ always() }}
+    needs: [selection, quality, functional, gnu, musl, script-tests, producer]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Run gates
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
         run: |
-          find scripts hooks -name '*.sh' -print0 | xargs -0 -n1 bash -n
+          python3 - <<'READINESS'
+          import json, os, sys
+          needs = json.loads(os.environ['NEEDS_JSON'])
+          selected = needs.get('selection', {}).get('outputs', {}).get('producer')
+          failed = selected not in ('true', 'false')
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as out:
+              for job in ('selection', 'quality', 'functional', 'gnu', 'musl', 'script-tests', 'producer'):
+                  result = needs.get(job, {}).get('result', 'missing')
+                  expected = 'skipped' if job == 'producer' and selected == 'false' else 'success'
+                  out.write(f'{job}: {result} (required: {expected})\n')
+                  failed |= result != expected
+              out.write('Readiness: ' + ('FAILED' if failed else 'PASS') + '\n')
+          sys.exit(1 if failed else 0)
+          READINESS
