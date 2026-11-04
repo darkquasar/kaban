@@ -743,7 +743,7 @@ fn the_sha_line_is_present_inside_git_and_absent_outside() {
 }
 
 /// R5-7 (F-W3-1, S1 "export output"): the rendered block is judged in overlapping windows, so
-/// an export of 200 accepted records (well over the 20,000-character per-field cap) is
+/// an export of 19 accepted records with long rationales (over the 20,000-character cap) is
 /// rendered and written, twice identically; a reject-class phrase in the last entry, past the
 /// cap, is still caught and the export withheld with the user file untouched.
 #[test]
@@ -751,13 +751,14 @@ fn a_block_over_the_per_field_cap_is_exported_and_a_hit_past_the_cap_still_withh
     use kaban_api::export::{ExportError, WithheldCause};
     let repo = Repo::new("long-block");
     let (lenient, store) = repo.db("a", Policy::empty(), true);
-    for i in 0..200 {
+    // Longer rationales cross the document cap without a large record population.
+    for i in 0..19 {
         accepted(
             &lenient,
-            if i % 2 == 0 { "Decision" } else { "Convention" },
+            "Decision",
             &format!(
-                "Record {i:03} keeps its own writer. One connection per process avoids the busy \
-                 loop seen in run {i}, which is the reasoning this entry carries."
+                "Record {i:02} keeps its own writer. {}",
+                "One connection per process avoids the busy loop. ".repeat(25)
             ),
             &[&format!("crates/m{i}/**")],
         );
@@ -773,7 +774,7 @@ fn a_block_over_the_per_field_cap_is_exported_and_a_hit_past_the_cap_still_withh
     );
     assert_eq!(
         written.matches("](.kaban/").count(),
-        200,
+        19,
         "every record once"
     );
     let second = export::export(&lenient, &write_to(&path, ExportFormat::AgentsMd)).unwrap();
@@ -813,15 +814,15 @@ fn a_block_over_the_per_field_cap_is_exported_and_a_hit_past_the_cap_still_withh
         written,
         "the user file is untouched"
     );
-    // the lenient service still exports the grown set (201 entries, no hit under its policy)
+    // the lenient service still exports all 20 entries, including the late policy hit
     let third = export::export(&lenient, &write_to(&path, ExportFormat::AgentsMd)).unwrap();
     assert_eq!(outcome(&third), WriteOutcome::Updated, "{third:?}");
-    assert_eq!(
-        std::fs::read_to_string(&path)
-            .unwrap()
-            .matches("](.kaban/")
-            .count(),
-        201
+    let grown = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(grown.matches("](.kaban/").count(), 20);
+    let hit = grown.find("Project Nightjar").unwrap();
+    assert!(
+        grown[..hit].chars().count() > 20_000,
+        "the rejected phrase is past the per-field cap"
     );
 }
 
