@@ -395,7 +395,9 @@ else:
     check(r.returncode == 0 and v.get("hookSpecificOutput", {}).get("hookEventName") == "SessionStart" and "bounded writer pool" in ctx and d2 in ctx, f"hook session-start briefs the accepted Decision as hookSpecificOutput.additionalContext (exit {r.returncode})")
     failure_env = {"session_id": "sess-smoke-0001", "hook_event_name": "PostToolUseFailure", "cwd": cwd, "tool_name": "Bash", "tool_input": {"command": "false"}, "error": f"smoke: the command returned exit status 1 ({FAILURE_CANARY})", "is_interrupt": False}
     r = hook("post-tool-use-failure", failure_env)
-    check(r.returncode == 0 and one_json(r) == {} and r.stderr.strip() == "", f"hook post-tool-use-failure prints {{}} and exits 0 (exit {r.returncode}; stderr {r.stderr!r})")
+    # A committed hook may report pending search visibility on stderr (SS-10);
+    # the recall below verifies the captured record without replaying the write.
+    check(r.returncode == 0 and one_json(r) == {}, f"hook post-tool-use-failure prints {{}} and exits 0 (exit {r.returncode}; stderr {r.stderr!r})")
     r = cli("recall", FAILURE_CANARY, "--hops", "0", "--full-text")
     v = one_json(r) or {"results": []}
     found = [x for x in v["results"] if x["kind"] == "Failure" and x.get("props", {}).get("pending_fix") is True and x.get("props", {}).get("command") == "false"]
