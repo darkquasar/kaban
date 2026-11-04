@@ -522,7 +522,8 @@ else:
     r2 = in_tmp("hook", "post-commit", "--stdin-json")
     rr = cli("recall", "temporary repository note writer pool", "--hops", "0")
     by_id = {x["id"]: x for x in (one_json(rr) or {"results": []})["results"]}
-    check(tid != "" and r.returncode == 0 and v == {"stamped": 1} and r.stderr == "" and r2.returncode == 0 and one_json(r2) == {"stamped": 0} and by_id.get(tid, {}).get("provenance", {}).get("commit_sha") == head and "commit_sha" not in by_id.get(d2, {}).get("provenance", {}), f"m5: hook post-commit in the temporary repository stamps HEAD on its own unstamped record once ({v.get('stamped')} then 0) and leaves the checkout's Decision unstamped (exit {r.returncode})")
+    # A committed stamp may report pending search visibility on stderr (SS-10).
+    check(tid != "" and r.returncode == 0 and v == {"stamped": 1} and r2.returncode == 0 and one_json(r2) == {"stamped": 0} and by_id.get(tid, {}).get("provenance", {}).get("commit_sha") == head and "commit_sha" not in by_id.get(d2, {}).get("provenance", {}), f"m5: hook post-commit in the temporary repository stamps HEAD on its own unstamped record once ({v.get('stamped')} then 0) and leaves the checkout's Decision unstamped (exit {r.returncode})")
     r = cli("ingest-decisions", "--repo", tmp)
     check(r.returncode == 4 and r.stdout == "" and r.stderr.strip() == OWN26_TEXT, f"m5: ingest-decisions is the OWN-26 typed stub: exit 4 with the fixed text (exit {r.returncode})")
     # docs-ingest DI1.6: the plain pipeline (`kaban ingest`, the MCP tools, the resource, the chunk
