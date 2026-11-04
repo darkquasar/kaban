@@ -1,0 +1,25 @@
+{
+  "datasketches-0.2.0-LICENSE": "https://github.com/apache/datasketches-rust/blob/fdb38b85d22e6549ab283bf3b9b133659267d19f/LICENSE",
+  "datasketches-0.2.0-NOTICE": "https://github.com/apache/datasketches-rust/blob/fdb38b85d22e6549ab283bf3b9b133659267d19f/NOTICE",
+  "htmlescape-0.3.1-LICENSE-APACHE": {
+    "license_expression_source": "https://github.com/veddan/rust-htmlescape/blob/446b5a912c86c81ec44e961e08b8d13c2732a409/Cargo.toml",
+    "note": "Crate declares Apache-2.0 / MIT / MPL-2.0 but ships no licence text. Apache-2.0 selected; standard unmodified Apache text. No upstream NOTICE exists.",
+    "text_source": "https://www.apache.org/licenses/LICENSE-2.0.txt"
+  },
+  "musl-1.2.5-COPYRIGHT": {
+    "archive_member": "musl-1.2.5/COPYRIGHT",
+    "archive_sha256": "a9a118bbe84d8764da0ea0d28b3ab3fae8477fc7e4085d90102b8596fc7c75e4",
+    "rust_build_source": "https://github.com/rust-lang/rust/blob/b940084d7eb6a299eb4bfeb8e34901bc051e7ac4/src/ci/docker/scripts/musl.sh",
+    "url": "https://www.musl-libc.org/releases/musl-1.2.5.tar.gz"
+  },
+  "ownedbytes-0.9.0-LICENSE": "https://github.com/quickwit-oss/tantivy/blob/c6e77d27c605cb3cea1a933fa7d68632aeb7865e/LICENSE",
+  "rmcp-3.5.1-LICENSE": "https://github.com/modelcontextprotocol/rust-sdk/blob/79437f291b2c44053d00dcd5db969fd0cca7c887/LICENSE",
+  "rust-1.99.0-*": {
+    "note": "Includes standard-library and compiler-builtins notices and a conservative upstream dependency inventory.",
+    "rust_commit": "b940084d7eb6a299eb4bfeb8e34901bc051e7ac4",
+    "source": "Rust 1.99.0 official rust-docs component, share/doc/rust/COPYRIGHT-library.html and licenses/*.txt"
+  },
+  "rust-1.99.0-COMPILER-BUILTINS-LICENSE.txt": "https://github.com/rust-lang/rust/blob/b940084d7eb6a299eb4bfeb8e34901bc051e7ac4/library/compiler-builtins/LICENSE.txt",
+  "tantivy-9e63fc5-LICENSE": "https://github.com/quickwit-oss/tantivy/blob/9e63fc508153ef770f9ff980c8fa2f11e8e2e6db/LICENSE",
+  "whatlang-0.18.0-LICENSE": "https://github.com/greyblake/whatlang-rs/blob/584009bbdbd715681fc1c144ac986814104bedbc/LICENSE"
+}
