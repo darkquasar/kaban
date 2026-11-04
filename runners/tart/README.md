@@ -4,7 +4,7 @@ This directory owns the Packer recipe and provisioner used for Kaban's local
 Ubuntu22.04 ARM64 runner image. Tool versions come from the checkout's existing
 `mise.toml`, `mise.lock`, root/producer `rust-toolchain.toml` and Go/SCIP installers.
 `bootstrap-inputs.json` pins only the Mise/Rustup bootstraps and their publisher
-checksums. Native package versions are recorded inside each built image.
+checksums. Native package versions are recorded during each build.
 
 ```text
 +--------------------+  snapshot  +-------------------+  Packer/SSH  +--------------------+
@@ -70,7 +70,7 @@ Keep checkout/build state on the guest disk. As the guest `admin` user, source
 source /etc/profile.d/kaban-ci-tools.sh
 export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0
 export CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_DEV_STRIP=symbols
-export CARGO_TARGET_DIR=/tmp/kaban-target-functional
+export CARGO_TARGET_DIR="$HOME/kaban-target-functional"
 bash scripts/dev/cargo-slot.sh bash scripts/ci/ci.sh functional
 ```
 
@@ -79,10 +79,18 @@ actual exit and mandatory NOT RUN markers. See [CI commands](../../docs/develope
 Do not promote a test clone back into the tools-only parent. Stop owned guests
 after use and preserve failures; never prune/delete unrelated VMs.
 
+This Ubuntu image clears `/tmp` on reboot. Use a guest home directory for a
+checkout or build cache that must survive shutdown/reboot; `/tmp` suits disposable
+single-boot scratch work. Cloning a stopped VM does not preserve its `/tmp` data
+through the clone's next boot.
+
 Refresh by staging a new build from the intended checkout after tool/OS/security
 changes. The same base digest does not pin mutable apt repositories: keep
-`/tmp/kaban-ci-inputs/native-packages.txt` and `installed-tools.txt` to identify the
-actual result. Retain the previous working image as fallback. Update bootstrap
+`/tmp/kaban-ci-inputs/native-packages.txt` and `installed-tools.txt` from the build
+before another boot to identify the actual result. These temporary records do not
+survive reboot; the Packer build log also contains the installed tool identities.
+Durable in-image metadata is a separate small recipe improvement. Retain the
+previous working image as fallback. Update bootstrap
 URLs/checksums from their official publisher together when refreshing those tools.
 
 This does not activate GitHub runners or make the current workflow image-aware:
