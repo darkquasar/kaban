@@ -21,6 +21,8 @@ their status. Mandatory runtime markers and size misses remain incomplete (exit 
 CARGO=<executable> selects Cargo, including paths with spaces; no toolchain override.
 CARGO_TARGET_DIR selects build output; producer uses its private producer/ subdirectory.
 KABAN_CI_ARTIFACT_DIR optionally stages run-local copies outside the cached target.
+KABAN_CI_ISOLATION_SPLIT=1 separates refusal tests using the same compiled binaries;
+requires a disposable GitHub-hosted runner and restores its namespace policy afterward.
 CI_SKIP_SMOKE=1 skips only smoke and forces GNU/all incomplete; KABAN_SIZE_TABLE=1
 adds optional GNU feature builds. Artifact groups require Linux and GNU utilities.
 HELP
@@ -234,8 +236,56 @@ LIBRARIES
   fi
 }
 
+# Only the disposable hosted job may change its kernel policy. Both selections
+# reuse nextest's build metadata; local functional runs retain their native policy.
+hosted_isolation_tests() (
+  set -e
+  if [ "${GITHUB_ACTIONS:-}" != true ] || [ "${RUNNER_ENVIRONMENT:-}" != github-hosted ]; then
+    echo "isolation split requires a disposable GitHub-hosted runner" >&2
+    exit 2
+  fi
+  key=kernel.apparmor_restrict_unprivileged_userns
+  original=$(sysctl -n "$key")
+  metadata=$(mktemp)
+  restore_isolation_policy() {
+    rc=$?
+    trap - EXIT
+    if ! sudo -n sysctl -q -w "$key=$original"; then
+      echo "failed to restore original namespace policy" >&2
+      [ "$rc" -ne 0 ] || rc=1
+    fi
+    rm -f "$metadata"
+    exit "$rc"
+  }
+  trap restore_isolation_policy EXIT
+
+  # Refuse an unsuitable runner before spending time compiling.
+  sudo -n sysctl -q -w "$key=0"
+  unshare --user --map-root-user --net --mount --pid --fork true
+  sudo -n sysctl -q -w "$key=1"
+  if unshare --user --map-root-user --net --mount --pid --fork true; then
+    echo "namespace restriction did not produce the unavailable context" >&2
+    exit 1
+  fi
+  "$CARGO" nextest list --workspace --locked --list-type binaries-only --message-format json > "$metadata"
+  refusal='binary_id(kaban-index::cli) & (test(=cli_index_required_without_isolating_tier_is_exit_8) | test(=rust_required_unavailable_never_runs_native_producer_probes))'
+  echo "isolation: unavailable; run only the two refusal tests from existing binaries"
+  refusal_rc=0
+  "$CARGO" nextest run --binaries-metadata "$metadata" -E "$refusal" --no-fail-fast --success-output immediate || refusal_rc=$?
+  sudo -n sysctl -q -w "$key=0"
+  echo "isolation: available; run the remaining workspace tests from existing binaries"
+  capable_rc=0
+  "$CARGO" nextest run --binaries-metadata "$metadata" -E "not ($refusal)" --no-fail-fast --success-output immediate || capable_rc=$?
+  [ "$refusal_rc" -eq 0 ] || exit "$refusal_rc"
+  exit "$capable_rc"
+)
+
 functional() {
-  step rust_runner "${CARGO:-cargo}" nextest run --workspace --no-fail-fast --success-output immediate
+  if [ "${KABAN_CI_ISOLATION_SPLIT:-0}" = 1 ]; then
+    step rust_runner hosted_isolation_tests
+  else
+    step rust_runner "${CARGO:-cargo}" nextest run --workspace --no-fail-fast --success-output immediate
+  fi
   step rust_runner "${CARGO:-cargo}" nextest run -p kaban-ingest --features pdf --success-output immediate
   step rust_runner "${CARGO:-cargo}" nextest run -p kaban --no-default-features --success-output immediate
   step doctests

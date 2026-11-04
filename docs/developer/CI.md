@@ -142,7 +142,40 @@ still need adequate `/tmp` space; actual namespace and resource assertions remai
 in the suites. macOS can run focused commands and helpers; comprehensive GNU/musl
 checks need a suitable native Linux environment.
 
-## Capability assessment and remaining gap
+## Hosted isolation selections
+
+The GitHub-hosted functional job sets `KABAN_CI_ISOLATION_SPLIT=1`. It checks that
+both namespace conditions can be established before compiling, then builds the
+workspace test executables once through nextest's binaries-only metadata command.
+Two filtered executions reuse those executables and the same target directory:
+
+```text
++---------------------+  reuse =>  +----------------------------------+
+| Workspace test build| =========> | Two isolation-unavailable tests  |
++---------------------+            +----------------------------------+
+          |
+          | reuse =>
+          v
++----------------------------------+
+| Remaining tests: isolation works |
++----------------------------------+
+```
+
+Only `cli_index_required_without_isolating_tier_is_exit_8` and
+`rust_required_unavailable_never_runs_native_producer_probes` run with
+`kernel.apparmor_restrict_unprivileged_userns=1`. The remaining workspace tests
+run with that restriction set to `0`. Both executions are attempted after a
+successful build even if one fails, and their failures and mandatory markers
+remain visible. The original setting is restored on exit. This changes only the
+disposable GitHub VM's runtime setting, with no persistent configuration file.
+Local and Tart commands retain their normal policy; opting in outside a
+GitHub-hosted job is refused. PDF, no-default and doctest selections stay separate.
+
+The existing per-group Cargo caches accelerate subsequent runs. The two isolation
+executions share their already-built files directly, without artifact transfer,
+another container image or another provisioned job.
+
+## Historical capability assessment and remaining gap
 
 The initial 2026-11-04 T4 assessment is a bounded blocker report, not Linux runtime
 qualification. The available local host is Darwin ARM64 with Rust/Cargo 1.99.0
@@ -281,8 +314,10 @@ activation. Historical native discovery/doctest observations below are retained;
 ordinary producer execution is still unproved. T5's local producer probe stops
 incomplete before compilation because available Python 3.14 differs from the
 3.12.16 pin. No tool installation, full product campaign or assertion repair is
-part of this workflow edit. Keep publication/activation pending those baselines
-and retain any real failures. Linux capability and musl-size blockers remain open.
+part of that initial workflow edit. Subsequent hosted runs passed producer and
+doctest baselines, and PR #3 now exercises the parallel workflow. The hosted
+isolation split above addresses the recorded capability gap; its actual selected
+test results determine completeness. The current musl index limit is 12 MB.
 
 `clean-room.sh` remains an explicit costly clean/reproducibility tool, outside
 routine validation. Its summary and exit are `INCOMPLETE`/3 when its CI child is

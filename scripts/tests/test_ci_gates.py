@@ -15,7 +15,7 @@ BASH = shutil.which("bash")
 
 
 class CiToolSelection(unittest.TestCase):
-    def run_gate(self, *, tools=("nextest", "deny"), fail="nextest", color="always", inherited_fd=False, versions=None, cargo_override=None, args=(), missing_tool=None, target_present=True, marker="", runner_fail="", helper_fail=False, smoke_skip=False, size_table=False, artifact_scenario="", artifact_sizes=None, repeats=1, artifact_root=False, summary=False):
+    def run_gate(self, *, tools=("nextest", "deny"), fail="nextest", color="always", inherited_fd=False, versions=None, cargo_override=None, args=(), missing_tool=None, target_present=True, marker="", runner_fail="", helper_fail=False, smoke_skip=False, size_table=False, artifact_scenario="", artifact_sizes=None, repeats=1, artifact_root=False, summary=False, isolation_split=False, hosted=True, isolation_probe="normal"):
         with tempfile.TemporaryDirectory(prefix="kaban-ci-tools-") as scratch:
             root = Path(scratch)
             script = root / "scripts/ci/ci.sh"
@@ -52,14 +52,27 @@ class CiToolSelection(unittest.TestCase):
             bin_dir = root / "bin"
             bin_dir.mkdir()
             (bin_dir / "python3").symlink_to(sys.executable)
+            policy = root / "namespace-policy"
+            policy.write_text("1")
             helper = bin_dir / "fixture-tool"
             helper.write_text(
                 f"#!{sys.executable}\n"
                 "import json, os, sys\nfrom pathlib import Path\n"
                 "tool = Path(sys.argv[0]).name\n"
+                "if tool in ('sudo', 'sysctl', 'unshare'):\n"
+                "    with open(os.environ['ISOLATION_CALLS'], 'a') as log: log.write(json.dumps([tool, *sys.argv[1:]]) + '\\n')\n"
                 "if tool == 'uname': print('x86_64' if '-m' in sys.argv else 'Linux')\n"
                 "elif tool == 'rustc' and '--print' in sys.argv: print(str(Path(os.environ['TARGET_LIB']).parents[3]) if 'sysroot' in sys.argv else os.environ['TARGET_LIB'])\n"
                 "elif tool == 'rustc': print(json.loads(os.environ['VERSIONS']).get('rustc', 'rustc ' + ('1.91.0' if Path.cwd().name == 'kaban-rust-scip' else '1.90.0') + ' (fixture)'))\n"
+                "elif tool == 'sudo':\n"
+                "    args = sys.argv[1:]; args.remove('-n'); os.execvp(args[0], args)\n"
+                "elif tool == 'sysctl':\n"
+                "    policy = Path(os.environ['NAMESPACE_POLICY'])\n"
+                "    if '-n' in sys.argv: print(policy.read_text())\n"
+                "    else: policy.write_text(sys.argv[-1].split('=')[1])\n"
+                "elif tool == 'unshare':\n"
+                "    mode = os.environ['ISOLATION_PROBE']; restricted = Path(os.environ['NAMESPACE_POLICY']).read_text() == '1'\n"
+                "    sys.exit(1 if mode == 'available-fails' or (restricted and mode != 'unavailable-works') else 0)\n"
                 "elif tool == 'stat':\n"
                 "    p=Path(sys.argv[-1]); print(p.stat().st_size)\n"
                 "    if '/default/' in str(p):\n"
@@ -68,7 +81,7 @@ class CiToolSelection(unittest.TestCase):
                 "elif tool == 'node': print(json.loads(os.environ['VERSIONS']).get('node', 'v22.0.0'))\n"
                 "else: print(tool + ' fixture')\n")
             helper.chmod(0o700)
-            for name in ('uname', 'rustc', 'node', 'go', 'scip-go', 'cc', 'musl-gcc', 'git', 'strace', 'stat'):
+            for name in ('uname', 'rustc', 'node', 'go', 'scip-go', 'cc', 'musl-gcc', 'git', 'strace', 'stat', 'sudo', 'sysctl', 'unshare'):
                 (bin_dir / name).symlink_to(helper)
             if missing_tool:
                 (bin_dir / missing_tool).unlink()
@@ -103,11 +116,19 @@ class CiToolSelection(unittest.TestCase):
                 "        if os.environ.get('CARGO_TERM_COLOR') == 'always':\n"
                 "            tool = '\\x1b[1m\\x1b[96m' + tool + '\\x1b[0m'\n"
                 "        print('    ' + tool)\n"
+                "elif args[:2] == ['nextest', 'list']:\n"
+                "    if os.environ['FAIL'] == 'isolation-build': sys.exit(37)\n"
+                "    print(json.dumps({'fixture': 'compiled once'}))\n"
                 "elif args[0] in ('nextest', 'test'):\n"
                 "    suite = ('workspace' if '--workspace' in args else 'pdf' if 'pdf' in args else 'no-default') if args[0] == 'nextest' else ('doc' if '--doc' in args else 'producer')\n"
+                "    if '--binaries-metadata' in args:\n"
+                "        assert json.loads(Path(args[args.index('--binaries-metadata') + 1]).read_text()) == {'fixture': 'compiled once'}\n"
+                "        suite = 'workspace' if args[args.index('-E') + 1].startswith('not ') else 'refusal'\n"
+                "        assert Path(os.environ['NAMESPACE_POLICY']).read_text() == ('1' if suite == 'refusal' else '0')\n"
                 "    print('runner: ' + suite + ' cwd=' + str(Path.cwd()) + ' target=' + os.environ.get('CARGO_TARGET_DIR', 'target'))\n"
                 "    print('visible success: ' + suite)\n"
                 "    if os.environ['MARKER'] == suite: print('NOT RUN: invented_branch: unavailable fixture', file=sys.stderr)\n"
+                "    if os.environ['RUNNER_FAIL'] == 'both' and suite in ('refusal', 'workspace'): sys.exit(37 if suite == 'refusal' else 38)\n"
                 "    if os.environ['RUNNER_FAIL'] == suite or args[0] == os.environ['FAIL']: sys.exit(37)\n"
                 "elif args[0] == os.environ['FAIL']:\n"
                 "    sys.exit(37)\n"
@@ -153,6 +174,12 @@ class CiToolSelection(unittest.TestCase):
                     env={
                         **os.environ,
                         "BASH_ENV": os.devnull,
+                        "KABAN_CI_ISOLATION_SPLIT": "1" if isolation_split else "0",
+                        "GITHUB_ACTIONS": "true" if hosted else "false",
+                        "RUNNER_ENVIRONMENT": "github-hosted" if hosted else "self-hosted",
+                        "NAMESPACE_POLICY": str(policy),
+                        "ISOLATION_CALLS": str(root / "isolation-calls.jsonl"),
+                        "ISOLATION_PROBE": isolation_probe,
                         "CARGO": str(cargo) if cargo_override is None else cargo_override,
                         "PATH": str(bin_dir) + os.pathsep + "/usr/bin:/bin",
                         "TARGET_LIB": str(root / "sysroot/lib/rustlib/x86_64-unknown-linux-musl/lib"),
@@ -182,6 +209,9 @@ class CiToolSelection(unittest.TestCase):
                     timeout=10,
                 )
                 runs.append(result)
+            result.namespace_policy = policy.read_text()
+            isolation_calls = root / "isolation-calls.jsonl"
+            result.isolation_calls = [json.loads(line) for line in isolation_calls.read_text().splitlines()] if isolation_calls.exists() else []
             result.summary = (root / "summary").read_text() if (root / "summary").exists() else ""
             result.stages_in_target = bool(list((root / "private target").glob("ci-artifacts.*")))
             result.run_codes = [run.returncode for run in runs]
@@ -197,6 +227,71 @@ class CiToolSelection(unittest.TestCase):
                                       for path in configs for binary in path.iterdir()
                                       if binary.name in ("kaban", "kaban-index")}
             return result, [json.loads(line) for line in (calls.read_text().splitlines() if calls.exists() else [])]
+
+    def test_hosted_isolation_split_reuses_build_and_restores_policy(self):
+        result, calls = self.run_gate(args=("functional",), fail="", isolation_split=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(sum(c[:2] == ["nextest", "list"] for c in calls), 1)
+        reused = [c for c in calls if "--binaries-metadata" in c]
+        self.assertEqual(len(reused), 2, calls)
+        self.assertEqual(reused[0][reused[0].index("--binaries-metadata") + 1],
+                         reused[1][reused[1].index("--binaries-metadata") + 1])
+        selection = "binary_id(kaban-index::cli) & (test(=cli_index_required_without_isolating_tier_is_exit_8) | test(=rust_required_unavailable_never_runs_native_producer_probes))"
+        self.assertEqual(reused[0][reused[0].index("-E") + 1], selection)
+        self.assertEqual(reused[1][reused[1].index("-E") + 1], "not (" + selection + ")")
+        self.assertFalse(any("--workspace" in c for c in reused))
+        self.assertFalse(Path(reused[0][reused[0].index("--binaries-metadata") + 1]).exists())
+        self.assertEqual(result.namespace_policy, "1")
+        self.assertIn("visible success: pdf", result.stdout)
+        self.assertIn("visible success: no-default", result.stdout)
+        self.assertIn("visible success: doc", result.stdout)
+
+    def test_hosted_isolation_split_runs_both_selections_and_preserves_first_failure(self):
+        for failed in ("refusal", "workspace", "both"):
+            with self.subTest(failed=failed):
+                result, calls = self.run_gate(args=("functional",), fail="", isolation_split=True,
+                                              runner_fail=failed)
+                self.assertEqual(result.returncode, 37, result.stdout + result.stderr)
+                reused = [c for c in calls if "--binaries-metadata" in c]
+                self.assertEqual(len(reused), 2)
+                self.assertFalse(Path(reused[0][reused[0].index("--binaries-metadata") + 1]).exists())
+                self.assertEqual(result.namespace_policy, "1")
+                self.assertIn("visible success: workspace", result.stdout)
+
+    def test_hosted_isolation_split_keeps_mandatory_marker_semantics(self):
+        for marker in ("refusal", "workspace"):
+            with self.subTest(marker=marker):
+                result, _ = self.run_gate(args=("functional",), fail="", isolation_split=True,
+                                          marker=marker)
+                self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+                self.assertIn("mandatory_skips: 1", result.stdout)
+                self.assertIn("invented_branch", result.stdout)
+                self.assertIn("visible success: doc", result.stdout)
+                self.assertEqual(result.namespace_policy, "1")
+
+    def test_hosted_isolation_split_fails_before_build_on_unsuitable_runner(self):
+        for probe in ("available-fails", "unavailable-works"):
+            with self.subTest(probe=probe):
+                result, calls = self.run_gate(args=("functional",), fail="", isolation_split=True,
+                                              isolation_probe=probe)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertFalse(any(c[:2] in (["nextest", "list"], ["nextest", "run"]) for c in calls))
+                self.assertEqual(result.namespace_policy, "1")
+        result, calls = self.run_gate(args=("functional",), fail="isolation-build", isolation_split=True)
+        self.assertEqual(result.returncode, 37, result.stdout + result.stderr)
+        self.assertFalse(any("--binaries-metadata" in c for c in calls))
+        self.assertEqual(result.namespace_policy, "1")
+
+    def test_isolation_policy_changes_require_opt_in_and_hosted_guard(self):
+        result, calls = self.run_gate(args=("functional",), fail="", isolation_split=True, hosted=False)
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertEqual(result.isolation_calls, [])
+        self.assertFalse(any(c[:2] in (["nextest", "list"], ["nextest", "run"]) for c in calls))
+        result, calls = self.run_gate(args=("functional",), fail="")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.isolation_calls, [])
+        self.assertFalse(any(c[:2] == ["nextest", "list"] for c in calls))
+        self.assertTrue(any(c[:2] == ["nextest", "run"] and "--workspace" in c for c in calls))
 
     def test_artifacts_can_stage_outside_cached_target_without_changing_consumers(self):
         result, calls = self.run_gate(args=("gnu",), fail="", artifact_root=True)
