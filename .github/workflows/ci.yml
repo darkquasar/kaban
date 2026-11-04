@@ -195,6 +195,55 @@ jobs:
             df -h . "$RUNNER_TEMP"
           } >> "$GITHUB_STEP_SUMMARY"
 
+  pdf:
+    name: PDF gates
+    needs: selection
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-pdf
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Prepare tool directory
+        run: sudo install -d -o "$(id -u)" -g "$(id -g)" -m 755 "$MISE_DATA_DIR"
+      - name: Install pinned tools (no executable cache)
+        uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4
+        with:
+          version: 2026.10.24
+          cache: false
+          install_args: --locked python aqua:nextest-rs/nextest/cargo-nextest
+      - name: Prepare pinned Rust toolchain
+        run: |
+          # Read the owning toolchain file; do not replace it with an image default.
+          channel=$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')
+          rustup toolchain install "$channel" --profile minimal
+          rustc --version && cargo --version
+      - name: Restore compatible Cargo dependencies
+        id: cargo-cache
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          prefix-key: ci-v1-pdf
+          workspaces: . -> target/ci-pdf
+          key: ${{ runner.os }}-${{ runner.arch }}-pdf-${{ hashFiles('mise.toml', 'mise.lock', 'tools/kaban-rust-scip/rust-toolchain.toml') }}
+          cache-bin: false
+          cache-on-failure: true
+          save-if: ${{ needs.selection.outputs.cache-save }}
+      - name: Fetch locked dependencies
+        run: cargo fetch --locked
+      - name: Run PDF checks
+        run: bash scripts/ci/ci.sh pdf
+      - name: Resource and cache summary
+        if: ${{ always() }}
+        run: |
+          {
+            echo 'Group: pdf; exact Cargo cache hit: ${{ steps.cargo-cache.outputs.cache-hit }}'
+            echo 'Cache save permitted: ${{ needs.selection.outputs.cache-save }}; see action post-step for actual save.'
+            free -h
+            df -h . "$RUNNER_TEMP"
+          } >> "$GITHUB_STEP_SUMMARY"
+
   gnu:
     name: Gnu gates
     needs: selection
@@ -396,7 +445,7 @@ jobs:
   gates:
     name: Rust gates (scripts/ci/ci.sh)
     if: ${{ always() }}
-    needs: [selection, quality, functional, gnu, musl, script-tests, producer]
+    needs: [selection, quality, functional, pdf, gnu, musl, script-tests, producer]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -410,7 +459,7 @@ jobs:
           selected = needs.get('selection', {}).get('outputs', {}).get('producer')
           failed = selected not in ('true', 'false')
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as out:
-              for job in ('selection', 'quality', 'functional', 'gnu', 'musl', 'script-tests', 'producer'):
+              for job in ('selection', 'quality', 'functional', 'pdf', 'gnu', 'musl', 'script-tests', 'producer'):
                   result = needs.get(job, {}).get('result', 'missing')
                   expected = 'skipped' if job == 'producer' and selected == 'false' else 'success'
                   out.write(f'{job}: {result} (required: {expected})\n')

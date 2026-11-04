@@ -1,7 +1,7 @@
 # CI checks
 
-Use native Cargo commands for focused work, `mise run core` for quality, helpers
-and functional checks, and `bash scripts/ci/ci.sh` (or `mise run ci`) for comprehensive
+Use native Cargo commands for focused work, `mise run core` for quality, helpers,
+functional and PDF checks, and `bash scripts/ci/ci.sh` (or `mise run ci`) for comprehensive
 checks. Standalone producer qualification is a separate explicit invocation.
 No command here establishes release readiness by itself.
 
@@ -28,12 +28,13 @@ cargo nextest run -p kaban-ingest --features pdf
 cargo nextest run -p kaban --no-default-features
 cargo nextest list --workspace
 
-# Local core: quality + helpers + functional, stopping on failure.
+# Local core: quality + helpers + functional + PDF, stopping on failure.
 mise run core
-# Without mise activation, invoke those three groups in sequence:
+# Without mise activation, invoke those four groups in sequence:
 bash scripts/ci/ci.sh quality
 bash scripts/ci/ci.sh helpers
 bash scripts/ci/ci.sh functional
+bash scripts/ci/ci.sh pdf
 
 # Comprehensive checks, including GNU release/smoke and native musl:
 bash scripts/ci/ci.sh                 # equivalent to explicit all
@@ -47,11 +48,12 @@ bash scripts/ci/ci.sh producer
 | --- | --- | --- |
 | `quality` | fmt, all three Clippy configurations, deny, store/dependency boundaries | Runtime suites and artifacts |
 | `helpers` | MCP catalog tests, build helper tests, Bash syntax under scripts/hooks | Rust tools and compilation |
-| `functional` | Workspace, ingest PDF and Kaban no-default nextest; library doctests | Producer, artifacts and ignored/manual cases |
+| `functional` | Workspace and Kaban no-default nextest; default library doctests | PDF variant, producer, artifacts and ignored/manual cases |
+| `pdf` | Full PDF-enabled ingest nextest suite and its library doctest | Default workspace, producer and artifacts |
 | `producer` | Locked fetch, fmt, locked workspace Clippy/tests, applicable doctests in tools/kaban-rust-scip | Root workspace and artifacts |
 | `gnu` | Default GNU release, MCP smoke, graph delta, optional size table | Functional tests, musl and producer |
 | `musl` | Native musl Kaban/index release and index size guard | GNU smoke, functional tests and producer |
-| `all` / `ci` | quality + helpers + functional + gnu + musl | Standalone producer and ignored/manual cases |
+| `all` / `ci` | quality + helpers + functional + pdf + gnu + musl | Standalone producer and ignored/manual cases |
 
 Every group has a matching mise task (`mise run quality`, etc.; comprehensive is
 `mise run ci`). `core` is a local composition, not a dispatcher group. Unknown
@@ -64,8 +66,8 @@ incomplete even when the parent test passed; a failed child retains its status.
 Library packages come from Cargo metadata, respecting actual library targets and
 `doctest = false`. The libraries share one `cargo test --doc --locked -p <package> -p <package> ...
 -- --show-output` invocation, preserving feature unification across them; ingest
-also runs separately with `--features pdf`. Kaban is bin-only, so the no-default Kaban
-suite adds no library doctest. Libraries without examples honestly report zero
+runs separately with `--features pdf` in the PDF group. Kaban is bin-only, so its
+no-default suite adds no library doctest. Libraries without examples honestly report zero
 examples. Native metadata at the T2 source revision identifies a producer library as well
 as its binary, and its `cargo test --workspace` command already includes applicable library
 doctests. It needs no second doctest invocation. Root workspaces with no library
@@ -119,7 +121,9 @@ components even though its toolchain file uses the minimal profile.
 comprehensive path retains the full prerequisite check; individual groups require
 only their selected tools. Rust groups need Python 3.11+ for authoritative TOML
 pins and check pinned Python/Cargo/Rust versions. Quality adds fmt/Clippy, deny
-and jq; functional adds nextest, pinned Node, Go/scip-go and cc. Producer probes
+and jq; functional adds nextest, pinned Node, Go/scip-go and cc. PDF needs only
+nextest, cc and Git beyond the common pinned Python/Cargo/Rust checks; it does not
+probe Node, Go/scip-go, deny, musl or namespace capabilities. Producer probes
 its own toolchain and components, without nextest/deny or musl. Helpers need Python 3.11+
 with SQLite, Git and Bash; they report an actionable exit 3 for an older Python
 without requiring the exact mise pin. Artifact groups require native Linux/GNU utilities;
@@ -232,7 +236,7 @@ do not suppress markers or introduce a generic counterpart engine.
 ## Native CI jobs
 
 The workflow checks PR merge candidates, main pushes, merge-group candidates and
-manual dispatches. Quality, functional, GNU and musl run as independent jobs after
+manual dispatches. Quality, functional, PDF, GNU and musl run as independent jobs after
 a small scope-selection job; helpers start independently. A selected producer job
 also runs independently under its own toolchain. Every job checks out the same
 native event candidate. None depends on quality, and a failed job does not cancel
@@ -253,7 +257,7 @@ No weekly schedule is active.
 
 `Rust gates (scripts/ci/ci.sh)` retains its required-status name as a short,
 always-evaluated readiness job. It requires successful selection, quality,
-functional, GNU, musl and helper jobs, plus producer when selected. Only a producer
+functional, PDF, GNU, musl and helper jobs, plus producer when selected. Only a producer
 explicitly excluded by successful selection may be skipped. Missing, failed,
 cancelled or unexpectedly skipped work fails readiness. `Helper script unit tests`
 retains its name and invokes `ci.sh helpers` once. No hosted job invokes `all`.
@@ -282,6 +286,34 @@ Setup, dependency restore, fetch, checks and post-save are native log phases;
 `ci.sh` prints each native command. Group summaries expose exit status and final
 resource/cache information. Compilation/tests within a group share its check step;
 its timing alone does not separate all compiler and test work.
+
+## PDF parallelization spike
+
+The PDF job moves the complete existing `kaban-ingest --features pdf` suite and
+its doctest out of functional CI. It keeps its own `target/ci-pdf` and cache key,
+with Python/nextest setup and no language-producer installation or namespace-policy
+changes. PDF remains required by the readiness job. Local `all` and `mise run core`
+still run both configurations; `mise run functional` selects the default suites,
+and `mise run pdf` selects the PDF configuration.
+
+```text
++-----------------+  default tests =>  +------------------+  status =>  +----------------+
+| Selection [CI]  | =================> | Functional [CI]  | ==========> | Readiness [CI] |
++-----------------+                    +------------------+             +----------------+
+         | PDF tests =>  +------------------+          status =>                 ^
+         +============> | PDF [CI]         | ===================================+
+                        +------------------+
+```
+
+The separate job compiles its own test configuration and can increase total runner
+work even when it shortens the critical path. Compare the PR's functional/PDF job
+and check-step durations, compiler `Finished` timings, actual dependency cache hits,
+whole-workflow elapsed time, and summed job durations with main run `41799905215`.
+That main run had no exact Rust cache hits; its GNU job was the critical path.
+A comparison with a warm PR run alone cannot establish an end-to-end speedup from
+PDF isolation. Keep the complete suite during this spike; choosing narrower PDF
+coverage is a separate decision. Hosted observations determine whether to retain
+the split; no compilation or elapsed-time savings are assumed here.
 
 ## Cache scopes and observation limits
 
@@ -361,9 +393,9 @@ All existing product assertions, Tantivy coverage and budgets remain:
 
 GNU index and musl Kaban sizes remain informational. Actual product-suite execution
 and current producer/doctest baselines remain required before activation and composed
-readiness; fixture dispatch checks do not qualify those suites. Weekly broad qualification and release
-automation remain deferred; there is no cross-run evidence handoff or new publication
-pipeline.
+readiness; fixture dispatch checks do not qualify those suites. Weekly broad
+qualification remains deferred. Release packaging and publication are described separately in [RELEASE.md](RELEASE.md); ordinary CI has no cross-run
+artifact handoff.
 
 ## Build outputs and reuse
 
