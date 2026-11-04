@@ -18,7 +18,7 @@ edition = "2024"
 rust-version = "1.99"   # MSRV = pinned toolchain (OD-8, R0-3); bump together with rust-toolchain.toml
 license = "Apache-2.0"
 authors = ["kaban authors"]
-repository = "https://github.com/darkquasar/kaban4"
+repository = "https://github.com/darkquasar/kaban"
 
 [workspace.dependencies]
 # internal crates
@@ -68,7 +68,7 @@ protobuf = "=3.7.2"                     # MIT: `Message::parse_from_bytes` on th
 blake3 = { version = "=1.8.7", default-features = false, features = ["std", "pure"] }  # CC0-1.0 OR Apache-2.0 OR Apache-2.0 WITH LLVM-exception: content hashes, derived ids (pure Rust, no C/asm)
 ignore = "=0.4.33"                      # Unlicense OR MIT: gitignore-aware walk (shared with core C5.4)
 globset = "=0.4.20"                     # Unlicense OR MIT: deny-glob matcher with glob ids (D-11; same pin as core C3.4)
-pulldown-cmark = { version = "=0.13.5", default-features = false }  # MIT: Markdown events with `into_offset_iter`, YAML metadata blocks (DI1.2, `md`; SECURITY/20261029)
+pulldown-cmark = { version = "=0.13.6", default-features = false }  # MIT: Markdown events with `into_offset_iter`, YAML metadata blocks (DI1.2, `md`; SECURITY/20261029)
 text-splitter = { version = "=0.33.0", features = ["markdown"] }    # MIT: intra-section split of a paragraph group above the hard max (DI1.2/DI1.3, `md`)
 chardetng = "=1.0.0"                    # Apache-2.0 OR MIT: `.txt` encoding detection (DI1.2)
 encoding_rs = "=0.8.42"                 # (Apache-2.0 OR MIT) AND BSD-3-Clause: decoding (DI1.2; BSD-3-Clause is on the allowlist)

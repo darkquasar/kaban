@@ -11,7 +11,7 @@ expression: status
     "ok": 4
   },
   "extractors": [
-    "pulldown-cmark@0.13.5",
+    "pulldown-cmark@0.13.6",
     "chardetng@1.0.0+encoding_rs@0.8.42"
   ],
   "last_run": "[last_run]",

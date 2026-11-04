@@ -71,15 +71,25 @@ fn a_later_success_of_the_same_command_records_evidence_with_the_files_edited_si
     );
 
     // Act
-    for (event, env) in [
-        ("post-tool-use-failure", &failure_env),
-        ("pre-tool-use", &edit_env),
-        ("post-tool-use", &other_env),
-        ("post-tool-use", &success_env),
+    for (event, env, writes_record) in [
+        ("post-tool-use-failure", &failure_env, true),
+        ("pre-tool-use", &edit_env, false),
+        ("post-tool-use", &other_env, false),
+        ("post-tool-use", &success_env, true),
     ] {
         let run = hook(&s, event, None, env);
         assert_eq!(run.code(), Some(0), "{event}: {}", run.stderr());
-        assert!(run.stderr().trim().is_empty(), "{event}: {}", run.stderr());
+        // SS-10 permits this fixed notice after a record commits before search catches up.
+        let stderr = run.stderr();
+        assert!(
+            stderr.trim().is_empty()
+                || (writes_record
+                    && stderr.trim()
+                        == format!(
+                            "kaban hook {event}: stored; not yet searchable, do not replay"
+                        )),
+            "{event}: {stderr}"
+        );
     }
 
     // Assert
@@ -190,7 +200,13 @@ fn hook_fix_sets_the_fix_text_links_fixed_by_to_an_improvement_and_clears_pendin
 
     // Assert
     assert_eq!(run.code(), Some(0), "{}", run.stderr());
-    assert!(run.stderr().trim().is_empty(), "{}", run.stderr());
+    // A committed fix may still be awaiting search visibility (SS-10).
+    let stderr = run.stderr();
+    assert!(
+        stderr.trim().is_empty()
+            || stderr.trim() == "kaban hook fix: stored; not yet searchable, do not replay",
+        "{stderr}"
+    );
     let out = run.json();
     assert_eq!(out["status"], json!("fixed"), "{out}");
     assert_eq!(out["failure_id"], json!(failure.id));

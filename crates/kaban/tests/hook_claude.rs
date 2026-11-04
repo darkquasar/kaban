@@ -206,7 +206,14 @@ fn post_tool_use_failure_records_a_failure_visible_to_recall_by_its_error_string
         "{}",
         run.stdout()
     );
-    assert!(run.stderr().trim().is_empty(), "{}", run.stderr());
+    // SS-10 permits this fixed notice while a committed write awaits search visibility.
+    let stderr = run.stderr();
+    assert!(
+        stderr.trim().is_empty()
+            || stderr.trim()
+                == "kaban hook post-tool-use-failure: stored; not yet searchable, do not replay",
+        "{stderr}"
+    );
     let api = s.api();
     let hits = api
         .recall(kaban_api::RecallRequest {
@@ -317,7 +324,14 @@ fn unknown_envelope_fields_are_ignored_even_when_they_carry_a_credential() {
     let run = hook(&s, "post-tool-use-failure", None, &env);
 
     assert_eq!(run.code(), Some(0), "{}", run.stderr());
-    assert!(run.stderr().trim().is_empty(), "{}", run.stderr());
+    // SS-10 permits this fixed notice while a committed write awaits search visibility.
+    let stderr = run.stderr();
+    assert!(
+        stderr.trim().is_empty()
+            || stderr.trim()
+                == "kaban hook post-tool-use-failure: stored; not yet searchable, do not replay",
+        "{stderr}"
+    );
     let failures: i64 = s
         .raw()
         .query_row(

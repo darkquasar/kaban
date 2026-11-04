@@ -59,7 +59,14 @@ fn codex_post_tool_use_with_a_non_zero_exit_records_a_failure_and_a_zero_exit_is
     let run = hook(&s, "post-tool-use", Some("codex"), &failed);
     assert_eq!(run.code(), Some(0), "{}", run.stderr());
     assert_eq!(run.json(), empty(), "{}", run.stdout());
-    assert!(run.stderr().trim().is_empty(), "{}", run.stderr());
+    // SS-10 permits this fixed notice while a committed write awaits search visibility.
+    let stderr = run.stderr();
+    assert!(
+        stderr.trim().is_empty()
+            || stderr.trim()
+                == "kaban hook post-tool-use: stored; not yet searchable, do not replay",
+        "{stderr}"
+    );
     let got = failures(&s);
     assert_eq!(got.len(), 1, "{got:?}");
     assert!(

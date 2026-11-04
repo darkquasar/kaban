@@ -1664,7 +1664,7 @@ fn a_held_repository_lock_defers_sync_and_refuses_resolve() {
 
 /// R5-7 (F-W3-1, S1): a generated document is judged in overlapping windows, never refused
 /// for its length alone. A record whose fields are each under the per-field cap but render
-/// over it together is written, and a digest of 201 accepted records is produced; a reject
+/// over it together is written, and a digest of 19 accepted records is produced; a reject
 /// hit deep in such a record (past the cap) is still caught and the file withheld. The import
 /// side reads the long file back unchanged.
 #[test]
@@ -1689,14 +1689,21 @@ fn long_generated_documents_are_written_and_a_hit_past_the_cap_is_still_withheld
         .id;
     accept(&a, &long, &["crates/**"]);
     let mut ids = vec![long.clone()];
-    for i in 0..200 {
-        let id = decision(&a, &format!("Decision {i:03} of the long digest. Keep it."));
+    // The digest renders summaries, so lengthen them instead of creating more records.
+    for i in 0..18 {
+        let id = decision(
+            &a,
+            &format!(
+                "Decision {i:02} of the long digest: {}. Keep it.",
+                "measured storage constraints; ".repeat(40)
+            ),
+        );
         accept(&a, &id, &[&format!("crates/m{i}/**")]);
         ids.push(id);
     }
 
     let report = sync::sync(&a, &repo.root, &SyncOpts::default()).unwrap();
-    assert_eq!((report.written, report.withheld), (201, 0), "{report:?}");
+    assert_eq!((report.written, report.withheld), (19, 0), "{report:?}");
     assert!(report.digest_updated, "{report:?}");
     let file = std::fs::read_to_string(repo.record_path("decisions", &long)).unwrap();
     assert!(
@@ -1712,7 +1719,7 @@ fn long_generated_documents_are_written_and_a_hit_past_the_cap_is_still_withheld
     );
     assert_eq!(
         digest.matches("](decisions/").count(),
-        201,
+        19,
         "every accepted record once"
     );
     let node = stored(&a_store, &long).unwrap();
@@ -1722,7 +1729,7 @@ fn long_generated_documents_are_written_and_a_hit_past_the_cap_is_still_withheld
     repo.commit("serialized");
     let (b, b_store) = repo.clone_db("b");
     let imported = sync::import(&b, &repo.root, "rebuild").unwrap();
-    assert_eq!(imported.imported, 201, "{imported:?}");
+    assert_eq!(imported.imported, 19, "{imported:?}");
     assert_eq!(
         (imported.rejected, imported.skipped),
         (0, 0),
@@ -1761,6 +1768,14 @@ fn long_generated_documents_are_written_and_a_hit_past_the_cap_is_still_withheld
         })
         .unwrap()
         .id;
+    // This final record brings the total to 20; its rendered hit is beyond the cap.
+    let prospective =
+        kaban_api::serialize::render(&stored(&a_store, &leaky).unwrap(), &[], None).unwrap();
+    let hit = prospective.find("nightjar").unwrap();
+    assert!(
+        prospective[..hit].chars().count() > 20_000,
+        "the rejected phrase is past the per-field cap"
+    );
     let report = sync::sync(&strict, &repo.root, &SyncOpts::default()).unwrap();
     assert_eq!((report.written, report.withheld), (0, 1), "{report:?}");
     assert!(

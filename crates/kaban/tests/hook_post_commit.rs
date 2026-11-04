@@ -240,7 +240,12 @@ fn post_commit_answers_without_an_envelope_with_stdin_closed_or_never_closing() 
         "the handler waited for stdin: {elapsed:?} (the watchdog answers at 1.8 s)"
     );
     assert_eq!(stamp_of(&s, &second).0.as_deref(), Some(head.as_str()));
-    assert!(stderr.is_empty(), "nothing to say on a clean run: {stderr}");
+    // The stamp committed even if its search visibility is still pending (SS-10).
+    assert!(
+        stderr.is_empty()
+            || stderr.trim() == "kaban hook post-commit: stored; not yet searchable, do not replay",
+        "unexpected stderr on a committed stamp: {stderr}"
+    );
 }
 
 /// Plan slice: outside a git repository the hook prints `{}` with one fixed stderr line and

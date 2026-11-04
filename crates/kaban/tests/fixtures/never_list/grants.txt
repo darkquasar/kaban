@@ -220,3 +220,6 @@ SECURITY/20261028 zstd-sys 2.1.2+zstd.1.5.7
 
 # SECURITY/20261029: owner-approved pulldown-cmark patch for RUSTSEC-2026-0414.
 SECURITY/20261029 pulldown-cmark 0.13.5
+
+# SECURITY/20261104: owner-approved pulldown-cmark patch for RUSTSEC-2026-0433.
+SECURITY/20261104 pulldown-cmark 0.13.6

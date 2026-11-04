@@ -1,20 +1,58 @@
 #!/usr/bin/env bash
-# E3 gates (core-plan.md §4) in order, from the workspace root.
-#   exit 0  every gate ran and passed
-#   exit 3  every gate that could run passed, but a gate was skipped: an optional tool was
-#           absent ("not-run: <tool> absent"), CI_SKIP_SMOKE=1 skipped the smoke, the host's musl
-#           target is absent ("not-run: musl target absent", G1-N4) or `mandatory_skips` counted a
-#           test that printed its `NOT RUN:` marker (stage1-plan CG10.3). "incomplete" is printed;
-#           CI must never treat exit 3 as a pass (review R0-2).
-#   other   the first failing gate's exit code (the script stops there)
-# Usage: bash scripts/ci/ci.sh            (CI_SKIP_SMOKE=1 skips only the MCP smoke, never the release
-#                                      build or the size gate, and forces exit 3;
-#                                      CARGO=<path> substitutes the cargo executable, e.g. a test shim;
-#                                      KABAN_SIZE_TABLE=1 adds the per-feature size table, three more
-#                                      release builds, run by the coordinator at lane boundaries)
+# Comprehensive Rust gates from the workspace root. See --help and docs/developer/CI.md.
+# Exit 0: all selected gates passed; 3: incomplete; other: first failing child's status.
 set -u
 kaban_ci_dir=$(cd "$(dirname "$0")" && pwd -P) || exit
 cd "$kaban_ci_dir/../.." || exit
+
+if [ "$#" -eq 1 ] && [ "$1" = "--help" ]; then
+  cat <<'HELP'
+Usage: bash scripts/ci/ci.sh [all|quality|helpers|functional|producer|gnu|musl]
+No argument means all: quality + helpers + functional + GNU + musl gates.
+quality: fmt, three Clippy variants, deny and dependency boundaries.
+helpers: Python build/catalog tests and shell syntax (no Rust tools needed).
+functional: workspace/PDF/no-default nextest suites and applicable library doctests.
+producer: separate tools/kaban-rust-scip workspace/toolchain, fetch/fmt/Clippy/tests.
+gnu: release build, MCP smoke and sizes; musl: native musl build/size gates.
+Local core is quality + helpers + functional (mise run core).
+Producer qualification is separate: invoke producer explicitly when applicable.
+Missing/wrong required tools stop before compilation (exit 3); child failures retain
+their status. Mandatory runtime markers and size misses remain incomplete (exit 3).
+CARGO=<executable> selects Cargo, including paths with spaces; no toolchain override.
+CARGO_TARGET_DIR selects build output; producer uses its private producer/ subdirectory.
+KABAN_CI_ARTIFACT_DIR optionally stages run-local copies outside the cached target.
+KABAN_CI_ISOLATION_SPLIT=1 separates refusal tests using the same compiled binaries;
+requires a disposable GitHub-hosted runner and restores its namespace policy afterward.
+CI_SKIP_SMOKE=1 skips only smoke and forces GNU/all incomplete; KABAN_SIZE_TABLE=1
+adds optional GNU feature builds. Artifact groups require Linux and GNU utilities.
+HELP
+  exit 0
+fi
+if [ "$#" -gt 1 ]; then
+  echo "Expected one group; see --help" >&2
+  exit 2
+fi
+kaban_group=${1:-all}
+case "$kaban_group" in
+  all|quality|helpers|functional|producer|gnu|musl) ;;
+  *) echo "Unknown group: $kaban_group; see --help" >&2; exit 2 ;;
+esac
+# Native hosted step summaries retain incomplete status even though Actions marks
+# every nonzero child as failure. Preserve the original exit if summary I/O fails.
+ci_summary() {
+  local rc=$?
+  if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+    local verdict=FAILED
+    case "$rc" in 0) verdict=PASS ;; 3) verdict=INCOMPLETE ;; esac
+    printf 'Group `%s`: %s (exit %s)\n' "$kaban_group" "$verdict" "$rc" >> "$GITHUB_STEP_SUMMARY" || :
+  fi
+}
+trap ci_summary EXIT
+
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "not-run: python3 absent; install the Python version in mise.toml; exit 3" >&2
+  exit 3
+fi
 
 # Hosted runners may pass non-CLOEXEC descriptors (including fd 142) to the job.
 # Start the gates with only their standard streams; keep the parent's streams,
@@ -58,270 +96,447 @@ step() {
   fi
 }
 
-have_cargo_subcommand() {
-  # CI colors human-facing Cargo output; command names here must remain plain text.
-  CARGO_TERM_COLOR=never "${CARGO:-cargo}" --list 2>/dev/null | awk '{print $1}' | grep -qx "$1"
+# Resolve an explicit executable before the producer changes working directory.
+if [ "$kaban_group" != helpers ]; then
+  if ! CARGO=$(command -v "${CARGO-cargo}"); then
+    echo "not-run: CARGO absent or not executable; select the pinned Cargo; exit 3" >&2
+    exit 3
+  fi
+  case "$CARGO" in /*) ;; *) CARGO="$PWD/$CARGO" ;; esac
+  export CARGO
+fi
+
+prerequisites() {
+  # Share the existing actionable probe helpers; choose only this group's tools.
+  PYTHONDONTWRITEBYTECODE=1 python3 - "$kaban_ci_dir" "$kaban_group" <<'CHECK'
+import os
+from pathlib import Path
+import sys
+sys.path.insert(0, sys.argv[1])
+from preflight import executable, incomplete, probe, main
+try:
+    group = sys.argv[2]
+    if sys.version_info < (3, 11):
+        incomplete("Python 3.11+ needed for CI helpers/TOML pins; install Python from mise.toml")
+    if group == "all":
+        cargo = executable(os.environ["CARGO"])
+        commands = probe([cargo, "--list"])
+        for tool in ("nextest", "deny"):
+            if tool not in [line.split()[0] for line in commands.splitlines() if line.split()]:
+                incomplete(f"cargo-{tool} absent; install the version pinned in mise.toml")
+        main()
+    elif group != "helpers":
+        import tomllib
+        root = Path(sys.argv[1]).parents[1]
+        pins = tomllib.loads((root / "mise.toml").read_text())["tools"]
+        rust = tomllib.loads(Path("rust-toolchain.toml").read_text())["toolchain"]["channel"]
+        cargo = executable(os.environ["CARGO"])
+        probe([cargo, "--version"], f"cargo {rust}")
+        rustc = executable(os.environ.get("RUSTC", "rustc"))
+        probe([rustc, "--version"], f"rustc {rust}")
+        probe([sys.executable, "--version"], f"Python {pins['python']}")
+        if group in ("quality", "functional"):
+            commands = probe([cargo, "--list"])
+            tool = "deny" if group == "quality" else "nextest"
+            if tool not in [line.split()[0] for line in commands.splitlines() if line.split()]:
+                incomplete(f"cargo-{tool} absent; install the version pinned in mise.toml")
+            key = "aqua:EmbarkStudios/cargo-deny" if tool == "deny" else "aqua:nextest-rs/nextest/cargo-nextest"
+            probe([cargo, tool, "--version"], f"cargo-{tool} {pins[key]}")
+        if group in ("quality", "producer"):
+            probe([cargo, "fmt", "--version"])
+            probe([cargo, "clippy", "--version"])
+        if group == "quality":
+            executable("jq")
+        if group in ("functional", "gnu"):
+            probe([executable("node"), "--version"], f"v{pins['node']}")
+            for tool in ("go", os.environ.get("SCIP_GO", "scip-go")):
+                executable(tool)
+        if group in ("functional", "producer", "gnu", "musl"):
+            executable("cc")
+        executable("git")
+        if group in ("gnu", "musl"):
+            if probe(["uname", "-s"]) != "Linux":
+                incomplete("artifact gates require native Linux and GNU utilities")
+        if group == "gnu" and os.environ.get("CI_SKIP_SMOKE") != "1":
+            executable("strace")
+        if group == "musl":
+            target = probe(["uname", "-m"]) + "-unknown-linux-musl"
+            config = tomllib.loads((root / ".cargo/config.toml").read_text())
+            linker = os.environ.get("CARGO_TARGET_" + target.upper().replace("-", "_") + "_LINKER",
+                                    config.get("target", {}).get(target, {}).get("linker"))
+            if not linker:
+                incomplete(f"no configured musl linker for {target}")
+            executable(linker)
+            libdir = probe([rustc, "--print", "target-libdir", "--target", target])
+            if not libdir or not Path(libdir).is_dir():
+                incomplete(f"musl target absent ({target}); use rustup target add")
+except (OSError, ValueError, KeyError) as error:
+    incomplete(str(error))
+CHECK
 }
 
-step "${CARGO:-cargo}" fmt --all --check
-step "${CARGO:-cargo}" clippy --workspace --all-targets --all-features -- -D warnings
-# the build without docs extractors (`--no-default-features`, the N1 size-table configuration
-# below) stays lint-clean too (docs-ingest-plan.md §16 item 3 (d), DI2.0): the `cfg(not(feature
-# = "ingest"))` arms are compiled only here
-step "${CARGO:-cargo}" clippy -p kaban --no-default-features --all-targets -- -D warnings
-step "${CARGO:-cargo}" clippy -p kaban-ingest --all-targets --no-default-features -- -D warnings
-
-# `mandatory_skips` (stage1-plan CG10.3, RV-10): the one workspace nextest run is captured so the
-# tests that could not run on this host are counted by name. The tree prints `NOT RUN: <test>:
-# <reason>` from a passing test (an indexer or an isolation tier absent), and nextest hides a
-# passing test's output unless `--success-output immediate`, so without it the count is always 0.
-nextest_log="$(mktemp)"
-nextest_workspace() {
-  "${CARGO:-cargo}" nextest run --workspace --no-fail-fast --success-output immediate 2>&1 | tee "$nextest_log"
-  return "${PIPESTATUS[0]}"
-}
-mandatory_skips() {
-  local names count
-  names=$(grep -E 'NOT RUN:|SKIPPED\(mandatory\)' "$nextest_log" \
-    | sed -E 's/^.*NOT RUN: ([A-Za-z0-9_]+):.*$/\1/; t; s/^.*[^A-Za-z0-9_]([A-Za-z0-9_]+) NOT RUN:.*$/\1/; t; s/^[[:space:]]+//' \
+# One runtime marker handler for nextest, Cargo tests and doctests.
+rust_runner() {
+  local log rc tee_rc names count
+  log=$(mktemp) || return 1
+  "$@" 2>&1 | tee "$log"
+  local statuses=("${PIPESTATUS[@]}")
+  rc=${statuses[0]}
+  tee_rc=${statuses[1]}
+  if [ "$rc" -eq 0 ] && [ "$tee_rc" -ne 0 ]; then rc=$tee_rc; fi
+  names=$(grep -E 'NOT RUN:|SKIPPED\(mandatory\)' "$log" \
+    | sed -E -e 's/^.*NOT RUN: ([A-Za-z0-9_]+):.*$/\1/' -e t \
+      -e 's/^.*[^A-Za-z0-9_]([A-Za-z0-9_]+) NOT RUN:.*$/\1/' -e t -e 's/^[[:space:]]+//' \
     | sort -u)
   count=$(printf '%s\n' "$names" | grep -c .)
-  echo "mandatory_skips: ${count}"
+  echo "mandatory_skips: $count"
   if [ "$count" -gt 0 ]; then
     printf '%s\n' "$names" | sed 's/^/  /'
-    echo "stage 1 is not complete while mandatory_skips is non-zero (stage1-plan CG10.3); exit 3"
+    echo "selected scope incomplete while mandatory_skips is non-zero; exit 3"
     missing=1
   fi
-  return 0
+  rm -f "$log"
+  return "$rc"
 }
 
-if have_cargo_subcommand nextest; then
-  step nextest_workspace
-  mandatory_skips
-  # `pdf` is opt-in for 3.0.0 (OWN-70, DI2.1b): the workspace run above skips the `golden_pdf`
-  # binary (`required-features = ["pdf"]`), so the PDF tests stay in the gate through this one
-  # feature-enabled run of the ingest crate
-  step "${CARGO:-cargo}" nextest run -p kaban-ingest --features pdf
-  # the feature-off binary (no `ingest`, no `code-graph`) keeps its own test set green
-  # (stage1-plan CG7.3): the ingest and code-graph test binaries are `cfg`-gated out, the
-  # catalog test subtracts the gated tools, and nothing else may depend on a feature
-  step "${CARGO:-cargo}" nextest run -p kaban --no-default-features
-else
-  echo "not-run: cargo-nextest absent (OD-12); falling back to cargo test --workspace"
-  echo "not-run: mandatory_skips (counted over the nextest output only)"
-  missing=1
-  step "${CARGO:-cargo}" test --workspace
-  step "${CARGO:-cargo}" test -p kaban-ingest --features pdf
-  step "${CARGO:-cargo}" test -p kaban --no-default-features
-fi
-
-if have_cargo_subcommand deny; then
-  step "${CARGO:-cargo}" deny check
-else
-  echo "not-run: cargo-deny absent (OD-12)"
-  missing=1
-fi
-
-# store-boundary dependency check (engine-spec EN-E10a hygiene, engine-plan E1.0, SO-5):
-#   kaban-api and kaban-ingest declare no direct normal `rusqlite` dependency (dev-only is fine),
-#   and the inverse normal tree of rusqlite under kaban-api is empty (today) or names
-#   kaban-codegraph as the only direct parent (after v4 CG5.2). Any other parent fails.
-store_boundary_deps() {
-  local meta direct parents
-  meta=$("${CARGO:-cargo}" metadata --format-version 1 --no-deps) || return 1
-  direct=$(printf '%s' "$meta" | jq -r '.packages[]
-    | select(.name == "kaban-api" or .name == "kaban-ingest")
-    | .name as $pkg | .dependencies[]
-    | select(.name == "rusqlite" and .kind == null)
-    | "\($pkg) -> rusqlite (normal)"') || return 1
-  if [ -n "$direct" ]; then
-    echo "FAILED: direct rusqlite dependency outside the store crate:" >&2
-    echo "$direct" >&2
-    return 1
-  fi
-  # inverse tree: depth 0 is rusqlite itself, depth 1 its direct parents; "nothing to print"
-  # (rusqlite dev-only) and "did not match any packages" (rusqlite absent) are both the empty tree
-  local tree rc
-  tree=$("${CARGO:-cargo}" tree -e normal -p kaban-api -i rusqlite --prefix depth 2>&1)
+# Cargo metadata supplies actual workspace library targets, including doctest=false.
+doctests() {
+  local metadata packages package has_pdf=0
+  local selections=()
+  metadata=$(mktemp) || return 1
+  "${CARGO:-cargo}" metadata --format-version 1 --no-deps > "$metadata"
+  local rc=$?
+  if [ "$rc" -ne 0 ]; then rm -f "$metadata"; return "$rc"; fi
+  packages=$(python3 - "$metadata" <<'LIBRARIES'
+import json, sys
+with open(sys.argv[1]) as stream:
+    metadata = json.load(stream)
+for package in metadata["packages"]:
+    if package["id"] in metadata["workspace_members"] and any(
+        target.get("doctest", True) and any(kind in ("lib", "proc-macro", "rlib") for kind in target["kind"])
+        for target in package["targets"]
+    ):
+        print(package["name"])
+LIBRARIES
+  )
   rc=$?
-  if [ $rc -ne 0 ] && ! printf '%s' "$tree" | grep -q 'did not match any packages'; then
-    echo "FAILED: cargo tree -i rusqlite -p kaban-api exited $rc:" >&2
-    echo "$tree" >&2
-    return 1
+  rm -f "$metadata"
+  [ "$rc" -eq 0 ] || return "$rc"
+  if [ -z "$packages" ]; then echo "doctests: no doctestable library targets"; fi
+  for package in $packages; do
+    selections+=( -p "$package" )
+    if [ "$package" = kaban-ingest ]; then has_pdf=1; fi
+  done
+  if [ "${#selections[@]}" -gt 0 ]; then
+    step rust_runner "${CARGO:-cargo}" test --doc --locked "${selections[@]}" -- --show-output
   fi
-  parents=$(printf '%s\n' "$tree" | awk '/^1[^0-9]/ { sub(/^1/, ""); print $1 }' | sort -u)
-  if [ -n "$parents" ] && [ "$parents" != "kaban-codegraph" ]; then
-    echo "FAILED: rusqlite reaches kaban-api through a parent other than kaban-codegraph:" >&2
-    echo "$parents" >&2
-    return 1
+  # Match the PDF-enabled functional variant's library examples too.
+  if [ "$has_pdf" -eq 1 ]; then
+    step rust_runner "${CARGO:-cargo}" test --doc --locked -p kaban-ingest --features pdf -- --show-output
   fi
-  echo "store boundary: no direct rusqlite in kaban-api/kaban-ingest; kaban-api inverse tree parents: ${parents:-none}"
 }
-if command -v jq >/dev/null 2>&1; then
-  step store_boundary_deps
-else
-  echo "not-run: jq absent (store-boundary dependency check)"
-  missing=1
-fi
 
-# v4 dependency allowlist (stage1-spec G1-E3, cg-join-v1 §2; stage1-plan CG2.4; after the
-# engine's store_boundary_deps step per the SO-12 allocation table): no forbidden
-# crate edge for kaban-codegraph / kaban-index, store -> codegraph dev-only, core never -> codegraph
-if command -v jq >/dev/null 2>&1; then
-  step env CARGO="${CARGO:-cargo}" bash scripts/ci/deps_allowlist.sh
-else
-  echo "not-run: jq absent (dependency allowlist)"
-  missing=1
-fi
+# Only the disposable hosted job may change its kernel policy. Both selections
+# reuse nextest's build metadata; local functional runs retain their native policy.
+hosted_isolation_tests() (
+  set -e
+  if [ "${GITHUB_ACTIONS:-}" != true ] || [ "${RUNNER_ENVIRONMENT:-}" != github-hosted ]; then
+    echo "isolation split requires a disposable GitHub-hosted runner" >&2
+    exit 2
+  fi
+  key=kernel.apparmor_restrict_unprivileged_userns
+  original=$(sysctl -n "$key")
+  metadata=$(mktemp)
+  restore_isolation_policy() {
+    rc=$?
+    trap - EXIT
+    if ! sudo -n sysctl -q -w "$key=$original"; then
+      echo "failed to restore original namespace policy" >&2
+      [ "$rc" -ne 0 ] || rc=1
+    fi
+    rm -f "$metadata"
+    exit "$rc"
+  }
+  trap restore_isolation_policy EXIT
 
-# release build and size gate are mandatory (core-spec N1); only the smoke can be skipped
-step "${CARGO:-cargo}" build --release
-size=$(stat -c '%s' "${kaban_target_dir}/release/kaban")
-echo "release binary: ${size} bytes"
-if [ "$size" -ge "$MAX_BINARY_BYTES" ]; then
-  echo "FAILED: binary size ${size} >= ${MAX_BINARY_BYTES} (N1)" >&2
-  exit 1
-fi
-if [ "${CI_SKIP_SMOKE:-0}" = "1" ]; then
-  echo "not-run: MCP smoke skipped by CI_SKIP_SMOKE=1"
-  missing=1
-elif command -v python3 >/dev/null 2>&1; then
-  smoke_db="$(mktemp -d)/smoke.db"
-  step python3 scripts/mcp/mcp_smoke.py "${kaban_target_dir}/release/kaban" "$smoke_db" examples/policy.yaml
-else
-  echo "not-run: python3 absent (smoke)"
-  missing=1
-fi
+  # Refuse an unsuitable runner before spending time compiling.
+  sudo -n sysctl -q -w "$key=0"
+  unshare --user --map-root-user --net --mount --pid --fork true
+  sudo -n sysctl -q -w "$key=1"
+  if unshare --user --map-root-user --net --mount --pid --fork true; then
+    echo "namespace restriction did not produce the unavailable context" >&2
+    exit 1
+  fi
+  "$CARGO" nextest list --workspace --locked --list-type binaries-only --message-format json > "$metadata"
+  refusal='binary_id(kaban-index::cli) & (test(=cli_index_required_without_isolating_tier_is_exit_8) | test(=rust_required_unavailable_never_runs_native_producer_probes))'
+  echo "isolation: unavailable; run only the two refusal tests from existing binaries"
+  refusal_rc=0
+  "$CARGO" nextest run --binaries-metadata "$metadata" -E "$refusal" --no-fail-fast --success-output immediate || refusal_rc=$?
+  sudo -n sysctl -q -w "$key=0"
+  echo "isolation: available; run the remaining workspace tests from existing binaries"
+  capable_rc=0
+  "$CARGO" nextest run --binaries-metadata "$metadata" -E "not ($refusal)" --no-fail-fast --success-output immediate || capable_rc=$?
+  [ "$refusal_rc" -eq 0 ] || exit "$refusal_rc"
+  exit "$capable_rc"
+)
 
-# v4 binary sizes (stage1-spec G1-N4; stage1-plan CG2.4, CG7.3, §18). Enforced from CG7.3:
-# `kaban(code-graph on) - kaban(code-graph off) < 900,000 B` (OWN-86 (4)), where "off" is
-# `--no-default-features --features ingest,text-index-tantivy` (the one feature toggled; the docs
-# extractors and the Tantivy adapter stay in, so the pair measures the code-graph reader delta and
-# not the ingest crate's or Tantivy's), and the
-# default `kaban` build stays under the 25 MiB N1 gate already applied above (OWN-64, OWN-112, OWN-B; the plan's
-# 12,000,000 B figure predates the docs extractors). `kaban-index` is printed for the GNU build
-# here and gated on the musl release in `musl_release` below (`< 8,000,000 B`, G1-N4, owner decision 2026-10-26). A missing
-# crate prints `skipped: ...`. The pair rebuilds the default kaban binary last so
-# target/release/kaban stays the default build.
-MAX_CODE_GRAPH_DELTA_BYTES=900000
-binary_sizes() {
-  local size on off delta
-  size=$(stat -c '%s' "${kaban_target_dir}/release/kaban") || return 1
+functional() {
+  if [ "${KABAN_CI_ISOLATION_SPLIT:-0}" = 1 ]; then
+    step rust_runner hosted_isolation_tests
+  else
+    step rust_runner "${CARGO:-cargo}" nextest run --workspace --no-fail-fast --success-output immediate
+  fi
+  step rust_runner "${CARGO:-cargo}" nextest run -p kaban-ingest --features pdf --success-output immediate
+  step rust_runner "${CARGO:-cargo}" nextest run -p kaban --no-default-features --success-output immediate
+  step doctests
+}
+
+helpers() {
+  (cd scripts/mcp && python3 -m unittest -v test_mcp_catalog) || return $?
+  python3 -m unittest discover -s scripts/tests -v || return $?
+  # pipefail retains a failed filesystem traversal as well as a syntax failure.
+  (set -o pipefail; find scripts hooks -name '*.sh' -print0 | xargs -0 -n1 bash -n)
+}
+
+producer() {
+  step "${CARGO:-cargo}" fetch --locked
+  step "${CARGO:-cargo}" fmt --all --check
+  step "${CARGO:-cargo}" clippy --workspace --all-targets --locked -- -D warnings
+  # Cargo's default workspace test selection includes applicable library doctests.
+  step rust_runner "${CARGO:-cargo}" test --workspace --locked -- --show-output
+}
+
+quality() {
+  step "${CARGO:-cargo}" fmt --all --check
+  step "${CARGO:-cargo}" clippy --workspace --all-targets --all-features -- -D warnings
+  # the build without docs extractors (`--no-default-features`, the N1 size-table configuration
+  # below) stays lint-clean too (docs-ingest-plan.md §16 item 3 (d), DI2.0): the `cfg(not(feature
+  # = "ingest"))` arms are compiled only here
+  step "${CARGO:-cargo}" clippy -p kaban --no-default-features --all-targets -- -D warnings
+  step "${CARGO:-cargo}" clippy -p kaban-ingest --all-targets --no-default-features -- -D warnings
+
+  step "${CARGO:-cargo}" deny check
+
+  # store-boundary dependency check (engine-spec EN-E10a hygiene, engine-plan E1.0, SO-5):
+  #   kaban-api and kaban-ingest declare no direct normal `rusqlite` dependency (dev-only is fine),
+  #   and the inverse normal tree of rusqlite under kaban-api is empty (today) or names
+  #   kaban-codegraph as the only direct parent (after v4 CG5.2). Any other parent fails.
+  store_boundary_deps() {
+    local meta direct parents
+    meta=$("${CARGO:-cargo}" metadata --format-version 1 --no-deps) || return 1
+    direct=$(printf '%s' "$meta" | jq -r '.packages[]
+      | select(.name == "kaban-api" or .name == "kaban-ingest")
+      | .name as $pkg | .dependencies[]
+      | select(.name == "rusqlite" and .kind == null)
+      | "\($pkg) -> rusqlite (normal)"') || return 1
+    if [ -n "$direct" ]; then
+      echo "FAILED: direct rusqlite dependency outside the store crate:" >&2
+      echo "$direct" >&2
+      return 1
+    fi
+    # inverse tree: depth 0 is rusqlite itself, depth 1 its direct parents; "nothing to print"
+    # (rusqlite dev-only) and "did not match any packages" (rusqlite absent) are both the empty tree
+    local tree rc
+    tree=$("${CARGO:-cargo}" tree -e normal -p kaban-api -i rusqlite --prefix depth 2>&1)
+    rc=$?
+    if [ $rc -ne 0 ] && ! printf '%s' "$tree" | grep -q 'did not match any packages'; then
+      echo "FAILED: cargo tree -i rusqlite -p kaban-api exited $rc:" >&2
+      echo "$tree" >&2
+      return 1
+    fi
+    parents=$(printf '%s\n' "$tree" | awk '/^1[^0-9]/ { sub(/^1/, ""); print $1 }' | sort -u)
+    if [ -n "$parents" ] && [ "$parents" != "kaban-codegraph" ]; then
+      echo "FAILED: rusqlite reaches kaban-api through a parent other than kaban-codegraph:" >&2
+      echo "$parents" >&2
+      return 1
+    fi
+    echo "store boundary: no direct rusqlite in kaban-api/kaban-ingest; kaban-api inverse tree parents: ${parents:-none}"
+  }
+  if command -v jq >/dev/null 2>&1; then
+    step store_boundary_deps
+  else
+    echo "not-run: jq absent (store-boundary dependency check)"
+    missing=1
+  fi
+
+  # v4 dependency allowlist (stage1-spec G1-E3, cg-join-v1 §2; stage1-plan CG2.4; after the
+  # engine's store_boundary_deps step per the SO-12 allocation table): no forbidden
+  # crate edge for kaban-codegraph / kaban-index, store -> codegraph dev-only, core never -> codegraph
+  if command -v jq >/dev/null 2>&1; then
+    step env CARGO="${CARGO:-cargo}" bash scripts/ci/deps_allowlist.sh
+  else
+    echo "not-run: jq absent (dependency allowlist)"
+    missing=1
+  fi
+}
+
+# Each artifact configuration is copied once into this invocation's private directory.
+kaban_artifacts=
+build_artifacts() {
+  local config=$1 output=$2 binaries=$3 binary path digest artifact_root
+  shift 3
+  if [ -z "$kaban_artifacts" ]; then
+    case "$kaban_target_dir" in /*) ;; *) kaban_target_dir="$PWD/$kaban_target_dir" ;; esac
+    mkdir -p "$kaban_target_dir" || return $?
+    artifact_root=${KABAN_CI_ARTIFACT_DIR:-$kaban_target_dir}
+    mkdir -p "$artifact_root" || return $?
+    kaban_artifacts=$(mktemp -d "$artifact_root/ci-artifacts.XXXXXX") || return $?
+    echo "artifacts: $kaban_artifacts"
+  fi
+  mkdir "$kaban_artifacts/$config" || return $?
+  printf '%s\n' "${CARGO:-cargo}" "$@" > "$kaban_artifacts/$config/cargo-args.txt" || return $?
+  step "${CARGO:-cargo}" "$@"
+  for binary in $binaries; do
+    path="$kaban_artifacts/$config/$binary"
+    cp "$kaban_target_dir/$output/$binary" "$path" || return $?
+    digest=$(python3 -c 'import hashlib, sys
+with open(sys.argv[1], "rb") as stream:
+    print(hashlib.file_digest(stream, "sha256").hexdigest())' "$path") || return $?
+    printf '%s\n' "$digest" > "$path.sha256" || return $?
+    echo "artifact: $config/$binary sha256=$digest"
+  done
+}
+
+artifact_file() {
+  local path="$kaban_artifacts/$1/$2" expected digest
+  if [ ! -f "$path" ] || [ ! -x "$path" ]; then
+    echo "FAILED: missing/non-executable staged artifact $path" >&2
+    return 1
+  fi
+  expected=$(cat "$path.sha256") || return $?
+  digest=$(python3 -c 'import hashlib, sys
+with open(sys.argv[1], "rb") as stream:
+    print(hashlib.file_digest(stream, "sha256").hexdigest())' "$path") || return $?
+  if [ "$digest" != "$expected" ]; then
+    echo "FAILED: staged artifact checksum mismatch: $path" >&2
+    return 1
+  fi
+  printf '%s\n' "$path"
+}
+
+artifact_size() {
+  local path
+  path=$(artifact_file "$@") || return $?
+  stat -c '%s' "$path"
+}
+
+gnu() {
+  local size default_binary on off delta index_size table_size binaries=kaban binary restored
+  if [ -f crates/kaban-index/Cargo.toml ]; then binaries='kaban kaban-index'; fi
+  step build_artifacts default release "$binaries" build --release
+  size=$(artifact_size default kaban) || return $?
+  echo "release binary: ${size} bytes"
+  if [ "$size" -ge "$MAX_BINARY_BYTES" ]; then
+    echo "FAILED: binary size ${size} >= ${MAX_BINARY_BYTES} (N1)" >&2
+    return 1
+  fi
+  if [ "${CI_SKIP_SMOKE:-0}" = "1" ]; then
+    echo "not-run: MCP smoke skipped by CI_SKIP_SMOKE=1"
+    missing=1
+  else
+    default_binary=$(artifact_file default kaban) || return $?
+    smoke_db="$(mktemp -d)/smoke.db"
+    step python3 scripts/mcp/mcp_smoke.py "$default_binary" "$smoke_db" examples/policy.yaml
+  fi
+
   echo "size: kaban ${size} (gate: < ${MAX_BINARY_BYTES}, applied above)"
+  # Keep the package build: workspace/package feature equivalence is not established.
   if [ -f crates/kaban-index/Cargo.toml ]; then
-    "${CARGO:-cargo}" build --release -p kaban-index || return 1
-    size=$(stat -c '%s' "${kaban_target_dir}/release/kaban-index") || return 1
-    echo "size: kaban-index ${size} (gnu, informational; the musl release below carries the G1-N4 gate)"
+    step build_artifacts gnu-index release kaban-index build --release -p kaban-index
+    index_size=$(artifact_size gnu-index kaban-index) || return $?
+    echo "size: kaban-index ${index_size} (gnu, informational; musl carries the G1-N4 gate)"
   else
     echo "skipped: kaban-index not yet present"
   fi
   if grep -Eq '^code-graph *=' crates/kaban/Cargo.toml; then
-    "${CARGO:-cargo}" build --release -p kaban --features code-graph || return 1
-    on=$(stat -c '%s' "${kaban_target_dir}/release/kaban") || return 1
+    # Historical workspace/default and explicit graph-on bytes differed; keep both builds.
+    step build_artifacts graph-on release kaban build --release -p kaban --features code-graph
+    on=$(artifact_size graph-on kaban) || return $?
     echo "size: kaban(code-graph on) ${on}"
-    "${CARGO:-cargo}" build --release -p kaban --no-default-features --features ingest,text-index-tantivy || return 1
-    off=$(stat -c '%s' "${kaban_target_dir}/release/kaban") || return 1
+    step build_artifacts graph-off release kaban build --release -p kaban --no-default-features --features ingest,text-index-tantivy
+    off=$(artifact_size graph-off kaban) || return $?
     echo "size: kaban(code-graph off) ${off}"
     delta=$((on - off))
-    echo "size: kaban(code-graph on) - kaban(code-graph off) ${delta} (gate: < ${MAX_CODE_GRAPH_DELTA_BYTES})"
-    "${CARGO:-cargo}" build --release || return 1
-    if [ "$delta" -ge "$MAX_CODE_GRAPH_DELTA_BYTES" ]; then
-      # a measured miss is reported, never worked around (OWN-13): the figure goes to PROGRESS and the owner
-      # decides between the budget and a size lane; the stage is not complete until then (exit 3)
-      echo "N4 MISS (reported, OWN-13; budget set by OWN-86 (4)): code-graph size delta ${delta} >= ${MAX_CODE_GRAPH_DELTA_BYTES} (G1-N4)" >&2
+    echo "size: kaban(code-graph on) - kaban(code-graph off) ${delta} (gate: < 900000)"
+    if [ "$delta" -ge 900000 ]; then
+      echo "N4 MISS (reported, OWN-13; budget set by OWN-86 (4)): code-graph size delta ${delta} >= 900000 (G1-N4)" >&2
       missing=1
     fi
   else
     echo "skipped: kaban code-graph on/off pair not yet present"
   fi
-}
-step binary_sizes
 
-# musl release of both binaries (stage1-spec §8.4, G1-N4; stage1-plan CG10.3): the host's musl
-# triple only (`.cargo/config.toml` names `musl-gcc` as the linker of both musl targets, and a
-# box has the linker of its own architecture; an installed foreign target has std but no linker,
-# so the installed list is never iterated). The target is installed when `rustup target list
-# --installed` names it, or, without rustup on PATH, when the sysroot has `lib/rustlib/<triple>`.
-# `kaban-index` musl `< 8,000,000 B` is binding (owner decision 2026-10-26) (N4 is a musl budget); the `kaban` musl size is
-# informational (N1 is the default gnu gate above). An absent target prints `not-run: musl target
-# absent` and the stage is not complete (exit 3).
-MAX_INDEX_MUSL_BYTES=8000000
-musl_target_installed() {
-  if command -v rustup >/dev/null 2>&1; then
-    rustup target list --installed 2>/dev/null | grep -qx "$1"
+  if [ "${KABAN_SIZE_TABLE:-0}" = "1" ]; then
+    echo "size-table: kaban(default) ${size} (gate: < ${MAX_BINARY_BYTES})"
+    step build_artifacts no-default release kaban build --release -p kaban --no-default-features
+    table_size=$(artifact_size no-default kaban) || return $?
+    echo "size-table: kaban(--no-default-features) ${table_size} (gate: < ${MAX_NO_DEFAULT_BYTES})"
+    if [ "$table_size" -ge "$MAX_NO_DEFAULT_BYTES" ]; then
+      echo "FAILED: --no-default-features binary size ${table_size} >= ${MAX_NO_DEFAULT_BYTES} (N1)" >&2
+      return 1
+    fi
+    if grep -Eq '^md-splitter *=' crates/kaban-ingest/Cargo.toml; then
+      step build_artifacts md-splitter release kaban build --release -p kaban --features kaban-ingest/md-splitter
+      table_size=$(artifact_size md-splitter kaban) || return $?
+      echo "size-table: kaban(md-splitter) ${table_size} (gate: informational)"
+    else
+      echo "skipped: md-splitter feature not present"
+    fi
+    if grep -Eq '^pdf *=' crates/kaban-ingest/Cargo.toml; then
+      step build_artifacts pdf release kaban build --release -p kaban --features kaban-ingest/pdf
+      table_size=$(artifact_size pdf kaban) || return $?
+      echo "size-table: kaban(--features kaban-ingest/pdf) ${table_size} (gate: informational)"
+    else
+      echo "skipped: pdf feature not present"
+    fi
   else
-    [ -d "$(rustc --print sysroot 2>/dev/null)/lib/rustlib/$1" ]
+    echo "skipped: size table (KABAN_SIZE_TABLE=1 enables it)"
   fi
+  # Cargo may hardlink release binaries to cached deps outputs. Replace the path
+  # instead of writing through that inode, preserving both cached variants and modes.
+  for binary in $binaries; do
+    default_binary=$(artifact_file default "$binary") || return $?
+    restored=$(mktemp "$kaban_target_dir/release/.$binary-restore.XXXXXX") || return $?
+    cp -p "$default_binary" "$restored" || return $?
+    mv -f "$restored" "$kaban_target_dir/release/$binary" || return $?
+    cmp -s "$default_binary" "$kaban_target_dir/release/$binary" || return $?
+    echo "restored: default $binary from staged bytes (no rebuild)"
+  done
 }
-musl_release() {
-  local t size_index size_kaban
-  t="$(uname -m)-unknown-linux-musl"
-  if ! musl_target_installed "$t"; then
-    echo "not-run: musl target absent (${t}; the G1-N4 budget is a musl budget, so the stage is not complete)"
-    missing=1
-    return 0
-  fi
-  "${CARGO:-cargo}" build --release --target "$t" -p kaban -p kaban-index || return 1
-  size_index=$(stat -c '%s' "${kaban_target_dir}/$t/release/kaban-index") || return 1
-  size_kaban=$(stat -c '%s' "${kaban_target_dir}/$t/release/kaban") || return 1
-  echo "size: kaban-index (musl ${t}) ${size_index} (gate: < ${MAX_INDEX_MUSL_BYTES}, G1-N4)"
-  echo "size: kaban (musl ${t}) ${size_kaban} (informational; N1 is the default gnu gate above)"
-  if [ "$size_index" -ge "$MAX_INDEX_MUSL_BYTES" ]; then
-    # a miss is reported, never worked around (OWN-13): the figure goes to PROGRESS and the owner
-    # decides between the budget and a size lane; the stage is not complete until then (exit 3)
-    echo "N4 MISS (reported, OWN-13; budget set by owner decision 2026-10-26): kaban-index musl size ${size_index} >= ${MAX_INDEX_MUSL_BYTES} (G1-N4)" >&2
-    missing=1
-  fi
-}
-step musl_release
 
-# per-feature size table (core-spec N1, OWN-110, spec 05 OWN-Q): `--no-default-features` gated at 17 MiB,
-# `kaban-ingest/md-splitter` and `kaban-ingest/pdf` informational (icu segmenter data; `pdf_oxide`,
-# OWN-70); the default build is rebuilt last so target/release/kaban stays the default build.
-# Three extra release builds, so it runs
-# only with KABAN_SIZE_TABLE=1 (coordinator, lane and milestone boundaries); skipping it does
-# not mark the run incomplete.
-size_table() {
-  local size
-  echo "size-table: kaban(default) ${1} (gate: < ${MAX_BINARY_BYTES})"
-  "${CARGO:-cargo}" build --release -p kaban --no-default-features || return 1
-  size=$(stat -c '%s' "${kaban_target_dir}/release/kaban") || return 1
-  echo "size-table: kaban(--no-default-features) ${size} (gate: < ${MAX_NO_DEFAULT_BYTES})"
-  if [ "$size" -ge "$MAX_NO_DEFAULT_BYTES" ]; then
-    echo "FAILED: --no-default-features binary size ${size} >= ${MAX_NO_DEFAULT_BYTES} (N1)" >&2
-    return 1
-  fi
-  if grep -Eq '^md-splitter *=' crates/kaban-ingest/Cargo.toml; then
-    "${CARGO:-cargo}" build --release -p kaban --features kaban-ingest/md-splitter || return 1
-    size=$(stat -c '%s' "${kaban_target_dir}/release/kaban") || return 1
-    echo "size-table: kaban(md-splitter) ${size} (gate: informational)"
-  else
-    echo "skipped: md-splitter feature not present"
-  fi
-  # `pdf` is opt-in for 3.0.0 (OWN-70, DI2.1b): the PDF-capable build is measured here and
-  # printed informationally; the N1 gates above are unchanged
-  if grep -Eq '^pdf *=' crates/kaban-ingest/Cargo.toml; then
-    "${CARGO:-cargo}" build --release -p kaban --features kaban-ingest/pdf || return 1
-    size=$(stat -c '%s' "${kaban_target_dir}/release/kaban") || return 1
-    echo "size-table: kaban(--features kaban-ingest/pdf) ${size} (gate: informational)"
-  else
-    echo "skipped: pdf feature not present"
-  fi
-  "${CARGO:-cargo}" build --release || return 1
-  size=$(stat -c '%s' "${kaban_target_dir}/release/kaban") || return 1
-  if [ "$size" != "$1" ]; then
-    echo "FAILED: default rebuild size ${size} differs from the gated build ${1}" >&2
-    return 1
+musl() {
+  local target size_index size_kaban
+  target="$(uname -m)-unknown-linux-musl"
+  step build_artifacts musl "$target/release" 'kaban kaban-index' build --release --target "$target" -p kaban -p kaban-index
+  size_index=$(artifact_size musl kaban-index) || return $?
+  size_kaban=$(artifact_size musl kaban) || return $?
+  echo "size: kaban-index (musl ${target}) ${size_index} (gate: < 12000000, G1-N4)"
+  echo "size: kaban (musl ${target}) ${size_kaban} (informational; N1 is the default gnu gate)"
+  if [ "$size_index" -ge 12000000 ]; then
+    echo "N4 MISS (reported, OWN-13; budget set by owner decision 2026-11-04): kaban-index musl size ${size_index} >= 12000000 (G1-N4)" >&2
+    missing=1
   fi
 }
-if [ "${KABAN_SIZE_TABLE:-0}" = "1" ]; then
-  step size_table "$size"
-else
-  echo "skipped: size table (KABAN_SIZE_TABLE=1 enables it)"
+
+if [ "$kaban_group" = producer ]; then
+  case "$kaban_target_dir" in /*) ;; *) kaban_target_dir="$PWD/$kaban_target_dir" ;; esac
+  export CARGO_TARGET_DIR="$kaban_target_dir/producer"
+  cd tools/kaban-rust-scip || exit
 fi
+step prerequisites
+case "$kaban_group" in
+  all)
+    step quality
+    step helpers
+    step functional
+    step gnu
+    step musl
+    ;;
+  *) step "$kaban_group" ;;
+esac
 
 if [ $missing -ne 0 ]; then
-  echo "RESULT: incomplete (a gate was skipped or a measured G1-N4 miss was reported: optional tool absent, CI_SKIP_SMOKE=1, musl target absent, mandatory_skips non-zero, or an N4 MISS line above); exit 3"
+  echo "RESULT: incomplete (a gate was skipped or a measured G1-N4 miss was reported: CI_SKIP_SMOKE=1, musl target absent, mandatory_skips non-zero, or an N4 MISS line above); exit 3"
   exit 3
 fi
-echo "RESULT: all gates passed"
+echo "RESULT: $kaban_group gates passed (producer is separate unless selected)"

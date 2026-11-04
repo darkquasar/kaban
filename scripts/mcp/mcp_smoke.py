@@ -395,7 +395,9 @@ else:
     check(r.returncode == 0 and v.get("hookSpecificOutput", {}).get("hookEventName") == "SessionStart" and "bounded writer pool" in ctx and d2 in ctx, f"hook session-start briefs the accepted Decision as hookSpecificOutput.additionalContext (exit {r.returncode})")
     failure_env = {"session_id": "sess-smoke-0001", "hook_event_name": "PostToolUseFailure", "cwd": cwd, "tool_name": "Bash", "tool_input": {"command": "false"}, "error": f"smoke: the command returned exit status 1 ({FAILURE_CANARY})", "is_interrupt": False}
     r = hook("post-tool-use-failure", failure_env)
-    check(r.returncode == 0 and one_json(r) == {} and r.stderr.strip() == "", f"hook post-tool-use-failure prints {{}} and exits 0 (exit {r.returncode}; stderr {r.stderr!r})")
+    # A committed hook may report pending search visibility on stderr (SS-10);
+    # the recall below verifies the captured record without replaying the write.
+    check(r.returncode == 0 and one_json(r) == {}, f"hook post-tool-use-failure prints {{}} and exits 0 (exit {r.returncode}; stderr {r.stderr!r})")
     r = cli("recall", FAILURE_CANARY, "--hops", "0", "--full-text")
     v = one_json(r) or {"results": []}
     found = [x for x in v["results"] if x["kind"] == "Failure" and x.get("props", {}).get("pending_fix") is True and x.get("props", {}).get("command") == "false"]
@@ -520,7 +522,8 @@ else:
     r2 = in_tmp("hook", "post-commit", "--stdin-json")
     rr = cli("recall", "temporary repository note writer pool", "--hops", "0")
     by_id = {x["id"]: x for x in (one_json(rr) or {"results": []})["results"]}
-    check(tid != "" and r.returncode == 0 and v == {"stamped": 1} and r.stderr == "" and r2.returncode == 0 and one_json(r2) == {"stamped": 0} and by_id.get(tid, {}).get("provenance", {}).get("commit_sha") == head and "commit_sha" not in by_id.get(d2, {}).get("provenance", {}), f"m5: hook post-commit in the temporary repository stamps HEAD on its own unstamped record once ({v.get('stamped')} then 0) and leaves the checkout's Decision unstamped (exit {r.returncode})")
+    # A committed stamp may report pending search visibility on stderr (SS-10).
+    check(tid != "" and r.returncode == 0 and v == {"stamped": 1} and r2.returncode == 0 and one_json(r2) == {"stamped": 0} and by_id.get(tid, {}).get("provenance", {}).get("commit_sha") == head and "commit_sha" not in by_id.get(d2, {}).get("provenance", {}), f"m5: hook post-commit in the temporary repository stamps HEAD on its own unstamped record once ({v.get('stamped')} then 0) and leaves the checkout's Decision unstamped (exit {r.returncode})")
     r = cli("ingest-decisions", "--repo", tmp)
     check(r.returncode == 4 and r.stdout == "" and r.stderr.strip() == OWN26_TEXT, f"m5: ingest-decisions is the OWN-26 typed stub: exit 4 with the fixed text (exit {r.returncode})")
     # docs-ingest DI1.6: the plain pipeline (`kaban ingest`, the MCP tools, the resource, the chunk
