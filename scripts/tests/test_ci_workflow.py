@@ -71,9 +71,16 @@ class WorkflowResults(unittest.TestCase):
             return result, dict(line.split('=', 1) for line in output.read_text().splitlines()), summary.read_text()
 
     def required(self, selected='true'):
-        needs = {job: {'result': 'success'} for job in ('selection', 'quality', 'functional', 'gnu', 'musl', 'script-tests', 'producer')}
+        needs = {job: {'result': 'success'} for job in ('selection', 'quality', 'functional', 'pdf', 'gnu', 'musl', 'script-tests', 'producer')}
         needs['selection']['outputs'] = {'producer': selected}
         return needs
+
+    def test_pdf_failure_is_required_for_readiness(self):
+        needs = self.required()
+        needs['pdf'] = {'result': 'failure'}
+        result, _, summary = self.execute('Run gates', needs=needs)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr + summary)
+        self.assertIn('pdf: failure', summary)
 
     def test_failed_required_job_cannot_be_replaced_by_a_successful_ci_child(self):
         needs = self.required()
@@ -121,7 +128,7 @@ class WorkflowResults(unittest.TestCase):
         _, pr, _ = self.execute('Select producer and cache scope', event={'number': 7})
         source = (ROOT / '.github/workflows/ci.yml').read_text()
         keys = []
-        for group in ('quality', 'functional', 'gnu', 'musl', 'producer'):
+        for group in ('quality', 'functional', 'pdf', 'gnu', 'musl', 'producer'):
             # Scope the public action input to this job (not a cache-service emulator).
             body = source.split('\n  ' + group + ':\n', 1)[1]
             body = re.split(r'\n  [a-z][a-z-]*:\n', body, maxsplit=1)[0]
@@ -130,7 +137,7 @@ class WorkflowResults(unittest.TestCase):
                 return prefix.replace('${{ needs.selection.outputs.cache-prefix }}', outputs.get('cache-prefix', ''))
             self.assertEqual(resolve(main), resolve(pr), 'A new PR must be able to reuse a compatible default-branch key')
             keys.append(resolve(main))
-        self.assertEqual(len(set(keys)), 5)  # incompatible group targets still stay distinct
+        self.assertEqual(len(set(keys)), 6)  # incompatible group targets still stay distinct
 
     def test_cache_writes_follow_event_and_default_branch_trust(self):
         for event, ref, payload, save in (

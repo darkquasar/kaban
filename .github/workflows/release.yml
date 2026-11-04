@@ -1,0 +1,187 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  pull_request:
+    paths:
+      - '.github/workflows/release.yml'
+      - 'scripts/release/**'
+      - 'scripts/mcp/**'
+      - 'scripts/tests/test_release*.py'
+      - 'licenses/release/**'
+      - '**/Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - '.cargo/config.toml'
+      - 'LICENSE'
+      - 'NOTICE'
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_PROFILE_DEV_DEBUG: '0'
+  CARGO_PROFILE_DEV_STRIP: symbols
+  CARGO_INCREMENTAL: '0'
+  CARGO_BUILD_JOBS: '2'
+  MISE_DATA_DIR: /opt/kaban-mise
+
+jobs:
+  authorize:
+    if: ${{ github.event_name == 'push' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Authorize exact tag commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/release/authorize.py
+
+  # Job IDs, environment, native GNU builds and cache inputs match ci.yml.
+  gnu:
+    needs: authorize
+    if: ${{ !cancelled() && (github.event_name == 'pull_request' || needs.authorize.result == 'success') }}
+    name: Package ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-24.04
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-gnu
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Install package prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends binutils strace
+      - name: Prepare pinned Rust toolchain
+        run: |
+          channel=$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')
+          rustup toolchain install "$channel" --profile minimal --component rustfmt --component clippy
+          rustc --version && cargo --version
+      - name: Restore compatible Cargo dependencies
+        id: cargo-cache
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          prefix-key: ci-v1-gnu
+          workspaces: . -> target/ci-gnu
+          key: ${{ runner.os }}-${{ runner.arch }}-gnu-${{ hashFiles('mise.toml', 'mise.lock', 'tools/kaban-rust-scip/rust-toolchain.toml') }}
+          cache-bin: false
+          save-if: false
+      - name: Build once, check exact executables and package
+        env:
+          RELEASE_TARGET: ${{ matrix.target }}
+        run: bash scripts/release/build.sh "$RELEASE_TARGET"
+      - name: Report dependency cache reuse
+        run: echo 'Exact Cargo cache hit ${{ steps.cargo-cache.outputs.cache-hit }}; release jobs never save caches.' >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: package-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+  musl:
+    needs: authorize
+    if: ${{ !cancelled() && (github.event_name == 'pull_request' || needs.authorize.result == 'success') }}
+    name: Package x86_64-unknown-linux-musl
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-musl
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Install package prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends musl-tools binutils strace
+      - name: Prepare pinned Rust toolchain
+        run: |
+          channel=$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')
+          rustup toolchain install "$channel" --profile minimal --component rustfmt --component clippy
+          rustup target add --toolchain "$channel" x86_64-unknown-linux-musl
+          rustc --version && cargo --version
+      - name: Restore compatible Cargo dependencies
+        id: cargo-cache
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          prefix-key: ci-v1-musl
+          workspaces: . -> target/ci-musl
+          key: ${{ runner.os }}-${{ runner.arch }}-musl-${{ hashFiles('mise.toml', 'mise.lock', 'tools/kaban-rust-scip/rust-toolchain.toml') }}
+          cache-bin: false
+          save-if: false
+      - name: Build once, check exact executables and package
+        run: bash scripts/release/build.sh x86_64-unknown-linux-musl
+      - name: Report dependency cache reuse
+        run: echo 'Exact Cargo cache hit ${{ steps.cargo-cache.outputs.cache-hit }}; release jobs never save caches.' >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: package-x86_64-unknown-linux-musl
+          path: dist/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+  publish:
+    needs: [authorize, gnu, musl]
+    if: >-
+      github.repository == 'darkquasar/kaban' && github.event_name == 'push' &&
+      startsWith(github.ref, 'refs/tags/v') && github.actor == 'darkquasar' &&
+      github.actor_id == '28435534' && github.triggering_actor == 'darkquasar'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: package-*
+          path: dist
+          merge-multiple: true
+      - name: Verify packages and write release notes
+        run: |
+          cat dist/*.tar.gz.sha256 > dist/SHA256SUMS
+          (cd dist && sha256sum -c SHA256SUMS)
+          python3 scripts/release/notes.py dist > dist/RELEASE_NOTES.md
+      - name: Recheck authorization immediately before publication
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/release/authorize.py
+      - name: Publish checked archives
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          prerelease=()
+          if [[ "${RELEASE_TAG%%+*}" == *-* ]]; then prerelease+=(--prerelease); fi
+          gh release create "$RELEASE_TAG" --verify-tag --title "kaban $RELEASE_TAG" \
+            --notes-file dist/RELEASE_NOTES.md "${prerelease[@]}" dist/*.tar.gz dist/SHA256SUMS

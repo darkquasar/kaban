@@ -7,14 +7,15 @@ cd "$kaban_ci_dir/../.." || exit
 
 if [ "$#" -eq 1 ] && [ "$1" = "--help" ]; then
   cat <<'HELP'
-Usage: bash scripts/ci/ci.sh [all|quality|helpers|functional|producer|gnu|musl]
-No argument means all: quality + helpers + functional + GNU + musl gates.
+Usage: bash scripts/ci/ci.sh [all|quality|helpers|functional|pdf|producer|gnu|musl]
+No argument means all: quality + helpers + functional + PDF + GNU + musl gates.
 quality: fmt, three Clippy variants, deny and dependency boundaries.
 helpers: Python build/catalog tests and shell syntax (no Rust tools needed).
-functional: workspace/PDF/no-default nextest suites and applicable library doctests.
+functional: workspace/no-default nextest suites and applicable default library doctests.
+pdf: full PDF-enabled ingest nextest suite and its library doctest.
 producer: separate tools/kaban-rust-scip workspace/toolchain, fetch/fmt/Clippy/tests.
 gnu: release build, MCP smoke and sizes; musl: native musl build/size gates.
-Local core is quality + helpers + functional (mise run core).
+Local core is quality + helpers + functional + PDF (mise run core).
 Producer qualification is separate: invoke producer explicitly when applicable.
 Missing/wrong required tools stop before compilation (exit 3); child failures retain
 their status. Mandatory runtime markers and size misses remain incomplete (exit 3).
@@ -34,7 +35,7 @@ if [ "$#" -gt 1 ]; then
 fi
 kaban_group=${1:-all}
 case "$kaban_group" in
-  all|quality|helpers|functional|producer|gnu|musl) ;;
+  all|quality|helpers|functional|pdf|producer|gnu|musl) ;;
   *) echo "Unknown group: $kaban_group; see --help" >&2; exit 2 ;;
 esac
 # Native hosted step summaries retain incomplete status even though Actions marks
@@ -135,7 +136,7 @@ try:
         rustc = executable(os.environ.get("RUSTC", "rustc"))
         probe([rustc, "--version"], f"rustc {rust}")
         probe([sys.executable, "--version"], f"Python {pins['python']}")
-        if group in ("quality", "functional"):
+        if group in ("quality", "functional", "pdf"):
             commands = probe([cargo, "--list"])
             tool = "deny" if group == "quality" else "nextest"
             if tool not in [line.split()[0] for line in commands.splitlines() if line.split()]:
@@ -151,7 +152,7 @@ try:
             probe([executable("node"), "--version"], f"v{pins['node']}")
             for tool in ("go", os.environ.get("SCIP_GO", "scip-go")):
                 executable(tool)
-        if group in ("functional", "producer", "gnu", "musl"):
+        if group in ("functional", "pdf", "producer", "gnu", "musl"):
             executable("cc")
         executable("git")
         if group in ("gnu", "musl"):
@@ -201,7 +202,7 @@ rust_runner() {
 
 # Cargo metadata supplies actual workspace library targets, including doctest=false.
 doctests() {
-  local metadata packages package has_pdf=0
+  local metadata packages package
   local selections=()
   metadata=$(mktemp) || return 1
   "${CARGO:-cargo}" metadata --format-version 1 --no-deps > "$metadata"
@@ -225,14 +226,9 @@ LIBRARIES
   if [ -z "$packages" ]; then echo "doctests: no doctestable library targets"; fi
   for package in $packages; do
     selections+=( -p "$package" )
-    if [ "$package" = kaban-ingest ]; then has_pdf=1; fi
   done
   if [ "${#selections[@]}" -gt 0 ]; then
     step rust_runner "${CARGO:-cargo}" test --doc --locked "${selections[@]}" -- --show-output
-  fi
-  # Match the PDF-enabled functional variant's library examples too.
-  if [ "$has_pdf" -eq 1 ]; then
-    step rust_runner "${CARGO:-cargo}" test --doc --locked -p kaban-ingest --features pdf -- --show-output
   fi
 }
 
@@ -286,9 +282,13 @@ functional() {
   else
     step rust_runner "${CARGO:-cargo}" nextest run --workspace --no-fail-fast --success-output immediate
   fi
-  step rust_runner "${CARGO:-cargo}" nextest run -p kaban-ingest --features pdf --success-output immediate
   step rust_runner "${CARGO:-cargo}" nextest run -p kaban --no-default-features --success-output immediate
   step doctests
+}
+
+pdf() {
+  step rust_runner "${CARGO:-cargo}" nextest run -p kaban-ingest --features pdf --success-output immediate
+  step rust_runner "${CARGO:-cargo}" test --doc --locked -p kaban-ingest --features pdf -- --show-output
 }
 
 helpers() {
@@ -529,6 +529,7 @@ case "$kaban_group" in
     step quality
     step helpers
     step functional
+    step pdf
     step gnu
     step musl
     ;;

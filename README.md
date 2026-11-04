@@ -5,9 +5,9 @@ records and their relationships in SQLite, retrieves them with lexical and graph
 search, and exposes the same service through a CLI and an MCP stdio server.
 It does not call a hosted model or run a network listener.
 
-This checkout is a local, unpublished M7 handoff. The Cargo/binary version is
-still `3.0.0-alpha.1`; milestone and changelog labels are not a version bump.
-See [release status and limitations](docs/developer/RELEASE.md).
+The first Linux release is being prepared as `3.0.0-alpha.1`, matching the
+Cargo/binary version. Packages target Linux x86-64 GNU, x86-64 musl and ARM64 GNU.
+See [release workflow, runtime requirements and limitations](docs/developer/RELEASE.md).
 For contributor orientation and preserved branch/evidence state, see [CODEBASE.md](CODEBASE.md).
 
 ## Build and first use
@@ -16,7 +16,7 @@ Use the Rust toolchain pinned in `rust-toolchain.toml` (1.99.0, also the MSRV)
 and a native C compiler for bundled SQLite. From this checkout:
 
 ```sh
-cargo build --release -p kaban -p kaban-index
+cargo build --release --locked -p kaban -p kaban-index
 
 # Run from your project directory; supply a policy you have reviewed.
 # The database is created on first open.
@@ -83,10 +83,10 @@ There is no working HTTP/REST transport or OpenAPI service. `serve --http` is a
 rejected placeholder, not a listener. Embedding retrieval, `ask`/workflow
 orchestration, `code_impact` and an automatic indexing loop are not delivered.
 M6 two-store/personal-memory work is cancelled, not scheduled for a later version.
-No refreshed Docker image is part of this handoff.
+No refreshed Docker image is part of this release.
 
-[Release notes](docs/developer/RELEASE.md) distinguish retained size/policy evidence from
-omitted qualification. [Offline Mintlify-structured user documentation](docs/index.mdx)
+[Release notes](docs/developer/RELEASE.md) describe package validation and its limits.
+[Offline Mintlify-structured user documentation](docs/index.mdx)
 is available in the checkout; this is not a hosted documentation deployment.
 
 ## Development and licence

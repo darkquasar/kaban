@@ -15,8 +15,8 @@ description = "Comprehensive gates including helpers; standalone producer is sep
 run = "bash scripts/ci/ci.sh"
 
 [tasks.core]
-description = "Quality, helpers and functional checks; no release builds"
-run = "bash scripts/ci/ci.sh quality && bash scripts/ci/ci.sh helpers && bash scripts/ci/ci.sh functional"
+description = "Quality, helpers, functional and PDF checks; no release builds"
+run = "bash scripts/ci/ci.sh quality && bash scripts/ci/ci.sh helpers && bash scripts/ci/ci.sh functional && bash scripts/ci/ci.sh pdf"
 
 [tasks.quality]
 description = "Formatting, Clippy, deny and dependency boundaries"
@@ -29,6 +29,10 @@ run = "bash scripts/ci/ci.sh helpers"
 [tasks.functional]
 description = "Nextest suites and library doctests"
 run = "bash scripts/ci/ci.sh functional"
+
+[tasks.pdf]
+description = "Full PDF-enabled ingest suite and doctest"
+run = "bash scripts/ci/ci.sh pdf"
 
 [tasks.producer]
 description = "Standalone Rust SCIP producer under its own toolchain"

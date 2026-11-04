@@ -84,7 +84,8 @@ class CiToolSelection(unittest.TestCase):
             for name in ('uname', 'rustc', 'node', 'go', 'scip-go', 'cc', 'musl-gcc', 'git', 'strace', 'stat', 'sudo', 'sysctl', 'unshare'):
                 (bin_dir / name).symlink_to(helper)
             if missing_tool:
-                (bin_dir / missing_tool).unlink()
+                for name in ((missing_tool,) if isinstance(missing_tool, str) else missing_tool):
+                    (bin_dir / name).unlink()
             # Dependency inspection is exercised elsewhere; keep this external jq boundary deterministic.
             (bin_dir / "jq").write_text('#!/bin/sh\ncat >/dev/null\n')
             (bin_dir / "jq").chmod(0o700)
@@ -242,7 +243,7 @@ class CiToolSelection(unittest.TestCase):
         self.assertFalse(any("--workspace" in c for c in reused))
         self.assertFalse(Path(reused[0][reused[0].index("--binaries-metadata") + 1]).exists())
         self.assertEqual(result.namespace_policy, "1")
-        self.assertIn("visible success: pdf", result.stdout)
+        self.assertNotIn("visible success: pdf", result.stdout)
         self.assertIn("visible success: no-default", result.stdout)
         self.assertIn("visible success: doc", result.stdout)
 
@@ -381,22 +382,40 @@ class CiToolSelection(unittest.TestCase):
                 self.assertEqual(result.returncode, code, result.stdout + result.stderr)
                 self.assertIn(diagnostic, result.stdout + result.stderr)
 
+    def test_pdf_runs_its_complete_suite_and_doctest_without_language_tools(self):
+        result, calls = self.run_gate(args=("pdf",), tools=("nextest",), fail="",
+                                      missing_tool=("node", "go", "scip-go", "musl-gcc"))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual([c for c in calls if c[0] not in ("--list",) and "--version" not in c], [
+            ["nextest", "run", "-p", "kaban-ingest", "--features", "pdf", "--success-output", "immediate"],
+            ["test", "--doc", "--locked", "-p", "kaban-ingest", "--features", "pdf", "--", "--show-output"],
+        ])
+        self.assertEqual(result.isolation_calls, [])
+        self.assertIn("tool: cc =>", result.stdout)
+
+    def test_pdf_keeps_pinned_nextest_prerequisites(self):
+        for tools, versions in (((), None), (("nextest",), {"nextest": "cargo-nextest 0.0.1"})):
+            with self.subTest(tools=tools, versions=versions):
+                result, calls = self.run_gate(args=("pdf",), tools=tools, versions=versions, fail="")
+                self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+                self.assertFalse(any(c[0] in ("test", "nextest") and "--version" not in c for c in calls))
+
     def test_functional_runs_exact_suites_and_library_docs_without_artifacts(self):
         result, calls = self.run_gate(args=("functional",), tools=("nextest",), fail="", missing_tool="musl-gcc")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual([c for c in calls if c[:2] == ["nextest", "run"]], [
             ["nextest", "run", "--workspace", "--no-fail-fast", "--success-output", "immediate"],
-            ["nextest", "run", "-p", "kaban-ingest", "--features", "pdf", "--success-output", "immediate"],
             ["nextest", "run", "-p", "kaban", "--no-default-features", "--success-output", "immediate"],
         ])
         self.assertIn(["test", "--doc", "--locked", "-p", "kaban-ingest", "-p", "fixture-core", "--", "--show-output"], calls)
-        self.assertIn(["test", "--doc", "--locked", "-p", "kaban-ingest", "--features", "pdf", "--", "--show-output"], calls)
+        self.assertFalse(any("pdf" in c for c in calls))
         self.assertFalse(any(c[0] in ("build", "fmt", "clippy", "deny") and "--version" not in c for c in calls))
 
     def test_every_selected_rust_suite_exposes_mandatory_markers_and_preserves_failure(self):
-        for suite in ("workspace", "pdf", "no-default", "doc", "producer"):
-            group = "producer" if suite == "producer" else "functional"
-            with self.subTest(suite=suite):
+        for group, suite in (("functional", "workspace"), ("functional", "no-default"),
+                             ("functional", "doc"), ("pdf", "pdf"), ("pdf", "doc"),
+                             ("producer", "producer")):
+            with self.subTest(group=group, suite=suite):
                 result, _ = self.run_gate(args=(group,), fail="", marker=suite)
                 self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
                 self.assertIn("mandatory_skips: 1\n  invented_branch\n", result.stdout)
@@ -431,7 +450,7 @@ class CiToolSelection(unittest.TestCase):
         self.assertEqual(default.returncode, 0, default.stdout + default.stderr)
         self.assertEqual(explicit.returncode, 0, explicit.stdout + explicit.stderr)
         self.assertEqual(calls, selected)
-        for group in ("quality", "helpers", "functional", "gnu", "musl"):
+        for group in ("quality", "helpers", "functional", "pdf", "gnu", "musl"):
             self.assertIn("==> " + group + "\n", default.stdout)
         self.assertFalse(any(c[0] == "fetch" or (c[0] == "test" and "--doc" not in c) for c in calls))
         self.assertTrue(any(c[0] == "build" and "--target" in c for c in calls))

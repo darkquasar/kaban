@@ -1,78 +1,110 @@
-# Local M7 release handoff
+# Linux releases
 
-This is an unpublished, local handoff under OWN-123, not a public release.
-`Cargo.toml` still declares **3.0.0-alpha.1**. M7 and `3.0.0` milestone/changelog
-labels do not identify the executable version. No version bump, tag, push or
-publication is included.
+The first release is **3.0.0-alpha.1**, matching `Cargo.toml`. PR4 prepares the
+release workflow; merging it does not create a tag or publish a release.
 
-## Artifacts and identity
+Each archive contains `kaban` and `kaban-index`, built together with the default
+features, plus Kaban's LICENSE and NOTICE and the target's dependency licence
+bundle. PDF, optional Markdown splitting, language producer tools and container
+images are not included.
 
-The coordinator's local package location is
-`../specs/kaban/specs/00-project/evidence/s31-m7-local-release/` outside this source worktree. Its manifest
-and acceptance record must bind each supplied binary to its full SHA-256, byte
-size, target, profile, feature set and source revision before it is called usable.
-The retained native inputs are under
-`../specs/kaban/specs/00-project/evidence/s30-l0-budget-logs/artifacts/`, with exact identities in
-`../specs/kaban/specs/00-project/evidence/s30-l0-budget-acceptance.md`.
+| Archive target | Runtime | Qualification |
+| --- | --- | --- |
+| `x86_64-unknown-linux-gnu` | Linux x86-64; glibc floor recorded from the binaries | Main x86-64 CI plus checks of the packaged binaries |
+| `x86_64-unknown-linux-musl` | Linux x86-64; static musl executables | Main musl build plus checks of the packaged binaries |
+| `aarch64-unknown-linux-gnu` | Linux ARM64; glibc floor recorded from the binaries | Native ARM64 build and checks of the packaged binaries; full functional CI remains x86-64 |
 
-The package scope is `kaban` default and `--no-default-features` release binaries
-for **aarch64-unknown-linux-gnu**. Retained metadata requires the aarch64 loader
-`/lib/ld-linux-aarch64.so.1`, `libgcc_s.so.1`, `libm.so.6`, `libc.so.6` and
-GLIBC_2.39 symbols. These require a compatible aarch64 GNU/Linux runtime;
-they are not static musl executables and do not imply an x86_64 build. A native
-source build is described in the [README](../../README.md). `kaban-index` is not
-bundled: build it separately with `cargo build --release -p kaban-index` if needed.
+GNU builds use Ubuntu 24.04. Read the measured minimum glibc version in each
+package's metadata and release notes before choosing a download; an Ubuntu 24.04
+build does not establish support for older distributions. The musl archive is the
+portable x86-64 option. macOS and Windows packages require portability work and
+are not part of this release.
 
-The strict retained size limits are **<25 MiB default** and **<15 MiB no-default**
-(26,214,400 and 15,728,640 bytes; OWN-B, spec 05 SS-13b: the default build now
-links the Tantivy text index, measured at 20,213,088 bytes (19.28 MiB), the
-no-default build at 13,067,904 bytes (12.46 MiB), see
-`../specs/kaban/specs/00-project/evidence/s05-t5-sizes.md`). PDF and benchmark feature builds are not those
-two feature profiles. The minimal build disables ingestion and code-tool adapters
-("code-graph off"); the Tantivy text index is linked in every build since spec 05
-OWN-M (the store owns it; a store without an index does not exist), so the no-default
-figure above predates it and is remeasured as proposed OWN-N.
+## Build, validate and publish
 
-Static musl binaries have earlier stream evidence only. They are not packaged or
-newly qualified by this handoff. Neither a configured Rust target nor an old size
-row establishes availability of a current static executable. No refreshed Docker
-image is delivered.
+```text
++-------------+  PR checks  +-------------------+
+| PR4 / fixes | ==========> | Linux packages    |
++-------------+             | build + run checks|
+                            +-------------------+
 
-## Qualification scope
++-------------+  push v*    +-------------------+  archive  +------------------+
+| Green main  | ==========> | Authorize + build | ========> | GitHub Release   |
++-------------+             +-------------------+          +------------------+
+```
 
-OWN-123 cancels further M7 tests, benchmarks, smoke, verification campaigns and
-review rounds, retaining only `cargo deny check` and final-built binary sizes.
-Exact applicable evidence may be reused instead of rerun. Consult the coordinator's
-acceptance record for commands, exits, checked identities and logs; this document
-does not itself attest a completed gate. Historical performance results belong
-to their original binary, target, features and corpus, not automatically to the
-final head. Omitted startup, latency, memory, static-build and protocol checks
-remain omitted, not passed.
+The release workflow validates packages on release-related pull requests. It
+builds each selected configuration once with `--locked -p kaban -p kaban-index`.
+GNU builds are native; musl uses `--target x86_64-unknown-linux-musl`. Compatible
+Cargo dependency caches may shorten compilation; a cache miss never bypasses a
+check. Archives move between jobs within the same workflow run.
 
-OWN-119 acceptance is separate: the earlier aggregate's inner CI3 retained a
-known host-negative mandatory skip. That skip is neither a product pass nor a
-demonstrated product failure. The independent OWN-119 review subsequently settled
-with no findings; its acceptance record retains the CI3 limitation. That review
-does not turn omitted M7 qualification into passes.
+Validation runs the existing MCP/CLI smoke script against the packaged `kaban`,
+and ordinary CLI commands against both executables, including `kaban-index`'s
+dependency-free scaffold report. This checks startup and basic behaviour of the
+actual downloads without installing language producers or rerunning the complete
+functional suite. It does not qualify a complete indexing toolchain on every
+target. Packaging also checks binary size, licence bundle freshness, executable
+permissions and runtime linkage, and records SHA-256 checksums.
+
+To publish after the PR is merged:
+
+1. Select a main tip whose **CI** push run has completed successfully. A successful
+   PR run alone is insufficient. An intermediate commit that was never a main
+   push tip has no eligible run.
+2. Confirm `Cargo.toml` contains the intended version and that the committed
+   licence bundles match `Cargo.lock` and the selected manifests.
+3. As repository owner `darkquasar`, create and push the matching version tag:
+
+   ```sh
+   git fetch origin
+   git tag -a v3.0.0-alpha.1 <green-main-commit> -m 'Kaban 3.0.0-alpha.1'
+   git push origin v3.0.0-alpha.1
+   ```
+
+4. Inspect the release workflow and its generated metadata and checksums. Versions
+   with a prerelease suffix publish as GitHub prereleases.
+
+The tag gate checks repository, owner identity and triggering actor, version
+agreement, main ancestry and the exact commit's successful main push CI. It fails
+immediately if CI is still running; rerun after CI succeeds. Only the final
+publication job receives `contents: write`, and it rechecks authorization before
+publishing. Pull request validation cannot publish.
+
+There is one release build path. Main CI does not upload a rolling set of release
+assets, and tag jobs do not rerun the entire functional suite. Homebrew and
+installer automation can be added separately.
+
+## Dependency licence bundles
+
+The committed bundles are under `licenses/release/<target>/`. Each records its
+locked dependency graph, build configuration and required upstream texts,
+including bundled native code. Check a target without network access:
+
+```sh
+python3 scripts/release/licenses.py check --target x86_64-unknown-linux-gnu
+```
+
+Dependency, target or feature changes require regenerating and reviewing the
+corresponding bundle before publication. See [THIRD_PARTY.md](THIRD_PARTY.md).
+`cargo deny check` remains a dependency policy check; it does not replace the
+redistribution texts.
 
 ## User-visible limits
 
-- MCP uses stdio; HTTP/REST/OpenAPI is unavailable. The parser's `serve --http`
-  placeholder is explicitly rejected, not a working transport.
-- M6 two-store/personal-memory functionality is cancelled. Existing single-store
-  workspaces and resources remain; no global routing or merged recall is promised.
-- No embeddings, `ask`/workflow orchestration, automatic code indexing or refreshed
-  container distribution is delivered. PDF extraction is opt-in, without OCR.
-- Code graph queries require an explicitly produced snapshot; indexing has separate
-  trust, toolchain and isolation requirements in [code-graph.md](code-graph.md).
+- Rust semantic indexing's external producer currently advertises
+  `aarch64-unknown-linux-gnu` only. An x86-64 download does not provide Rust
+  semantic indexing. Producer executables are not bundled on ARM64 either; see
+  [code-graph.md](code-graph.md) for setup and trust requirements.
+- PDF is optional and absent from these binaries. Build with
+  `--features kaban-ingest/pdf` if needed; a PDF download would be a separate
+  feature, size and licence configuration.
+- MCP uses stdio. HTTP/REST/OpenAPI, embeddings, `ask`/workflow orchestration,
+  automatic indexing and two-store/personal-memory routing are unavailable.
+- Code queries need an explicitly produced snapshot. Indexing can execute
+  repository tools and has separate isolation and trust requirements.
 
-## Local usability is not external-distribution clearance
-
-Include the Kaban LICENSE and NOTICE and read [THIRD_PARTY.md](THIRD_PARTY.md).
-The selected inventory is not a complete transitive license bundle. `cargo deny`
-is dependency-policy evidence, not proof that every upstream notice, copyright,
-license text or native-library obligation has been collected. External distribution
-needs an artifact-specific dependency/feature inventory and its required texts;
-that legal/compliance gap does not prevent a clearly labelled local handoff and
-does not authorize publication. [Offline user docs](../index.mdx) are available
-in the checkout; no live documentation site is deployed.
+The earlier M7 handoff was local and unpublished. Its retained ARM64 measurements
+and omitted checks describe those historical artifacts, not these release bytes.
+Current CI enforces default GNU `kaban` below 25 MiB; the optional no-default size
+table uses 17 MiB. Release metadata supplies the actual measured sizes.
