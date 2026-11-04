@@ -460,10 +460,10 @@ musl() {
   step build_artifacts musl "$target/release" 'kaban kaban-index' build --release --target "$target" -p kaban -p kaban-index
   size_index=$(artifact_size musl kaban-index) || return $?
   size_kaban=$(artifact_size musl kaban) || return $?
-  echo "size: kaban-index (musl ${target}) ${size_index} (gate: < 8000000, G1-N4)"
+  echo "size: kaban-index (musl ${target}) ${size_index} (gate: < 12000000, G1-N4)"
   echo "size: kaban (musl ${target}) ${size_kaban} (informational; N1 is the default gnu gate)"
-  if [ "$size_index" -ge 8000000 ]; then
-    echo "N4 MISS (reported, OWN-13; budget set by owner decision 2026-10-26): kaban-index musl size ${size_index} >= 8000000 (G1-N4)" >&2
+  if [ "$size_index" -ge 12000000 ]; then
+    echo "N4 MISS (reported, OWN-13; budget set by owner decision 2026-11-04): kaban-index musl size ${size_index} >= 12000000 (G1-N4)" >&2
     missing=1
   fi
 }

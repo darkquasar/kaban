@@ -294,8 +294,9 @@ It invokes the same comprehensive `ci.sh`; no duplicate gate implementation exis
 Historical measured source: `44286bb81e7d6338983f65c79bb8a68cf929c9ef`, tree
 `30e65982e4eebabc34cdbe80953381e9b6517978`. Its hosted run was **incomplete, exit 3**:
 eighteen namespace subchecks lacked evidence and musl index was 8,361,968 bytes,
-above the strict 8,000,000-byte bound. These remain unresolved qualification and
-size blockers; removing the catalogue does not resolve them.
+above the then-current strict 8,000,000-byte bound. On 2026-11-04 the owner raised
+the musl index bound to 12,000,000 bytes; that measured size fits the new bound.
+The historical run remains incomplete, and its namespace coverage gap is separate.
 
 Linux ARM64 native discovery with Rust 1.99.0 and nextest 0.9.150 found:
 
@@ -321,7 +322,7 @@ All existing product assertions, Tantivy coverage and budgets remain:
 | Default GNU Kaban | <25 MiB |
 | Optional no-default size table | <17 MiB |
 | Graph on/off delta | <900,000 bytes |
-| Native musl index | <8,000,000 bytes |
+| Native musl index | <12,000,000 bytes |
 
 GNU index and musl Kaban sizes remain informational. Actual product-suite execution
 and current producer/doctest baselines remain required before activation and composed
@@ -355,7 +356,7 @@ local invocations add no automatic pruning.
 | Explicit graph-on | Kept distinct from workspace default; historical bytes differed. Paired with graph-off for the strict <900,000-byte delta. |
 | Graph-off | Retains `--no-default-features --features ingest,text-index-tantivy`; Tantivy stays selected. |
 | Optional no-default / md-splitter / PDF | Separate staged copies; no-default stays strictly <17 MiB, other table entries informational. |
-| Native musl | Separate explicit-target Kaban/index build; index stays strictly <8,000,000 bytes. No musl runtime/smoke claim. |
+| Native musl | Separate explicit-target Kaban/index build; index stays strictly <12,000,000 bytes. No musl runtime/smoke claim. |
 
 Before each size/smoke consumer, the script checks that its staged binary exists,
 is executable and matches its saved SHA-256. Missing or changed bytes fail the

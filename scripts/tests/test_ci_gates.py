@@ -278,7 +278,8 @@ class CiToolSelection(unittest.TestCase):
             ("gnu", False, {"default/kaban": 25 * 1024 * 1024}, 1, "FAILED: binary size"),
             ("gnu", True, {"no-default/kaban": 17 * 1024 * 1024}, 1, "FAILED: --no-default-features"),
             ("gnu", False, {"graph-on/kaban": 900064}, 3, "N4 MISS"),
-            ("musl", False, {"musl/kaban-index": 8000000}, 3, "N4 MISS"),
+            ("musl", False, {"musl/kaban-index": 11999999}, 0, "gate: < 12000000"),
+            ("musl", False, {"musl/kaban-index": 12000000}, 3, "N4 MISS"),
         ):
             with self.subTest(group=group, sizes=sizes):
                 result, _ = self.run_gate(args=(group,), fail="", size_table=table, artifact_sizes=sizes)

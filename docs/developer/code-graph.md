@@ -360,8 +360,8 @@ The release profile (`lto = "thin"`, `codegen-units = 1`, `strip = true`) applie
 binaries. The G1-N4 budget for `kaban-index` is a **musl** budget: the release build for the
 host's musl triple, `cargo build --release --target <arch>-unknown-linux-musl -p kaban -p
 kaban-index` (`.cargo/config.toml` names `musl-gcc` as the linker and `+crt-static`), must keep
-`target/<triple>/release/kaban-index` strictly under 8,000,000 decimal B (owner decision
-2026-10-26; budget alignment, not a size optimization). `scripts/ci/ci.sh` builds that triple only
+`target/<triple>/release/kaban-index` strictly under 12,000,000 decimal B (owner decision
+2026-11-04; budget increase, not a size optimization). `scripts/ci/ci.sh` builds that triple only
 (the box has its own architecture's `musl-gcc`; a foreign installed target has `std` but no
 linker), applies the gate (`FAILED ... (G1-N4)`), prints the `kaban` musl size informationally
 (N1 is the default gnu gate) and, when the host's musl target is not installed (`rustup target add
