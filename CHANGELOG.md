@@ -7,4 +7,4 @@
 - The `kaban bench` command with its required tests and fixtures.
 
 Benchmark reports, schemas and shell/Python tooling live in the sibling specs
-repository at `kaban/archive/benchmarks/`.
+checkout at `../specs/kaban/archive/benchmarks/`.

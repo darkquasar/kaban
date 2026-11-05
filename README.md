@@ -94,7 +94,7 @@ is available in the checkout; this is not a hosted documentation deployment.
 
 The workspace separates model/store, policy, service/API, CLI/MCP adapters,
 document ingestion, code-graph reading and the explicit indexer. Start with
-[the current delivery protocol](../specs/kaban/specs/00-project/PROTOCOL.md) for contribution gates,
+[the current delivery protocol](../specs/kaban/00-project/archive/PROTOCOL.md) for contribution gates,
 and `docs/developer/rust-style/` for local Rust conventions.
 
 For CI commands, see [developer CI](docs/developer/CI.md). The

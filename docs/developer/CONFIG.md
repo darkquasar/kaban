@@ -122,6 +122,6 @@ Use quality/latency measurements from your own workload before changing a knob.
 | `why.anchor_prefilter` | true | Anchor query latency and result parity |
 
 Indexer isolation, cache-sharing, deadline and quota semantics are specified in the
-[v4 stage-one plan](../../../specs/kaban/specs/02-code-graph-v4/stage1-plan.md) CG4.2. The complete executable
+[v4 stage-one plan](../../../specs/kaban/02-code-graph-v4/stage1-plan.md) CG4.2. The complete executable
 register is [the default fixture](../../crates/kaban-core/fixtures/config/defaults.yaml),
 whose test verifies equality with `EngineConfig::default()`.

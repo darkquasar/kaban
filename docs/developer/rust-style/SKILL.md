@@ -13,7 +13,7 @@ description: Idiomatic Rust conventions for writing or reviewing Rust in this pr
 > Every task brief's E1 read names rule files from `RULES-INDEX.md`; implementers list the files
 > read with their hashes in the task report.
 >
-> **Project overrides (OWN-73, 2026-10-26; `../specs/kaban/specs/00-project/PROTOCOL.md` wins over this file where they differ):**
+> **Project overrides (OWN-73, 2026-10-26; `../specs/kaban/00-project/archive/PROTOCOL.md` wins over this file where they differ):**
 > reports name the rule files read in one line, no hashes; the test runner is `cargo nextest` (no `cargo test`
 > fallback); the MSRV is the pinned toolchain in `rust-toolchain.toml` (1.99.0), not "stable minus 2"; the gate
 > before claiming done is PROTOCOL.md §4 (crate-level in a lane, the workspace in the wave clean-room).
