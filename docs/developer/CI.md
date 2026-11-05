@@ -271,7 +271,10 @@ under `docs/`, the named root project documents and licence files, release notic
 bundles, and Linguist-only `.gitattributes` edits. Changes to checkout-affecting
 attributes (for example `filter`, `text` or `eol`), including their removal, keep
 Rust checks selected. Attribute macros in either the base or head file also
-retain those checks, even when the macro itself was not edited. Other file types under `docs/` are not assumed to be prose.
+retain those checks, even when the macro itself was not edited. Only simple ASCII
+attribute syntax is eligible for the shortcut; quoted patterns, carriage returns
+and other byte encodings conservatively retain Rust checks. Other file types
+under `docs/` are not assumed to be prose.
 
 Rust source, test fixtures, workflow/build scripts, manifests, locks, tool setup,
 and unknown paths retain the complete Rust checks. Mixed diffs also retain them.

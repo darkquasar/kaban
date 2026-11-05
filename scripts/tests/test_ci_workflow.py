@@ -56,7 +56,8 @@ class WorkflowResults(unittest.TestCase):
                 for filename in paths:
                     changed = root / filename
                     changed.parent.mkdir(parents=True, exist_ok=True)
-                    changed.write_text(file_contents if file_contents is not None else 'invented diff\n')
+                    content = file_contents if file_contents is not None else 'invented diff\n'
+                    changed.write_bytes(content if isinstance(content, bytes) else content.encode())
                     git('add', '--', filename)
                 git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
                     '-c', 'core.hooksPath=/dev/null', 'commit', '--allow-empty', '-qm', 'change')
@@ -134,6 +135,9 @@ class WorkflowResults(unittest.TestCase):
             ('*.rs filter=custom linguist-documentation\n', None),
             ('[attr]binary linguist-documentation\n', None),
             ('*.html linguist-documentation\n', '*.rs text eol=lf\n'),
+            ('* linguist-documentation\reol=crlf\n', None),
+            ('*.rs linguist-documentation\rworking-tree-encoding=UTF-16LE\n', None),
+            (b'# caf\xe9\n*.html linguist-documentation\n', None),
         ):
             with self.subTest(content=content, original=original):
                 result, output, summary = self.execute('Select producer and cache scope',
@@ -143,13 +147,15 @@ class WorkflowResults(unittest.TestCase):
                 self.assertEqual(output['rust'], 'true', summary)
 
     def test_unchanged_attribute_macro_cannot_hide_checkout_changes(self):
-        macro = '[attr]linguist-documentation working-tree-encoding=UTF-16LE\n'
-        result, output, summary = self.execute('Select producer and cache scope',
-            event={'number': 7}, changed_path='.gitattributes',
-            initial_files={'.gitattributes': macro},
-            file_contents=macro + '*.rs linguist-documentation\n')
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(output['rust'], 'true', summary)
+        for pattern in ('[attr]linguist-documentation', '"[attr]linguist-documentation"'):
+            with self.subTest(pattern=pattern):
+                macro = pattern + ' working-tree-encoding=UTF-16LE\n'
+                result, output, summary = self.execute('Select producer and cache scope',
+                    event={'number': 7}, changed_path='.gitattributes',
+                    initial_files={'.gitattributes': macro},
+                    file_contents=macro + '*.rs linguist-documentation\n')
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(output['rust'], 'true', summary)
 
     def test_readiness_requires_valid_scope_and_all_selected_results(self):
         for flag in ('rust', 'producer'):

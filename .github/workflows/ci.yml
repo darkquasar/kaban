@@ -74,27 +74,33 @@ jobs:
                               if entries.stdout:
                                   content = subprocess.run(['git', 'show', f'{revision}:{path}'],
                                       capture_output=True)
+                                  # Only simple ASCII syntax is eligible. Quoted
+                                  # patterns can hide macros; Git treats a lone CR
+                                  # as whitespace, unlike Python universal newlines.
                                   if content.returncode != 0 or any(
-                                      line.lstrip().startswith(b'[attr]') for line in content.stdout.splitlines()):
+                                      byte not in (9, 10) and not 32 <= byte <= 126
+                                      for byte in content.stdout) or any(
+                                      line.lstrip(b' \t').startswith((b'[attr]', b'"'))
+                                      for line in content.stdout.split(b'\n')):
                                       return False
                           attributes = subprocess.run(['git', 'diff', '--no-ext-diff',
                               '--no-textconv', '--unified=0', base, 'HEAD', '--', path],
-                              capture_output=True, text=True)
+                              capture_output=True)
                           if attributes.returncode != 0:
                               return False
                           hunk = False
-                          allowed = {'linguist-documentation', 'linguist-generated',
-                              'linguist-vendored', 'linguist-detectable', 'linguist-language'}
-                          for line in attributes.stdout.splitlines():
-                              if line.startswith('@@ '):
+                          allowed = {b'linguist-documentation', b'linguist-generated',
+                              b'linguist-vendored', b'linguist-detectable', b'linguist-language'}
+                          for line in attributes.stdout.split(b'\n'):
+                              if line.startswith(b'@@ '):
                                   hunk = True
-                              elif hunk and line[:1] in ('+', '-'):
+                              elif hunk and line[:1] in (b'+', b'-'):
                                   content = line[1:].strip()
-                                  if not content or content.startswith('#'):
+                                  if not content or content.startswith(b'#'):
                                       continue
                                   fields = content.split()
-                                  if (len(fields) < 2 or fields[0].startswith('[attr]') or
-                                      any(a.lstrip('-!').split('=', 1)[0] not in allowed for a in fields[1:])):
+                                  if (len(fields) < 2 or fields[0].startswith(b'[attr]') or
+                                      any(a.lstrip(b'-!').split(b'=', 1)[0] not in allowed for a in fields[1:])):
                                       return False
                           return hunk
                       if path.startswith('docs/'):
