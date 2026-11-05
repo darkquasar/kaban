@@ -196,6 +196,43 @@ class WorkflowResults(unittest.TestCase):
         self.assertNotIn('scripts/tests/', paths)
         self.assertIn('run: bash scripts/release/build.sh', release)
 
+    def test_agent_instructions_and_local_instruction_ignore_do_not_build_rust(self):
+        original = '/target/\n# Existing project rules\n/fixtures/generated/\n'
+        for event in ('pull_request', 'push'):
+            result, output, summary = self.execute('Select producer and cache scope',
+                event={'number': 7}, event_name=event, changed_path='AGENTS.md')
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(output['rust'], 'false', summary)
+            for content, expected in (
+                (original + '/REPOLOCAL.md\n', 'false'),
+                (original + '# Machine-local instructions\n/REPOLOCAL.md\n', 'false'),
+                (original + '/REPOLOCAL.md\r/fixtures/\n', 'true'),
+                (original + '/REPOLOCAL.md\x00\n', 'true'),
+                (original + 'REPOLOCAL.md\n', 'true'),
+                (original + '/fixtures/\n', 'true'),
+                (original + '!/fixtures/generated/\n', 'true'),
+            ):
+                with self.subTest(event=event, content=content):
+                    result, output, summary = self.execute('Select producer and cache scope',
+                        event={'number': 7}, event_name=event, changed_path='.gitignore',
+                        initial_files={'.gitignore': original}, file_contents=content)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(output['rust'], expected, summary)
+                    self.assertEqual(output['producer'], expected, summary)
+        result, output, summary = self.execute('Select producer and cache scope',
+            changed_path='.gitignore', initial_files={'.gitignore': original + '/REPOLOCAL.md\n'},
+            file_contents=original)
+        self.assertEqual(output['rust'], 'false', summary)
+        for paths, expected in (
+            (('AGENTS.md', '.gitignore'), 'false'),
+            (('AGENTS.md', '.gitignore', 'Cargo.lock'), 'true'),
+        ):
+            result, output, summary = self.execute('Select producer and cache scope',
+                changed_path=paths, initial_files={'.gitignore': original},
+                file_contents=original + '/REPOLOCAL.md\n')
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(output['rust'], expected, summary)
+
     def test_attributes_affecting_checkout_or_build_inputs_keep_rust_checks(self):
         for content, original in (
             ('*.rs text eol=lf\n', None),

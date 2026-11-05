@@ -276,6 +276,13 @@ attribute syntax is eligible for the shortcut; quoted patterns, carriage returns
 and other byte encodings conservatively retain Rust checks. Other file types
 under `docs/` are not assumed to be prose.
 
+Root `AGENTS.md` is repository guidance, so it also omits Rust. A `.gitignore`
+edit qualifies only when its changed rules are the exact root `/REPOLOCAL.md`
+entry, comments or empty lines. Other ignore-rule changes retain Rust because
+they can affect fixture discovery. An unanchored rule, control-character variant
+or mixed change does not qualify. These checks use literal byte lines, not a
+general Git-ignore interpreter.
+
 The helper-only allowlist covers direct Python modules under `scripts/tests/`,
 the MCP catalog unit test, and the three manually invoked drivers
 `scripts/ci/clean-room.sh`, `scripts/dev/cargo-slot.sh` and

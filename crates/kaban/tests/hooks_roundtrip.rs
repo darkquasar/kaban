@@ -266,8 +266,13 @@ fn round_trip(host: &Host) {
 
     // hook fix, then recall shows the resolution and its FIXED_BY neighbour
     let reply = json!({"session_id": host.session, "failure_id": failure_id, "fix": FIX});
-    let (_, out) = hook_call(&s, host, "fix", &reply);
-    assert_eq!(out["status"], json!("fixed"), "{out}");
+    let (run, out) = hook_call(&s, host, "fix", &reply);
+    assert_eq!(
+        out["status"],
+        json!("fixed"),
+        "{out}; stderr: {}",
+        run.stderr()
+    );
     assert_eq!(out["failure_id"], json!(failure_id), "{out}");
     let cards = recall(&s, host.recall_query, "1");
     let failure = the_failure(&cards);

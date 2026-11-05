@@ -61,6 +61,23 @@ jobs:
                   def documentation(path):
                       if path.startswith('licenses/release/'):
                           return True
+                      if path == '.gitignore':
+                          # Only the root machine-local instruction entry is
+                          # metadata. Other ignore rules can affect test inputs.
+                          edits = subprocess.run(['git', 'diff', '--no-ext-diff',
+                              '--no-textconv', '--no-renames', '--unified=0', base,
+                              'HEAD', '--', path], capture_output=True)
+                          if edits.returncode != 0:
+                              return False
+                          hunk = False
+                          for line in edits.stdout.split(b'\n'):
+                              if line.startswith(b'@@ '):
+                                  hunk = True
+                              elif hunk and line[:1] in (b'+', b'-'):
+                                  entry = line[1:]
+                                  if entry not in (b'', b'/REPOLOCAL.md') and not entry.startswith(b'#'):
+                                      return False
+                          return hunk
                       if path == '.gitattributes':
                           # Attributes can also change checkout/build inputs. Only
                           # Linguist-only edits (including removals) are metadata.
@@ -107,7 +124,7 @@ jobs:
                           return PurePosixPath(path).suffix.lower() in (
                               '.md', '.mdx', '.txt', '.rst', '.adoc',
                               '.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp', '.ico')
-                      return path in ('README.md', 'CHANGELOG.md', 'CODEBASE.md',
+                      return path in ('README.md', 'CHANGELOG.md', 'CODEBASE.md', 'AGENTS.md',
                           'CONTRIBUTING.md', 'SECURITY.md', 'CODE_OF_CONDUCT.md',
                           'LICENSE', 'LICENSE-MIT', 'LICENSE-APACHE', 'NOTICE')
                   def helper_only(path):
