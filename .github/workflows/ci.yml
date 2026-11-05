@@ -26,10 +26,11 @@ env:
 
 jobs:
   selection:
-    name: Select producer scope
+    name: Select CI scope
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     outputs:
+      rust: ${{ steps.scope.outputs.rust }}
       producer: ${{ steps.scope.outputs.producer }}
       cache-save: ${{ steps.scope.outputs.cache-save }}
     steps:
@@ -44,35 +45,82 @@ jobs:
         run: |
           python3 - <<'SCOPE'
           import json, os, subprocess
-          from pathlib import Path
+          from pathlib import Path, PurePosixPath
           event = json.loads(Path(os.environ['GITHUB_EVENT_PATH']).read_text())
           name, ref = os.environ['GITHUB_EVENT_NAME'], os.environ['GITHUB_REF']
-          # Only a wholly documentation-only diff excludes the producer. Anything
-          # unknown/shared (tools, protocol, fixtures, drivers, setup, locks) selects it.
+          # Only proven documentation/metadata changes omit Rust jobs. Build,
+          # workflow, fixture, tool and unknown inputs retain the full checks.
           selected, reason = True, 'shared or unknown impact'
           base = (event.get('pull_request', {}).get('base', {}).get('sha') if name == 'pull_request'
                   else event.get('before') if name == 'push' else None)
           if base and base != '0' * 40:
-              diff = subprocess.run(['git', 'diff', '--no-renames', '--name-only', '-z', base, 'HEAD'],
+              diff = subprocess.run(['git', 'diff', '--no-ext-diff', '--no-textconv', '--no-renames', '--name-only', '-z', base, 'HEAD'],
                                     capture_output=True)
               if diff.returncode == 0:
                   paths = diff.stdout.decode('utf-8', errors='replace').split('\0')[:-1]
-                  if paths and all(p.startswith('docs/') or p in ('README.md', 'LICENSE', 'LICENSE-MIT', 'LICENSE-APACHE') for p in paths):
-                      selected, reason = False, 'documentation-only diff'
+                  def documentation(path):
+                      if path.startswith('licenses/release/'):
+                          return True
+                      if path == '.gitattributes':
+                          # Attributes can also change checkout/build inputs. Only
+                          # Linguist-only edits (including removals) are metadata.
+                          # An unchanged macro can make a Linguist-named
+                          # assignment expand into checkout-affecting attributes.
+                          for revision in (base, 'HEAD'):
+                              entries = subprocess.run(['git', 'ls-tree', '--name-only',
+                                  revision, '--', path], capture_output=True)
+                              if entries.returncode != 0:
+                                  return False
+                              if entries.stdout:
+                                  content = subprocess.run(['git', 'show', f'{revision}:{path}'],
+                                      capture_output=True)
+                                  if content.returncode != 0 or any(
+                                      line.lstrip().startswith(b'[attr]') for line in content.stdout.splitlines()):
+                                      return False
+                          attributes = subprocess.run(['git', 'diff', '--no-ext-diff',
+                              '--no-textconv', '--unified=0', base, 'HEAD', '--', path],
+                              capture_output=True, text=True)
+                          if attributes.returncode != 0:
+                              return False
+                          hunk = False
+                          allowed = {'linguist-documentation', 'linguist-generated',
+                              'linguist-vendored', 'linguist-detectable', 'linguist-language'}
+                          for line in attributes.stdout.splitlines():
+                              if line.startswith('@@ '):
+                                  hunk = True
+                              elif hunk and line[:1] in ('+', '-'):
+                                  content = line[1:].strip()
+                                  if not content or content.startswith('#'):
+                                      continue
+                                  fields = content.split()
+                                  if (len(fields) < 2 or fields[0].startswith('[attr]') or
+                                      any(a.lstrip('-!').split('=', 1)[0] not in allowed for a in fields[1:])):
+                                      return False
+                          return hunk
+                      if path.startswith('docs/'):
+                          return PurePosixPath(path).suffix.lower() in (
+                              '.md', '.mdx', '.txt', '.rst', '.adoc',
+                              '.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp', '.ico')
+                      return path in ('README.md', 'CHANGELOG.md', 'CODEBASE.md',
+                          'CONTRIBUTING.md', 'SECURITY.md', 'CODE_OF_CONDUCT.md',
+                          'LICENSE', 'LICENSE-MIT', 'LICENSE-APACHE', 'NOTICE')
+                  if paths and all(documentation(p) for p in paths):
+                      selected, reason = False, 'documentation/metadata-only diff'
           trusted = (name in ('push', 'workflow_dispatch') and
                      ref == 'refs/heads/' + os.environ['DEFAULT_BRANCH'])
           # GitHub scopes PR writes to the merge ref; default-branch entries
           # remain readable by PRs with the same compatible group key.
           pr = name == 'pull_request' and isinstance(event.get('number'), int)
           with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
-              out.write(f'producer={str(selected).lower()}\ncache-save={str(trusted or pr).lower()}\n')
+              out.write(f'rust={str(selected).lower()}\nproducer={str(selected).lower()}\ncache-save={str(trusted or pr).lower()}\n')
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as out:
-              out.write(f'Producer selected: {selected} ({reason}). Cache save permitted: {trusted or pr} (native ref scope).\n')
+              out.write(f'Rust jobs and producer selected: {selected} ({reason}). Cache save permitted: {trusted or pr} (native ref scope).\n')
           SCOPE
 
   quality:
     name: Quality gates
     needs: selection
+    if: ${{ needs.selection.outputs.rust == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     env:
@@ -128,6 +176,7 @@ jobs:
   functional:
     name: Functional gates
     needs: selection
+    if: ${{ needs.selection.outputs.rust == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     env:
@@ -198,6 +247,7 @@ jobs:
   pdf:
     name: PDF gates
     needs: selection
+    if: ${{ needs.selection.outputs.rust == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     env:
@@ -247,6 +297,7 @@ jobs:
   gnu:
     name: Gnu gates
     needs: selection
+    if: ${{ needs.selection.outputs.rust == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     env:
@@ -316,6 +367,7 @@ jobs:
   musl:
     name: Musl gates
     needs: selection
+    if: ${{ needs.selection.outputs.rust == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     env:
@@ -457,11 +509,14 @@ jobs:
           import json, os, sys
           needs = json.loads(os.environ['NEEDS_JSON'])
           selected = needs.get('selection', {}).get('outputs', {}).get('producer')
-          failed = selected not in ('true', 'false')
+          rust = needs.get('selection', {}).get('outputs', {}).get('rust')
+          rust_jobs = ('quality', 'functional', 'pdf', 'gnu', 'musl')
+          failed = selected not in ('true', 'false') or rust not in ('true', 'false')
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as out:
               for job in ('selection', 'quality', 'functional', 'pdf', 'gnu', 'musl', 'script-tests', 'producer'):
                   result = needs.get(job, {}).get('result', 'missing')
-                  expected = 'skipped' if job == 'producer' and selected == 'false' else 'success'
+                  omitted = (job == 'producer' and selected == 'false') or (job in rust_jobs and rust == 'false')
+                  expected = 'skipped' if omitted else 'success'
                   out.write(f'{job}: {result} (required: {expected})\n')
                   failed |= result != expected
               out.write('Readiness: ' + ('FAILED' if failed else 'PASS') + '\n')
