@@ -265,7 +265,7 @@ retains its name and invokes `ci.sh helpers` once. No hosted job invokes `all`.
 Exit 3 remains a failed hosted step; its summary explicitly says `INCOMPLETE`.
 A result from another candidate or run cannot replace a missing check.
 
-Documentation/metadata-only PRs and main pushes run selection, helpers and
+Documentation/metadata/helper-only PRs and main pushes run selection, helpers and
 readiness, without compiling or testing Rust. The allowlist covers prose/images
 under `docs/`, the named root project documents and licence files, release notice
 bundles, and Linguist-only `.gitattributes` edits. Changes to checkout-affecting
@@ -276,8 +276,35 @@ attribute syntax is eligible for the shortcut; quoted patterns, carriage returns
 and other byte encodings conservatively retain Rust checks. Other file types
 under `docs/` are not assumed to be prose.
 
+Root `AGENTS.md` is repository guidance, so it also omits Rust. A `.gitignore`
+edit qualifies only when its changed rules are the exact root `/REPOLOCAL.md`
+entry, comments or empty lines. Other ignore-rule changes retain Rust because
+they can affect fixture discovery. An unanchored rule, control-character variant
+or mixed change does not qualify. These checks use literal byte lines, not a
+general Git-ignore interpreter.
+
+The helper-only allowlist covers direct Python modules under `scripts/tests/`,
+the MCP catalog unit test, and the three manually invoked drivers
+`scripts/ci/clean-room.sh`, `scripts/dev/cargo-slot.sh` and
+`scripts/dev/lane-gate.sh`. The helper job executes their existing tests and shell
+syntax checks. Named script/hook/producer README and host-event documentation
+also qualify; arbitrary Markdown under fixtures does not. Some fixture READMEs
+are embedded in Rust tests and must retain Rust coverage.
+
+The five release scripts (`authorize.py`, `build.sh`, `licenses.py`, `notes.py`,
+`package.py`) omit duplicate root Rust checks. Their paths independently select
+package validation on PRs; ordinary main pushes do not run the release workflow.
+Authorization is covered by helper tests and executes on tags; release-note
+rendering runs during tag publication. PR package builds do not execute either
+tag-only step. Release/MCP unit-test changes run in helpers without launching
+package builds. Changes to the runtime MCP smoke
+or catalog validator retain Rust and package checks. CI orchestration, preflight,
+tool installers, dependency gates, hook implementations and unknown scripts are
+not helper-only. No changed-line parser tries to classify Rust or shell comments.
+
 Rust source, test fixtures, workflow/build scripts, manifests, locks, tool setup,
-and unknown paths retain the complete Rust checks. Mixed diffs also retain them.
+and unknown paths retain the complete Rust checks, except the named helper-only
+paths above. A mixed diff retains Rust whenever any path needs it.
 Unavailable base/diff data, empty diffs, manual runs and merge-group candidates
 select everything. This deliberately uses a small safe allowlist rather than
 assuming that every change outside `.rs` files is irrelevant to the application.

@@ -54,9 +54,11 @@ See [scripts](scripts/README.md) for prerequisites and helper commands.
 
 ## Specifications and archives
 
-Specifications live in the sibling `specs` checkout under `kaban/specs/`. Start at
-[the project index](../specs/kaban/specs/00-project/README.md) and
-[delivery protocol](../specs/kaban/specs/00-project/PROTOCOL.md).
+Specifications live in a sibling `specs` checkout (`../specs/kaban/`), kept outside this
+repository. Each stream folder (`00-project/`, `05-storage-search/`, ...) holds its spec, plan
+and research; reviews, evidence and owner decisions sit in the stream's `archive/`. Start at
+[the project index](../specs/kaban/00-project/README.md) and
+[historical delivery protocol](../specs/kaban/00-project/archive/PROTOCOL.md).
 
 Benchmark reports, schemas and shell/Python tooling are available in
 [`specs/kaban/archive/benchmarks`](../specs/kaban/archive/benchmarks/README.md).

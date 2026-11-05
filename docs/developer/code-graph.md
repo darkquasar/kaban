@@ -7,8 +7,8 @@ is a SCIP indexer: `scip-go`, `scip-typescript` or `kaban-rust-scip` (this repos
 Rust producer, `tools/kaban-rust-scip/`). Its stdout and stderr are gated before the log is
 written; the content-policy scan over the SCIP output itself is opt-in (`index.policy_scan`,
 off by default: the snapshot stays on this machine). Specification:
-`../specs/kaban/specs/02-code-graph-v4/stage1-spec.md` (G1-F7, G1-S5, G1-S6, G1-S8, §7); Rust:
-`../specs/kaban/specs/02-code-graph-v4/rust-indexing-plan.md`; user documentation:
+`../specs/kaban/02-code-graph-v4/stage1-spec.md` (G1-F7, G1-S5, G1-S6, G1-S8, §7); Rust:
+`../specs/kaban/02-code-graph-v4/rust-indexing-plan.md`; user documentation:
 `docs/guides/code-graph.mdx`, `docs/reference/kaban-index.mdx`,
 `docs/reference/code-tools.mdx`.
 
@@ -26,8 +26,8 @@ off by default: the snapshot stays on this machine). Specification:
   kaban-index status | gc | purge-derived | doctor      (read, collect, delete, inspect)
 ```
 
-Measured on the integrated head (`../specs/kaban/specs/00-project/evidence/dogfood/shared-index-0e583ae.json`,
-`../specs/kaban/specs/00-project/evidence/gofix1-evidence/t2-cli-*.json`, `../specs/kaban/specs/00-project/evidence/df2-evidence/df3-gate.md`):
+Measured on the integrated head (`../specs/kaban/02-code-graph-v4/archive/evidence/dogfood/shared-index-0e583ae.json`,
+`../specs/kaban/02-code-graph-v4/archive/evidence/gofix1-evidence/t2-cli-*.json`, `../specs/kaban/02-code-graph-v4/archive/evidence/df2-evidence/df3-gate.md`):
 Kaban indexes itself (Rust) in 188 s on `none` (producer 169 s; 576 files, 75,257 symbols,
 425,601 edges, 209,350,656 B) and in 231 s on `namespaces` (at `2daaeb1`: 573 files, 76,504
 symbols, 424,954 edges, 209,084,416 B); the GitHub CLI `v2.102.0` (Go) in 27 s on `none` and
@@ -284,7 +284,7 @@ that carries the `published_unsynced` marker is re-verified first (a fresh open 
   declarations are published beside 2,809 distinct block-local items (4,280 references into
   them), 9 incomplete modules, 352 shared-file contexts, 3 skipped targets, 1 proc macro not
   built, 406 tokens without a symbol and 44 generic derived impls without an edge
-  (`../specs/kaban/specs/00-project/evidence/docs1-evidence/code-index-resource.json`). Every `code_*` answer says so;
+  (`../specs/kaban/02-code-graph-v4/archive/evidence/docs1-evidence/code-index-resource.json`). Every `code_*` answer says so;
   an empty answer does not prove absence.
 - Every run keeps its own gated log: `<commit40>.<lang>.a.log` holds the first run,
   `<commit40>.go.b.log` Go's `--skip-tests` run; `gc` and `purge-derived` remove them with the

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Wave clean-room (../specs/kaban/specs/00-project/PROTOCOL.md §4): the ONE full verification per integration wave.
+# Wave clean-room (../specs/kaban/00-project/archive/PROTOCOL.md §4): the ONE full verification per integration wave.
 # Usage: scripts/ci/clean-room.sh <label> [log-dir]      e.g. scripts/ci/clean-room.sh coord-merge23
 # Runs from the repository root whatever the cwd. When the build directory is shared between worktrees hold the
 # exclusive cargo lock around it, detached if the calling shell may die:
@@ -10,7 +10,7 @@
 set -u
 cd "$(dirname "$0")/../.."
 label=${1:?usage: scripts/ci/clean-room.sh <label> [log-dir]}
-L=${2:-$(cd ../.. && pwd)/../specs/kaban/specs/00-project/evidence/e1-logs}
+L=${2:-$(cd .. && pwd)/specs/kaban/00-project/archive/evidence/e1-logs}
 mkdir -p "$L"
 export CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-2} CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_DEV_STRIP=symbols
 S=$L/$label-summary.log

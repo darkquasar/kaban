@@ -33,7 +33,7 @@ tests establish structure/counts, not the truth of the author's judgment.
 No SIMILAR_TO allocation, embeddings grading or unavailable producer evidence.
 
 `walkthrough.jsonl` is a source catalog: only the judged excerpts from
-`../specs/kaban/specs/03-engine-v5/walkthrough-example.md`, plus inspected synthetic notes and
+`../specs/kaban/03-engine-v5/research/walkthrough-example.md`, plus inspected synthetic notes and
 candidate entity labels. Walkthrough text is illustrative, not a pipeline result.
 Synthetic references use seed `0x9E3779B97F4A7C15`, zero-based sequential ordinals
 0, 1, 2, 4, workspace `ws1`. The generator's first five notes have no Decision

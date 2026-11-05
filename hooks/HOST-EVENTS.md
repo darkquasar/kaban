@@ -7,7 +7,11 @@ sessions on 2026-10-26: Claude Code 2.1.295 (`claude -p`, model `sonnet`), Codex
 `node@sha256:0e5f9065…da2a8`. Every payload was reduced to field names and JSON types before
 it left the container (S1 fence, `scripts/hooks-live/container/reduce.jq`); values shown here
 are only type markers, tool identifiers and the harness's own sentinel outcomes. Reduced
-captures: `../specs/kaban/specs/00-project/evidence/m4-logs/m4w2d-sessions/<host>-<session>/events.jsonl`.
+captures: `../specs/kaban/00-project/archive/evidence/m4-logs/m4w2d-sessions/<host>-<session>/events.jsonl`.
+
+The capture paths in this document are historical references. Those captures are
+not present in the current sibling specs archive; the observations below do not
+claim that those files can currently be restored from it.
 
 Prompt for every session (fixed by the brief): "Create the file notes.txt with one line, then
 run the command `false`, then stop." Claude s3 used a subagent variant of the prompt to reach
@@ -76,7 +80,7 @@ Two sessions with `hooks/claude-code/settings.hooks.json` as shipped (commands v
 `$CLAUDE_PROJECT_DIR/hooks/claude-code/*.sh`), the static musl `kaban 3.0.0-alpha.1` on `PATH`
 behind a logging shim, a seeded database (one accepted Decision `KBN-DEC-<hex>` with path scope
 `notes.txt`) and the capture hook kept alongside (`scripts/hooks-live/run.sh claude-code s1|s2
---recipes`, model `sonnet`). Reduced results: `../specs/kaban/specs/00-project/evidence/m4-logs/m4w2d2-sessions/claude-code-s{1,2}/`.
+--recipes`, model `sonnet`). Reduced results: `../specs/kaban/00-project/archive/evidence/m4-logs/m4w2d2-sessions/claude-code-s{1,2}/`.
 
 | Entry | Fired | kaban call | Output consumed |
 |---|---|---|---|
@@ -150,7 +154,7 @@ commands `bash "${CODEX_HOME:-$HOME/.codex}"/hooks/kaban/<script>.sh` (the shell
 works: Codex runs hook commands through a shell), the seeded database and the capture hook
 alongside. s1 registered `hooks.json`; s2 registered the same entries as `[[hooks.<Event>]]`
 tables appended to `$CODEX_HOME/config.toml` with **no** `hooks.json` (`--variant config-toml`).
-Reduced results: `../specs/kaban/specs/00-project/evidence/m4-logs/m4w2d2-sessions/codex-s{1,2}/`.
+Reduced results: `../specs/kaban/00-project/archive/evidence/m4-logs/m4w2d2-sessions/codex-s{1,2}/`.
 
 | Entry | Fired (s1 hooks.json / s2 config.toml) | kaban call | Output consumed |
 |---|---|---|---|
@@ -217,7 +221,7 @@ Notes:
 
 Two sessions with `hooks/pi/kaban-hooks.ts` loaded with `-e` beside the capture extension
 (sentinel probes off), the seeded database, `KABAN_HOOK_DEBUG=1`. Reduced results:
-`../specs/kaban/specs/00-project/evidence/m4-logs/m4w2d2-sessions/pi-s{1,2}/`.
+`../specs/kaban/00-project/archive/evidence/m4-logs/m4w2d2-sessions/pi-s{1,2}/`.
 
 | Extension handler | Fired | kaban call | Output consumed |
 |---|---|---|---|

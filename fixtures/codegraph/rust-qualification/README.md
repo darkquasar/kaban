@@ -49,4 +49,4 @@ requires existing `bwrap`, `timeout`, and the real (non-rustup-proxy) compiler
 toolchain. It downloads/installs nothing and never changes user configuration.
 It uses the existing Cargo slot helper and retains evidence/scratch for inspection.
 The release pin and observed limitations are recorded in
-`../specs/kaban/specs/macos-rust-execution.md`.
+`../specs/kaban/00-project/archive/macos-rust-execution.md`.
