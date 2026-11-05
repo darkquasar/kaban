@@ -236,7 +236,7 @@ do not suppress markers or introduce a generic counterpart engine.
 ## Native CI jobs
 
 The workflow checks PR merge candidates, main pushes, merge-group candidates and
-manual dispatches. Quality, functional, PDF, GNU and musl run as independent jobs after
+manual dispatches. Selected quality, functional, PDF, GNU and musl checks run as independent jobs after
 a small scope-selection job; helpers start independently. A selected producer job
 also runs independently under its own toolchain. Every job checks out the same
 native event candidate. None depends on quality, and a failed job does not cancel
@@ -256,20 +256,34 @@ No weekly schedule is active.
 ```
 
 `Rust gates (scripts/ci/ci.sh)` retains its required-status name as a short,
-always-evaluated readiness job. It requires successful selection, quality,
-functional, PDF, GNU, musl and helper jobs, plus producer when selected. Only a producer
-explicitly excluded by successful selection may be skipped. Missing, failed,
+always-evaluated readiness job. It requires successful selection and helpers,
+and every selected quality, functional, PDF, GNU, musl and producer job. A Rust
+job may be skipped only when successful selection explicitly excludes its scope.
+Both selection flags must be valid, even when the jobs are omitted. Missing, failed,
 cancelled or unexpectedly skipped work fails readiness. `Helper script unit tests`
 retains its name and invokes `ci.sh helpers` once. No hosted job invokes `all`.
 Exit 3 remains a failed hosted step; its summary explicitly says `INCOMPLETE`.
 A result from another candidate or run cannot replace a missing check.
 
-Producer is omitted only for a nonempty diff entirely beneath `docs/` or changing
-root README/license files. Tools, producer/protocol/fixture/driver paths,
-manifests/locks, setup and any other shared or unknown path select it. Unavailable
-base/diff data, empty diffs, manual runs and merge-group candidates select it.
-This is a conservative path rule, not a dependency model; ordinary root groups
-always run, including for documentation changes.
+Documentation/metadata-only PRs and main pushes run selection, helpers and
+readiness, without compiling or testing Rust. The allowlist covers prose/images
+under `docs/`, the named root project documents and licence files, release notice
+bundles, and Linguist-only `.gitattributes` edits. Changes to checkout-affecting
+attributes (for example `filter`, `text` or `eol`), including their removal, keep
+Rust checks selected. Attribute macros in either the base or head file also
+retain those checks, even when the macro itself was not edited. Only simple ASCII
+attribute syntax is eligible for the shortcut; quoted patterns, carriage returns
+and other byte encodings conservatively retain Rust checks. Other file types
+under `docs/` are not assumed to be prose.
+
+Rust source, test fixtures, workflow/build scripts, manifests, locks, tool setup,
+and unknown paths retain the complete Rust checks. Mixed diffs also retain them.
+Unavailable base/diff data, empty diffs, manual runs and merge-group candidates
+select everything. This deliberately uses a small safe allowlist rather than
+assuming that every change outside `.rs` files is irrelevant to the application.
+Release-related notice changes still trigger the release workflow's own package
+validation. A change to this CI workflow itself runs the full graph once, so its
+routing can be validated before metadata-only changes start omitting jobs.
 
 All actions use immutable commit revisions. Mise 2026.10.24 provisions the selected
 locked tools without restoring or saving executable tool caches. Rust setup reads

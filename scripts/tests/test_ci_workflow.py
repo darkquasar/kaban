@@ -36,7 +36,7 @@ def run_block(name):
 
 
 class WorkflowResults(unittest.TestCase):
-    def execute(self, name, *, needs=None, event=None, event_name='pull_request', ref='refs/pull/7/merge', default='main', changed_path=None, base_present=True):
+    def execute(self, name, *, needs=None, event=None, event_name='pull_request', ref='refs/pull/7/merge', default='main', changed_path=None, base_present=True, file_contents=None, initial_files=None):
         with tempfile.TemporaryDirectory() as scratch:
             root = Path(scratch)
             event = dict(event or {})
@@ -44,15 +44,23 @@ class WorkflowResults(unittest.TestCase):
                 def git(*args):
                     return subprocess.check_output(['git', *args], cwd=root, text=True, stderr=subprocess.DEVNULL).strip()
                 git('init', '-q')
+                for filename, content in (initial_files or {}).items():
+                    initial = root / filename
+                    initial.parent.mkdir(parents=True, exist_ok=True)
+                    initial.write_text(content)
+                    git('add', '--', filename)
                 git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
                     '-c', 'core.hooksPath=/dev/null', 'commit', '--allow-empty', '-qm', 'base')
                 base = git('rev-parse', 'HEAD')
-                changed = root / changed_path
-                changed.parent.mkdir(parents=True, exist_ok=True)
-                changed.write_text('invented diff\n')
-                git('add', '--', changed_path)
+                paths = (changed_path,) if isinstance(changed_path, str) else changed_path
+                for filename in paths:
+                    changed = root / filename
+                    changed.parent.mkdir(parents=True, exist_ok=True)
+                    content = file_contents if file_contents is not None else 'invented diff\n'
+                    changed.write_bytes(content if isinstance(content, bytes) else content.encode())
+                    git('add', '--', filename)
                 git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
-                    '-c', 'core.hooksPath=/dev/null', 'commit', '-qm', 'change')
+                    '-c', 'core.hooksPath=/dev/null', 'commit', '--allow-empty', '-qm', 'change')
                 base = base if base_present else 'f' * 40
                 if event_name == 'pull_request': event['pull_request'] = {'base': {'sha': base}}
                 elif event_name == 'push': event['before'] = base
@@ -72,8 +80,109 @@ class WorkflowResults(unittest.TestCase):
 
     def required(self, selected='true'):
         needs = {job: {'result': 'success'} for job in ('selection', 'quality', 'functional', 'pdf', 'gnu', 'musl', 'script-tests', 'producer')}
-        needs['selection']['outputs'] = {'producer': selected}
+        needs['selection']['outputs'] = {'producer': selected, 'rust': 'true'}
         return needs
+
+    def test_linguist_only_attributes_skip_rust_for_pr_and_main_push(self):
+        for event in ('pull_request', 'push'):
+            with self.subTest(event=event):
+                result, outputs, summary = self.execute('Select producer and cache scope',
+                    event={'number': 7}, event_name=event, changed_path='.gitattributes',
+                    file_contents='# Upstream notices\nlicenses/release/**/*.html linguist-documentation\n')
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(outputs.get('rust'), 'false', summary)
+                self.assertEqual(outputs['producer'], 'false', summary)
+
+    def test_readiness_accepts_only_explicit_metadata_skips(self):
+        needs = self.required('false')
+        needs['selection']['outputs']['rust'] = 'false'
+        for job in ('quality', 'functional', 'pdf', 'gnu', 'musl', 'producer'):
+            needs[job]['result'] = 'skipped'
+        result, _, summary = self.execute('Run gates', needs=needs)
+        self.assertEqual(result.returncode, 0, summary)
+        self.assertIn('Readiness: PASS', summary)
+        needs['script-tests']['result'] = 'failure'
+        result, _, summary = self.execute('Run gates', needs=needs)
+        self.assertNotEqual(result.returncode, 0, summary)
+
+    def test_rust_selection_omits_only_known_documentation_and_metadata(self):
+        for path, expected in (
+            ('README.md', 'false'), ('CODEBASE.md', 'false'), ('docs/guide.mdx', 'false'),
+            ('docs/image.svg', 'false'), ('NOTICE', 'false'),
+            ('licenses/release/upstream/notice.html', 'false'),
+            ('crates/kaban/src/main.rs', 'true'), ('Cargo.lock', 'true'),
+            ('Cargo.toml', 'true'), ('.cargo/config.toml', 'true'),
+            ('.github/workflows/ci.yml', 'true'), ('mise.toml', 'true'),
+            ('scripts/tests/test_ci_workflow.py', 'true'), ('fixtures/example.md', 'true'),
+            ('docs/executable.rs', 'true'), ('unknown.txt', 'true'),
+        ):
+            with self.subTest(path=path):
+                result, output, summary = self.execute('Select producer and cache scope',
+                    event={'number': 7}, changed_path=path)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(output['rust'], expected, summary)
+        for paths in (('README.md', 'crates/kaban/src/main.rs'), ()):
+            result, output, summary = self.execute('Select producer and cache scope',
+                event={'number': 7}, changed_path=paths)
+            self.assertEqual(output['rust'], 'true', summary)
+        result, output, summary = self.execute('Select producer and cache scope',
+            event={'number': 7}, changed_path='README.md', base_present=False)
+        self.assertEqual(output['rust'], 'true', summary)
+
+    def test_attributes_affecting_checkout_or_build_inputs_keep_rust_checks(self):
+        for content, original in (
+            ('*.rs text eol=lf\n', None),
+            ('*.rs filter=custom linguist-documentation\n', None),
+            ('[attr]binary linguist-documentation\n', None),
+            ('*.html linguist-documentation\n', '*.rs text eol=lf\n'),
+            ('* linguist-documentation\reol=crlf\n', None),
+            ('*.rs linguist-documentation\rworking-tree-encoding=UTF-16LE\n', None),
+            (b'# caf\xe9\n*.html linguist-documentation\n', None),
+        ):
+            with self.subTest(content=content, original=original):
+                result, output, summary = self.execute('Select producer and cache scope',
+                    event={'number': 7}, changed_path='.gitattributes', file_contents=content,
+                    initial_files={'.gitattributes': original} if original else None)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(output['rust'], 'true', summary)
+
+    def test_unchanged_attribute_macro_cannot_hide_checkout_changes(self):
+        for pattern in ('[attr]linguist-documentation', '"[attr]linguist-documentation"'):
+            with self.subTest(pattern=pattern):
+                macro = pattern + ' working-tree-encoding=UTF-16LE\n'
+                result, output, summary = self.execute('Select producer and cache scope',
+                    event={'number': 7}, changed_path='.gitattributes',
+                    initial_files={'.gitattributes': macro},
+                    file_contents=macro + '*.rs linguist-documentation\n')
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(output['rust'], 'true', summary)
+
+    def test_readiness_requires_valid_scope_and_all_selected_results(self):
+        for flag in ('rust', 'producer'):
+            for value in (None, 'unknown', True):
+                with self.subTest(flag=flag, value=value):
+                    needs = self.required()
+                    if value is None:
+                        del needs['selection']['outputs'][flag]
+                    else:
+                        needs['selection']['outputs'][flag] = value
+                    result, _, summary = self.execute('Run gates', needs=needs)
+                    self.assertEqual(result.returncode, 1, summary)
+        for job in ('selection', 'quality', 'functional', 'pdf', 'gnu', 'musl', 'script-tests', 'producer'):
+            for state in ('missing', 'cancelled', 'failure', 'success'):
+                if job in ('selection', 'script-tests') and state == 'success':
+                    continue
+                with self.subTest(job=job, state=state):
+                    needs = self.required('false')
+                    needs['selection']['outputs']['rust'] = 'false'
+                    for name in ('quality', 'functional', 'pdf', 'gnu', 'musl', 'producer'):
+                        needs[name]['result'] = 'skipped'
+                    if state == 'missing':
+                        del needs[job]
+                    else:
+                        needs[job]['result'] = state
+                    result, _, summary = self.execute('Run gates', needs=needs)
+                    self.assertEqual(result.returncode, 1, summary)
 
     def test_pdf_failure_is_required_for_readiness(self):
         needs = self.required()

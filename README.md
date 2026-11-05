@@ -5,8 +5,9 @@ records and their relationships in SQLite, retrieves them with lexical and graph
 search, and exposes the same service through a CLI and an MCP stdio server.
 It does not call a hosted model or run a network listener.
 
-The first Linux release is being prepared as `3.0.0-alpha.1`, matching the
-Cargo/binary version. Packages target Linux x86-64 GNU, x86-64 musl and ARM64 GNU.
+[Kaban 3.0.0-alpha.1 is available as a Linux prerelease](https://github.com/darkquasar/kaban/releases/tag/v3.0.0-alpha.1).
+Packages target Linux x86-64 GNU, x86-64 musl and ARM64 GNU. Each archive includes
+the separate `kaban` and `kaban-index` executables.
 See [release workflow, runtime requirements and limitations](docs/developer/RELEASE.md).
 For contributor orientation and preserved branch/evidence state, see [CODEBASE.md](CODEBASE.md).
 
