@@ -35,6 +35,8 @@ are not part of this release.
 
 The release workflow validates packages on release-related pull requests. It
 builds each selected configuration once with `--locked -p kaban -p kaban-index`.
+Packaging scripts and runtime MCP smoke/catalog validators trigger those checks;
+changes confined to their unit tests run the CI helper suite without package builds.
 GNU builds are native; musl uses `--target x86_64-unknown-linux-musl`. Compatible
 Cargo dependency caches may shorten compilation; a cache miss never bypasses a
 check. Archives move between jobs within the same workflow run.

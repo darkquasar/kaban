@@ -58,7 +58,7 @@ Specifications live in a sibling `specs` checkout (`../specs/kaban/`), kept outs
 repository. Each stream folder (`00-project/`, `05-storage-search/`, ...) holds its spec, plan
 and research; reviews, evidence and owner decisions sit in the stream's `archive/`. Start at
 [the project index](../specs/kaban/00-project/README.md) and
-[delivery protocol](../specs/kaban/00-project/archive/PROTOCOL.md).
+[historical delivery protocol](../specs/kaban/00-project/archive/PROTOCOL.md).
 
 Benchmark reports, schemas and shell/Python tooling are available in
 [`specs/kaban/archive/benchmarks`](../specs/kaban/archive/benchmarks/README.md).

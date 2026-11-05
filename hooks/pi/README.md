@@ -95,6 +95,9 @@ Offline: `scripts/hooks-live/test-pi-extension.sh --kaban <bin>` runs, inside th
 object against the static binary with a recording shim: exact envelope keys per event (the
 allowlist above), no `content` secret and no image item forwarded, briefing nextTurn,
 pre-context steer, Failure recorded, one continuation, second settle silent, evidence appended
-(`../specs/kaban/specs/00-project/evidence/m4-logs/m4corr2-pi-ext-fake-pi-green.log`). Live: the Docker lane
+(`../specs/kaban/00-project/archive/evidence/m4-logs/m4corr2-pi-ext-fake-pi-green.log`). Live: the Docker lane
 (`scripts/hooks-live/run.sh pi <s> --recipes …`, OWN-7), two round-2 sessions and one
 re-verification session after R4-4 (`m4corr2-sessions/pi-c1`), all green.
+
+The cited `m4-logs` captures are historical and are not present in the current
+sibling specs archive.

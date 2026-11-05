@@ -41,7 +41,7 @@ the MCP timing limits are unchanged. These prerequisites do not enable namespace
 that remains a separate runner capability and the gate still reports unavailable
 mandatory coverage.
 
-Historical benchmark scripts, schemas and reports live in the peer specs repository at
+Historical benchmark scripts, schemas and reports live in the sibling specs checkout at
 `../specs/kaban/archive/benchmarks/`. The Rust `kaban bench` CLI and its test fixtures remain available.
 
 These scripts came from a multi-agent development workflow. Lane and slot helpers in `dev/`

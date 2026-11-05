@@ -1,5 +1,5 @@
 //! The E1-end correction through `KabanApi` (E1.9a; astra review RE3-1, RE3-2, RE3-4, RE3-6
-//! as dispositioned in `../specs/kaban/specs/00-project/evidence/e1-end-astra-review-dispositions.copy.md`): human
+//! as dispositioned in `../specs/kaban/03-engine-v5/archive/reviews/e1-end-astra-review-dispositions.md`): human
 //! acceptance of a review candidate reaches the store's EN-F5a branch, the gated kind is
 //! canonicalised before every registry lookup, a promotion target is judged against the
 //! registry before anything moves, and `schema_describe` projects `x:` labels through the

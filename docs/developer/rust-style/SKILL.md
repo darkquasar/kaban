@@ -13,7 +13,9 @@ description: Idiomatic Rust conventions for writing or reviewing Rust in this pr
 > Every task brief's E1 read names rule files from `RULES-INDEX.md`; implementers list the files
 > read with their hashes in the task report.
 >
-> **Project overrides (OWN-73, 2026-10-26; `../specs/kaban/00-project/archive/PROTOCOL.md` wins over this file where they differ):**
+> **Recorded project conventions (OWN-73, 2026-10-26; historical context: `../specs/kaban/00-project/archive/PROTOCOL.md`):**
+> Historical task grants are not fresh authority. Current repository/user instructions
+> govern current work; see `docs/developer/CI.md` for current verification commands.
 > reports name the rule files read in one line, no hashes; the test runner is `cargo nextest` (no `cargo test`
 > fallback); the MSRV is the pinned toolchain in `rust-toolchain.toml` (1.99.0), not "stable minus 2"; the gate
 > before claiming done is PROTOCOL.md §4 (crate-level in a lane, the workspace in the wave clean-room).

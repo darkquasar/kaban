@@ -2,7 +2,7 @@
 # The PROTOCOL.md §4 lane gate in one command (OWN-79): fmt, clippy -D warnings on the touched crates, nextest ONCE,
 # the nextest list delta against the lane's base list, and the *.snap.new check. Run from the lane worktree root.
 # Usage: scripts/dev/lane-gate.sh <log-prefix> <base-list-file> -p <crate> [-p <crate> ...] [--no-default-kaban]
-#   e.g. scripts/dev/lane-gate.sh ../specs/kaban/specs/00-project/evidence/e2-logs/e27 ../specs/kaban/specs/00-project/evidence/e2-logs/e27-base-list.txt -p kaban-core -p kaban-store-sqlite
+#   e.g. scripts/dev/lane-gate.sh ../specs/kaban/00-project/archive/evidence/e2-logs/e27 ../specs/kaban/00-project/archive/evidence/e2-logs/e27-base-list.txt -p kaban-core -p kaban-store-sqlite
 # Writes <prefix>-gate-{fmt,clippy,clippy-nodefault,nextest}.log, <prefix>-gate-list.txt, <prefix>-gate-list-delta.txt and
 # <prefix>-gate-summary.log; exits non-zero on any red. Take the base list BEFORE the first edit:
 #   scripts/dev/cargo-slot.sh cargo nextest list -p <crates...> --offline 2>/dev/null | grep -v '^[[:space:]]*$' | sort > <base-list-file>

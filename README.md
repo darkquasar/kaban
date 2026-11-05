@@ -93,9 +93,9 @@ is available in the checkout; this is not a hosted documentation deployment.
 ## Development and licence
 
 The workspace separates model/store, policy, service/API, CLI/MCP adapters,
-document ingestion, code-graph reading and the explicit indexer. Start with
-[the current delivery protocol](../specs/kaban/00-project/archive/PROTOCOL.md) for contribution gates,
-and `docs/developer/rust-style/` for local Rust conventions.
+document ingestion, code-graph reading and the explicit indexer. The
+[historical delivery protocol](../specs/kaban/00-project/archive/PROTOCOL.md) records earlier
+contribution gates; local Rust conventions live in `docs/developer/rust-style/`.
 
 For CI commands, see [developer CI](docs/developer/CI.md). The
 [Tart runner image](runners/tart/README.md) contains the Packer recipe and setup

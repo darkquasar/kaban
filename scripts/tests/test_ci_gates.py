@@ -582,6 +582,37 @@ class CiToolSelection(unittest.TestCase):
 
 
 class CleanRoomResults(unittest.TestCase):
+    def test_default_logs_use_the_sibling_specs_checkout(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch) / 'repos/team/kaban'
+            ci = root / 'scripts/ci'
+            ci.mkdir(parents=True)
+            shutil.copyfile(ROOT / 'scripts/ci/clean-room.sh', ci / 'clean-room.sh')
+            (ci / 'ci.sh').write_text('exit 0\n')
+            for package in ('fixture', 'kaban'):
+                source = root / 'crates' / package / 'src'
+                source.mkdir(parents=True)
+                (source / 'lib.rs').touch()
+            bin_dir = root / 'bin'
+            bin_dir.mkdir()
+            for name, body in {
+                'cargo': 'exit 0\n',
+                'flock': 'shift 2\nexec "$@"\n',
+                'git': 'echo fixture-head\n',
+            }.items():
+                tool = bin_dir / name
+                tool.write_text('#!/bin/sh\n' + body)
+                tool.chmod(0o700)
+            env = {**os.environ, 'CARGO': str(bin_dir / 'cargo'),
+                   'PATH': str(bin_dir) + os.pathsep + os.environ['PATH']}
+            result = subprocess.run([BASH, str(ci / 'clean-room.sh'), 'fixture'],
+                                    cwd=scratch, env=env, text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            logs = root.parent / 'specs/kaban/00-project/archive/evidence/e1-logs'
+            summary = logs / 'fixture-summary.log'
+            self.assertTrue(summary.is_file(), 'default logs were not placed in the sibling specs checkout')
+            self.assertIn('result PASS', summary.read_text())
+
     def test_incomplete_child_stays_incomplete_unless_another_step_failed(self):
         for ci_status, clean_status, expected, verdict in (
             (3, 0, 3, "INCOMPLETE"), (3, 1, 1, "FAIL"), (1, 0, 1, "FAIL"), (0, 0, 0, "PASS")

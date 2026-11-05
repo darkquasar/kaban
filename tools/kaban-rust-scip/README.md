@@ -7,11 +7,11 @@
 rust-analyzer (`ra_ap_* 0.0.358`) into neither Kaban executable. It speaks contract v2 (below),
 advertises one host, `aarch64-unknown-linux-gnu` (22 qualification profiles on the release
 build, the `required-features` and `derive-impls` profiles included; evidence
-`../specs/kaban/specs/00-project/evidence/df2-evidence/`, `r2-evidence/`, `r3-evidence/`, outside the repository), and
+`../specs/kaban/02-code-graph-v4/archive/evidence/df2-evidence/`, `r2-evidence/`, `r3-evidence/`, outside the repository), and
 indexes real repositories: Kaban itself at `0e583ae` in 169 s of producer time on the `none`
 tier (576 files, 75,257 symbols, 425,601 edges, 209,350,656 B,
-`../specs/kaban/specs/00-project/evidence/dogfood/shared-index-0e583ae.json`) and 212 s under `namespaces` at `2daaeb1`
-(`../specs/kaban/specs/00-project/evidence/df2-evidence/df3-gate.md`). No other host is advertised and no macOS runtime
+`../specs/kaban/02-code-graph-v4/archive/evidence/dogfood/shared-index-0e583ae.json`) and 212 s under `namespaces` at `2daaeb1`
+(`../specs/kaban/02-code-graph-v4/archive/evidence/df2-evidence/df3-gate.md`). No other host is advertised and no macOS runtime
 exists (macOS development stopped by owner decision). Prepared `index` executes Cargo, build
 scripts and proc macros: invoke it only inside `kaban-index`'s runner.
 

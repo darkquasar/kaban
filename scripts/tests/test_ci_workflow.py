@@ -65,7 +65,7 @@ class WorkflowResults(unittest.TestCase):
                 if event_name == 'pull_request': event['pull_request'] = {'base': {'sha': base}}
                 elif event_name == 'push': event['before'] = base
             (root / 'event.json').write_text(json.dumps(event))
-            (root / 'scripts/ci').mkdir(parents=True)
+            (root / 'scripts/ci').mkdir(parents=True, exist_ok=True)
             (root / 'scripts/ci/ci.sh').write_text('exit 0\n')
             output = root / 'output'
             summary = root / 'summary'
@@ -113,7 +113,7 @@ class WorkflowResults(unittest.TestCase):
             ('crates/kaban/src/main.rs', 'true'), ('Cargo.lock', 'true'),
             ('Cargo.toml', 'true'), ('.cargo/config.toml', 'true'),
             ('.github/workflows/ci.yml', 'true'), ('mise.toml', 'true'),
-            ('scripts/tests/test_ci_workflow.py', 'true'), ('fixtures/example.md', 'true'),
+            ('scripts/tests/test_ci_workflow.py', 'false'), ('fixtures/example.md', 'true'),
             ('docs/executable.rs', 'true'), ('unknown.txt', 'true'),
         ):
             with self.subTest(path=path):
@@ -128,6 +128,73 @@ class WorkflowResults(unittest.TestCase):
         result, output, summary = self.execute('Select producer and cache scope',
             event={'number': 7}, changed_path='README.md', base_present=False)
         self.assertEqual(output['rust'], 'true', summary)
+
+    def test_helper_only_changes_skip_rust_but_shared_scripts_and_fixtures_do_not(self):
+        cases = (
+            ('scripts/ci/clean-room.sh', 'false'),
+            ('scripts/dev/cargo-slot.sh', 'false'),
+            ('scripts/dev/lane-gate.sh', 'false'),
+            ('scripts/tests/test_ci_gates.py', 'false'),
+            ('scripts/mcp/test_mcp_catalog.py', 'false'),
+            ('scripts/release/build.sh', 'false'),
+            ('scripts/release/authorize.py', 'false'),
+            ('scripts/release/licenses.py', 'false'),
+            ('scripts/release/notes.py', 'false'),
+            ('scripts/release/package.py', 'false'),
+            ('scripts/README.md', 'false'),
+            ('hooks/HOST-EVENTS.md', 'false'),
+            ('hooks/pi/README.md', 'false'),
+            ('tools/kaban-rust-scip/README.md', 'false'),
+            ('scripts/ci/ci.sh', 'true'),
+            ('scripts/ci/preflight.py', 'true'),
+            ('scripts/ci/install-go.sh', 'true'),
+            ('scripts/ci/deps_allowlist.sh', 'true'),
+            ('scripts/mcp/mcp_smoke.py', 'true'),
+            ('hooks/pi/kaban-hooks.ts', 'true'),
+            ('fixtures/judged/README.md', 'true'),
+            ('fixtures/codegraph/VERSIONS', 'true'),
+            ('scripts/new-helper.sh', 'true'),
+            ('scripts/release/new-script.py', 'true'),
+            ('scripts/tests/fixtures/example.rs', 'true'),
+            ('.github/workflows/ci.yml', 'true'),
+        )
+        for event in ('pull_request', 'push'):
+            for path, expected in cases:
+                with self.subTest(event=event, path=path):
+                    result, output, summary = self.execute('Select producer and cache scope',
+                        event={'number': 7}, event_name=event, changed_path=path)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(output['rust'], expected, summary)
+                    self.assertEqual(output['producer'], expected, summary)
+        for paths, expected in (
+            (('README.md', 'scripts/ci/clean-room.sh'), 'false'),
+            (('scripts/tests/test_ci_gates.py', 'crates/kaban/src/main.rs'), 'true'),
+            (('scripts/ci/clean-room.sh', 'scripts/ci/ci.sh'), 'true'),
+        ):
+            result, output, summary = self.execute('Select producer and cache scope',
+                event={'number': 7}, changed_path=paths)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(output['rust'], expected, summary)
+
+    def test_helper_only_scope_preserves_fallbacks_and_release_package_validation(self):
+        for name in ('workflow_dispatch', 'merge_group'):
+            result, output, summary = self.execute('Select producer and cache scope',
+                event_name=name, changed_path='scripts/ci/clean-room.sh')
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(output['rust'], 'true', summary)
+        result, output, summary = self.execute('Select producer and cache scope',
+            changed_path='scripts/ci/clean-room.sh', base_present=False)
+        self.assertEqual(output['rust'], 'true', summary)
+        # Root Rust skips rely on the separate workflow still executing the
+        # release scripts against the packaged binaries when those scripts change.
+        release = (ROOT / '.github/workflows/release.yml').read_text()
+        paths = release.split('    paths:\n', 1)[1].split('\nconcurrency:', 1)[0]
+        self.assertIn("      - 'scripts/release/**'", paths)
+        self.assertIn("      - 'scripts/mcp/mcp_smoke.py'", paths)
+        self.assertIn("      - 'scripts/mcp/mcp_catalog.py'", paths)
+        self.assertNotIn("'scripts/mcp/**'", paths)
+        self.assertNotIn('scripts/tests/', paths)
+        self.assertIn('run: bash scripts/release/build.sh', release)
 
     def test_attributes_affecting_checkout_or_build_inputs_keep_rust_checks(self):
         for content, original in (

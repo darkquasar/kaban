@@ -50,7 +50,7 @@
 //! to the dictionary that encoded it.
 //!
 //! Measured on the SS-13a storage sample (822 Markdown files, 11.1 MB; 802 documents, 8,330
-//! chunks, 15,358 rows; `../specs/kaban/specs/00-project/evidence/s05-t7-record.md`): bodies 10,122,075 -> 4,673,450
+//! chunks, 15,358 rows; `../specs/kaban/05-storage-search/archive/evidence/t7-record.md`): bodies 10,122,075 -> 4,673,450
 //! bytes (-53.8%; 5,869,574 without the dictionary), the compact database 47,828,992 ->
 //! 40,284,160 bytes (-15.8%) against the same records stored plain at the same schema; the
 //! release binary grew 786,464 bytes (libzstd, the dictionary, this module), both size gates held.

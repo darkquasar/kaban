@@ -2,7 +2,7 @@
 
 use std::process::{Command, Output};
 
-/// The one host whose 21-profile qualification evidence exists (../specs/kaban/specs/00-project/evidence/ri2-evidence/).
+/// The one host whose 21-profile qualification evidence exists (../specs/kaban/02-code-graph-v4/archive/evidence/ri2-evidence/).
 const QUALIFIED_HOST: &str = "aarch64-unknown-linux-gnu";
 
 fn capabilities_probe() -> Output {

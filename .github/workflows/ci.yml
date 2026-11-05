@@ -48,8 +48,8 @@ jobs:
           from pathlib import Path, PurePosixPath
           event = json.loads(Path(os.environ['GITHUB_EVENT_PATH']).read_text())
           name, ref = os.environ['GITHUB_EVENT_NAME'], os.environ['GITHUB_REF']
-          # Only proven documentation/metadata changes omit Rust jobs. Build,
-          # workflow, fixture, tool and unknown inputs retain the full checks.
+          # Proven documentation/metadata and helper-only changes omit Rust.
+          # Build/setup, workflows, fixtures and unknown inputs keep all checks.
           selected, reason = True, 'shared or unknown impact'
           base = (event.get('pull_request', {}).get('base', {}).get('sha') if name == 'pull_request'
                   else event.get('before') if name == 'push' else None)
@@ -110,8 +110,24 @@ jobs:
                       return path in ('README.md', 'CHANGELOG.md', 'CODEBASE.md',
                           'CONTRIBUTING.md', 'SECURITY.md', 'CODE_OF_CONDUCT.md',
                           'LICENSE', 'LICENSE-MIT', 'LICENSE-APACHE', 'NOTICE')
-                  if paths and all(documentation(p) for p in paths):
-                      selected, reason = False, 'documentation/metadata-only diff'
+                  def helper_only(path):
+                      file = PurePosixPath(path)
+                      # These manual drivers and test harnesses are exercised by
+                      # the always-running helper job, not by Rust job consumers.
+                      if path in ('scripts/ci/clean-room.sh', 'scripts/dev/cargo-slot.sh',
+                          'scripts/dev/lane-gate.sh', 'scripts/mcp/test_mcp_catalog.py',
+                          'scripts/README.md', 'hooks/README.md', 'hooks/HOST-EVENTS.md',
+                          'hooks/pi/README.md', 'tools/kaban-rust-scip/README.md'):
+                          return True
+                      if file.parent == PurePosixPath('scripts/tests') and file.suffix == '.py':
+                          return True
+                      # These paths separately select package validation on PRs.
+                      # Authorization/notes execute on tags, not in PR packaging.
+                      return (file.parent == PurePosixPath('scripts/release') and
+                          file.name in ('authorize.py', 'build.sh', 'licenses.py',
+                              'notes.py', 'package.py'))
+                  if paths and all(documentation(p) or helper_only(p) for p in paths):
+                      selected, reason = False, 'documentation/metadata/helper-only diff'
           trusted = (name in ('push', 'workflow_dispatch') and
                      ref == 'refs/heads/' + os.environ['DEFAULT_BRANCH'])
           # GitHub scopes PR writes to the merge ref; default-branch entries
