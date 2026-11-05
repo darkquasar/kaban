@@ -44,3 +44,4 @@ node_modules/
 *.swp
 .serena/
 .claude/settings.local.json
+/REPOLOCAL.md
