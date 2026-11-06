@@ -14,6 +14,179 @@ use kaban_codegraph::schema::{EdgeType, NodeId};
 use kaban_codegraph::sqlite::{self, SqliteSnapshot, validate_for_attach};
 use kaban_codegraph::{SCHEMA_VERSION, SnapshotError, WriteError};
 
+/// Also run once with LIBSQLITE3_FLAGS=-DSQLITE_MAX_ALLOCATION_SIZE=1048576:
+/// every row/page fits, while the complete database cannot fit in one SQLite allocation.
+#[test]
+fn created_snapshot_persists_an_image_larger_than_one_sqlite_allocation() {
+    use kaban_codegraph::write::{self, CreatedSnapshot};
+    use std::os::fd::AsFd;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let scratch = scratch();
+    let commit = commit(0xe2);
+    let path = scratch.path().join(format!("{commit}.cg.db.tmp-1"));
+    let output = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)
+        .unwrap();
+    let snapshot = CreatedSnapshot::open(output.as_fd()).unwrap();
+    let conn = snapshot.connection();
+    write::begin(conn).unwrap();
+    let mut fixture = Snapshot::new(&commit);
+    for row in 0..320 {
+        fixture.set_meta(&format!("capacity_{row:04}"), &"x".repeat(8192));
+    }
+    let meta: Vec<_> = fixture
+        .meta
+        .iter()
+        .map(|(key, value)| (key.as_str(), value.as_str()))
+        .collect();
+    write::insert_meta(conn, &meta).unwrap();
+    write::rebuild_fts(conn).unwrap();
+    let bytes: i64 = conn
+        .query_row(
+            "SELECT page_count * page_size FROM pragma_page_count(), pragma_page_size()",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        bytes > 1_048_576,
+        "exercise export beyond the allocation cap"
+    );
+    snapshot
+        .finish()
+        .expect("persist pages without a whole-image allocation");
+
+    let published = final_path(scratch.path(), &commit);
+    std::fs::rename(&path, &published).unwrap();
+    assert!(SqliteSnapshot::open_ro(&published).is_ok());
+    let conn = rusqlite::Connection::open_with_flags(
+        &published,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let (rows, bytes): (i64, i64) = conn
+        .query_row(
+            "SELECT count(*), sum(length(value)) FROM meta WHERE key LIKE 'capacity_%'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!((rows, bytes), (320, 320 * 8192));
+}
+
+#[test]
+fn created_snapshot_finishes_only_into_the_retained_inode_after_replacement() {
+    use kaban_codegraph::write::{self, CreatedSnapshot};
+    use std::os::fd::AsFd;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let scratch = scratch();
+    let directory = scratch.path().join("snapshots");
+    std::fs::create_dir(&directory).unwrap();
+    let commit = commit(0xe1);
+    let name = format!("{commit}.cg.db.tmp-1");
+    let output = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(directory.join(&name))
+        .unwrap();
+    let snapshot = CreatedSnapshot::open(output.as_fd()).unwrap();
+    write::begin(snapshot.connection()).unwrap();
+    let fixture = Snapshot::new(&commit);
+    let meta: Vec<_> = fixture
+        .meta
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    write::insert_meta(snapshot.connection(), &meta).unwrap();
+    write::rebuild_fts(snapshot.connection()).unwrap();
+
+    let admitted = scratch.path().join("admitted");
+    std::fs::rename(&directory, &admitted).unwrap();
+    let retained = admitted.join("retained-inode");
+    std::fs::rename(admitted.join(&name), &retained).unwrap();
+    std::fs::write(admitted.join(&name), b"basename decoy").unwrap();
+    std::fs::create_dir(&directory).unwrap();
+    std::fs::write(directory.join(&name), b"directory decoy").unwrap();
+    assert_eq!(
+        output.metadata().unwrap().len(),
+        0,
+        "no output before finish"
+    );
+    snapshot.finish().unwrap();
+
+    assert_eq!(
+        std::fs::read(admitted.join(&name)).unwrap(),
+        b"basename decoy"
+    );
+    assert_eq!(
+        std::fs::read(directory.join(&name)).unwrap(),
+        b"directory decoy"
+    );
+    assert_eq!(
+        output.metadata().unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    let published = final_path(&admitted, &commit);
+    std::fs::rename(retained, &published).unwrap();
+    assert!(SqliteSnapshot::open_ro(&published).is_ok());
+    let connection = rusqlite::Connection::open(&published).unwrap();
+    let actual: String = connection
+        .query_row("SELECT value FROM meta WHERE key = 'commit'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(actual, commit);
+}
+
+#[test]
+fn unfinished_and_failed_created_snapshots_leave_output_sentinels_untouched() {
+    use kaban_codegraph::write::{self, CreatedSnapshot};
+    use std::error::Error;
+    use std::os::fd::AsFd;
+
+    let scratch = scratch();
+    let path = scratch.path().join("created");
+    std::fs::write(&path, b"output sentinel").unwrap();
+    let output = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+    let snapshot = CreatedSnapshot::open(output.as_fd()).unwrap();
+    write::begin(snapshot.connection()).unwrap();
+    drop(snapshot);
+    assert_eq!(std::fs::read(&path).unwrap(), b"output sentinel");
+
+    let readonly = std::fs::File::open(&path).unwrap();
+    let snapshot = CreatedSnapshot::open(readonly.as_fd()).unwrap();
+    write::begin(snapshot.connection()).unwrap();
+    let error = snapshot.finish().unwrap_err();
+    assert!(matches!(error, WriteError::Output(_)), "{error:?}");
+    assert_eq!(error.to_string(), "snapshot output failed");
+    let holder = error
+        .source()
+        .unwrap()
+        .downcast_ref::<kaban_core::BackendSource>()
+        .unwrap();
+    assert!(holder.source().is_none());
+    assert!(holder.driver().downcast_ref::<std::io::Error>().is_some());
+    assert_eq!(std::fs::read(&path).unwrap(), b"output sentinel");
+
+    let diagnostic = WriteError::from(std::io::Error::other("invented_output_marker_9b31"));
+    let chain = anyhow::Error::new(diagnostic);
+    for text in [
+        format!("{chain}"),
+        format!("{chain:#}"),
+        format!("{chain:?}"),
+        format!("{chain:#?}"),
+    ] {
+        assert!(!text.contains("invented_output_marker_9b31"), "{text}");
+    }
+}
+
 #[test]
 fn directory_identity_stays_bound_to_the_opened_object_after_replacement() {
     use kaban_codegraph::identity::{fs_identity, resolve_common_dir, walk};

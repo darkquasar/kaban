@@ -144,6 +144,155 @@ fn is_hex(s: &str, len: usize) -> bool {
             .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
 }
 
+/// Darwin opens tool descriptors read-only rather than with Linux O_PATH. A FIFO must
+/// still be rejected before waiting for a writer. Run the attempted admission in a child
+/// so a blocking regression is killed and reaped before the assertion fails.
+#[cfg(target_os = "macos")]
+#[test]
+fn tool_admission_refuses_fifo_without_blocking() {
+    use kaban_index::tools::{ToolError, admit_executable};
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+
+    const CHILD_FIFO: &str = "KABAN_TEST_ADMISSION_FIFO";
+    if let Some(path) = std::env::var_os(CHILD_FIFO) {
+        assert_eq!(
+            admit_executable(Path::new(&path), &[]),
+            Err(ToolError::UntrustedMode)
+        );
+        return;
+    }
+
+    let scratch = Scratch::new("tool-fifo");
+    let fifo = scratch.path().join("not-an-executable");
+    assert!(
+        Command::new("/usr/bin/mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "tool_admission_refuses_fifo_without_blocking",
+            "--nocapture",
+        ])
+        .env(CHILD_FIFO, &fifo)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let completed = loop {
+        if child.try_wait().unwrap().is_some() {
+            break true;
+        }
+        if Instant::now() >= deadline {
+            child.kill().unwrap();
+            break false;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        completed,
+        "tool admission blocked on a FIFO without a writer"
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn native_tool_admission_tracks_installer_links_and_refuses_replacement() {
+    use kaban_index::tools::{ToolError, admit_executable, recheck};
+
+    let scratch = Scratch::new("tool-installer-link");
+    let installed = scratch.path().join("installed/bin");
+    let links = scratch.path().join("links");
+    fs::create_dir_all(&installed).unwrap();
+    fs::create_dir(&links).unwrap();
+    let tool = installed.join("producer");
+    fs::write(&tool, b"invented executable bytes").unwrap();
+    fs::set_permissions(&tool, fs::Permissions::from_mode(0o755)).unwrap();
+    let link = links.join("producer");
+    std::os::unix::fs::symlink(&tool, &link).unwrap();
+    let admitted = admit_executable(&link, &[]).unwrap();
+    assert_eq!(admitted.path, fs::canonicalize(&tool).unwrap());
+    assert_eq!(recheck(&admitted), Ok(()));
+    assert_eq!(
+        admit_executable(&link, &[scratch.path()]),
+        Err(ToolError::UntrustedLocation)
+    );
+
+    // Retain the old object under another name so inode reuse cannot hide replacement.
+    fs::rename(&tool, installed.join("previous-producer")).unwrap();
+    fs::write(&tool, b"replacement executable bytes").unwrap();
+    fs::set_permissions(&tool, fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(recheck(&admitted), Err(ToolError::Changed));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn native_namespace_backend_refuses_and_preserves_isolation_policy() {
+    use kaban_core::config::{Index, Isolation};
+    use kaban_index::isolate::{self, ReasonClass, SelectError, Tier, namespaces};
+    use namespaces::{Expect, HelperMode, HelperOpts, NsError, NsInodes, View};
+
+    // No helper or producer exists here. An unavailable mechanism must be reported before
+    // any attempt to open their paths, read procfs, construct a view or spawn a process.
+    let absent = Path::new("/kaban-m1-nonexistent-helper");
+    let probes = isolate::probe_all(&Index::default(), absent);
+    assert_eq!(probes.len(), 2);
+    assert_eq!(probes[0].tier, Tier::Namespaces);
+    assert_eq!(probes[0].available, Err(ReasonClass::HandleExecUnsupported));
+    assert_eq!(probes[1].available, Err(ReasonClass::NotInThisRelease));
+    let preferred = isolate::select(Isolation::Preferred, &probes).unwrap();
+    assert_eq!(preferred.tier, Tier::None);
+    assert_eq!(preferred.warning, Some(isolate::ISOLATION_NONE));
+    let off = isolate::select(Isolation::Off, &probes).unwrap();
+    assert_eq!((off.tier, off.warning), (Tier::None, None));
+    let refused = isolate::select(Isolation::Required, &probes).unwrap_err();
+    assert_eq!(refused, SelectError::RequiredUnavailable);
+    assert_eq!(refused.exit_code(), 8);
+    assert!(namespaces::NsInodes::current().is_err());
+    assert_eq!(
+        namespaces::run_tool_in_view(absent, absent, &[], std::time::Duration::from_secs(1), &[])
+            .unwrap_err(),
+        ReasonClass::HandleExecUnsupported
+    );
+    let opts = HelperOpts {
+        parent: NsInodes {
+            user: 1,
+            net: 2,
+            mnt: 3,
+        },
+        view: View {
+            checkout: absent.to_owned(),
+            scratch: absent.to_owned(),
+            ro: Vec::new(),
+            caches: Vec::new(),
+        },
+        mode: HelperMode::Probe,
+        expect: Expect::default(),
+    };
+    assert!(matches!(
+        namespaces::run_helper(&opts),
+        Err(NsError::Setup {
+            op: "namespaces_unsupported",
+            source: rustix::io::Errno::NOSYS
+        })
+    ));
+    assert_eq!(
+        namespaces::self_exe().unwrap(),
+        std::env::current_exe().unwrap()
+    );
+}
+
 /// Every leaf of the record is a number, a 40-hex id, a semver-shaped version or null (RS2-2).
 fn assert_no_strings(v: &serde_json::Value, path: &str) {
     match v {

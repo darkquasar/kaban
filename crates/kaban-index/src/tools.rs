@@ -1,7 +1,8 @@
 //! Verified tools (U2 RU2-2, RU2-3; stage1-spec G1-S5.3 "the resolved indexer binary, absolute,
 //! verified at run start", S5.1 view). An executable is admitted from the object, not the
 //! name: canonicalised once (an installer's symlink is resolved at admission), opened
-//! `O_PATH|O_NOFOLLOW`, `fstat`-checked (a regular file owned by the invoking user or root,
+//! with no-follow host flags (metadata-only on Linux, read-only/nonblocking on Darwin),
+//! `fstat`-checked (a regular file owned by the invoking user or root,
 //! writable by neither group nor other) and refused under the checkout or the kaban data
 //! directory; it carries its identity (device, inode, size, change time) to the spawn, where
 //! [`recheck`] compares it again. The language toolchain found on `PATH` contributes its
@@ -11,7 +12,7 @@
 //! the checkout or the data directory, never `/`.
 //!
 //! ```text
-//!   admit_executable(path, forbidden) ==> canonicalize ==> open O_PATH|O_NOFOLLOW ==> fstat
+//!   admit_executable(path, forbidden) ==> canonicalize ==> no-follow open ==> fstat
 //!       regular, uid in {euid, 0}, mode & 0o022 == 0, not under a forbidden root ==> AdmittedTool
 //!   recheck(&tool) at the spawn ==> the same canonical path and ToolIdentity, else Changed
 //!   toolchain(lang, PATH, &RootRule) ==> Toolchain { bin_dir (PATH), root? + resources (binds) }
@@ -72,21 +73,31 @@ pub enum ToolError {
     Changed,
 }
 
+#[cfg(target_os = "linux")]
+const TOOL_OPEN_FLAGS: OFlags = OFlags::PATH.union(OFlags::NOFOLLOW).union(OFlags::CLOEXEC);
+
+#[cfg(target_os = "macos")]
+const TOOL_OPEN_FLAGS: OFlags = OFlags::RDONLY
+    // Check type before consuming bytes; a FIFO must not wait for a writer at open.
+    .union(OFlags::NONBLOCK)
+    .union(OFlags::NOFOLLOW)
+    .union(OFlags::CLOEXEC);
+
 fn stat_tool(path: &Path) -> Result<(PathBuf, Stat), ToolError> {
     let canonical = std::fs::canonicalize(path).map_err(|_| ToolError::NotFound)?;
-    let fd = rustix::fs::open(
-        &canonical,
-        OFlags::PATH | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::empty(),
-    )
-    .map_err(|_| ToolError::NotFound)?;
+    let fd = rustix::fs::open(&canonical, TOOL_OPEN_FLAGS, Mode::empty())
+        .map_err(|_| ToolError::NotFound)?;
     let st = rustix::fs::fstat(&fd).map_err(|_| ToolError::NotFound)?;
     Ok((canonical, st))
 }
 
 fn identity_of(st: &Stat) -> ToolIdentity {
+    #[cfg(target_os = "macos")]
+    let device = u64::from(u32::from_ne_bytes(st.st_dev.to_ne_bytes()));
+    #[cfg(not(target_os = "macos"))]
+    let device = st.st_dev;
     ToolIdentity {
-        dev: st.st_dev,
+        dev: device,
         ino: st.st_ino,
         size: u64::try_from(st.st_size).unwrap_or(0),
         ctime_sec: st.st_ctime,

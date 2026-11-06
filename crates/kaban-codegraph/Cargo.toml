@@ -18,6 +18,9 @@ test-support = []
 [dependencies]
 kaban-core.workspace = true
 rusqlite.workspace = true
+sqlite-vfs = "=0.2.0"       # safe descriptor VFS for page-backed snapshot export (M2.1)
+tempfile = "=3.27.0"       # anonymous staging file; existing locked version
+getrandom.workspace = true # SQLite VFS randomness; no path-based temporary files
 rustix.workspace = true     # the G1-S6 handle walk (openat O_PATH|O_DIRECTORY|O_NOFOLLOW, fstat, statx) without unsafe (CG4.1)
 hmac.workspace = true       # `repo_id` HMAC-SHA256 over passed-in key bytes (§4.1, CG4.1; no kaban-policy edge)
 sha2.workspace = true       # idem

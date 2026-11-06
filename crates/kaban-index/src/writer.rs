@@ -6,9 +6,9 @@
 //! caller-supplied strings included, RU1-1) and refuses before any file exists, then creates
 //! `<commit40>.cg.db.tmp-<pid>` through the admitted directory handle (`O_CREAT|O_EXCL|
 //! O_NOFOLLOW`, 0600, U1 residual 1), writes the tables through `kaban_codegraph::write` into
-//! that very inode (SQLite opens `/proc/self/fd/<n>` of the created descriptor: no path of
-//! the directory is ever spelled, U2 RU2-10), confirms the name in the directory still points
-//! at it, fsyncs the file, publishes it with `renameat2(RENAME_NOREPLACE)` relative to the
+//! that very inode (the finalized SQLite image is copied to the retained descriptor: no path
+//! of the directory is ever spelled, U2 RU2-10), confirms the name still points at it,
+//! fsyncs the file, publishes it with a no-overwrite rename relative to the
 //! handle and fsyncs the directory through the same handle. A directory `fsync` failure
 //! after the rename is [`PublishError::Unsynced`] (`published_unsynced`, U1 residual 3): the
 //! snapshot is present at its final name, a `<commit40>.cg.db.unsynced` marker (0600) beside it
@@ -24,8 +24,8 @@
 //!                                                             |
 //!   publish_admitted(&DirHandle, &rows, &meta, &policy, dir_fsync)
 //!       ==> meta_rows (formed meta scan, a hit is masked and counted)
-//!       ==> fd = openat(handle, tmp, EXCL|NOFOLLOW|RDWR, 0600) ==> write::* (/proc/self/fd/fd)
-//!       ==> openat(handle, tmp) has the same (dev, ino) as fd, else TempSwapped
+//!       ==> fd = openat(handle, tmp, EXCL|NOFOLLOW|RDWR, 0600) ==> write::* (retained fd)
+//!       ==> statat(handle, tmp, NOFOLLOW) has the same (dev, ino) as fd, else TempSwapped
 //!       ==> fsync(fd) ==> renameat_with(handle, tmp, handle, final, NOREPLACE)
 //!       ==> dir_fsync(handle) ok ==> Published { name, bytes } | err ==> Unsynced { name } + marker
 //! ```
@@ -910,17 +910,23 @@ impl From<Errno> for PublishError {
     }
 }
 
-/// Removes the temp file through the directory handle on drop unless the publication
-/// succeeded.
+/// Best-effort removal of the created temp file unless publication succeeded. Preserve a
+/// name known to refer to a replacement; this identity check and unlink are not atomic.
 struct TempGuard<'a> {
     dir: &'a DirHandle,
     name: &'a str,
+    identity: rustix::fs::Stat,
     armed: bool,
 }
 
 impl Drop for TempGuard<'_> {
     fn drop(&mut self) {
-        if self.armed {
+        if self.armed
+            && rustix::fs::statat(self.dir, self.name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW)
+                .is_ok_and(|stat| {
+                    (stat.st_dev, stat.st_ino) == (self.identity.st_dev, self.identity.st_ino)
+                })
+        {
             let _ = rustix::fs::unlinkat(self.dir, self.name, rustix::fs::AtFlags::empty());
         }
     }
@@ -934,7 +940,7 @@ impl Drop for TempGuard<'_> {
 ///
 /// # Errors
 /// [`PublishError`]: the walk, an existing final or temp name, a filesystem
-/// error, a write helper refusal (the temp file is removed in every error case), `Unsynced`.
+/// error, a write helper refusal (best-effort cleanup of the created temp file), `Unsynced`.
 pub fn publish(
     dir: &Path,
     rows: &Rows,
@@ -975,7 +981,7 @@ pub struct Published {
 
 /// Publish `rows` as `<commit40>.cg.db` inside the admitted directory `dir` (U1 residual 1 and
 /// U2 RU2-10: the handle is the only spelling of the directory; the temp file is created
-/// through it, SQLite writes the created inode itself through `/proc/self/fd/<n>`, the name
+/// through it, the finalized SQLite image is copied to that created descriptor, the name
 /// is confirmed to still point at that inode, and the rename and the directory fsync go
 /// through the handle; no caller string is involved). The `meta` values are re-scanned under
 /// `policy` first (RU1-1): a hit refuses before the temp file. `dir_fsync` is the directory
@@ -984,7 +990,7 @@ pub struct Published {
 ///
 /// # Errors
 /// [`PublishError`]: a meta policy hit, an existing final or temp name, a filesystem error, a
-/// write helper refusal (the temp file is removed in every error case), `Unsynced`.
+/// write helper refusal (best-effort cleanup of the created temp file), `Unsynced`.
 pub fn publish_admitted(
     dir: &DirHandle,
     rows: &Rows,
@@ -1016,24 +1022,25 @@ pub fn publish_admitted(
     let mut guard = TempGuard {
         dir,
         name: &tmp_name,
+        identity: created_stat,
         armed: true,
     };
 
-    // SQLite writes the created inode itself: it opens `/proc/self/fd/<n>` of the descriptor
-    // held open here, which the kernel resolves to that open file description whatever the
-    // directory is called by now (U2 RU2-10)
+    // Fault injection at the filesystem boundary; production has no hook or callback.
+    #[cfg(test)]
+    tests::AFTER_TEMP_CREATE.with(|hook| {
+        if let Some(replace) = hook.borrow_mut().take() {
+            replace();
+        }
+    });
+
+    // SQL owns no output path. The finalized image is copied only to this retained
+    // descriptor, regardless of directory renames or basename replacement (U2 RU2-10).
     write_all(created.as_fd(), rows, meta_rows)?;
 
     // the name in the admitted directory still points at the inode SQLite wrote
-    let named = rustix::fs::openat(
-        dir,
-        &tmp_name,
-        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::empty(),
-    )?;
-    let named_stat = rustix::fs::fstat(&named)?;
-    drop(named);
-    if (named_stat.st_dev, named_stat.st_ino) != (created_stat.st_dev, created_stat.st_ino) {
+    let named_stat = rustix::fs::statat(dir, &tmp_name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW)?;
+    if (named_stat.st_dev, named_stat.st_ino) != (guard.identity.st_dev, guard.identity.st_ino) {
         return Err(PublishError::TempSwapped);
     }
     rustix::fs::fsync(&created)?;
@@ -1077,20 +1084,102 @@ fn write_all(
     rows: &Rows,
     meta_rows: &[(String, String)],
 ) -> Result<(), PublishError> {
-    let conn = write::open_created(created)?;
-    write::begin(&conn)?;
-    write::insert_files(&conn, &rows.files)?;
-    write::insert_symbols(&conn, &rows.symbols)?;
-    write::insert_edges(&conn, &rows.edges)?;
-    write::insert_occurrences(&conn, &rows.occurrences)?;
-    write::insert_snippets(&conn, &rows.snippets)?;
-    write::insert_edge_types(&conn, &Rows::edge_types())?;
+    let snapshot = write::CreatedSnapshot::open(created)?;
+    let conn = snapshot.connection();
+    write::begin(conn)?;
+    write::insert_files(conn, &rows.files)?;
+    write::insert_symbols(conn, &rows.symbols)?;
+    write::insert_edges(conn, &rows.edges)?;
+    write::insert_occurrences(conn, &rows.occurrences)?;
+    write::insert_snippets(conn, &rows.snippets)?;
+    write::insert_edge_types(conn, &Rows::edge_types())?;
     let borrowed: Vec<(&str, &str)> = meta_rows
         .iter()
         .map(|(k, v)| (k.as_str(), v.as_str()))
         .collect();
-    write::insert_meta(&conn, &borrowed)?;
-    write::rebuild_fts(&conn)?;
-    write::finish(&conn)?;
+    write::insert_meta(conn, &borrowed)?;
+    write::rebuild_fts(conn)?;
+    snapshot.finish()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use super::*;
+    use std::cell::RefCell;
+
+    std::thread_local! {
+        pub(super) static AFTER_TEMP_CREATE: RefCell<Option<Box<dyn FnOnce()>>> = const { RefCell::new(None) };
+    }
+
+    #[test]
+    fn publication_failure_preserves_a_replaced_temporary_name() {
+        struct Scratch(PathBuf);
+        impl Drop for Scratch {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        for symlink in [false, true] {
+            let nonce = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let scratch = Scratch(
+                std::env::temp_dir()
+                    .join(format!("kaban-publication-{}-{nonce}", std::process::id())),
+            );
+            std::fs::create_dir(&scratch.0).unwrap();
+            let directory = std::fs::canonicalize(&scratch.0).unwrap();
+            let policy = Policy::empty();
+            let bytes = include_bytes!("../../../fixtures/codegraph/go-drivers/index.scip");
+            let gated = crate::decode_and_gate(bytes, &policy).unwrap();
+            let admitted = crate::admit_index(&gated);
+            let rows = Rows::derive(&admitted, None, &policy);
+            let meta = Meta {
+                commit: Commit::parse(&"a1".repeat(20)).unwrap(),
+                repo_id: "0123456789abcdef0123456789abcdef".to_owned(),
+                policy_version: "test".to_owned(),
+                provenance: Provenance {
+                    isolation: IsolationTier::None,
+                    isolation_detail: "test".to_owned(),
+                    resources: Vec::new(),
+                    container_image_digest: None,
+                },
+            };
+            let temp = directory.join(format!("{}.cg.db.tmp-{}", meta.commit, std::process::id()));
+            let retained = directory.join("retained-inode");
+            let sentinel = directory.join("sentinel");
+            std::fs::write(&sentinel, b"replacement sentinel").unwrap();
+            let replacement = temp.clone();
+            let displaced = retained.clone();
+            let target = sentinel.clone();
+            AFTER_TEMP_CREATE.with(|hook| {
+                *hook.borrow_mut() = Some(Box::new(move || {
+                    std::fs::rename(&replacement, displaced).unwrap();
+                    if symlink {
+                        std::os::unix::fs::symlink(target, replacement).unwrap();
+                    } else {
+                        std::fs::write(replacement, b"replacement sentinel").unwrap();
+                    }
+                }));
+            });
+
+            let error = publish(&directory, &rows, &meta, &policy).unwrap_err();
+            assert!(matches!(error, PublishError::TempSwapped), "{error:?}");
+            assert_eq!(
+                std::fs::read(&temp).unwrap(),
+                b"replacement sentinel",
+                "cleanup must preserve the replacement"
+            );
+            assert_eq!(std::fs::read(&sentinel).unwrap(), b"replacement sentinel");
+            assert!(
+                std::fs::metadata(&retained).unwrap().len() > 0,
+                "writing stayed on the created inode"
+            );
+            assert!(!directory.join(format!("{}.cg.db", meta.commit)).exists());
+        }
+    }
 }

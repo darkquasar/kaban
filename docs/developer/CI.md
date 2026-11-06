@@ -146,6 +146,123 @@ still need adequate `/tmp` space; actual namespace and resource assertions remai
 in the suites. macOS can run focused commands and helpers; comprehensive GNU/musl
 checks need a suitable native Linux environment.
 
+## Native ARM64 macOS setup
+
+Native setup is separate from product qualification. The first M0 observations
+use macOS 15.6.1 (24G90), ARM64, Command Line Tools with SDK 15.5 and Rust/Cargo
+1.99.0. This records a tested setup, not support for every macOS 15 patch or a
+completed application port. The admitted-directory child cwd binding remains an
+M0 feasibility blocker; do not replace it with an unchecked pathname.
+
+```text
++------------------+  locked tools  +------------------+  focused checks  +----------------+
+| Native ARM64 Mac | =============> | Private scratch  | ===============> | M0 evidence    |
++------------------+                +------------------+                  +----------------+
+```
+
+Install ordinary Apple Command Line Tools if absent; full Xcode and signing tools
+are not required for these unsigned CLI probes. Record the actual environment:
+
+```sh
+sw_vers
+uname -m
+xcode-select -p
+xcrun --show-sdk-path
+xcrun --show-sdk-version
+df -h .
+sysctl -n hw.memsize
+vm_stat
+```
+
+Use a trusted Mise installation. The existing verified local bootstrap is
+`~/.local/share/mise/bootstrap/mise-2026.10.24`; it need not be on PATH. Its raw
+macos-arm64 SHA256 is
+`ac0ee145cb145affe3ea60623a4abdb253e5ad1f938def299e633e816c0b8523`, checked against
+the [upstream checksum manifest](https://github.com/jdx/mise/releases/download/v2026.10.24/SHASUMS256.txt).
+Normal trust and provenance checks stay enabled. From the repository root:
+
+```sh
+MISE="$HOME/.local/share/mise/bootstrap/mise-2026.10.24"  # or your trusted mise path
+"$MISE" trust ./mise.toml
+"$MISE" install --locked
+"$MISE" exec -- python3 --version
+"$MISE" exec -- node --version
+"$MISE" exec -- cargo nextest --version
+"$MISE" exec -- cargo deny --version
+```
+
+The lock now covers Darwin ARM64 as well as both existing Linux architectures.
+Regeneration, when needed, uses
+`mise lock --platform linux-x64,linux-arm64,macos-arm64`; inspect its diff, retain
+Linux entries and install with `--locked`. Do not hand-edit download metadata.
+
+Read both Rust pins rather than inventing a Mac-specific toolchain:
+
+```sh
+kaban_root_rust=$("$MISE" exec -- python3 -c 'import pathlib,tomllib; print(tomllib.loads(pathlib.Path("rust-toolchain.toml").read_text())["toolchain"]["channel"])')
+kaban_producer_rust=$("$MISE" exec -- python3 -c 'import pathlib,tomllib; print(tomllib.loads(pathlib.Path("tools/kaban-rust-scip/rust-toolchain.toml").read_text())["toolchain"]["channel"])')
+rustup toolchain install "$kaban_root_rust" --component rustfmt --component clippy --component rust-src
+rustup toolchain install "$kaban_producer_rust" --component rustfmt --component clippy --component rust-src
+rustc -vV
+cargo --version
+(cd tools/kaban-rust-scip && rustc -vV && cargo --version)
+```
+
+External producers live outside the checkout and `KABAN_HOME`. The current Linux
+`install-go.sh`/`install-scip-go.sh` scripts are not Darwin installers. For a new
+user-owned tools directory, these native downloads match the existing fixture
+versions. Run with shell failure checking; do not overwrite an existing install:
+
+```sh
+set -euo pipefail
+kaban_tools="$HOME/.local/share/kaban-tools/macos-arm64"
+test ! -e "$kaban_tools"
+mkdir -p -m 700 "$kaban_tools/bin"
+kaban_downloads=$(mktemp -d "${TMPDIR:-/tmp}/kaban-native-downloads.XXXXXXXX")
+curl -fSL https://dl.google.com/go/go1.26.0.darwin-arm64.tar.gz -o "$kaban_downloads/go.tar.gz"
+printf '%s  %s\n' b1640525dfe68f066d56f200bef7bf4dce955a1a893bd061de6754c211431023 "$kaban_downloads/go.tar.gz" | shasum -a 256 --check
+tar -xzf "$kaban_downloads/go.tar.gz" -C "$kaban_tools"
+curl -fSL https://github.com/scip-code/scip-go/releases/download/v0.2.7/scip-go-darwin-arm64.tar.gz -o "$kaban_downloads/scip-go.tar.gz"
+printf '%s  %s\n' f21b505452a8dbb270c18ec66690e583801f9e96cff1d72e84c004b7374ec672 "$kaban_downloads/scip-go.tar.gz" | shasum -a 256 --check
+tar -xzf "$kaban_downloads/scip-go.tar.gz" -C "$kaban_tools/bin" scip-go
+chmod -R go-w "$kaban_tools/go"
+"$MISE" exec -- npm install --prefix "$kaban_tools/typescript" --save-exact @sourcegraph/scip-typescript@0.4.0
+export GOROOT="$kaban_tools/go"
+export SCIP_GO="$kaban_tools/bin/scip-go"
+export PATH="$GOROOT/bin:$kaban_tools/bin:$kaban_tools/typescript/node_modules/.bin:$PATH"
+go version
+"$SCIP_GO" --version
+"$MISE" exec -- scip-typescript --version
+```
+
+Go's checksum comes from the [official download metadata](https://go.dev/dl/?mode=json&include=all);
+scip-go's comes from the [v0.2.7 release](https://github.com/scip-code/scip-go/releases/tag/v0.2.7).
+The native setup produced TypeScript 5.9.3 through scip-typescript 0.4.0; retain
+the external installation's package lock and integrity metadata. Installation
+and version checks do not prove real producer-to-query behavior. Building the
+standalone Rust producer and qualifying all three languages belong to later M4.
+
+Use disposable data and one private target for an authorized native check:
+
+```sh
+export KABAN_HOME=$(mktemp -d "${TMPDIR:-/tmp}/kaban-native-home.XXXXXXXX")
+export CARGO_TARGET_DIR=$(mktemp -d "${TMPDIR:-/tmp}/kaban-native-target.XXXXXXXX")
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 KABAN_CARGO_SLOTS=1
+export CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_DEV_STRIP=symbols
+"$MISE" exec -- bash scripts/ci/ci.sh helpers
+# Prefix authorized focused Cargo checks with the existing slot helper:
+# "$MISE" exec -- bash scripts/dev/cargo-slot.sh cargo <focused arguments>
+```
+
+Keep at least 2,000,000,000 bytes free before heavy work and measure memory/disk;
+start with one heavy local invocation. The first bounded 218 MB SQLite probe is
+not a full-product resource estimate. Do not run `ci.sh all`, GNU/musl artifact
+groups or change host isolation policy on this Mac. Comprehensive preflight now
+passes pinned tool discovery and intentionally exits 3 at its Linux requirement;
+that is incomplete comprehensive coverage, not a product failure or a native CI
+pass. M6 owns the future focused Mac dispatcher/workflow. No sudo, Gatekeeper
+change, real user database or shared Homebrew permission change is needed.
+
 ## Hosted isolation selections
 
 The GitHub-hosted functional job sets `KABAN_CI_ISOLATION_SPLIT=1`. It checks that

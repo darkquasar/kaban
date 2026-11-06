@@ -19,6 +19,12 @@ checksum_source = "mise-versions"
 url = "https://github.com/EmbarkStudios/cargo-deny/releases/download/0.20.2/cargo-deny-0.20.2-x86_64-unknown-linux-musl.tar.gz"
 url_api = "https://api.github.com/repos/EmbarkStudios/cargo-deny/releases/assets/471598214"
 
+[tools."aqua:EmbarkStudios/cargo-deny"."platforms.macos-arm64"]
+checksum = "sha256:fe67d82a10d8597a3549364cb733a3f9cc1bfff9031b7ae46384a9f2a72090c3"
+checksum_source = "mise-versions"
+url = "https://github.com/EmbarkStudios/cargo-deny/releases/download/0.20.2/cargo-deny-0.20.2-aarch64-apple-darwin.tar.gz"
+url_api = "https://api.github.com/repos/EmbarkStudios/cargo-deny/releases/assets/471597689"
+
 [[tools."aqua:nextest-rs/nextest/cargo-nextest"]]
 version = "0.9.150"
 backend = "aqua:nextest-rs/nextest/cargo-nextest"
@@ -36,6 +42,12 @@ checksum_source = "mise-versions"
 url = "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.150/cargo-nextest-0.9.150-x86_64-unknown-linux-gnu.tar.gz"
 url_api = "https://api.github.com/repos/nextest-rs/nextest/releases/assets/679066447"
 
+[tools."aqua:nextest-rs/nextest/cargo-nextest"."platforms.macos-arm64"]
+checksum = "sha256:82a759b4d218d38359424196ab244c470e8f7c7d149c814fbbeef4d67c3c301a"
+checksum_source = "mise-versions"
+url = "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.150/cargo-nextest-0.9.150-universal-apple-darwin.tar.gz"
+url_api = "https://api.github.com/repos/nextest-rs/nextest/releases/assets/679078149"
+
 [[tools.node]]
 version = "22.23.4"
 backend = "core:node"
@@ -52,6 +64,10 @@ url = "https://nodejs.org/dist/v22.23.4/node-v22.23.4-linux-arm64.tar.gz"
 checksum = "sha256:b8492284c76a54baf58d61668dd0e41ee0fc98adabf9503d30f05d08f55b4406"
 url = "https://nodejs.org/dist/v22.23.4/node-v22.23.4-linux-x64.tar.gz"
 
+[tools.node."platforms.macos-arm64"]
+checksum = "sha256:c9e1dbc748b33ed2d14f42445191ecaf14c56259c7a9a26d0042c49ec2b66428"
+url = "https://nodejs.org/dist/v22.23.4/node-v22.23.4-darwin-arm64.tar.gz"
+
 [[tools.python]]
 version = "3.12.16"
 backend = "core:python"
@@ -65,4 +81,9 @@ provenance = "github-attestations"
 [tools.python."platforms.linux-x64"]
 checksum = "sha256:ce4f6d0a6cfdb3bed6e44c2f9affd85943c76a42e25ad3a259002f31d6fb8a20"
 url = "https://github.com/astral-sh/python-build-standalone/releases/download/20261026/cpython-3.12.16+20261026-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz"
+provenance = "github-attestations"
+
+[tools.python."platforms.macos-arm64"]
+checksum = "sha256:353d5f1b4fd2715e7053f12f068435d5bbad16b91e057006b5d01e0925709a7e"
+url = "https://github.com/astral-sh/python-build-standalone/releases/download/20261026/cpython-3.12.16+20261026-aarch64-apple-darwin-install_only_stripped.tar.gz"
 provenance = "github-attestations"

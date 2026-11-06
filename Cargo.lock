@@ -1583,6 +1583,7 @@ name = "kaban-codegraph"
 version = "3.0.0-alpha.1"
 dependencies = [
  "anyhow",
+ "getrandom 0.3.4",
  "hmac",
  "kaban-codegraph",
  "kaban-core",
@@ -1590,6 +1591,7 @@ dependencies = [
  "rusqlite",
  "rustix",
  "sha2 0.10.9",
+ "sqlite-vfs",
  "tempfile",
  "thiserror 2.0.21",
  "tracing",
@@ -2767,6 +2769,16 @@ name = "smallvec"
 version = "1.16.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f9395f0f0eee849a9b707b2f06bb92a6a422090e2123bb2ef8e87a0e61892a8e"
+
+[[package]]
+name = "sqlite-vfs"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a0258972cbfaa18f42f8be285c4d237c719a6844d48471c9461cc8556fc9df38"
+dependencies = [
+ "log",
+ "time",
+]
 
 [[package]]
 name = "sqlite-wasm-rs"

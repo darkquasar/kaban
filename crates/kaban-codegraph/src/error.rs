@@ -130,11 +130,21 @@ pub enum WriteError {
     /// behind the redacting holder.
     #[error("sqlite failed")]
     Sql(#[source] BackendSource),
+    /// Copying the finalized image to the created file failed. Backend diagnostics stay
+    /// behind the same redacting boundary as SQLite diagnostics.
+    #[error("snapshot output failed")]
+    Output(#[source] BackendSource),
 }
 
 impl From<rusqlite::Error> for WriteError {
     fn from(e: rusqlite::Error) -> Self {
         Self::Sql(BackendSource::new(e))
+    }
+}
+
+impl From<std::io::Error> for WriteError {
+    fn from(error: std::io::Error) -> Self {
+        Self::Output(BackendSource::new(error))
     }
 }
 

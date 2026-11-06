@@ -310,7 +310,22 @@ mod tests {
         let root = s.0.join("root");
         std::fs::create_dir_all(root.join(".kaban/ontology")).unwrap();
         let fifo = root.join(".kaban/ontology/blocked.yaml");
+        #[cfg(not(target_os = "macos"))]
         rustix::fs::mkfifoat(rustix::fs::CWD, &fifo, Mode::RUSR | Mode::WUSR).unwrap();
+        #[cfg(target_os = "macos")]
+        {
+            // Darwin's rustix backend has no mkfifoat. Create the same FIFO fixture;
+            // the nonblocking containment assertion below remains unchanged.
+            assert!(
+                std::process::Command::new("/usr/bin/mkfifo")
+                    .arg("-m")
+                    .arg("600")
+                    .arg(&fifo)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
 
         let (tx, rx) = std::sync::mpsc::channel();
         let root_for_thread = root.clone();

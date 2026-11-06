@@ -254,7 +254,16 @@ impl OutputError {
 }
 
 /// `O_PATH|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC`: a directory handle that follows no link.
+#[cfg(target_os = "linux")]
 const DIR_HANDLE: OFlags = OFlags::PATH
+    .union(OFlags::DIRECTORY)
+    .union(OFlags::NOFOLLOW)
+    .union(OFlags::CLOEXEC);
+
+// Darwin has no O_PATH. Retain the opened directory object, conservatively requiring
+// read permission as in codegraph's directory admission.
+#[cfg(target_os = "macos")]
+const DIR_HANDLE: OFlags = OFlags::RDONLY
     .union(OFlags::DIRECTORY)
     .union(OFlags::NOFOLLOW)
     .union(OFlags::CLOEXEC);

@@ -3,13 +3,16 @@
 //! whose ids are their 1-based positions; a helper that finds its input out of order refuses with
 //! [`WriteError::Unsorted`] or [`WriteError::Ids`] and writes nothing, so two builds from the same
 //! rows are byte-identical. The caller owns the connection (a `<commit40>.cg.db.tmp-<pid>` file
-//! opened 0600 by `kaban-index`, a scratch file in tests).
+//! opened 0600 by `kaban-index`, a scratch file in tests). [`CreatedSnapshot`] retains the
+//! publisher's created descriptor and owns its connection until explicit finalization.
 //!
 //! ```text
 //!   open_existing ==> begin ==> insert_files ==> insert_symbols ==> insert_edges
 //!         ==> insert_occurrences ==> insert_snippets ==> insert_edge_types ==> insert_meta
 //!         ==> rebuild_fts ==> finish
 //! ```
+
+mod persistence;
 
 use std::os::fd::{AsRawFd, BorrowedFd};
 use std::path::Path;
@@ -45,12 +48,11 @@ pub fn open_existing(path: &Path) -> Result<Connection, WriteError> {
     Ok(Connection::open_with_flags(path, flags)?)
 }
 
-/// Open the temporary snapshot file the publisher created through its directory handle, by
-/// the descriptor itself (`/proc/self/fd/<n>`; U2 RU2-10): the kernel resolves that magic
-/// link to the open file description's inode, so a rename of the directory or a swap of the
-/// name after the create cannot redirect SQLite's writes to another file. No `NOFOLLOW` here
-/// (the magic link is the point; the caller opened the descriptor `O_NOFOLLOW` through the
-/// handle), no `CREATE`. The descriptor must refer to a regular file.
+/// Legacy Linux connection opener through `/proc/self/fd/<n>`, retained for callers that
+/// own their connection. SQLite performs its own filename normalization. The portable
+/// publisher uses [`CreatedSnapshot`] to avoid any SQLite pathname reopening and to bind
+/// the finalized output to the created descriptor. No `CREATE`; the descriptor must refer
+/// to a regular file. This legacy entry point is not available without procfs.
 ///
 /// # Errors
 /// [`WriteError::NotTempFile`] when the descriptor is not a regular file (the publisher's temp
@@ -65,6 +67,64 @@ pub fn open_created(fd: BorrowedFd<'_>) -> Result<Connection, WriteError> {
         format!("/proc/self/fd/{}", fd.as_raw_fd()),
         flags,
     )?)
+}
+
+/// A snapshot whose finalized bytes are written only to the publisher's retained file.
+/// SQL runs in memory; row helpers still borrow an ordinary connection. Consuming
+/// [`Self::finish`] commits, backs up pages to an anonymous file and copies through a
+/// fixed-size buffer before the publisher's identity check,
+/// file fsync, no-overwrite rename and directory fsync. Drop never attempts a fallible copy.
+/// The caller keeps ownership of its exclusively created temporary file for this lifetime.
+pub struct CreatedSnapshot<'fd> {
+    connection: Connection,
+    output: BorrowedFd<'fd>,
+}
+
+impl std::fmt::Debug for CreatedSnapshot<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CreatedSnapshot")
+            .finish_non_exhaustive()
+    }
+}
+
+impl<'fd> CreatedSnapshot<'fd> {
+    /// Retain a regular output descriptor and open a private in-memory database.
+    ///
+    /// # Errors
+    /// [`WriteError::NotTempFile`] for a non-regular descriptor, [`WriteError::Output`]
+    /// for metadata failure, or [`WriteError::Sql`] when SQLite cannot initialize.
+    pub fn open(output: BorrowedFd<'fd>) -> Result<Self, WriteError> {
+        let stat = rustix::fs::fstat(output).map_err(std::io::Error::from)?;
+        if !rustix::fs::FileType::from_raw_mode(stat.st_mode).is_file() {
+            return Err(WriteError::NotTempFile);
+        }
+        Ok(Self {
+            connection: Connection::open_in_memory()?,
+            output,
+        })
+    }
+
+    /// Borrow the connection for the existing sorted/gated row helpers.
+    #[must_use]
+    pub const fn connection(&self) -> &Connection {
+        &self.connection
+    }
+
+    /// Commit/analyze/vacuum, copy to the retained inode and close the connection.
+    /// Persistence uses an anonymous disk-backed staging file and a 64 KiB copy buffer,
+    /// never a contiguous whole-image allocation. This still needs database/row memory
+    /// and space for the staging file; it does not promise constant total RAM.
+    /// The publisher owns durability and publication after this returns successfully.
+    ///
+    /// # Errors
+    /// [`WriteError::Sql`] for SQLite finalization/backup/close failures;
+    /// [`WriteError::Output`] for staging-file or output I/O failures.
+    pub fn finish(self) -> Result<(), WriteError> {
+        finish(&self.connection)?;
+        persistence::persist(&self.connection, self.output)?;
+        self.connection.close().map_err(|(_, error)| error.into())
+    }
 }
 
 /// `<commit40>.cg.db.tmp-<pid>`: 40 lowercase hex digits, the fixed infix, one or more decimal
