@@ -128,28 +128,7 @@ fn git(root: &Path, args: &[&str]) -> String {
 /// from an ancestor (nextest under `flock(1)` leaks its lock fd): closed in the shell before
 /// `kaban-index` starts, so its `Refuse` descriptor policy holds (`kaban-index/tests/cli.rs`).
 fn non_cloexec_fds() -> Vec<u32> {
-    const O_CLOEXEC: u64 = 0o2_000_000;
-    let mut out = Vec::new();
-    for entry in std::fs::read_dir("/proc/self/fd").unwrap() {
-        let entry = entry.unwrap();
-        let Ok(number) = entry.file_name().to_string_lossy().parse::<u32>() else {
-            continue;
-        };
-        if number <= 2 {
-            continue;
-        }
-        let info =
-            std::fs::read_to_string(format!("/proc/self/fdinfo/{number}")).unwrap_or_default();
-        let flags = info
-            .lines()
-            .find_map(|l| l.strip_prefix("flags:"))
-            .and_then(|f| u64::from_str_radix(f.trim(), 8).ok())
-            .unwrap_or(0);
-        if flags & O_CLOEXEC == 0 {
-            out.push(number);
-        }
-    }
-    out
+    kaban_core::process::inheritable_fds().expect("descriptor observation is required")
 }
 
 /// `kaban-index <args>` with the real toolchain first on `PATH` and `KABAN_HOME = <home>`, in

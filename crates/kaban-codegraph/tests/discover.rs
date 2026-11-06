@@ -203,12 +203,7 @@ fn snapshot_ref_fields() {
 /// connection): the connection-lifetime probe of RG2-6. nextest runs each test in its own
 /// process, so no other test's connections are counted.
 fn open_fds_to(path: &std::path::Path) -> usize {
-    let target = std::fs::canonicalize(path).unwrap();
-    std::fs::read_dir("/proc/self/fd")
-        .unwrap()
-        .filter_map(Result::ok)
-        .filter(|e| std::fs::read_link(e.path()).is_ok_and(|l| l == target))
-        .count()
+    builder::open_fds_to(path)
 }
 
 /// `GM2a` RG2-6: the cache bounds **cached** connections at two; a caller's lease

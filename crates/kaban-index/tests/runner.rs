@@ -18,9 +18,11 @@ use kaban_core::process::{InheritedFds, KillReason, MonitorVerdict, ProcessError
 use kaban_index::detect::Lang;
 use kaban_index::identity_cli::{self, AdmittedDir};
 use kaban_index::isolate::{
-    Detail, ISOLATION_NONE, PathView, Probe, ReasonClass, Scratch, SelectError, Tier, WrapperError,
-    env_for, resolve_wrapper, select,
+    Detail, ISOLATION_NONE, PathView, Probe, ReasonClass, Scratch, SelectError, Tier, env_for,
+    select,
 };
+#[cfg(target_os = "linux")]
+use kaban_index::isolate::{WrapperError, resolve_wrapper};
 use kaban_index::language;
 use kaban_index::runner::{
     GoRun, IndexerSpec, IsolationRun, QuotaCaps, RunClass, RunError, RunReport, classify_outcome,
@@ -431,6 +433,7 @@ fn runner_env_allowlist_only() {
 }
 
 /// Whether `pid` is still a live process (a reaped or zombie process is not).
+#[cfg(target_os = "linux")]
 fn alive(pid: &str) -> bool {
     fs::read_to_string(format!("/proc/{pid}/stat"))
         .ok()
@@ -439,6 +442,16 @@ fn alive(pid: &str) -> bool {
             after.chars().next()
         })
         .is_some_and(|state| state != 'Z' && state != 'X')
+}
+
+#[cfg(target_os = "macos")]
+fn alive(pid: &str) -> bool {
+    let raw: u32 = pid.parse().expect("positive fixture PID");
+    match kaban_core::process::process_liveness(raw) {
+        kaban_core::process::Liveness::Dead => false,
+        kaban_core::process::Liveness::Unknown => panic!("fixture PID observation unavailable"),
+        kaban_core::process::Liveness::Alive => true,
+    }
 }
 
 /// A descendant whose pid the fake indexer wrote to `pidfile`: `SIGKILL`ed on drop if alive
@@ -542,35 +555,25 @@ fn runner_output_cap_kills() {
     assert!(log.len() < 4096 + 64, "the log holds at most the cap");
 }
 
-/// Bytes available under `/tmp`.
+/// Bytes available on the filesystem holding this run's temporary scratch.
 fn tmp_available() -> u64 {
-    let out = std::process::Command::new("df")
-        .args(["--output=avail", "-B1", "/tmp"])
-        .output()
-        .unwrap();
-    String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .last()
-        .and_then(|l| l.trim().parse().ok())
-        .unwrap_or(0)
+    let stat =
+        rustix::fs::statvfs(std::env::temp_dir()).expect("scratch disk observer is required");
+    stat.f_bavail.saturating_mul(stat.f_frsize)
 }
 
 // slice 4 (S5.6): the fake indexer writes 1 GiB + 1 byte of zeros into one file under the
 // scratch; the per-file cap (1 GiB) kills the group (`quota_exceeded`, exit 6) and the raw
 // file is gone with the scratch. Needs 2.5 GB free under `/tmp` (the brief's figure), else
-// the slice is reported not-run with the figure.
+// the test fails its prerequisite with the figure (never an early-return pass).
 #[test]
 fn runner_quota_file_kills() {
     const GIB: u64 = 1 << 30;
     let avail = tmp_available();
-    if avail < 2_500_000_000 {
-        // the brief's rule: not-run with the figure, never a silent pass
-        #[allow(clippy::print_stderr)]
-        {
-            eprintln!("runner_quota_file_kills NOT RUN: /tmp has {avail} bytes available");
-        }
-        return;
-    }
+    assert!(
+        avail >= 2_500_000_000,
+        "runner_quota_file_kills prerequisite unavailable: scratch has {avail} bytes free"
+    );
     let home = Home::new("quota-file");
     let dir = home.repo_dir();
     let checkout = home.checkout();
@@ -887,14 +890,17 @@ fn elf_tool(name: &str) -> PathBuf {
     let gnu = PathBuf::from(format!("/bin/gnu{name}"));
     if gnu.is_file() {
         gnu
-    } else {
+    } else if Path::new(&format!("/bin/{name}")).is_file() {
         PathBuf::from(format!("/bin/{name}"))
+    } else {
+        PathBuf::from(format!("/usr/bin/{name}"))
     }
 }
 
 // slice 9 (S5.2): `PATH` holds a fake `unshare` and a fake `docker` that would each create a
 // canary file; the candidate list names paths that do not exist; neither fake is resolved or
 // executed (`PATH` is never consulted), and the canary file is absent.
+#[cfg(target_os = "linux")]
 #[test]
 fn wrapper_from_candidate_list_only() {
     let home = Home::new("wrapper-path");
@@ -932,6 +938,7 @@ fn wrapper_from_candidate_list_only() {
 
 // slice 10 (S5.2): a group-writable candidate is refused (`wrapper_writable`), and a refused
 // candidate is a finding: the next candidate is not tried over it.
+#[cfg(target_os = "linux")]
 #[test]
 fn wrapper_rejects_writable_candidate() {
     let home = Home::new("wrapper-writable");
@@ -966,6 +973,7 @@ fn wrapper_rejects_writable_candidate() {
 }
 
 // slice 11 (S5.2, RV-9): a `#!` file at a candidate path is `wrapper_not_elf` and never runs.
+#[cfg(target_os = "linux")]
 #[test]
 fn wrapper_rejects_script_candidate() {
     let home = Home::new("wrapper-script");
@@ -998,7 +1006,23 @@ fn leftover_scratch_removed_by_next_run() {
     fs::write(dead.join("out/index.scip"), b"stale").unwrap();
     let other_live = dir.path.join("run-1");
     fs::create_dir_all(&other_live).unwrap();
+    let unknown = dir.path.join("run-4294967295");
+    fs::create_dir_all(&unknown).unwrap();
+    let unknown_temp = dir.path.join("unknown.cg.db.tmp-4294967295");
+    fs::write(&unknown_temp, b"preserve").unwrap();
+    let live_temp = dir.path.join("live.cg.db.tmp-1");
+    fs::write(&live_temp, b"preserve").unwrap();
     let scratch = Scratch::create(&dir).unwrap();
+    assert!(
+        unknown.exists(),
+        "unknown PID must never authorize scratch removal"
+    );
+    let dead_temp = dir.path.join("dead.cg.db.tmp-4194303");
+    fs::write(&dead_temp, b"stale").unwrap();
+    assert_eq!(kaban_index::gc::sweep_leftovers(&dir), 1);
+    assert!(!dead_temp.exists());
+    assert!(unknown.exists() && unknown_temp.exists() && live_temp.exists());
+    assert!(scratch.root().exists(), "gc preserves the current run too");
     assert!(!dead.exists(), "the dead run's scratch is removed");
     assert!(other_live.exists(), "pid 1 is alive: its scratch stays");
     assert!(scratch.root().exists());
@@ -1169,12 +1193,27 @@ fn runner_reports_peak_rss() {
     let checkout = home.checkout();
     let scratch = Scratch::create(&dir).unwrap();
     let policy = Policy::empty();
-    let indexer = fake("alloc.sh");
-    let report = run_indexer(spec(&indexer, &["64"], &checkout, &scratch, &dir, &policy)).unwrap();
+    #[cfg(target_os = "linux")]
+    let (indexer, args) = (fake("alloc.sh"), vec!["64"]);
+    #[cfg(not(target_os = "linux"))]
+    let (indexer, args) = (fake("env.sh"), vec![]);
+    let report = run_indexer(spec(&indexer, &args, &checkout, &scratch, &dir, &policy)).unwrap();
     assert!(report.class.is_none(), "{report:?}");
-    let peak = report.peak_rss_bytes.expect("sampled at least once");
-    assert!(peak >= 64 << 20, "peak {peak} bytes");
-    assert_eq!(report.monitor_verdicts.len(), 2, "quota and RSS");
+    #[cfg(target_os = "linux")]
+    {
+        let peak = report.peak_rss_bytes.expect("sampled at least once");
+        assert!(peak >= 64 << 20, "peak {peak} bytes");
+        assert_eq!(report.monitor_verdicts.len(), 2, "quota and RSS");
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        assert_eq!(report.peak_rss_bytes, None, "RSS explicitly unavailable");
+        assert_eq!(
+            report.monitor_verdicts,
+            vec![MonitorVerdict::Ok],
+            "scratch quotas still enforced"
+        );
+    }
 }
 
 // negative path (S5.6 residual, documented): on the `none` tier the fake indexer can write
@@ -1500,6 +1539,7 @@ fn late_and_silent_monitor_verdicts_fail_closed() {
 // U1 residual 4 (a): the handle checks are a point check immediately before `exec`: a wrapper
 // resolved as an acceptable handle whose same inode becomes group-writable before the run is
 // refused at the spawn boundary (`wrapper_writable`) and never executes.
+#[cfg(target_os = "linux")]
 #[test]
 fn wrapper_handle_is_rechecked_immediately_before_exec() {
     let home = Home::new("point-check");
@@ -1635,4 +1675,268 @@ fn failed_run_reports_how_it_died() {
     .unwrap();
     assert_eq!(report.class, None, "{report:?}");
     assert!(report.failure().is_none(), "{report:?}");
+}
+
+// M3: the hidden helper receives the admitted directory on fd0. Changing its old
+// pathname must not change cwd, and every refusal must precede producer execution.
+#[test]
+fn cwd_helper_keeps_the_admitted_directory_and_rechecks_the_producer() {
+    use std::os::fd::AsFd;
+    use std::os::unix::process::CommandExt;
+    use std::process::{Command, Stdio};
+    let home = Home::new("cwd-helper");
+    let checkout = home.checkout();
+    fs::write(checkout.join("marker"), b"original").unwrap();
+    let directory = fs::File::open(&checkout).unwrap();
+    let st = rustix::fs::fstat(&directory).unwrap();
+    let expected = format!("{},{}", st.st_dev, st.st_ino);
+    let producer = home.path().join("producer");
+    fs::write(
+        &producer,
+        "#!/bin/sh\ncat marker\nprintf '\\npid=%s\\n' \"$$\"\ncat\n",
+    )
+    .unwrap();
+    fs::set_permissions(&producer, fs::Permissions::from_mode(0o700)).unwrap();
+    let admitted = kaban_index::tools::admit_executable(&producer, &[]).unwrap();
+    let id = admitted.identity;
+    let identity = format!(
+        "{},{},{},{},{}",
+        id.dev, id.ino, id.size, id.ctime_sec, id.ctime_nsec
+    );
+    let moved = home.path().join("moved");
+    fs::rename(&checkout, &moved).unwrap();
+    fs::create_dir(&checkout).unwrap();
+    fs::write(checkout.join("marker"), b"decoy").unwrap();
+    let run_helper = |input: fs::File, expected: &str, identity: &str| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_kaban-index"));
+        command
+            .args([
+                "cwd-helper",
+                "--directory",
+                expected,
+                "--identity",
+                identity,
+                "--",
+            ])
+            .arg(&producer)
+            .current_dir("/")
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .stdin(Stdio::from(input))
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .process_group(0);
+        let child = command.spawn().unwrap();
+        let pid = child.id();
+        drop(command);
+        (pid, child.wait_with_output().unwrap())
+    };
+    let parent = std::env::current_dir().unwrap();
+    for symlink in [false, true] {
+        if symlink {
+            fs::remove_dir_all(&checkout).unwrap();
+            std::os::unix::fs::symlink(&moved, &checkout).unwrap();
+        }
+        let (pid, out) = run_helper(directory.try_clone().unwrap(), &expected, &identity);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(
+            String::from_utf8(out.stdout).unwrap(),
+            format!("original\npid={pid}\n")
+        );
+        assert_eq!(std::env::current_dir().unwrap(), parent);
+    }
+    for (input, expected, identity) in [
+        (directory.try_clone().unwrap(), "0,0", identity.as_str()),
+        (
+            fs::File::open(moved.join("marker")).unwrap(),
+            expected.as_str(),
+            identity.as_str(),
+        ),
+        (
+            directory.try_clone().unwrap(),
+            expected.as_str(),
+            "0,0,0,0,0",
+        ),
+    ] {
+        let (_, out) = run_helper(input, expected, identity);
+        assert_eq!(out.status.code(), Some(125));
+        assert_eq!(out.stdout, [] as [u8; 0]);
+        assert_eq!(out.stderr, b"cwd_helper_refused\n");
+    }
+    // Exercise the additive core handoff entry point with the same production helper.
+    let mut handoff = core_spec(
+        kaban_core::process::Exec::Path(env!("CARGO_BIN_EXE_kaban-index").into()),
+        Path::new("/"),
+        vec![],
+        Duration::from_secs(1),
+    );
+    handoff.args = [
+        "cwd-helper",
+        "--directory",
+        &expected,
+        "--identity",
+        &identity,
+        "--",
+    ]
+    .into_iter()
+    .map(OsString::from)
+    .chain([producer.clone().into_os_string()])
+    .collect();
+    handoff.env.insert("PATH", "/usr/bin:/bin").unwrap();
+    let outcome =
+        kaban_core::process::run_with_directory_handoff(handoff, directory.as_fd()).unwrap();
+    assert!(outcome.status.unwrap().success(), "{outcome:?}");
+    assert!(outcome.stdout.starts_with(b"original\npid="));
+    let ordinary = core_spec(
+        kaban_core::process::Exec::Path("/usr/bin/true".into()),
+        Path::new("/"),
+        vec![],
+        Duration::from_secs(1),
+    );
+    let plain = fs::File::open(moved.join("marker")).unwrap();
+    assert!(matches!(
+        kaban_core::process::run_with_directory_handoff(ordinary, plain.as_fd()),
+        Err(ProcessError::Env("cwd_not_directory"))
+    ));
+    // A metadata/content change to the same executable inode is also refused.
+    fs::write(&producer, "#!/bin/sh\necho changed\n").unwrap();
+    let (_, out) = run_helper(directory.try_clone().unwrap(), &expected, &identity);
+    assert_eq!(out.status.code(), Some(125));
+    assert_eq!(out.stdout, [] as [u8; 0]);
+    assert!(
+        rustix::io::fcntl_getfd(directory.as_fd())
+            .unwrap()
+            .contains(rustix::io::FdFlags::CLOEXEC)
+    );
+    // exec retains supervision after the helper/producer leader exits: its pipe holder
+    // must be killed at the deadline and the return must remain bounded.
+    let pidfile = moved.join("descendant.pid");
+    let descendant = Descendant(pidfile.clone());
+    fs::write(
+        &producer,
+        format!(
+            "#!/bin/sh\nsleep 30 &\necho $! > '{}'\nexit 0\n",
+            pidfile.display()
+        ),
+    )
+    .unwrap();
+    let id = kaban_index::tools::admit_executable(&producer, &[])
+        .unwrap()
+        .identity;
+    let identity = format!(
+        "{},{},{},{},{}",
+        id.dev, id.ino, id.size, id.ctime_sec, id.ctime_nsec
+    );
+    let mut handoff = core_spec(
+        kaban_core::process::Exec::Path(env!("CARGO_BIN_EXE_kaban-index").into()),
+        Path::new("/"),
+        vec![],
+        Duration::from_millis(100),
+    );
+    handoff.deadline = Duration::from_secs(1);
+    handoff.args = [
+        "cwd-helper",
+        "--directory",
+        &expected,
+        "--identity",
+        &identity,
+        "--",
+    ]
+    .into_iter()
+    .map(OsString::from)
+    .chain([producer.into_os_string()])
+    .collect();
+    handoff.env.insert("PATH", "/usr/bin:/bin").unwrap();
+    let outcome =
+        kaban_core::process::run_with_directory_handoff(handoff, directory.as_fd()).unwrap();
+    assert_eq!(outcome.killed, Some(KillReason::Deadline), "{outcome:?}");
+    assert!(
+        outcome.status.unwrap().success(),
+        "leader exited before the deadline"
+    );
+    assert!(outcome.wall < Duration::from_millis(1300));
+    assert!(descendant.dead_within(Duration::from_millis(200)));
+}
+
+#[test]
+fn concurrent_scratch_and_gc_preserve_a_live_runs_files() {
+    struct Worker(std::process::Child);
+    impl Drop for Worker {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let home = Home::new("concurrent-scratch");
+    let mut worker = Worker(
+        std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "concurrent_scratch_child",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("KABAN_SCRATCH_TEST_HOME", home.path())
+            .spawn()
+            .unwrap(),
+    );
+    let until = std::time::Instant::now() + Duration::from_secs(10);
+    while !home.path().join("ready").exists() {
+        assert!(
+            worker.0.try_wait().unwrap().is_none(),
+            "worker exited before handshake"
+        );
+        assert!(
+            std::time::Instant::now() < until,
+            "worker handshake timed out"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let dir = home.repo_dir();
+    let other = dir.path.join(format!("run-{}", worker.0.id()));
+    let other_temp = dir.path.join(format!("live.cg.db.tmp-{}", worker.0.id()));
+    let scratch = Scratch::create(&dir).unwrap();
+    assert_eq!(kaban_index::gc::sweep_leftovers(&dir), 0);
+    assert_eq!(fs::read(other.join("out/sentinel")).unwrap(), b"owned");
+    assert_eq!(fs::read(&other_temp).unwrap(), b"owned");
+    fs::write(home.path().join("release"), b"release").unwrap();
+    loop {
+        if let Some(status) = worker.0.try_wait().unwrap() {
+            assert!(status.success());
+            break;
+        }
+        assert!(std::time::Instant::now() < until, "worker did not settle");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(!other.exists());
+    assert!(scratch.root().exists());
+}
+
+#[test]
+#[ignore = "separate live run launched by concurrent_scratch_and_gc_preserve_a_live_runs_files"]
+fn concurrent_scratch_child() {
+    let home =
+        PathBuf::from(std::env::var_os("KABAN_SCRATCH_TEST_HOME").expect("explicit fixture home"));
+    let dir = identity_cli::admit_repo_dir(&home, &"ab".repeat(16)).unwrap();
+    let scratch = Scratch::create(&dir).unwrap();
+    fs::write(scratch.out().join("sentinel"), b"owned").unwrap();
+    let temp = dir
+        .path
+        .join(format!("live.cg.db.tmp-{}", std::process::id()));
+    fs::write(&temp, b"owned").unwrap();
+    fs::write(home.join("ready"), b"ready").unwrap();
+    let until = std::time::Instant::now() + Duration::from_secs(10);
+    while !home.join("release").exists() {
+        assert!(
+            std::time::Instant::now() < until,
+            "parent did not release worker"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    scratch.remove().unwrap();
+    fs::remove_file(temp).unwrap();
 }

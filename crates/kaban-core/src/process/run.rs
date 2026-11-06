@@ -85,6 +85,30 @@ const POLL: Duration = Duration::from_millis(1);
 /// [`InheritedFds::Refuse`]); [`ProcessError::Spawn`] when the spawn or a `try_wait` poll fails
 /// (the group is killed first).
 pub fn run(spec: Spec<'_>) -> Result<Outcome, ProcessError> {
+    run_with_stdin(spec, Stdio::null())
+}
+
+/// Internal helper handoff: pass a retained directory as stdin to an admitted helper.
+/// The helper must validate its identity, fchdir, and reset stdin to null before exec.
+/// Ordinary callers retain [`run`]'s null stdin and unchanged [`Spec`].
+///
+/// # Errors
+/// A non-directory, descriptor clone error, or the same errors as [`run`].
+pub fn run_with_directory_handoff(
+    spec: Spec<'_>,
+    directory: std::os::fd::BorrowedFd<'_>,
+) -> Result<Outcome, ProcessError> {
+    let stat = rustix::fs::fstat(directory).map_err(|e| ProcessError::Spawn(e.into()))?;
+    if !rustix::fs::FileType::from_raw_mode(stat.st_mode).is_dir() {
+        return Err(ProcessError::Env("cwd_not_directory"));
+    }
+    let owned = directory
+        .try_clone_to_owned()
+        .map_err(ProcessError::Spawn)?;
+    run_with_stdin(spec, Stdio::from(owned))
+}
+
+fn run_with_stdin(spec: Spec<'_>, stdin: Stdio) -> Result<Outcome, ProcessError> {
     let Spec {
         exec,
         args,
@@ -104,7 +128,7 @@ pub fn run(spec: Spec<'_>) -> Result<Outcome, ProcessError> {
         .current_dir(cwd)
         .env_clear()
         .envs(env.iter())
-        .stdin(Stdio::null())
+        .stdin(stdin)
         .stdout(stdio_for(stdout_cap))
         .stderr(stdio_for(stderr_cap))
         .process_group(0);

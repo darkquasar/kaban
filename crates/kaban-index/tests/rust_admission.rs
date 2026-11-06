@@ -82,28 +82,7 @@ fn git(cwd: &Path, args: &[&str]) -> String {
 
 /// The numbers of the descriptors this process holds without `FD_CLOEXEC` (above 2).
 fn non_cloexec_fds() -> Vec<u32> {
-    const O_CLOEXEC: u64 = 0o2_000_000;
-    let mut out = Vec::new();
-    for entry in fs::read_dir("/proc/self/fd").unwrap().flatten() {
-        let Ok(number) = entry.file_name().to_string_lossy().parse::<u32>() else {
-            continue;
-        };
-        if number <= 2 {
-            continue;
-        }
-        let Ok(info) = fs::read_to_string(format!("/proc/self/fdinfo/{number}")) else {
-            continue;
-        };
-        let flags = info
-            .lines()
-            .find_map(|l| l.strip_prefix("flags:"))
-            .and_then(|f| u64::from_str_radix(f.trim(), 8).ok())
-            .unwrap_or(0);
-        if flags & O_CLOEXEC == 0 {
-            out.push(number);
-        }
-    }
-    out
+    kaban_core::process::inheritable_fds().expect("descriptor observation is required")
 }
 
 /// Native probes enforce `Refuse` on their caller, so re-execute these tests cleanly when

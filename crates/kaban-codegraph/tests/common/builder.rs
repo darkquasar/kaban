@@ -274,3 +274,40 @@ pub fn lines(sl: u32, el: u32) -> Range {
         ec: 1,
     }
 }
+
+/// Connection-lifetime observer: inspect existing descriptors, never reopen SQLite paths.
+pub fn open_fds_to(path: &Path) -> usize {
+    #[cfg(target_os = "linux")]
+    {
+        let target = std::fs::canonicalize(path).unwrap();
+        std::fs::read_dir("/proc/self/fd")
+            .unwrap()
+            .map(Result::unwrap)
+            .filter(|e| std::fs::read_link(e.path()).is_ok_and(|l| l == target))
+            .count()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let target = std::fs::metadata(path).unwrap();
+        std::fs::read_dir("/dev/fd")
+            .unwrap()
+            .map(Result::unwrap)
+            .filter(|entry| {
+                let fd = entry
+                    .file_name()
+                    .to_string_lossy()
+                    .parse::<i32>()
+                    .expect("descriptor number");
+                match nix::sys::stat::fstat(fd) {
+                    Ok(st) => {
+                        u64::from(u32::from_ne_bytes(st.st_dev.to_ne_bytes())) == target.dev()
+                            && st.st_ino == target.ino()
+                    }
+                    Err(nix::errno::Errno::EBADF) => false,
+                    Err(e) => panic!("descriptor observation failed: {e}"),
+                }
+            })
+            .count()
+    }
+}

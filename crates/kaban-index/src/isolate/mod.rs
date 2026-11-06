@@ -299,7 +299,7 @@ impl Scratch {
     /// [`ScratchError::Io`].
     pub fn create(dir: &AdmittedDir) -> Result<Self, ScratchError> {
         use std::os::unix::fs::DirBuilderExt;
-        sweep_leftovers(&dir.path);
+        let _ = crate::gc::sweep_leftovers(dir);
         let root = dir.path.join(format!("{RUN_PREFIX}{}", std::process::id()));
         if root.exists() {
             std::fs::remove_dir_all(&root).map_err(|_| ScratchError::Io("remove_leftover"))?;
@@ -525,7 +525,7 @@ impl Drop for Scratch {
 /// Remove `name` under `parent` recursively through handles: `statat(NOFOLLOW)` decides (a
 /// symlink is unlinked, never followed), a directory first gets the owner's `rwx` back, is
 /// opened `O_DIRECTORY|O_NOFOLLOW`, emptied entry by entry, then removed. Absence is success.
-fn remove_tree(parent: BorrowedFd<'_>, name: &OsStr) -> Result<(), Errno> {
+pub(crate) fn remove_tree(parent: BorrowedFd<'_>, name: &OsStr) -> Result<(), Errno> {
     let st = match rustix::fs::statat(parent, name, AtFlags::SYMLINK_NOFOLLOW) {
         Ok(st) => st,
         Err(Errno::NOENT) => return Ok(()),
@@ -563,25 +563,5 @@ fn remove_tree(parent: BorrowedFd<'_>, name: &OsStr) -> Result<(), Errno> {
     match rustix::fs::unlinkat(parent, name, AtFlags::REMOVEDIR) {
         Ok(()) | Err(Errno::NOENT) => Ok(()),
         Err(e) => Err(e),
-    }
-}
-
-/// Remove `run-<pid>` entries of `dir` whose pid is not a live process.
-fn sweep_leftovers(dir: &Path) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let Some(pid) = name
-            .to_str()
-            .and_then(|n| n.strip_prefix(RUN_PREFIX))
-            .and_then(|p| p.parse::<u32>().ok())
-        else {
-            continue;
-        };
-        if pid != std::process::id() && !Path::new(&format!("/proc/{pid}")).exists() {
-            let _ = std::fs::remove_dir_all(entry.path());
-        }
     }
 }
