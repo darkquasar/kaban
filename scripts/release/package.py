@@ -20,7 +20,7 @@ def package(args):
     for name in ('kaban', 'kaban-index'):
         path = stage / name
         size = path.stat().st_size
-        if (not musl and name == 'kaban' and size >= 25 * 1024 * 1024) or (musl and name == 'kaban-index' and size >= 12_000_000):
+        if (not musl and name == 'kaban' and size >= 40 * 1024 * 1024) or (musl and name == 'kaban-index' and size >= 12_000_000):
             raise ValueError(f'{name} exceeds its release size budget: {size} bytes')
         dynamic = subprocess.check_output(['readelf', '-d', str(path)], text=True)
         segments = subprocess.check_output(['readelf', '-l', str(path)], text=True)

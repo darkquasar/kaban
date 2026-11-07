@@ -371,7 +371,8 @@ class CiToolSelection(unittest.TestCase):
 
     def test_artifact_strict_budgets_keep_failure_and_incomplete_semantics(self):
         for group, table, sizes, code, diagnostic in (
-            ("gnu", False, {"default/kaban": 25 * 1024 * 1024}, 1, "FAILED: binary size"),
+            ("gnu", False, {"default/kaban": 40 * 1024 * 1024 - 1}, 0, "gate: < 41943040"),
+            ("gnu", False, {"default/kaban": 40 * 1024 * 1024}, 1, "FAILED: binary size"),
             ("gnu", True, {"no-default/kaban": 17 * 1024 * 1024}, 1, "FAILED: --no-default-features"),
             ("gnu", False, {"graph-on/kaban": 900064}, 3, "N4 MISS"),
             ("musl", False, {"musl/kaban-index": 11999999}, 0, "gate: < 12000000"),

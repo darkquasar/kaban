@@ -108,5 +108,5 @@ redistribution texts.
 
 The earlier M7 handoff was local and unpublished. Its retained ARM64 measurements
 and omitted checks describe those historical artifacts, not these release bytes.
-Current CI enforces default GNU `kaban` below 25 MiB; the optional no-default size
+Current CI enforces default GNU `kaban` below 40 MiB; the optional no-default size
 table uses 17 MiB. Release metadata supplies the actual measured sizes.

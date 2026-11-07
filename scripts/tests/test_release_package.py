@@ -20,7 +20,13 @@ class ReleasePackage(unittest.TestCase):
     def test_musl_with_dynamic_dependency_is_refused(self):
         self.check_package('x86_64-unknown-linux-musl', dynamic=True)
 
-    def check_package(self, target, dynamic=False):
+    def test_gnu_kaban_size_budget_accepts_below_40_mib_and_refuses_at_boundary(self):
+        for size in (40 * 1024 * 1024 - 1, 40 * 1024 * 1024, 40 * 1024 * 1024 + 1):
+            with self.subTest(size=size):
+                self.check_package('x86_64-unknown-linux-gnu', kaban_size=size,
+                                   size_refused=size >= 40 * 1024 * 1024)
+
+    def check_package(self, target, dynamic=False, kaban_size=None, size_refused=False):
         with tempfile.TemporaryDirectory() as scratch:
             root = Path(scratch)
             stage = root / 'kaban-v1.0.0-test'
@@ -29,6 +35,9 @@ class ReleasePackage(unittest.TestCase):
                 file = stage / name
                 file.write_bytes(b'invented executable: ' + name.encode())
                 file.chmod(0o755)
+                if name == 'kaban' and kaban_size is not None:
+                    with file.open('r+b') as stream:
+                        stream.truncate(kaban_size)
             (stage / 'LICENSE').write_text('project license')
             (stage / 'NOTICE').write_text('project notice')
             (stage / 'third-party').mkdir()
@@ -43,6 +52,11 @@ class ReleasePackage(unittest.TestCase):
                 '--target', target, '--version', '1.0.0-test', '--commit', 'a' * 40,
                 '--output', str(output)], capture_output=True, text=True,
                 env={**os.environ, 'PATH': str(root) + os.pathsep + os.environ['PATH']})
+            if size_refused:
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('exceeds its release size budget', result.stderr)
+                self.assertFalse(list(output.glob('*.tar.gz')))
+                return
             if dynamic:
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn('static', result.stderr)

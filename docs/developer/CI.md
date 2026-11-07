@@ -620,7 +620,7 @@ All existing product assertions, Tantivy coverage and budgets remain:
 
 | Check | Strict bound |
 | --- | --- |
-| Default GNU Kaban | <25 MiB |
+| Default GNU Kaban | <40 MiB |
 | Optional no-default size table | <17 MiB |
 | Graph on/off delta | <900,000 bytes |
 | Native musl index | <12,000,000 bytes |
@@ -652,7 +652,7 @@ local invocations add no automatic pruning.
 
 | Configuration | Consumers / reuse |
 | --- | --- |
-| Workspace default | Default Kaban's <25 MiB guard and full GNU MCP smoke use its verified staged copy; workspace index is also saved. |
+| Workspace default | Default Kaban's <40 MiB guard and full GNU MCP smoke use its verified staged copy; workspace index is also saved. |
 | GNU index package | Separate build retained: effective workspace/package equivalence has not been established. Its size stays informational. |
 | Explicit graph-on | Kept distinct from workspace default; historical bytes differed. Paired with graph-off for the strict <900,000-byte delta. |
 | Graph-off | Retains `--no-default-features --features ingest,text-index-tantivy`; Tantivy stays selected. |

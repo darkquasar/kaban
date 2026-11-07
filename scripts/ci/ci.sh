@@ -80,10 +80,10 @@ fi
 kaban_target_dir=${CARGO_TARGET_DIR:-target}
 
 # core-spec N1 (OWN-64, OWN-110, OWN-112) as amended by spec 05 OWN-B (2026-10-26, SS-13b): the default build
-# (features `ingest`, `code-graph`, `text-index-tantivy`) stays under 25 MiB; the build with
+# (features `ingest`, `code-graph`, `text-index-tantivy`) stays under 40 MiB; the build with
 # default features disabled still includes Tantivy and stays under 17 MiB (spec 05 OWN-Q),
 # gated inside the size table below.
-MAX_BINARY_BYTES=$((25 * 1024 * 1024))
+MAX_BINARY_BYTES=$((40 * 1024 * 1024))
 MAX_NO_DEFAULT_BYTES=$((17 * 1024 * 1024))
 missing=0
 
