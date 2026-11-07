@@ -122,7 +122,7 @@ fn is_hex(s: &str, len: usize) -> bool {
             .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
 }
 
-/// Darwin opens tool descriptors read-only rather than with Linux O_PATH. A FIFO must
+/// Darwin opens tool descriptors read-only rather than with Linux `O_PATH`. A FIFO must
 /// still be rejected before waiting for a writer. Run the attempted admission in a child
 /// so a blocking regression is killed and reaped before the assertion fails.
 #[cfg(target_os = "macos")]

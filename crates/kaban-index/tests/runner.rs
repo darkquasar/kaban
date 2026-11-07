@@ -997,6 +997,59 @@ fn wrapper_rejects_script_candidate() {
 // slice 12 (spec §7): a left-over `run-<pid>` of a dead process is removed by the next run's
 // scratch creation; a live process's scratch is left alone.
 #[test]
+fn leftover_sweep_never_recovers_another_runs_permissions() {
+    let home = Home::new("leftover-permissions");
+    let dir = home.repo_dir();
+    assert_eq!(
+        kaban_core::process::process_liveness(4_194_303),
+        kaban_core::process::Liveness::Dead
+    );
+    // Keep the inode open: even a successful unlink must not change its mode. A dead
+    // runner does not prove its producer group is gone, so mode recovery is unsafe.
+    let dead = dir.path.join("run-4194303");
+    fs::create_dir_all(&dead).unwrap();
+    let retained = fs::File::open(&dead).unwrap();
+    retained
+        .set_permissions(fs::Permissions::from_mode(0o500))
+        .unwrap();
+    assert_eq!(kaban_index::gc::sweep_leftovers(&dir), 1);
+    assert!(!dead.exists());
+    assert_eq!(
+        retained.metadata().unwrap().permissions().mode() & 0o777,
+        0o500
+    );
+
+    // The same rule applies recursively, including an inaccessible descendant.
+    fs::create_dir_all(dead.join("nested")).unwrap();
+    let nested = fs::File::open(dead.join("nested")).unwrap();
+    nested
+        .set_permissions(fs::Permissions::from_mode(0o000))
+        .unwrap();
+    let removed = kaban_index::gc::sweep_leftovers(&dir);
+    let mode = nested.metadata().unwrap().permissions().mode() & 0o777;
+    nested
+        .set_permissions(fs::Permissions::from_mode(0o700))
+        .unwrap();
+    assert_eq!(
+        removed, 0,
+        "inaccessible entries are left for later cleanup"
+    );
+    assert_eq!(mode, 0o000, "a nested entry's mode must remain unchanged");
+    assert!(dead.join("nested").exists());
+
+    let outside = home.path().join("outside");
+    fs::create_dir(&outside).unwrap();
+    fs::write(outside.join("sentinel"), b"preserve").unwrap();
+    fs::set_permissions(&outside, fs::Permissions::from_mode(0o500)).unwrap();
+    std::os::unix::fs::symlink(&outside, dead.join("link")).unwrap();
+    assert_eq!(kaban_index::gc::sweep_leftovers(&dir), 1);
+    let outside_mode = fs::metadata(&outside).unwrap().permissions().mode() & 0o777;
+    fs::set_permissions(&outside, fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(outside_mode, 0o500);
+    assert_eq!(fs::read(outside.join("sentinel")).unwrap(), b"preserve");
+}
+
+#[test]
 fn leftover_scratch_removed_by_next_run() {
     let home = Home::new("leftover");
     let dir = home.repo_dir();

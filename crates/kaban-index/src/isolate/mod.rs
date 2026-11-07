@@ -526,6 +526,20 @@ impl Drop for Scratch {
 /// symlink is unlinked, never followed), a directory first gets the owner's `rwx` back, is
 /// opened `O_DIRECTORY|O_NOFOLLOW`, emptied entry by entry, then removed. Absence is success.
 pub(crate) fn remove_tree(parent: BorrowedFd<'_>, name: &OsStr) -> Result<(), Errno> {
+    remove_tree_inner(parent, name, true)
+}
+
+/// Cross-run cleanup cannot assume a dead runner's producers have stopped. Never
+/// recover permissions here; leave inaccessible entries for a later safe cleanup.
+pub(crate) fn remove_leftover_tree(parent: BorrowedFd<'_>, name: &OsStr) -> Result<(), Errno> {
+    remove_tree_inner(parent, name, false)
+}
+
+fn remove_tree_inner(
+    parent: BorrowedFd<'_>,
+    name: &OsStr,
+    recover_permissions: bool,
+) -> Result<(), Errno> {
     let st = match rustix::fs::statat(parent, name, AtFlags::SYMLINK_NOFOLLOW) {
         Ok(st) => st,
         Err(Errno::NOENT) => return Ok(()),
@@ -537,10 +551,12 @@ pub(crate) fn remove_tree(parent: BorrowedFd<'_>, name: &OsStr) -> Result<(), Er
             Err(e) => Err(e),
         };
     }
-    // the owner's bits, so a mode-000 directory can be listed (the entry is a directory, not
-    // a link: the stat above did not follow one; the child that could race this is dead)
-    let mode = Mode::from_raw_mode(st.st_mode & 0o7777) | Mode::RWXU;
-    rustix::fs::chmodat(parent, name, mode, AtFlags::empty())?;
+    // Owned-run teardown follows producer settlement. A cross-run sweep observes
+    // only the runner PID, so it must never enter this symlink-following recovery.
+    if recover_permissions {
+        let mode = Mode::from_raw_mode(st.st_mode & 0o7777) | Mode::RWXU;
+        rustix::fs::chmodat(parent, name, mode, AtFlags::empty())?;
+    }
     let dir = rustix::fs::openat(
         parent,
         name,
@@ -557,7 +573,7 @@ pub(crate) fn remove_tree(parent: BorrowedFd<'_>, name: &OsStr) -> Result<(), Er
         children.push(OsStr::from_bytes(bytes).to_owned());
     }
     for child in &children {
-        remove_tree(dir.as_fd(), child)?;
+        remove_tree_inner(dir.as_fd(), child, recover_permissions)?;
     }
     drop(dir);
     match rustix::fs::unlinkat(parent, name, AtFlags::REMOVEDIR) {

@@ -185,7 +185,9 @@ pub fn apply(dir: &AdmittedDir, collect: &[(String, Reason)]) -> Result<Vec<Stri
 }
 
 /// Remove the left-overs of killed runs (§7): `*.cg.db.tmp-<pid>` files and `run-<pid>`
-/// directories whose pid is not a live process. Returns the number removed.
+/// directories whose pid is observed dead. Never recover another run's permissions:
+/// its producer group may still be alive. Inaccessible entries remain for later cleanup.
+/// Returns the number removed.
 #[must_use]
 pub fn sweep_leftovers(dir: &AdmittedDir) -> usize {
     // Linux's admitted handle is O_PATH. Explicitly obtain a readable stream relative
@@ -219,7 +221,7 @@ pub fn sweep_leftovers(dir: &AdmittedDir) -> usize {
         {
             continue;
         }
-        let ok = crate::isolate::remove_tree(dir.handle.as_fd(), raw_name).is_ok();
+        let ok = crate::isolate::remove_leftover_tree(dir.handle.as_fd(), raw_name).is_ok();
         if ok {
             removed += 1;
         }
