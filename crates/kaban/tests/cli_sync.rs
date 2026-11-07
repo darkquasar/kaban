@@ -469,32 +469,9 @@ fn sync_deadline_stops_a_stalled_run_with_the_fixed_text_and_exit_4() {
     let id = stdout_json(&created)["id"].as_str().unwrap().to_owned();
     std::fs::create_dir_all(repo.root.join(".kaban")).unwrap();
     // another kaban "holds" the repository for the whole run: this sync stalls on the lock
-    let mut holder = Command::new("flock")
-        .args(["--no-fork", "-x"])
-        .arg(repo.root.join(".kaban"))
-        .args(["sleep", "120"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("flock(1) is available");
-    let held = || {
-        !Command::new("flock")
-            .args(["-n", "-x"])
-            .arg(repo.root.join(".kaban"))
-            .arg("true")
-            .status()
-            .unwrap()
-            .success()
-    };
-    let t0 = Instant::now();
-    while !held() {
-        assert!(
-            t0.elapsed() < Duration::from_secs(10),
-            "holder never locked"
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    // Hold the same kernel lock directly; this fixture needs no GNU flock executable.
+    let holder = std::fs::File::open(repo.root.join(".kaban")).unwrap();
+    holder.try_lock().unwrap();
 
     let started = Instant::now();
     let out = kaban(&s, &db, &repo.root, &["sync", "--deadline", "1"]);
@@ -522,8 +499,7 @@ fn sync_deadline_stops_a_stalled_run_with_the_fixed_text_and_exit_4() {
         .collect();
     assert!(leftovers.is_empty(), "no temp file left: {leftovers:?}");
 
-    holder.kill().unwrap();
-    holder.wait().unwrap();
+    drop(holder);
 
     // the holder is gone: a deadline the run meets changes nothing (the environment spelling
     // of the same flag)

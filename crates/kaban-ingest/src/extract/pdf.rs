@@ -110,6 +110,19 @@ impl Extractor for PdfOxideExtractor {
         ctx.check()?;
         let doc =
             PdfDocument::from_bytes(bytes.to_vec()).map_err(|e| format_error(OPEN_ERROR, e))?;
+        // The backend's permissive page conversion can turn decryption failures
+        // into empty text. Refuse unreadable encryption before that can look like
+        // a scanned document requiring OCR. Empty-password PDFs remain supported.
+        if doc.is_encrypted()
+            && !doc
+                .authenticate(b"")
+                .map_err(|e| format_error(OPEN_ERROR, e))?
+        {
+            return Err(format_error(
+                OPEN_ERROR,
+                pdf_oxide::Error::InvalidPdf("pdf password required".into()),
+            ));
+        }
         let total = doc.page_count().map_err(|e| format_error(OPEN_ERROR, e))?;
         let page_count = u32::try_from(total).ok();
         let cap = usize::try_from(self.page_cap).unwrap_or(usize::MAX);
