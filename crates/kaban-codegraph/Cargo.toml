@@ -35,5 +35,9 @@ proptest.workspace = true
 sha2.workspace = true       # byte-identical snapshot builds (G1-N5)
 tempfile = "3"              # locked 3.27.0; RAII scratch directories (test-fixture-raii)
 
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+# Native descriptor-lifetime tests query original raw descriptors without unsafe.
+nix = { version = "=0.29.0", default-features = false, features = ["fs"] }
+
 [lints]
 workspace = true

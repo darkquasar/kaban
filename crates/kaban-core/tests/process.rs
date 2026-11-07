@@ -99,9 +99,22 @@ fn args(list: &[&str]) -> Vec<OsString> {
 }
 
 fn spec<'a>(exec: Exec, argv: &[&str], cwd: &'a Path, deadline: Duration) -> Spec<'a> {
+    // Native shell fixtures are interpreted by the system shell. Fresh script files can
+    // incur macOS launch assessment beyond the deliberately short monitor interval.
+    #[cfg(target_os = "macos")]
+    let (exec, arguments) = match exec {
+        Exec::Path(path) if path.extension().is_some_and(|e| e == "sh") => {
+            let mut arguments = vec![path.into_os_string()];
+            arguments.extend(args(argv));
+            (Exec::Path("/bin/sh".into()), arguments)
+        }
+        other => (other, args(argv)),
+    };
+    #[cfg(not(target_os = "macos"))]
+    let arguments = args(argv);
     Spec {
         exec,
-        args: args(argv),
+        args: arguments,
         cwd,
         env: EnvAllowlist::new(),
         deadline,
@@ -116,6 +129,7 @@ fn spec<'a>(exec: Exec, argv: &[&str], cwd: &'a Path, deadline: Duration) -> Spe
 }
 
 /// Whether `pid` is still a live process (a reaped or zombie process is not).
+#[cfg(target_os = "linux")]
 fn alive(pid: &str) -> bool {
     std::fs::read_to_string(format!("/proc/{pid}/stat"))
         .ok()
@@ -124,6 +138,16 @@ fn alive(pid: &str) -> bool {
             after.chars().next()
         })
         .is_some_and(|state| state != 'Z' && state != 'X')
+}
+
+#[cfg(target_os = "macos")]
+fn alive(pid: &str) -> bool {
+    let raw: u32 = pid.parse().expect("positive fixture PID");
+    match kaban_core::process::process_liveness(raw) {
+        kaban_core::process::Liveness::Dead => false,
+        kaban_core::process::Liveness::Unknown => panic!("fixture PID observation unavailable"),
+        kaban_core::process::Liveness::Alive => true,
+    }
 }
 
 const GRACE: Duration = Duration::from_millis(200);
@@ -169,12 +193,16 @@ fn a_grandchild_holding_the_pipe_dies_with_the_group_at_the_deadline() {
 fn a_group_kill_on_an_already_reaped_group_is_reported_in_the_outcome() {
     let scratch = Scratch::new("gone-group");
     let pidfile = scratch.0.join("escaped.pid");
+    #[cfg(target_os = "linux")]
+    let escape = "setsid sleep 30".to_owned();
+    #[cfg(target_os = "macos")]
+    let escape = format!(
+        "'{}' --exact escaped_session_fixture --ignored --nocapture",
+        std::env::current_exe().unwrap().display()
+    );
     let wrapper = scratch.script(
         "escape.sh",
-        &format!(
-            "setsid sleep 30 &\necho $! > '{}'\nexit 0\n",
-            pidfile.display()
-        ),
+        &format!("{escape} &\necho $! > '{}'\nexit 0\n", pidfile.display()),
     );
     let escaped = Descendant::armed(pidfile);
     let deadline = Duration::from_millis(200);
@@ -433,7 +461,7 @@ fn a_monitor_erroring_on_its_second_sample_kills_within_two_intervals() {
     let scratch = Scratch::new("monitor");
     let interval = Duration::from_millis(50);
     let mut s = spec(
-        Exec::Path(PathBuf::from("/usr/bin/sleep")),
+        Exec::Path(PathBuf::from("/bin/sleep")),
         &["30"],
         &scratch.0,
         Duration::from_secs(5),
@@ -586,6 +614,7 @@ fn env_allowlist_internal_git_keys_present() {
 /// A single-utility ELF for `name`: this host's `/bin/true`, `/bin/false` and `/bin/ls` may be a
 /// multicall binary that dispatches on `argv[0]` (uutils), which a `/proc/self/fd/<n>` exec
 /// cannot provide, so the GNU single binaries are preferred where the distribution ships them.
+#[cfg(target_os = "linux")]
 fn elf_tool(name: &str) -> PathBuf {
     let gnu = PathBuf::from(format!("/bin/gnu{name}"));
     if gnu.is_file() {
@@ -595,6 +624,7 @@ fn elf_tool(name: &str) -> PathBuf {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn is_elf(path: &Path) -> bool {
     std::fs::read(path).is_ok_and(|b| b.starts_with(b"\x7fELF"))
 }
@@ -735,11 +765,16 @@ impl tracing::Subscriber for Capture {
 
 /// An owned descriptor of a file in `scratch` whose `FD_CLOEXEC` flag is cleared through the
 /// owned handle (safe): the invented inherited descriptor of RG1-2. Closed on drop.
-#[cfg(target_os = "linux")]
 fn non_cloexec_fixture(scratch: &Scratch) -> (std::fs::File, PathBuf) {
     let path = scratch.0.join("inherited.txt");
     std::fs::write(&path, "leak").unwrap();
-    let file = std::fs::File::open(&path).unwrap();
+    let low = std::fs::File::open(&path).unwrap();
+    #[cfg(target_os = "macos")]
+    let minimum = 4096;
+    #[cfg(not(target_os = "macos"))]
+    let minimum = 142; // also exercises the retained VM's lower RLIMIT_NOFILE
+    let file = std::fs::File::from(rustix::io::fcntl_dupfd_cloexec(&low, minimum).unwrap());
+    drop(low);
     rustix::io::fcntl_setfd(&file, rustix::io::FdFlags::empty()).unwrap();
     assert!(
         rustix::io::fcntl_getfd(&file).unwrap().is_empty(),
@@ -751,7 +786,6 @@ fn non_cloexec_fixture(scratch: &Scratch) -> (std::fs::File, PathBuf) {
 // RG1-2, `Refuse` (the default): a descriptor this process holds without `FD_CLOEXEC` would pass
 // to the child, so `run` refuses before any spawn and names the descriptor for what it is
 // (G7, GO-FIX-1): `InheritedFd { fd }` with its number, the message saying so and the action.
-#[cfg(target_os = "linux")]
 #[test]
 fn a_non_cloexec_descriptor_is_refused_before_spawn_under_refuse() {
     use std::os::fd::AsRawFd;
@@ -760,18 +794,24 @@ fn a_non_cloexec_descriptor_is_refused_before_spawn_under_refuse() {
     let scratch = Scratch::new("refuse-fd");
     let (leak, _) = non_cloexec_fixture(&scratch);
     let leaked = u32::try_from(leak.as_raw_fd()).unwrap();
+    let fds = kaban_core::process::inheritable_fds().unwrap();
+    assert!(
+        fds.contains(&leaked),
+        "the actual non-CLOEXEC descriptor is observed"
+    );
+    let first = *fds.iter().min().unwrap();
     let marker = scratch.0.join("ran");
     let script = scratch.script("mark.sh", &format!("touch '{}'\n", marker.display()));
     let mut s = spec(Exec::Path(script), &[], &scratch.0, Duration::from_secs(5));
     s.inherited_fds = InheritedFds::Refuse;
     let err = run(s).unwrap_err();
     assert!(
-        matches!(err, ProcessError::InheritedFd { fd: Some(fd) } if fd == leaked),
-        "{err:?} names descriptor {leaked}"
+        matches!(err, ProcessError::InheritedFd { fd: Some(fd) } if fd == first),
+        "{err:?} names lowest descriptor {first}"
     );
     assert_eq!(
         err.to_string(),
-        format!("inherited an open file descriptor (fd {leaked}); close it in the caller")
+        format!("inherited an open file descriptor (fd {first}); close it in the caller")
     );
     assert!(!marker.exists(), "no child may have been spawned");
     assert!(
@@ -784,15 +824,16 @@ fn a_non_cloexec_descriptor_is_refused_before_spawn_under_refuse() {
 // `/proc/self/fd`), and the runner traced once at `info` with the count only: no fd number, no
 // path (OWN-61 lane decision: `info`, not `warn`, so a hook's stderr stays empty under
 // `RUST_LOG=warn`).
-#[cfg(target_os = "linux")]
 #[test]
 fn a_non_cloexec_descriptor_is_tolerated_with_a_count_only_info_trace() {
+    use std::os::fd::AsRawFd;
     let scratch = Scratch::new("tolerate-fd");
-    let (_leak, target) = non_cloexec_fixture(&scratch);
+    let (leak, _target) = non_cloexec_fixture(&scratch);
+    let number = leak.as_raw_fd().to_string();
     let capture = Capture::default();
     let mut s = spec(
-        Exec::Path(PathBuf::from("/bin/ls")),
-        &["-l", "/proc/self/fd"],
+        Exec::Path(PathBuf::from("/bin/bash")),
+        &["-c", "cat <&\"$1\"", "bash", &number],
         &scratch.0,
         Duration::from_secs(5),
     );
@@ -801,7 +842,7 @@ fn a_non_cloexec_descriptor_is_tolerated_with_a_count_only_info_trace() {
     assert!(outcome.status.unwrap().success(), "{outcome:?}");
     let listing = String::from_utf8(outcome.stdout).unwrap();
     assert!(
-        listing.contains(&format!(" -> {}", target.display())),
+        listing == "leak",
         "the tolerated descriptor reached the child: {listing}"
     );
     let lines = capture.lines();
@@ -830,41 +871,16 @@ fn a_non_cloexec_descriptor_is_tolerated_with_a_count_only_info_trace() {
 /// inherited from an ancestor (nextest under `flock(1)` leaves its lock fd open) and pass to
 /// every child. The clean-process test closes exactly these in the shell before re-executing
 /// the test binary.
-#[cfg(target_os = "linux")]
 fn non_cloexec_fds() -> Vec<u32> {
-    const O_CLOEXEC: u64 = 0o2_000_000;
-    let mut out = Vec::new();
-    for entry in std::fs::read_dir("/proc/self/fd").unwrap() {
-        let entry = entry.unwrap();
-        let Ok(number) = entry.file_name().to_string_lossy().parse::<u32>() else {
-            continue;
-        };
-        if number <= 2 {
-            continue;
-        }
-        let Ok(info) = std::fs::read_to_string(format!("/proc/self/fdinfo/{number}")) else {
-            continue; // the read_dir handle itself, closed by now
-        };
-        let flags = info
-            .lines()
-            .find_map(|l| l.strip_prefix("flags:"))
-            .and_then(|f| u64::from_str_radix(f.trim(), 8).ok())
-            .unwrap_or(0);
-        if flags & O_CLOEXEC == 0 {
-            out.push(number);
-        }
-    }
-    out
+    kaban_core::process::inheritable_fds().expect("descriptor observation is required")
 }
 
 const CLEAN_PROCESS_TEST: &str =
     "a_handle_child_in_a_clean_process_inherits_exactly_the_standard_descriptors";
-#[cfg(target_os = "linux")]
 const HIGH_FD_PROCESS_TEST: &str = "a_handle_child_cleans_an_inherited_high_descriptor";
 
 // GitHub's runner can leave descriptor 142 open. Start a real inherited-descriptor case,
 // then exercise the same cleanup launcher as the ordinary clean-process test below.
-#[cfg(target_os = "linux")]
 #[test]
 fn a_handle_child_inherits_only_standard_descriptors_with_a_high_parent_descriptor() {
     let scratch = Scratch::new("fds-high-parent");
@@ -897,7 +913,6 @@ fn a_handle_child_inherits_only_standard_descriptors_with_a_high_parent_descript
     );
 }
 
-#[cfg(target_os = "linux")]
 #[test]
 #[ignore = "re-executed with descriptor 142 by the high-parent-descriptor test"]
 fn a_handle_child_cleans_an_inherited_high_descriptor() {
@@ -915,7 +930,6 @@ fn a_handle_child_cleans_an_inherited_high_descriptor() {
 // fd), so this test re-executes the test binary for the ignored clean-process test below
 // through `run` itself, with Bash closing exactly the leaked descriptors before the exec.
 // Bash accepts arbitrary descriptor numbers; `/bin/sh` may only accept single digits.
-#[cfg(target_os = "linux")]
 #[test]
 fn a_handle_child_inherits_only_the_standard_descriptors() {
     let scratch = Scratch::new("fds-outer");
@@ -957,44 +971,94 @@ fn a_handle_child_inherits_only_the_standard_descriptors() {
 // The clean-process half of slice 5c: run by the test above in a process whose only open
 // descriptors are 0, 1 and 2 (run directly under a launcher that leaks a descriptor, `Refuse`
 // refuses, which is RG1-2's contract, not this test's subject).
-#[cfg(target_os = "linux")]
 #[test]
 #[ignore = "re-executed in a clean child by a_handle_child_inherits_only_the_standard_descriptors"]
 fn a_handle_child_in_a_clean_process_inherits_exactly_the_standard_descriptors() {
     let scratch = Scratch::new("fds-clean");
+    #[cfg(target_os = "linux")]
     let wrapper = scratch.0.join("ls");
+    #[cfg(target_os = "linux")]
     std::fs::copy(elf_tool("ls"), &wrapper).unwrap();
     // an extra parent descriptor that must not leak (Rust opens with CLOEXEC)
-    let held = std::fs::File::open("/proc/self/stat").unwrap();
-    let handle = Exec::open_handle(&wrapper).unwrap();
-    let mut s = spec(
-        handle,
-        &["-l", "/proc/self/fd"],
-        &scratch.0,
-        Duration::from_secs(5),
+    let held = std::fs::File::open(&scratch.0).unwrap();
+    #[cfg(target_os = "linux")]
+    let (handle, arguments) = (
+        Exec::open_handle(&wrapper).unwrap(),
+        vec!["-l", "/proc/self/fd"],
     );
+    #[cfg(target_os = "macos")]
+    let (handle, arguments) = (
+        Exec::Path(std::env::current_exe().unwrap()),
+        vec![
+            "--exact",
+            "native_descriptor_probe",
+            "--ignored",
+            "--nocapture",
+        ],
+    );
+    let mut s = spec(handle, &arguments, &scratch.0, Duration::from_secs(5));
     s.inherited_fds = InheritedFds::Refuse;
     let outcome = run(s).unwrap();
     drop(held);
     assert!(outcome.status.unwrap().success(), "{outcome:?}");
     let listing = String::from_utf8(outcome.stdout).unwrap();
-    let mut seen: Vec<(u32, String)> = listing
-        .lines()
-        .filter_map(|line| {
-            let (left, target) = line.split_once(" -> ")?;
-            let number = left.rsplit(' ').next()?.parse().ok()?;
-            Some((number, target.to_owned()))
+    #[cfg(target_os = "macos")]
+    assert!(
+        listing.contains("test result: ok. 1 passed"),
+        "native FD observer ran: {listing}"
+    );
+    #[cfg(target_os = "linux")]
+    {
+        let mut seen: Vec<(u32, String)> = listing
+            .lines()
+            .filter_map(|line| {
+                let (left, target) = line.split_once(" -> ")?;
+                let number = left.rsplit(' ').next()?.parse().ok()?;
+                Some((number, target.to_owned()))
+            })
+            .collect();
+        seen.sort();
+        let numbers: Vec<u32> = seen.iter().map(|(n, _)| *n).collect();
+        assert_eq!(
+            numbers,
+            vec![0, 1, 2, 3],
+            "exactly the standard descriptors and ls's own: {listing}"
+        );
+        assert!(
+            seen[3].1.starts_with("/proc/") && seen[3].1.ends_with("/fd"),
+            "fd 3 is ls's own directory descriptor: {listing}"
+        );
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "session fixture launched by the escaped-group test"]
+fn escaped_session_fixture() {
+    rustix::process::setsid().unwrap();
+    std::thread::sleep(Duration::from_secs(30));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "native FD observer reexecuted by the clean-process test"]
+fn native_descriptor_probe() {
+    // Inspect in-process: Darwin ls itself opens two traversal descriptors.
+    let mut numbers: Vec<u32> = std::fs::read_dir("/dev/fd")
+        .unwrap()
+        .map(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .parse()
+                .unwrap()
         })
         .collect();
-    seen.sort();
-    let numbers: Vec<u32> = seen.iter().map(|(n, _)| *n).collect();
+    numbers.sort_unstable();
     assert_eq!(
         numbers,
         vec![0, 1, 2, 3],
-        "exactly the standard descriptors and ls's own: {listing}"
-    );
-    assert!(
-        seen[3].1.starts_with("/proc/") && seen[3].1.ends_with("/fd"),
-        "fd 3 is ls's own directory descriptor: {listing}"
+        "only standard FDs and this read_dir's FD"
     );
 }

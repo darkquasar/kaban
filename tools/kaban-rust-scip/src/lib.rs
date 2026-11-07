@@ -1,6 +1,6 @@
 //! Contract and symbol primitives for the standalone Rust producer.
 //!
-//! A host is advertised only after the complete semantic fixture oracle (all 21 qualification
+//! A host is advertised only after the complete semantic fixture oracle (27 qualification
 //! profiles) passed on it; the evidence lives outside the repository (R0 qualification folder).
 
 pub mod identity;
@@ -27,6 +27,6 @@ pub fn capabilities() -> Capabilities {
         semantic_profile: "kaban-rust-v1",
         producer_version: env!("CARGO_PKG_VERSION"),
         ra_ap_version: "0.0.358",
-        supported_host_triples: &["aarch64-unknown-linux-gnu"],
+        supported_host_triples: &["aarch64-unknown-linux-gnu", "aarch64-apple-darwin"],
     }
 }

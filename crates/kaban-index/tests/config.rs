@@ -41,29 +41,7 @@ impl Drop for Scratch {
 /// the binary starts, so the production descriptor policy (`Refuse`) of doctor's probes holds
 /// (U2 RU2-3; the CG4.6 D13 pattern of `tests/cli.rs`).
 fn non_cloexec_fds() -> Vec<u32> {
-    const O_CLOEXEC: u64 = 0o2_000_000;
-    let mut out = Vec::new();
-    for entry in fs::read_dir("/proc/self/fd").unwrap() {
-        let entry = entry.unwrap();
-        let Ok(number) = entry.file_name().to_string_lossy().parse::<u32>() else {
-            continue;
-        };
-        if number <= 2 {
-            continue;
-        }
-        let Ok(info) = fs::read_to_string(format!("/proc/self/fdinfo/{number}")) else {
-            continue;
-        };
-        let flags = info
-            .lines()
-            .find_map(|l| l.strip_prefix("flags:"))
-            .and_then(|f| u64::from_str_radix(f.trim(), 8).ok())
-            .unwrap_or(0);
-        if flags & O_CLOEXEC == 0 {
-            out.push(number);
-        }
-    }
-    out
+    kaban_core::process::inheritable_fds().expect("descriptor observation is required")
 }
 
 /// Run `kaban-index doctor <args>` with `KABAN_HOME=<home>` and `PATH=<path_env>`, in a child

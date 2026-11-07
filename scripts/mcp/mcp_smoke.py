@@ -108,11 +108,21 @@ check(cg_missing == [] and "code_impact" not in names, f"cg: tools/list has the 
 # (d) serve_children_are_git_only (G1-S3): while the smoke drives the server, a daemon thread
 # reads /proc/<pid>/task/*/children every 100 ms and `call()` reads them after every tool call;
 # each child's /proc/<child>/comm must be `git`; the first other comm fails the smoke by name.
-# Linux only (/proc); in Docker mode /proc sees the `docker run` client, not the server.
+# Darwin samples the native process table; Docker observes the client, not the server.
 import threading
 cg_children = {"samples": 0, "comms": set(), "bad": [], "enabled": False}
 def children_comms(pid):
     comms = []
+    if sys.platform == "darwin":
+        # ucomm is the kernel's short command name, matching Linux /proc/comm.
+        # Darwin's executable-path field comm may print an exiting git as (git).
+        result = subprocess.run(["/bin/ps", "-ww", "-axo", "ppid=,ucomm="],
+                                capture_output=True, text=True, timeout=2, check=True)
+        for line in result.stdout.splitlines():
+            parent, comm = line.strip().split(None, 1)
+            if int(parent) == pid:
+                comms.append(comm.strip())
+        return comms
     for f in glob.glob(f"/proc/{pid}/task/*/children"):
         try:
             kids = open(f).read().split()
@@ -129,7 +139,14 @@ def children_ok():
     if not cg_children["enabled"]:
         return
     cg_children["samples"] += 1
-    for comm in children_comms(p.pid):
+    try:
+        comms = children_comms(p.pid)
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        if "observation failed" not in cg_children["bad"]:
+            cg_children["bad"].append("observation failed")
+            check(False, f"cg: child observation failed: {type(error).__name__}")
+        return
+    for comm in comms:
         cg_children["comms"].add(comm)
         if comm != "git" and comm not in cg_children["bad"]:
             cg_children["bad"].append(comm)
@@ -140,11 +157,12 @@ def children_sampler():
         time.sleep(0.1)
 if docker_image:
     print("not-run: serve_children (docker: /proc sees the docker client)")
-elif not sys.platform.startswith("linux"):
-    print("not-run: serve_children (not Linux)")
+elif not (sys.platform.startswith("linux") or sys.platform == "darwin"):
+    print("not-run: serve_children (unsupported host)")
 else:
     cg_children["enabled"] = True
-    threading.Thread(target=children_sampler, daemon=True).start()
+    cg_sampler = threading.Thread(target=children_sampler, daemon=True)
+    cg_sampler.start()
     time.sleep(0.25); children_ok()
 # (b) one `code_definition` call without a snapshot: `isError`, the fixed text, and the target is
 # echoed nowhere (not in the reply, not in any stdout line so far)
@@ -314,6 +332,10 @@ check(body.get("documents", []) == [] and body.get("more") is False and body.get
 # file modes while the server still holds the database (SQLite removes -wal/-shm on close)
 live_modes = {os.path.basename(f): oct(os.stat(f).st_mode & 0o777) for f in glob.glob(db + "*") if os.path.isfile(f) and not f.endswith(".audit.jsonl")}
 p.stdin.close(); p.wait(timeout=5)
+if cg_children["enabled"]:
+    cg_sampler.join(timeout=3)
+    check(not cg_sampler.is_alive() and not cg_children["bad"],
+          f"cg: child observation completed ({cg_children['samples']} samples; {sorted(cg_children['comms'])})")
 err = p.stderr.read()
 check(all(json.loads(l).get("jsonrpc") == "2.0" for l in raw_out if l.strip()), "stdout purity: every line is JSON-RPC")
 files = [f for f in glob.glob(db + "*") if os.path.isfile(f)]

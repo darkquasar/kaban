@@ -50,6 +50,7 @@ pub(super) fn admit(workspace: &Path, target: &str) -> Result<()> {
 /// A `[target.'cfg(...)']` table may apply to the active target and counts as active; a table
 /// of another triple is inert.
 fn redirect(config: &toml::Table, target: &str) -> Option<String> {
+    let darwin = target.ends_with("-apple-darwin");
     let linker_variable = format!(
         "CARGO_TARGET_{}_LINKER",
         target.to_ascii_uppercase().replace('-', "_")
@@ -61,24 +62,64 @@ fn redirect(config: &toml::Table, target: &str) -> Option<String> {
             .and_then(|t| t.get("force"))
             .and_then(Value::as_bool)
             == Some(true);
-        let pin =
-            matches!(name.as_str(), "COMPILER_PATH" | "CC" | "PATH") || *name == linker_variable;
+        let pin = matches!(name.as_str(), "COMPILER_PATH" | "CC" | "PATH")
+            || *name == linker_variable
+            || (darwin
+                && matches!(
+                    name.as_str(),
+                    "SDKROOT" | "DEVELOPER_DIR" | "CARGO" | "RUSTC" | "RUSTDOC"
+                ));
         if pin && forced {
             return Some(format!(
                 "[env] {name} with force = true redirects the compiler backend; remove it to index"
             ));
         }
-        if name.starts_with("LD_") || name == "GCC_EXEC_PREFIX" {
+        if name.starts_with("LD_")
+            || name == "GCC_EXEC_PREFIX"
+            || (darwin
+                && (name.starts_with("DYLD_")
+                    || matches!(
+                        name.as_str(),
+                        "TOOLCHAINS"
+                            | "CCC_OVERRIDE_OPTIONS"
+                            | "CPATH"
+                            | "C_INCLUDE_PATH"
+                            | "CPLUS_INCLUDE_PATH"
+                            | "OBJC_INCLUDE_PATH"
+                            | "LIBRARY_PATH"
+                            | "CXX"
+                            | "AR"
+                            | "AS"
+                            | "LD"
+                            | "RUSTC_WRAPPER"
+                            | "RUSTC_WORKSPACE_WRAPPER"
+                            | "RUSTUP_TOOLCHAIN"
+                    )))
+        {
             return Some(format!(
                 "[env] {name} redirects the compiler backend; remove it to index"
             ));
         }
     }
+    if darwin
+        && config
+            .get("build")
+            .and_then(Value::as_table)
+            .is_some_and(|table| {
+                ["rustc", "rustc-wrapper", "rustc-workspace-wrapper"]
+                    .iter()
+                    .any(|key| table.contains_key(*key))
+            })
+    {
+        return Some(
+            "[build] compiler proxy redirects the compiler backend; remove it to index".to_owned(),
+        );
+    }
     if let Some(flag) = config
         .get("build")
         .and_then(Value::as_table)
         .and_then(|b| b.get("rustflags"))
-        .and_then(backend_flag)
+        .and_then(|value| backend_flag(value, darwin))
     {
         return Some(format!(
             "[build] rustflags carries {flag}, which redirects the compiler backend; remove it to index"
@@ -92,7 +133,10 @@ fn redirect(config: &toml::Table, target: &str) -> Option<String> {
         let Some(table) = table.as_table() else {
             continue;
         };
-        if let Some(flag) = table.get("rustflags").and_then(backend_flag) {
+        if let Some(flag) = table
+            .get("rustflags")
+            .and_then(|value| backend_flag(value, darwin))
+        {
             return Some(format!(
                 "[target.{name}] rustflags carries {flag}, which redirects the compiler backend; remove it to index"
             ));
@@ -108,7 +152,7 @@ fn redirect(config: &toml::Table, target: &str) -> Option<String> {
 
 /// The flag of a `rustflags` value (a string or an array of strings) that redirects the
 /// compiler backend, spelled as cargo would pass it, or `None`.
-fn backend_flag(value: &Value) -> Option<String> {
+fn backend_flag(value: &Value, darwin: bool) -> Option<String> {
     let tokens: Vec<String> = match value {
         Value::String(s) => s.split_whitespace().map(str::to_owned).collect(),
         Value::Array(items) => items
@@ -141,6 +185,23 @@ fn backend_flag(value: &Value) -> Option<String> {
                         arg.starts_with("-B")
                             || arg.starts_with("-specs")
                             || arg.starts_with("--specs")
+                            || (darwin
+                                && [
+                                    "-isysroot",
+                                    "--sysroot",
+                                    "-syslibroot",
+                                    "-Wl,-syslibroot",
+                                    "-fuse-ld=",
+                                    "--ld-path=",
+                                    "-resource-dir",
+                                    "--config",
+                                    "-Xclang",
+                                    "-Xlinker",
+                                    "@",
+                                    "-Wl,@",
+                                ]
+                                .iter()
+                                .any(|prefix| arg.starts_with(prefix)))
                     })
                 });
         if redirects {

@@ -5,20 +5,21 @@ own licences. [NOTICE](../../NOTICE) records project attribution and vendored
 documentation sources; the binary archives also carry the resolved dependency
 and runtime notices described here.
 
-## Linux release profile
+## Four-target full release profile
 
 The committed [release bundles](../../licenses/release/README.md) cover these
 configurations, each building **both `kaban` and `kaban-index`** with default
-features:
+features plus `kaban-ingest/pdf,kaban-ingest/md-splitter`:
 
 | Target | Registry packages in inventory |
 |---|---:|
-| `x86_64-unknown-linux-gnu` | 239 |
-| `x86_64-unknown-linux-musl` | 239 |
-| `aarch64-unknown-linux-gnu` | 237 |
+| `x86_64-unknown-linux-gnu` | 332 |
+| `x86_64-unknown-linux-musl` | 332 |
+| `aarch64-unknown-linux-gnu` | 331 |
+| `aarch64-apple-darwin` | 334 |
 
 The inventory comes from `cargo tree --locked --target TARGET -p kaban -p
-kaban-index --edges normal,build`. Build dependencies and proc macros are
+kaban-index --features kaban-ingest/pdf,kaban-ingest/md-splitter --edges normal,build`. Build dependencies and proc macros are
 included conservatively; dev-only dependencies are excluded. Each target's
 `manifest.json` records resolved versions, features, declared licence expressions,
 source repositories, individual notice hashes, and the complete bundle hash.
@@ -48,6 +49,18 @@ Retaining another alternative's text does not select that alternative.
 
 The collection includes these less obvious sources:
 
+- `pdf_oxide`: MIT/Apache alternatives, its NOTICE and nested DejaVu/fallback-font
+  notices. The selected features are `icc` and `legacy-crypto`; retaining fallback
+  notices does not claim CJK/emoji font features are enabled.
+- `qcms`: complete original MIT headers, including both Mozilla Foundation and
+  Corporation copyright variants and Marti Maria attribution.
+- `text-splitter` and ICU: MIT splitter terms and Unicode-3.0 licences covering
+  embedded segmentation/normalization/property data and their IBM attribution.
+- `alloc-stdlib` and `taffy`: omitted repository-root BSD/MIT texts recovered at
+  their crate-recorded revisions. No dependency version was changed.
+- Brotli: both BSD and MIT texts; the decompressor's exact Google 2013 MIT
+  attribution is retained alongside the complete upstream Brotli MIT terms and
+  its Dropbox BSD licence, even though its filename-matched LICENSE has only BSD.
 - `encoding_rs`: MIT plus the BSD-3-Clause WHATWG text and copyright notices.
 - `unicode-ident`: MIT plus Unicode-3.0; nested Unicode table notices from other
   crates are also retained.
@@ -78,10 +91,10 @@ complete text blocks while preserving every package/path association.
 
 ## Other configurations
 
-These bundles cover the named release profiles. Optional PDF, `md-splitter`,
-benchmark configurations, external producer executables, and other targets need
-their own resolved inventories and notices before distribution. PDF remains
-opt-in and is absent from the default archives. `cargo deny check` enforces the
+These bundles cover the four full-profile downloads, including PDF and
+`md-splitter`. Other source/benchmark configurations, external producer executables
+and other targets need their own resolved inventories/notices before distribution.
+Cargo defaults remain lean. `cargo deny check` enforces the
 repository dependency policy; it does not replace collecting distribution texts.
 
 ## Vendored documentation

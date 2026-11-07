@@ -13,7 +13,7 @@ members = [
 ]
 
 [workspace.package]
-version = "3.0.0-alpha.1"
+version = "3.0.0"
 edition = "2024"
 rust-version = "1.99"   # MSRV = pinned toolchain (OD-8, R0-3); bump together with rust-toolchain.toml
 license = "Apache-2.0"
@@ -22,14 +22,14 @@ repository = "https://github.com/darkquasar/kaban"
 
 [workspace.dependencies]
 # internal crates
-kaban-core = { path = "crates/kaban-core", version = "3.0.0-alpha.1" }
-kaban-policy = { path = "crates/kaban-policy", version = "3.0.0-alpha.1" }
-kaban-store-sqlite = { path = "crates/kaban-store-sqlite", version = "3.0.0-alpha.1" }
-kaban-api = { path = "crates/kaban-api", version = "3.0.0-alpha.1" }
-kaban-ingest = { path = "crates/kaban-ingest", version = "3.0.0-alpha.1" }
-kaban-codegraph = { path = "crates/kaban-codegraph", version = "3.0.0-alpha.1" }
-kaban-index = { path = "crates/kaban-index", version = "3.0.0-alpha.1" }
-kaban-index-tantivy = { path = "crates/kaban-index-tantivy", version = "3.0.0-alpha.1" }
+kaban-core = { path = "crates/kaban-core", version = "3.0.0" }
+kaban-policy = { path = "crates/kaban-policy", version = "3.0.0" }
+kaban-store-sqlite = { path = "crates/kaban-store-sqlite", version = "3.0.0" }
+kaban-api = { path = "crates/kaban-api", version = "3.0.0" }
+kaban-ingest = { path = "crates/kaban-ingest", version = "3.0.0" }
+kaban-codegraph = { path = "crates/kaban-codegraph", version = "3.0.0" }
+kaban-index = { path = "crates/kaban-index", version = "3.0.0" }
+kaban-index-tantivy = { path = "crates/kaban-index-tantivy", version = "3.0.0" }
 
 # exact pins per core-plan.md §3 (licences recorded there)
 rmcp = { version = "=3.5.1", features = ["server", "transport-io", "elicitation"] }  # elicitation (+ url): C3.2 accept handshake probe (M3-20, OWN-4)

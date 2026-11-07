@@ -130,29 +130,7 @@ fn commit_more(repo: &Path, n: u32, date: &str) -> String {
 /// from an ancestor; closed in the shell before the binary starts (the CG1.1 clean-process
 /// pattern), so the binary's `Refuse` policy sees a clean process.
 fn non_cloexec_fds() -> Vec<u32> {
-    const O_CLOEXEC: u64 = 0o2_000_000;
-    let mut out = Vec::new();
-    for entry in fs::read_dir("/proc/self/fd").unwrap() {
-        let entry = entry.unwrap();
-        let Ok(number) = entry.file_name().to_string_lossy().parse::<u32>() else {
-            continue;
-        };
-        if number <= 2 {
-            continue;
-        }
-        let Ok(info) = fs::read_to_string(format!("/proc/self/fdinfo/{number}")) else {
-            continue;
-        };
-        let flags = info
-            .lines()
-            .find_map(|l| l.strip_prefix("flags:"))
-            .and_then(|f| u64::from_str_radix(f.trim(), 8).ok())
-            .unwrap_or(0);
-        if flags & O_CLOEXEC == 0 {
-            out.push(number);
-        }
-    }
-    out
+    kaban_core::process::inheritable_fds().expect("descriptor observation is required")
 }
 
 /// Run `kaban-index <args>` with `KABAN_HOME=<home>` and the extra environment, in a child
@@ -2054,10 +2032,25 @@ fn cli_index_required_without_isolating_tier_is_exit_8() {
         );
         return;
     }
+    let marker = s.path().join("producer-probed");
+    let original = fs::read_to_string(&good).unwrap();
+    fs::write(
+        &good,
+        original.replacen(
+            "#!/bin/sh\n",
+            &format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
+            1,
+        ),
+    )
+    .unwrap();
     let out = index(
         &home,
         &repo,
         &["--indexer", &indexer_arg(&good), "--isolation", "required"],
+    );
+    assert!(
+        !marker.exists(),
+        "required refuses before any producer probe"
     );
     assert_eq!(code(&out), 8, "{}", stderr(&out));
     assert_eq!(json(&out)["class"], "isolation_unavailable");
@@ -2765,10 +2758,17 @@ fn report_has_peak_rss_and_overrides() {
         overrides.contains(&("index.isolation".to_owned(), "off".to_owned())),
         "the per-run override is an effective override: {overrides:?}"
     );
+    #[cfg(target_os = "linux")]
     let peak = report["peak_rss_bytes_per_indexer"]["go"]
         .as_u64()
         .expect("peak RSS sampled on Linux");
+    #[cfg(target_os = "linux")]
     assert!(peak > 0, "{report}");
+    #[cfg(not(target_os = "linux"))]
+    assert!(
+        report["peak_rss_bytes_per_indexer"]["go"].is_null(),
+        "RSS unavailable"
+    );
     assert!(report["wall_ms_per_indexer"]["go"].is_number());
     assert_eq!(report["languages"], serde_json::json!(["go"]));
     let counts = &report["counts"];

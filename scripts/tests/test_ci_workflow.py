@@ -64,6 +64,7 @@ class WorkflowResults(unittest.TestCase):
                 base = base if base_present else 'f' * 40
                 if event_name == 'pull_request': event['pull_request'] = {'base': {'sha': base}}
                 elif event_name == 'push': event['before'] = base
+                elif event_name == 'merge_group': event['merge_group'] = {'base_sha': base}
             (root / 'event.json').write_text(json.dumps(event))
             (root / 'scripts/ci').mkdir(parents=True, exist_ok=True)
             (root / 'scripts/ci/ci.sh').write_text('exit 0\n')
@@ -79,9 +80,59 @@ class WorkflowResults(unittest.TestCase):
             return result, dict(line.split('=', 1) for line in output.read_text().splitlines()), summary.read_text()
 
     def required(self, selected='true'):
-        needs = {job: {'result': 'success'} for job in ('selection', 'quality', 'functional', 'pdf', 'gnu', 'musl', 'script-tests', 'producer')}
+        needs = {job: {'result': 'success'} for job in ('selection', 'quality', 'functional', 'pdf', 'gnu', 'musl', 'script-tests', 'producer', 'macos')}
         needs['selection']['outputs'] = {'producer': selected, 'rust': 'true'}
         return needs
+
+    def test_macos_producer_scope_is_narrow_and_unknowns_are_conservative(self):
+        for path, expected in (
+            ('docs/guide.md', 'false'), ('scripts/tests/test_ci_workflow.py', 'false'),
+            ('crates/kaban-ingest/src/chunk.rs', 'false'),
+            ('crates/kaban-store-sqlite/src/lib.rs', 'false'),
+            ('crates/kaban-index-tantivy/src/lib.rs', 'false'),
+            ('crates/kaban/src/cli/remember.rs', 'false'),
+            ('hooks/codex/stop.sh', 'false'), ('fixtures/ingest/doc.md', 'false'),
+            ('examples/policy.yaml', 'false'),
+            ('crates/kaban-ingest/build.rs', 'true'),
+            ('crates/kaban-ingest/Cargo.toml', 'true'),
+            ('tools/kaban-rust-scip/src/apple.rs', 'true'),
+            ('crates/kaban-index/src/language/rust.rs', 'true'),
+            ('crates/kaban-index/src/tools.rs', 'true'),
+            ('crates/kaban-core/src/process.rs', 'true'),
+            ('crates/kaban/src/mcp/code.rs', 'true'),
+            ('fixtures/codegraph/VERSIONS', 'true'), ('Cargo.lock', 'true'),
+            ('mise.toml', 'true'), ('scripts/ci/ci.sh', 'true'),
+            ('unknown.txt', 'true'),
+        ):
+            for event in ('pull_request', 'push'):
+                with self.subTest(path=path, event=event):
+                    result, output, summary = self.execute('Select producer and cache scope',
+                        event={'number': 7}, event_name=event, changed_path=path)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(output.get('macos-producer'), expected, summary)
+        for name in ('workflow_dispatch', 'merge_group'):
+            result, output, summary = self.execute('Select producer and cache scope',
+                event_name=name, changed_path='docs/guide.md', base_present=False)
+            self.assertEqual(output.get('macos-producer'), 'true', summary)
+        result, output, summary = self.execute('Select producer and cache scope',
+            changed_path='docs/guide.md', base_present=False)
+        self.assertEqual(output.get('macos-producer'), 'true', summary)
+
+    def test_macos_producer_scope_handles_mixed_changes_and_merge_base(self):
+        for paths, expected in (
+            (('hooks/codex/stop.sh', 'fixtures/ingest/doc.md'), 'false'),
+            (('crates/kaban/src/cli/remember.rs', 'crates/kaban-core/src/process/env.rs'), 'true'),
+            (('docs/guide.md', 'tools/kaban-rust-scip/src/lib.rs'), 'true'),
+            (('examples/policy.yaml', 'unknown.txt'), 'true'),
+        ):
+            for event in ('pull_request', 'push', 'merge_group'):
+                result, output, summary = self.execute('Select producer and cache scope',
+                    event={'number': 7}, event_name=event, changed_path=paths)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(output.get('macos-producer'), expected, summary)
+                if event == 'merge_group':
+                    self.assertEqual(output['rust'], 'true', summary)  # existing Linux scope
+                    self.assertEqual(output['producer'], 'true', summary)
 
     def test_linguist_only_attributes_skip_rust_for_pr_and_main_push(self):
         for event in ('pull_request', 'push'):
@@ -96,7 +147,7 @@ class WorkflowResults(unittest.TestCase):
     def test_readiness_accepts_only_explicit_metadata_skips(self):
         needs = self.required('false')
         needs['selection']['outputs']['rust'] = 'false'
-        for job in ('quality', 'functional', 'pdf', 'gnu', 'musl', 'producer'):
+        for job in ('quality', 'functional', 'pdf', 'gnu', 'musl', 'producer', 'macos'):
             needs[job]['result'] = 'skipped'
         result, _, summary = self.execute('Run gates', needs=needs)
         self.assertEqual(result.returncode, 0, summary)
@@ -272,14 +323,14 @@ class WorkflowResults(unittest.TestCase):
                         needs['selection']['outputs'][flag] = value
                     result, _, summary = self.execute('Run gates', needs=needs)
                     self.assertEqual(result.returncode, 1, summary)
-        for job in ('selection', 'quality', 'functional', 'pdf', 'gnu', 'musl', 'script-tests', 'producer'):
+        for job in ('selection', 'quality', 'functional', 'pdf', 'gnu', 'musl', 'script-tests', 'producer', 'macos'):
             for state in ('missing', 'cancelled', 'failure', 'success'):
                 if job in ('selection', 'script-tests') and state == 'success':
                     continue
                 with self.subTest(job=job, state=state):
                     needs = self.required('false')
                     needs['selection']['outputs']['rust'] = 'false'
-                    for name in ('quality', 'functional', 'pdf', 'gnu', 'musl', 'producer'):
+                    for name in ('quality', 'functional', 'pdf', 'gnu', 'musl', 'producer', 'macos'):
                         needs[name]['result'] = 'skipped'
                     if state == 'missing':
                         del needs[job]
@@ -341,7 +392,7 @@ class WorkflowResults(unittest.TestCase):
         _, pr, _ = self.execute('Select producer and cache scope', event={'number': 7})
         source = (ROOT / '.github/workflows/ci.yml').read_text()
         keys = []
-        for group in ('quality', 'functional', 'pdf', 'gnu', 'musl', 'producer'):
+        for group in ('quality', 'functional', 'pdf', 'gnu', 'musl', 'producer', 'macos'):
             # Scope the public action input to this job (not a cache-service emulator).
             body = source.split('\n  ' + group + ':\n', 1)[1]
             body = re.split(r'\n  [a-z][a-z-]*:\n', body, maxsplit=1)[0]
@@ -350,7 +401,7 @@ class WorkflowResults(unittest.TestCase):
                 return prefix.replace('${{ needs.selection.outputs.cache-prefix }}', outputs.get('cache-prefix', ''))
             self.assertEqual(resolve(main), resolve(pr), 'A new PR must be able to reuse a compatible default-branch key')
             keys.append(resolve(main))
-        self.assertEqual(len(set(keys)), 6)  # incompatible group targets still stay distinct
+        self.assertEqual(len(set(keys)), 7)  # incompatible group targets still stay distinct
 
     def test_cache_writes_follow_event_and_default_branch_trust(self):
         for event, ref, payload, save in (

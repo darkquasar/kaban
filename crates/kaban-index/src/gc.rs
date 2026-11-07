@@ -20,8 +20,10 @@
 use std::collections::BTreeSet;
 
 use kaban_codegraph::{CodeGraphReader, SnapshotError, SqliteSnapshot};
-use rustix::fs::AtFlags;
+use rustix::fs::{AtFlags, Dir, Mode, OFlags};
 use serde::Serialize;
+use std::os::fd::AsFd;
+use std::os::unix::ffi::OsStrExt;
 use thiserror::Error;
 
 use crate::detect::Lang;
@@ -183,16 +185,28 @@ pub fn apply(dir: &AdmittedDir, collect: &[(String, Reason)]) -> Result<Vec<Stri
 }
 
 /// Remove the left-overs of killed runs (§7): `*.cg.db.tmp-<pid>` files and `run-<pid>`
-/// directories whose pid is not a live process. Returns the number removed.
+/// directories whose pid is observed dead. Never recover another run's permissions:
+/// its producer group may still be alive. Inaccessible entries remain for later cleanup.
+/// Returns the number removed.
 #[must_use]
 pub fn sweep_leftovers(dir: &AdmittedDir) -> usize {
-    let Ok(rd) = std::fs::read_dir(&dir.path) else {
+    // Linux's admitted handle is O_PATH. Explicitly obtain a readable stream relative
+    // to that retained inode; Dir::read_from would retain O_PATH and fail iteration.
+    let Ok(readable) = rustix::fs::openat(
+        &dir.handle,
+        ".",
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    ) else {
+        return 0;
+    };
+    let Ok(rd) = Dir::new(readable) else {
         return 0;
     };
     let mut removed = 0;
     for entry in rd.flatten() {
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else {
+        let raw_name = std::ffi::OsStr::from_bytes(entry.file_name().to_bytes());
+        let Some(name) = raw_name.to_str() else {
             continue;
         };
         let pid = name
@@ -202,14 +216,12 @@ pub fn sweep_leftovers(dir: &AdmittedDir) -> usize {
         let Some(pid) = pid else {
             continue;
         };
-        if pid == std::process::id() || std::path::Path::new(&format!("/proc/{pid}")).exists() {
+        if pid == std::process::id()
+            || kaban_core::process::process_liveness(pid) != kaban_core::process::Liveness::Dead
+        {
             continue;
         }
-        let ok = if entry.file_type().is_ok_and(|t| t.is_dir()) {
-            std::fs::remove_dir_all(entry.path()).is_ok()
-        } else {
-            rustix::fs::unlinkat(&dir.handle, name, AtFlags::empty()).is_ok()
-        };
+        let ok = crate::isolate::remove_leftover_tree(dir.handle.as_fd(), raw_name).is_ok();
         if ok {
             removed += 1;
         }

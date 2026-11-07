@@ -1,33 +1,35 @@
 ---
 title: "Quickstart"
-description: "Build locally, configure a workspace, and remember an accepted Decision."
+description: "Install both binaries, configure a workspace, and remember an accepted Decision."
 ---
 
 The commands below are instructions, not a recorded execution. Use a trusted
 checkout and a shell on the machine where your project and data live.
 
-## 1. Build and install locally
+## 1. Install both executables
 
-The checkout pins Rust 1.99.0 in `rust-toolchain.toml`; the MSRV is the same.
-A native C compiler is needed for bundled SQLite. Provision prerequisites in
-your own environment, then run these commands from the Kaban checkout:
+The 3.0.0 candidate provides full-profile Linux GNU x86-64/ARM64, static Linux
+musl x86-64 and native Apple Silicon archives. Stable assets are not published yet;
+the historical alpha is a different lean Linux profile. Follow the complete
+[checksum-verified download, two-binary installation and unsigned macOS guidance](developer/RELEASE.md).
+Install `kaban` and `kaban-index` together in a user-owned PATH directory. Memory,
+MCP, Markdown splitting and PDF extraction need no Cargo or external PDF renderer.
+Language producers are separate explicit installs; installing the pair grants no
+repository trust and does not run an indexer.
+
+For a source build, use the pinned Rust 1.99.0 toolchain and a native C compiler:
 
 ```sh
-cargo build --release -p kaban -p kaban-index
+cargo build --release --locked -p kaban -p kaban-index \
+  --features kaban-ingest/pdf,kaban-ingest/md-splitter
 mkdir -p "$HOME/.local/bin"
-install -m 755 target/release/kaban "$HOME/.local/bin/kaban"
-install -m 755 target/release/kaban-index "$HOME/.local/bin/kaban-index"
+install -m 755 target/release/kaban target/release/kaban-index "$HOME/.local/bin/"
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
-`install` replaces any existing binaries at those two destinations; choose another
-directory if you need to retain older copies. Building `kaban-index` does not run
-an indexer or grant repository trust.
-
-The accepted local package instead contains GNU/Linux AArch64 `kaban` default and
-minimal binaries, not an indexer or PDF binary. It needs a compatible glibc host
-with GLIBC_2.39 symbols; it is not a portable static build. See
-[release details](developer/RELEASE.md) before using packaged artifacts on another host.
+These commands replace the pair at those destinations. Preserve older binaries
+and protected database/key backups before an update; older executables do not
+imply a supported schema downgrade.
 
 ## 2. Choose data, policy and workspace
 

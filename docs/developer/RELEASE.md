@@ -1,112 +1,177 @@
-# Linux releases
+# Full-profile Linux and Apple Silicon packages
 
-The first release is **3.0.0-alpha.1**, matching `Cargo.toml`. PR4 prepares the
-release workflow; merging it does not create a tag or publish a release.
+The candidate workspace version is **3.0.0**. Only the historical
+[3.0.0-alpha.1 Linux prerelease](https://github.com/darkquasar/kaban/releases/tag/v3.0.0-alpha.1)
+is published today. The stable download commands below apply **after** a separately
+authorized stable publication; preparing packages or merging a PR publishes nothing.
 
-Each archive contains `kaban` and `kaban-index`, built together with the default
-features, plus Kaban's LICENSE and NOTICE and the target's dependency licence
-bundle. PDF, optional Markdown splitting, language producer tools and container
-images are not included.
-
-| Archive target | Runtime | Qualification |
-| --- | --- | --- |
-| `x86_64-unknown-linux-gnu` | Linux x86-64; glibc floor recorded from the binaries | Main x86-64 CI plus checks of the packaged binaries |
-| `x86_64-unknown-linux-musl` | Linux x86-64; static musl executables | Main musl build plus checks of the packaged binaries |
-| `aarch64-unknown-linux-gnu` | Linux ARM64; glibc floor recorded from the binaries | Native ARM64 build and checks of the packaged binaries; full functional CI remains x86-64 |
-
-GNU builds use Ubuntu 24.04. Read the measured minimum glibc version in each
-package's metadata and release notes before choosing a download; an Ubuntu 24.04
-build does not establish support for older distributions. The musl archive is the
-portable x86-64 option. macOS and Windows packages require portability work and
-are not part of this release.
-
-## Build, validate and publish
-
-```text
-+-------------+  PR checks  +-------------------+
-| PR4 / fixes | ==========> | Linux packages    |
-+-------------+             | build + run checks|
-                            +-------------------+
-
-+-------------+  push v*    +-------------------+  archive  +------------------+
-| Green main  | ==========> | Authorize + build | ========> | GitHub Release   |
-+-------------+             +-------------------+          +------------------+
-```
-
-The release workflow validates packages on release-related pull requests. It
-builds each selected configuration once with `--locked -p kaban -p kaban-index`.
-Packaging scripts and runtime MCP smoke/catalog validators trigger those checks;
-changes confined to their unit tests run the CI helper suite without package builds.
-GNU builds are native; musl uses `--target x86_64-unknown-linux-musl`. Compatible
-Cargo dependency caches may shorten compilation; a cache miss never bypasses a
-check. Archives move between jobs within the same workflow run.
-
-Validation runs the existing MCP/CLI smoke script against the packaged `kaban`,
-and ordinary CLI commands against both executables, including `kaban-index`'s
-dependency-free scaffold report. This checks startup and basic behaviour of the
-actual downloads without installing language producers or rerunning the complete
-functional suite. It does not qualify a complete indexing toolchain on every
-target. Packaging also checks binary size, licence bundle freshness, executable
-permissions and runtime linkage, and records SHA-256 checksums.
-
-To publish after the PR is merged:
-
-1. Select a main tip whose **CI** push run has completed successfully. A successful
-   PR run alone is insufficient. An intermediate commit that was never a main
-   push tip has no eligible run.
-2. Confirm `Cargo.toml` contains the intended version and that the committed
-   licence bundles match `Cargo.lock` and the selected manifests.
-3. As repository owner `darkquasar`, create and push the matching version tag:
-
-   ```sh
-   git fetch origin
-   git tag -a v3.0.0-alpha.1 <green-main-commit> -m 'Kaban 3.0.0-alpha.1'
-   git push origin v3.0.0-alpha.1
-   ```
-
-4. Inspect the release workflow and its generated metadata and checksums. Versions
-   with a prerelease suffix publish as GitHub prereleases.
-
-The tag gate checks repository, owner identity and triggering actor, version
-agreement, main ancestry and the exact commit's successful main push CI. It fails
-immediately if CI is still running; rerun after CI succeeds. Only the final
-publication job receives `contents: write`, and it rechecks authorization before
-publishing. Pull request validation cannot publish.
-
-There is one release build path. Main CI does not upload a rolling set of release
-assets, and tag jobs do not rerun the entire functional suite. Homebrew and
-installer automation can be added separately.
-
-## Dependency licence bundles
-
-The committed bundles are under `licenses/release/<target>/`. Each records its
-locked dependency graph, build configuration and required upstream texts,
-including bundled native code. Check a target without network access:
+Each target uses one canonical build:
 
 ```sh
-python3 scripts/release/licenses.py check --target x86_64-unknown-linux-gnu
+cargo build --release --locked -p kaban -p kaban-index \
+  --features kaban-ingest/pdf,kaban-ingest/md-splitter
 ```
 
-Dependency, target or feature changes require regenerating and reviewing the
-corresponding bundle before publication. See [THIRD_PARTY.md](THIRD_PARTY.md).
-`cargo deny check` remains a dependency policy check; it does not replace the
-redistribution texts.
+Archives contain exactly `kaban` and `kaban-index` as executables, LICENSE, NOTICE,
+`third-party/` licences/runtime notices, BUILD.json and RELEASE.json. PDF extraction
+uses bundled `pdf_oxide`; Markdown splitting includes the compiled ICU data. No
+Cargo, external PDF renderer, producer executable, SDK or language runtime is bundled
+or needed for memory, MCP and supported document ingestion. Source defaults/minimal
+builds remain separate choices.
 
-## User-visible limits
+| Target | Runtime and qualification |
+| --- | --- |
+| `x86_64-unknown-linux-gnu` | Native Linux x86-64; glibc >= 2.39; generic functional CI and extracted package smoke |
+| `aarch64-unknown-linux-gnu` | Native Linux ARM64; glibc >= 2.39; extracted package smoke; no complete ARM64 functional matrix |
+| `x86_64-unknown-linux-musl` | Static Linux x86-64; no glibc dependency; its own extracted executables run on the Ubuntu x86-64 host |
+| `aarch64-apple-darwin` | Apple Silicon; deployment/load-command minimum 15.0, tested local patch 15.6.1 and hosted 15.8.2; focused native CI and extracted package smoke |
 
-- Rust semantic indexing's external producer currently advertises
-  `aarch64-unknown-linux-gnu` only. An x86-64 download does not provide Rust
-  semantic indexing. Producer executables are not bundled on ARM64 either; see
-  [code-graph.md](code-graph.md) for setup and trust requirements.
-- PDF is optional and absent from these binaries. Build with
-  `--features kaban-ingest/pdf` if needed; a PDF download would be a separate
-  feature, size and licence configuration.
-- MCP uses stdio. HTTP/REST/OpenAPI, embeddings, `ask`/workflow orchestration,
-  automatic indexing and two-store/personal-memory routing are unavailable.
-- Code queries need an explicitly produced snapshot. Indexing can execute
-  repository tools and has separate isolation and trust requirements.
+The macOS 15.0 deployment setting alone does not prove launch/API compatibility on
+15.0; the earliest exercised patch is **15.6.1**. No macOS 13/14, Intel or Windows
+support is claimed. RELEASE.json records each package's actual tested macOS patch,
+SDK, minimum load command and system dylibs. Non-system dylibs are refused.
+GNU packages record their actual symbol requirements and refuse a floor above 2.39.
 
-The earlier M7 handoff was local and unpublished. Its retained ARM64 measurements
-and omitted checks describe those historical artifacts, not these release bytes.
-Current CI enforces default GNU `kaban` below 25 MiB; the optional no-default size
-table uses 17 MiB. Release metadata supplies the actual measured sizes.
+## Download and install both executables
+
+Choose your target from the table. For example, on Apple Silicon, after stable
+publication:
+
+```sh
+version=3.0.0
+target=aarch64-apple-darwin
+archive="kaban-v$version-$target.tar.gz"
+base="https://github.com/darkquasar/kaban/releases/download/v$version"
+curl -fLO "$base/$archive"
+curl -fLO "$base/SHA256SUMS"
+awk -v name="$archive" '$2 == name { print; found++ } END { if (found != 1) exit 1 }' \
+  SHA256SUMS > "$archive.sha256"
+# Use the checksum command supplied by the host.
+if command -v sha256sum >/dev/null 2>&1; then
+  sha256sum -c "$archive.sha256"
+else
+  shasum -a 256 -c "$archive.sha256"
+fi
+tar -xzf "$archive"
+package="kaban-v$version-$target"
+mkdir -p "$HOME/.local/bin"
+install -m 755 "$package/kaban" "$package/kaban-index" "$HOME/.local/bin/"
+export PATH="$HOME/.local/bin:$PATH"
+kaban --version
+kaban-index --version
+```
+
+Run the download/check/extract steps in a fresh directory; proceed to installation
+only after checksum verification succeeds. Checksums establish consistency with the
+trusted release download, not a separate publisher signature. Both binaries must
+have the same version. Before publication, maintainers can download the four PR
+artifacts with `gh run download RUN_ID --name package-TARGET`; verify the included
+`.tar.gz.sha256`, then use the same extraction/install steps. Those artifacts are
+validation candidates, not published releases.
+
+Run from your project with private data paths (inspect existing directory modes;
+`mkdir -m` sets modes only on creation):
+
+```sh
+mkdir -p -m 700 "$HOME/.kaban"
+export KABAN_HOME="$HOME/.kaban"
+export KABAN_DB="$KABAN_HOME/kaban.db"
+export KABAN_WORKSPACE="my-project"
+# Optional: export KABAN_POLICY="/absolute/path/to/reviewed-policy.yaml"
+kaban remember Fact "The package installation check succeeded"
+kaban recall "package installation"
+kaban doctor
+kaban serve
+```
+
+`serve` speaks MCP on stdin/stdout; register its absolute executable path using
+[REGISTER.md](REGISTER.md). The database path must be explicit: its CLI default is
+`kaban.db` in the working directory, independently of KABAN_HOME. Engine configuration
+is `KABAN_HOME/config.yaml`; policy is a separate reviewed file. Audit/codegraph keys
+live under `KABAN_HOME/keys/`; repository trust and snapshots live under
+`KABAN_HOME/codegraph/<repo-id>/`. Keep these locations private and outside repositories.
+
+Language producers are [separate installs](code-graph.md). Qualified versions include
+Go 1.26.0/scip-go 0.2.7, Node 22.23.4/scip-typescript 0.4.0 and Rust 1.99.0 with
+producer 0.1.0-dev. Rust producer qualification covers Linux ARM64 GNU and native
+macOS ARM64 with root-owned CLT; runner-owned Xcode is correctly refused. Install
+producers outside both indexed repositories and KABAN_HOME. Explicitly trust and
+index a repository; serve/hooks/sync do not launch an indexer. On macOS, preferred
+isolation warns and uses trusted `none`; required isolation refuses exit 8. This
+is not Linux namespace isolation.
+
+Hooks are source scripts, not archive executables. After the version tag exists,
+download the matching source archive without building Rust:
+
+```sh
+curl -fL https://github.com/darkquasar/kaban/archive/refs/tags/v3.0.0.tar.gz \
+  -o kaban-v3.0.0-source.tar.gz
+tar -xzf kaban-v3.0.0-source.tar.gz
+```
+
+Follow that source's `hooks/README.md` and host instructions: copy Claude's
+`hooks/claude-code/` and merge its hooks object; copy Codex shell payloads to
+`${CODEX_HOME:-$HOME/.codex}/hooks/kaban/` and approve them normally; copy pi's
+`hooks/pi/kaban-hooks.ts` to `~/.pi/agent/extensions/` or load it with `pi -e`.
+Preserve existing host configuration and use the same PATH/data/workspace settings.
+
+## Unsigned macOS approval and updates
+
+Under OD-1, the first stable may be unsigned or linker ad-hoc signed. Ad-hoc
+signatures provide no Developer ID or verified publisher identity. These packages
+are **not notarized**. Existing ARM64 linker signatures are inspected and preserved;
+there is no signing-account, certificate or notarization requirement.
+
+A browser download can acquire quarantine and require normal macOS approval.
+After verifying the archive and deliberately trusting this download, use the normal
+macOS approval prompt/settings if available. If a bare CLI remains blocked, inspect
+and remove quarantine only from its two exact verified files, then install them:
+
+```sh
+xattr -p com.apple.quarantine "$package/kaban"
+xattr -p com.apple.quarantine "$package/kaban-index"
+xattr -d com.apple.quarantine "$package/kaban"
+xattr -d com.apple.quarantine "$package/kaban-index"
+```
+
+An absent attribute needs no removal. Never disable Gatekeeper/SIP or use recursive
+quarantine removal. Automatic browser-quarantined launch is not promised. CLI
+artifact download/install evidence and browser-quarantined behavior are distinct.
+
+For updates, stop active MCP/CLI users and retain protected backups of databases
+and their matching keys/config/policy, including any database outside KABAN_HOME.
+Verify the replacement archive and replace **both binaries together**. Preserve data
+and trust directories. Opening a newer binary can migrate a database; replacing
+executables with older ones does not authorize a schema downgrade. Restore a
+compatible protected backup if a rollback requires it.
+
+## Build and publication authorization
+
+```text
++----------------+  one build per target  +--------------------+
+| Selected PR    | =====================> | Four native packages|
++----------------+                        +--------------------+
+
++----------------+  exact main CI + tag  +--------------------+  all four pass  +------------+
+| Owner tag push | ====================> | Authorize + package| ==============> | Publisher  |
++----------------+                       +--------------------+                 +------------+
+```
+
+Release-related PR paths select independent GNU, musl and macOS jobs; helper-test-only
+changes retain cheap helper validation. Each job builds the full profile once,
+stages hashes/modes, packages/extracts it and runs CLI/MCP plus Markdown/PDF smoke on
+extracted shipped bytes. It checks exact executables/notices, static musl, runtime
+requirements, signatures, checksums and strict non-musl Kaban **<40 MiB**; existing
+musl-index limits remain. It does not replay full debug suites. Compatible dependency
+caches accelerate compilation; no verdict or executable-tool cache replaces checks.
+
+Future publication requires separate owner authorization: the repository owner's
+matching version tag must name the exact checked main commit with successful main
+push CI. Only the one publisher receives contents-write permission; it waits for
+all four package targets, verifies checksums/completeness and rechecks authorization
+immediately before publication. No local asset upload, cross-run promotion, partial
+stable success or renamed historical alpha asset is part of this path.
+
+Licence bundles must match the exact target, lock, manifests and full features;
+see [THIRD_PARTY.md](THIRD_PARTY.md). Producers, OCR, HTTP/REST, automatic indexing,
+embeddings and two-store routing are not supplied by these downloads.

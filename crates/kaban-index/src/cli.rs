@@ -79,6 +79,23 @@ pub enum Verb {
     /// builds the view, verifies it and `exec`s the indexer (CG4.4, G1-S5.2).
     #[command(hide = true, name = "ns-helper")]
     NsHelper(NsHelperArgs),
+    /// Internal descriptor-bound cwd handoff.
+    #[command(hide = true, name = "cwd-helper")]
+    CwdHelper(CwdHelperArgs),
+}
+
+/// The hidden native child helper. Identities are passed by the admitted parent.
+#[derive(Debug, Args)]
+pub struct CwdHelperArgs {
+    /// Expected directory dev,ino.
+    #[arg(long)]
+    pub directory: String,
+    /// Expected executable `dev,ino,size,ctime_sec,ctime_nsec`.
+    #[arg(long)]
+    pub identity: String,
+    /// Canonical executable and its arguments.
+    #[arg(last = true, required = true)]
+    pub exec: Vec<OsString>,
 }
 
 /// `--isolation preferred|required|off` (OWN-29): overrides `index.isolation` for one run.

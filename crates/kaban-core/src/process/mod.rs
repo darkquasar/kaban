@@ -56,7 +56,8 @@
 //! child inherits exactly stdin, stdout and stderr from this crate's own descriptors. A
 //! descriptor this process inherited without CLOEXEC (an MCP host launching `kaban serve`, a
 //! `flock(1)` launcher) would pass to the child and cannot be closed or re-flagged here without
-//! `unsafe`; `run` therefore reads `/proc/self/fdinfo` before the spawn and, under
+//! `unsafe`; `run` therefore reads Linux `/proc/self/fdinfo` or Darwin `/dev/fd` with
+//! F_GETFD on each original raw descriptor before the spawn and, under
 //! [`InheritedFds::Refuse`] (the default), refuses with `InheritedFd { fd }` (the lowest such
 //! descriptor named in the message, G7); under
 //! [`InheritedFds::Tolerate`] (`GitRunner`) it traces once at `info` with the count only and
@@ -64,20 +65,24 @@
 //!
 //! Layout (proj-mod-rs-dir, proj-mod-by-feature; OWN-61): `env` holds the allowlist, `exec` the
 //! executable, the handle checks and the descriptor admission, `monitor` the monitor trait and
-//! kill reasons, `run` the runner with its reader threads and monitor workers. The public surface
+//! kill reasons, `observe` conservative process liveness, `run` the runner with its reader threads and monitor workers. The public surface
 //! is re-exported here and is the plan's plus [`InheritedFds`].
 
 mod env;
 mod exec;
 mod monitor;
+mod observe;
 mod run;
 
 use thiserror::Error;
 
 pub use env::{EnvAllowlist, GIT_INTERNAL, TrustedInternal};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub use exec::inheritable_fds;
 pub use exec::{Exec, InheritedFds};
 pub use monitor::{KillReason, Monitor, MonitorVerdict, Stream};
-pub use run::{Outcome, Spec, run};
+pub use observe::{Liveness, process_liveness};
+pub use run::{Outcome, Spec, run, run_with_directory_handoff};
 
 /// Why no child ran, or why it could not be supervised. Messages name the class only.
 #[derive(Debug, Error)]

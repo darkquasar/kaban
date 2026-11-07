@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 SPEC = importlib.util.spec_from_file_location(
     "release_licenses", Path(__file__).resolve().parents[1] / "release/licenses.py"
@@ -69,6 +70,57 @@ class ReleaseLicenses(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "supplement.*rmcp.*99.0.0"):
             LICENSES.collect_notices(self.package, self.root / "upstream")
 
+    def test_qcms_preserves_complete_embedded_copyright_variants(self):
+        self.package.update(name='qcms', license='MIT')
+        source = self.root/'src'
+        source.mkdir()
+        expected = []
+        for name in ('matrix.rs', 'chain.rs', 'transform.rs', 'iccread.rs', 'transform_util.rs'):
+            text = '// Copyright ' + ('Corporation' if name == 'chain.rs' else 'Foundation') + '\n// Permission is hereby granted invented terms\n// THE SOFTWARE IS PROVIDED invented disclaimer\n'
+            (source/name).write_text(text + '\nfn invented() {}\n')
+            expected.append({'path': 'src/' + name + ' (licence header)', 'text': text})
+        self.assertEqual(LICENSES.collect_notices(self.package, self.root/'upstream'), expected)
+        (source/'chain.rs').write_text('// incomplete header\n')
+        with self.assertRaisesRegex(ValueError, 'qcms.*header'):
+            LICENSES.collect_notices(self.package, self.root/'upstream')
+
+    def test_brotli_decompressor_keeps_google_attribution_and_complete_terms(self):
+        self.package.update(name='brotli-decompressor', version='6.0.1')
+        (self.root/'LICENSE').write_text('Invented Dropbox BSD terms')
+        (self.root/'src').mkdir()
+        header = '// Copyright 2013 Google Inc. All Rights Reserved.\n//\n// Distributed under MIT license.\n// See file LICENSE for detail or copy at https://opensource.org/licenses/MIT\n//\n'
+        (self.root/'src/context.rs').write_text('#![allow(non_snake_case)]\n\n' + header + '\nfn example() {}')
+        upstream = self.root/'upstream'
+        upstream.mkdir()
+        (upstream/'brotli-9.0.0-LICENSE.MIT').write_text('Invented complete MIT terms')
+        result = LICENSES.collect_notices(self.package, upstream)
+        self.assertIn(header, [item['text'] for item in result])
+        self.assertIn('Invented complete MIT terms', [item['text'] for item in result])
+        self.assertIn('Invented Dropbox BSD terms', [item['text'] for item in result])
+
+    def test_generated_inventory_resolves_the_exact_full_profile(self):
+        (self.root/'LICENSE').write_text('Invented complete licence')
+        (self.root/'rust-toolchain.toml').write_text('[toolchain]\nchannel = "1.99.0"\n')
+        upstream = self.root/'licenses/release/upstream'
+        upstream.mkdir(parents=True)
+        for name in ('rust-1.99.0-COMPILER-BUILTINS-LICENSE.txt', 'rust-1.99.0-COPYRIGHT-library.html'):
+            (upstream/name).write_text('Invented runtime notice')
+        packages = [{'name': n, 'version': '1.0.0', 'source': None} for n in ('kaban', 'kaban-index')]
+        packages.append({**self.package, 'source': 'registry+https://example.invalid'})
+        def cargo(root, *args):
+            if args[0] == 'metadata':
+                return json.dumps({'packages': packages})
+            tree = 'kaban v1.0.0|default\nkaban-index v1.0.0|default\n'
+            if '--features' in args and args[args.index('--features')+1] == 'kaban-ingest/pdf,kaban-ingest/md-splitter':
+                tree += 'invented v1.0.0|pdf,splitter-data\n'
+            return tree
+        with patch.object(LICENSES, 'cargo_output', cargo):
+            LICENSES.generate(self.root, 'aarch64-apple-darwin')
+        manifest = json.loads((self.root/'licenses/release/aarch64-apple-darwin/manifest.json').read_text())
+        self.assertEqual(manifest['features'], ['default', 'kaban-ingest/pdf', 'kaban-ingest/md-splitter'])
+        self.assertEqual(manifest['dependencies'][0]['name'], 'invented')
+        LICENSES.check(self.root, 'aarch64-apple-darwin')
+
     def make_checked_bundle(self):
         target = LICENSES.TARGETS[0]
         output = self.root / "licenses/release" / target
@@ -77,7 +129,7 @@ class ReleaseLicenses(unittest.TestCase):
         (output / "THIRD_PARTY_LICENSES.txt").write_bytes(data)
         (output / "RUST_STANDARD_LIBRARY_NOTICES.html").write_text("<p>Runtime terms</p>\n")
         manifest = {"schema": 1, "target": target, "packages": ["kaban", "kaban-index"],
-                    "features": "default", "dependency_edges": ["normal", "build"],
+                    "features": ["default", "kaban-ingest/pdf", "kaban-ingest/md-splitter"], "dependency_edges": ["normal", "build"],
                     "inputs": LICENSES.input_hashes(self.root),
                     "bundle_sha256": LICENSES.digest(data), "dependencies": [],
                     "files": {path.name: LICENSES.digest(path.read_bytes()) for path in output.iterdir()}}

@@ -32,6 +32,7 @@ jobs:
     outputs:
       rust: ${{ steps.scope.outputs.rust }}
       producer: ${{ steps.scope.outputs.producer }}
+      macos-producer: ${{ steps.scope.outputs.macos-producer }}
       cache-save: ${{ steps.scope.outputs.cache-save }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -51,8 +52,10 @@ jobs:
           # Proven documentation/metadata and helper-only changes omit Rust.
           # Build/setup, workflows, fixtures and unknown inputs keep all checks.
           selected, reason = True, 'shared or unknown impact'
+          macos_producer = True
           base = (event.get('pull_request', {}).get('base', {}).get('sha') if name == 'pull_request'
-                  else event.get('before') if name == 'push' else None)
+                  else event.get('before') if name == 'push'
+                  else event.get('merge_group', {}).get('base_sha') if name == 'merge_group' else None)
           if base and base != '0' * 40:
               diff = subprocess.run(['git', 'diff', '--no-ext-diff', '--no-textconv', '--no-renames', '--name-only', '-z', base, 'HEAD'],
                                     capture_output=True)
@@ -143,17 +146,44 @@ jobs:
                       return (file.parent == PurePosixPath('scripts/release') and
                           file.name in ('authorize.py', 'build.sh', 'licenses.py',
                               'notes.py', 'package.py'))
-                  if paths and all(documentation(p) or helper_only(p) for p in paths):
+                  if name != 'merge_group' and paths and all(documentation(p) or helper_only(p) for p in paths):
                       selected, reason = False, 'documentation/metadata/helper-only diff'
+                  # Narrow producer/contract/setup inputs select qualification;
+                  # known unrelated product trees omit it. Unknown paths select.
+                  def producer_relevant(path):
+                      if documentation(path) or helper_only(path):
+                          return False
+                      file = PurePosixPath(path)
+                      if file.name in ('Cargo.toml', 'Cargo.lock', 'rust-toolchain',
+                              'rust-toolchain.toml', 'build.rs', 'Makefile', 'CMakeLists.txt'):
+                          return True
+                      if path in ('mise.toml', 'mise.lock') or path.startswith((
+                              'tools/kaban-rust-scip/', 'crates/kaban-core/',
+                              'crates/kaban-index/', 'crates/kaban-codegraph/',
+                              'crates/kaban/src/mcp/', 'crates/kaban/tests/common/',
+                              'crates/kaban/tests/mcp_code', 'crates/kaban/tests/mcp_rust',
+                              'crates/kaban/tests/code_smoke', 'crates/kaban/tests/serve_codegraph',
+                              'crates/kaban/tests/acceptance_north_star',
+                              'fixtures/codegraph/', 'scripts/ci/', '.cargo/', '.github/')):
+                          return True
+                      if path.startswith(('crates/kaban-ingest/', 'crates/kaban-store-sqlite/',
+                              'crates/kaban-index-tantivy/', 'crates/kaban/src/cli/',
+                              'hooks/', 'fixtures/ingest/', 'fixtures/walkthrough/', 'examples/')):
+                          return False
+                      if file.parent == PurePosixPath('crates/kaban/tests') and file.suffix == '.rs':
+                          return False
+                      return True
+                  if paths:
+                      macos_producer = any(producer_relevant(p) for p in paths)
           trusted = (name in ('push', 'workflow_dispatch') and
                      ref == 'refs/heads/' + os.environ['DEFAULT_BRANCH'])
           # GitHub scopes PR writes to the merge ref; default-branch entries
           # remain readable by PRs with the same compatible group key.
           pr = name == 'pull_request' and isinstance(event.get('number'), int)
           with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
-              out.write(f'rust={str(selected).lower()}\nproducer={str(selected).lower()}\ncache-save={str(trusted or pr).lower()}\n')
+              out.write(f'rust={str(selected).lower()}\nproducer={str(selected).lower()}\nmacos-producer={str(macos_producer).lower()}\ncache-save={str(trusted or pr).lower()}\n')
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as out:
-              out.write(f'Rust jobs and producer selected: {selected} ({reason}). Cache save permitted: {trusted or pr} (native ref scope).\n')
+              out.write(f'Rust jobs and producer selected: {selected} ({reason}). Darwin producer qualification: {macos_producer}. Cache save permitted: {trusted or pr} (native ref scope).\n')
           SCOPE
 
   quality:
@@ -514,6 +544,95 @@ jobs:
             df -h . "$RUNNER_TEMP"
           } >> "$GITHUB_STEP_SUMMARY"
 
+  macos:
+    name: Native macOS gates
+    needs: selection
+    if: ${{ needs.selection.outputs.rust == 'true' }}
+    runs-on: macos-15
+    timeout-minutes: 90
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-macos
+      TMPDIR: /private/tmp
+      KABAN_CARGO_SLOTS: "1"
+      TOKIO_WORKER_THREADS: "2"
+      KABAN_MACOS_PRODUCER_QUALIFY: ${{ needs.selection.outputs.macos-producer == 'true' && '1' || '0' }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Verify native Mac runner and prepare private directories
+        run: |
+          export MISE_DATA_DIR="$RUNNER_TEMP/kaban-mise"
+          export KABAN_HOME="$RUNNER_TEMP/kaban-home"
+          printf 'MISE_DATA_DIR=%s\nKABAN_HOME=%s\n' "$MISE_DATA_DIR" "$KABAN_HOME" >> "$GITHUB_ENV"
+          echo "KABAN_MACOS_SETUP_START=$(date +%s)" >> "$GITHUB_ENV"
+          test "$(uname -s)" = Darwin
+          test "$(uname -m)" = arm64
+          test "$RUNNER_ARCH" = ARM64
+          mkdir -m 700 "$MISE_DATA_DIR" "$KABAN_HOME"
+          if [ "$KABAN_MACOS_PRODUCER_QUALIFY" = 1 ]; then
+            # Hosted Xcode is runner-owned; admission requires root-owned Apple resources.
+            if [ ! -d /Library/Developer/CommandLineTools ]; then
+              echo 'not-run: installed Apple Command Line Tools absent; exit 3' >&2
+              exit 3
+            fi
+            sudo /usr/bin/xcode-select --switch /Library/Developer/CommandLineTools
+          fi
+          {
+            uname -a
+            sw_vers
+            xcode-select -p
+            xcrun --show-sdk-version
+            pkgutil --pkg-info com.apple.pkg.CLTools_Executables
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Install pinned Mac tools (no executable cache)
+        uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4
+        with:
+          version: 2026.10.24
+          cache: false
+          install_args: --locked python node aqua:nextest-rs/nextest/cargo-nextest
+      - name: Prepare pinned Mac Rust toolchains
+        run: |
+          channel=$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')
+          rustup toolchain install "$channel" --profile minimal
+          if [ "$KABAN_MACOS_PRODUCER_QUALIFY" = 1 ]; then
+            producer_channel=$(python3 -c 'import tomllib; print(tomllib.load(open("tools/kaban-rust-scip/rust-toolchain.toml", "rb"))["toolchain"]["channel"])')
+            rustup toolchain install "$producer_channel" --profile minimal --component rust-src --component rustfmt --component clippy
+          fi
+          rustc -vV
+          cargo --version
+          echo "Mac setup elapsed: $(($(date +%s) - KABAN_MACOS_SETUP_START))s" >> "$GITHUB_STEP_SUMMARY"
+          echo "KABAN_MACOS_RESTORE_START=$(date +%s)" >> "$GITHUB_ENV"
+      - name: Restore compatible Mac Cargo dependencies
+        id: cargo-cache
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          prefix-key: ci-v1-macos
+          workspaces: |
+            . -> target/ci-macos
+            tools/kaban-rust-scip -> ../../target/ci-macos/producer
+          key: ${{ runner.os }}-${{ runner.arch }}-macos-full-${{ hashFiles('mise.toml', 'mise.lock', 'rust-toolchain.toml', 'tools/kaban-rust-scip/rust-toolchain.toml', 'tools/kaban-rust-scip/Cargo.lock') }}
+          cache-bin: false
+          cache-on-failure: true
+          save-if: ${{ needs.selection.outputs.cache-save }}
+      - name: Fetch Mac locked dependencies
+        run: |
+          echo "Mac dependency restore elapsed: $(($(date +%s) - KABAN_MACOS_RESTORE_START))s" >> "$GITHUB_STEP_SUMMARY"
+          time cargo fetch --locked
+      - name: Run focused native Mac checks
+        run: bash scripts/dev/cargo-slot.sh bash scripts/ci/ci.sh macos
+      - name: Mac resource and cache summary
+        if: ${{ always() }}
+        run: |
+          {
+            echo 'Group: macos; exact Cargo cache hit: ${{ steps.cargo-cache.outputs.cache-hit }}'
+            echo 'Cache save permitted: ${{ needs.selection.outputs.cache-save }}; see action post-step for actual save.'
+            echo 'Producer qualification selected: ${{ needs.selection.outputs.macos-producer }}; trusted none is not Linux namespace isolation.'
+            sysctl -n hw.memsize
+            vm_stat
+            df -h . "$RUNNER_TEMP" /private/tmp
+          } >> "$GITHUB_STEP_SUMMARY"
+
   script-tests:
     name: Helper script unit tests
     runs-on: ubuntu-24.04
@@ -536,7 +655,7 @@ jobs:
   gates:
     name: Rust gates (scripts/ci/ci.sh)
     if: ${{ always() }}
-    needs: [selection, quality, functional, pdf, gnu, musl, script-tests, producer]
+    needs: [selection, quality, functional, pdf, gnu, musl, script-tests, producer, macos]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -549,10 +668,10 @@ jobs:
           needs = json.loads(os.environ['NEEDS_JSON'])
           selected = needs.get('selection', {}).get('outputs', {}).get('producer')
           rust = needs.get('selection', {}).get('outputs', {}).get('rust')
-          rust_jobs = ('quality', 'functional', 'pdf', 'gnu', 'musl')
+          rust_jobs = ('quality', 'functional', 'pdf', 'gnu', 'musl', 'macos')
           failed = selected not in ('true', 'false') or rust not in ('true', 'false')
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as out:
-              for job in ('selection', 'quality', 'functional', 'pdf', 'gnu', 'musl', 'script-tests', 'producer'):
+              for job in ('selection', 'quality', 'functional', 'pdf', 'gnu', 'musl', 'script-tests', 'producer', 'macos'):
                   result = needs.get(job, {}).get('result', 'missing')
                   omitted = (job == 'producer' and selected == 'false') or (job in rust_jobs and rust == 'false')
                   expected = 'skipped' if omitted else 'success'

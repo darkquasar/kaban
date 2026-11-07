@@ -1,18 +1,21 @@
 # kaban-rust-scip — the Rust producer of the code graph
 
-## Status (2026-10-26, integration head 0e583ae)
+## Status (2026-11-07, M4 native producer qualification)
 
 `kaban-rust-scip 0.1.0-dev` is the SCIP producer `kaban-index` runs for `Cargo.toml` roots
 (`--languages rust`). This independent workspace does not join the Kaban workspace and links
 rust-analyzer (`ra_ap_* 0.0.358`) into neither Kaban executable. It speaks contract v2 (below),
-advertises one host, `aarch64-unknown-linux-gnu` (22 qualification profiles on the release
-build, the `required-features` and `derive-impls` profiles included; evidence
-`../specs/kaban/02-code-graph-v4/archive/evidence/df2-evidence/`, `r2-evidence/`, `r3-evidence/`, outside the repository), and
-indexes real repositories: Kaban itself at `0e583ae` in 169 s of producer time on the `none`
+advertises the qualified hosts `aarch64-unknown-linux-gnu` and `aarch64-apple-darwin`.
+Darwin M4 passed all 27 current semantic/refusal profiles, real build/proc-macro/LTO
+markers, backend shadowing, stable output/collision checks and actual CLI/MCP snapshot
+queries on macOS 15.6.1 with CLT/SDK 15.5. Protocol 2 and version 0.1.0-dev are unchanged.
+See [native setup](../../docs/developer/code-graph.md#native-arm64-macos-producer-setup-and-qualification).
+Historical Linux qualification remains recorded in
+`../specs/kaban/02-code-graph-v4/archive/evidence/df2-evidence/`, `r2-evidence/`, `r3-evidence/`, outside the repository.
+Earlier real-repository measurements: Kaban itself at `0e583ae` in 169 s of producer time on the `none`
 tier (576 files, 75,257 symbols, 425,601 edges, 209,350,656 B,
 `../specs/kaban/02-code-graph-v4/archive/evidence/dogfood/shared-index-0e583ae.json`) and 212 s under `namespaces` at `2daaeb1`
-(`../specs/kaban/02-code-graph-v4/archive/evidence/df2-evidence/df3-gate.md`). No other host is advertised and no macOS runtime
-exists (macOS development stopped by owner decision). Prepared `index` executes Cargo, build
+(`../specs/kaban/02-code-graph-v4/archive/evidence/df2-evidence/df3-gate.md`). No other host is advertised. Prepared `index` executes Cargo, build
 scripts and proc macros: invoke it only inside `kaban-index`'s runner.
 
 Since DF-2 the producer reports instead of refusing: feature-gated member targets
@@ -65,6 +68,17 @@ against the real toolchain). A member target whose
 `required-features` are not active in the default profile is skipped, not refused; its name is
 reported on stderr (`semantic skipped targets=<names>`). A `protocol_version: 1` configuration is refused
 (`unsupported prepared protocol version; expected 2`); there is no v1 compatibility.
+
+Darwin derives `SDKROOT` and `DEVELOPER_DIR` from the admitted canonical Apple Clang
+in the standard root-owned CLT/Xcode layout. Its backend directory precedes the Rust
+toolchain and `/tools` on `PATH`; Clang uses its integrated assembler and real LTO linker.
+Caller SDK/developer settings never enter the clean child. The real UID pins
+`__CF_USER_TEXT_ENCODING`, which CoreFoundation otherwise inserts automatically; the exact
+environment check remains strict. Both admission layers reject workspace SDK/backend/proxy
+redirects. These are child-environment changes, with no extra prepared JSON fields.
+`scripts/qualify-loading.sh` preserves Linux's bwrap path and uses trusted disposable
+native copies on Darwin, retaining negative tool/sysroot masks and the backend-shadow purpose.
+This native recipe supplies no isolation tier. Keep a separate build target per source root.
 
 ## A7 output boundary
 
@@ -123,7 +137,7 @@ Historical A0–A6 primitives and qualification findings (superseded by A7 above
 - Repository-free `--version` and bounded `capabilities --json` probes. The latter
   names protocol 2 (1 before RI-3d), profile `kaban-rust-v1`, producer `0.1.0-dev`, candidate
   `ra_ap_version: "0.0.358"`, and `supported_host_triples` (historically `[]`; now
-  `["aarch64-unknown-linux-gnu"]`, see the top of this file). Consumers must reject
+  `["aarch64-unknown-linux-gnu", "aarch64-apple-darwin"]`, see the top of this file). Consumers must reject
   an unlisted host. A profile name is not evidence that its oracle passed.
 - A typed target namespace using Cargo package name/version, target kind/name and
   a checkout-relative source-root discriminator. Item descriptors remain semantic
@@ -201,8 +215,8 @@ The initial checkpoint on Linux ARM64 with the existing Rust 1.99.0 passed
 and the license-only deny check.
 The continuation executed all eight inherited tests successfully and added
 public-CLI admission regressions with observed behavioral red/green evidence.
-The historical A2 gate did not load a semantic workspace. No SCIP artifact or
-native macOS qualification exists; see A4/A5 for later bounded evidence.
+The historical A2 gate did not load a semantic workspace and established neither a SCIP
+artifact nor native macOS qualification; see A4/A5 and the current status for later evidence.
 
 Inspected library behavior that the eventual loader must handle explicitly:
 
@@ -284,3 +298,8 @@ Dependency licenses and the exact inspected files are described in `NOTICE`.
 CodeQL's pinned Rust loader/translator were inspected as architecture precedents;
 their TRAP translation and absolute-path/dependency-hash crate identities are not
 reused. Direct public RA APIs supply the required semantic facts without that runtime.
+
+Native CI keeps unit/admission tests in the checked test profile. Loading/semantic/
+refusal qualification and the real producer-to-MCP case use one normal optimized
+`cargo build --release --locked --bins --examples` producer, matching installation.
+The staged producer hash is logged; no debug-artifact fallback is used.

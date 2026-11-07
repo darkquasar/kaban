@@ -51,9 +51,9 @@ pub struct Dictionary {
     automaton: AhoCorasick,
     /// Retained automaton bytes (not process RSS).
     pub memory_usage: usize,
-    /// Same-process sampled build RSS increase, in bytes.
+    /// Same-process sampled build RSS increase on Linux, in bytes; unavailable (zero) elsewhere.
     pub build_peak_delta: u64,
-    /// Same-process high-water increase as a sampling cross-check.
+    /// Linux same-process high-water increase; unavailable (zero) elsewhere.
     pub build_hwm_delta: u64,
     /// Sources used by this dictionary.
     pub sources: Vec<DictSource>,
@@ -342,13 +342,19 @@ pub fn build_dictionary(
             }
         })
         .collect();
+    #[cfg(target_os = "linux")]
     let sampler = BuildSampler::start();
     let automaton = AhoCorasick::builder()
         .match_kind(MatchKind::LeftmostLongest)
         .kind(Some(AhoCorasickKind::ContiguousNFA))
         .prefilter(true)
         .build(patterns.iter().map(|p| &p.normalized));
+    #[cfg(target_os = "linux")]
     let (build_peak_delta, build_hwm_delta) = sampler.finish();
+    // Existing integer telemetry uses zero for unavailable observations. Retained
+    // automaton bytes remain measured and enforce the configured budget everywhere.
+    #[cfg(not(target_os = "linux"))]
+    let (build_peak_delta, build_hwm_delta) = (0, 0);
     let automaton =
         automaton.map_err(|_| crate::IngestError::Config("gazetteer build failed".into()))?;
     let memory_usage = automaton.memory_usage();
@@ -372,6 +378,7 @@ pub fn build_dictionary(
     })
 }
 
+#[cfg(target_os = "linux")]
 fn process_memory() -> (u64, u64) {
     let Ok(status) = std::fs::read_to_string("/proc/self/status") else {
         return (0, 0);
@@ -388,12 +395,14 @@ fn process_memory() -> (u64, u64) {
     (bytes("VmRSS:"), bytes("VmHWM:"))
 }
 
+#[cfg(target_os = "linux")]
 struct BuildSampler {
     before: (u64, u64),
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
     worker: Option<std::thread::JoinHandle<u64>>,
 }
 
+#[cfg(target_os = "linux")]
 impl BuildSampler {
     fn start() -> Self {
         let before = process_memory();

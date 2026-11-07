@@ -133,12 +133,33 @@ pub const GIT_OVERRIDES: [&str; 6] = [
 
 /// The pinned git handle: the first candidate that exists decides (a refused one is the
 /// error, as for the wrappers).
+#[cfg(not(target_os = "macos"))]
 fn trusted_git() -> Result<Exec, IdentityCliError> {
     let candidates: Vec<PathBuf> = GIT_CANDIDATES.iter().map(PathBuf::from).collect();
     let refs: Vec<&Path> = candidates.iter().map(PathBuf::as_path).collect();
     crate::isolate::wrapper::resolve_wrapper(&refs, None)
         .map(|w| w.exec)
         .map_err(|_| IdentityCliError::GitUntrusted)
+}
+
+/// Darwin uses the fixed candidates with native admission and pre-spawn revalidation.
+/// Never consult the caller's `PATH`.
+#[cfg(target_os = "macos")]
+fn trusted_git() -> Result<Exec, IdentityCliError> {
+    for candidate in GIT_CANDIDATES {
+        let path = Path::new(candidate);
+        if !path
+            .try_exists()
+            .map_err(|_| IdentityCliError::GitUntrusted)?
+        {
+            continue;
+        }
+        let tool = crate::tools::admit_executable(path, &[])
+            .map_err(|_| IdentityCliError::GitUntrusted)?;
+        crate::tools::recheck(&tool).map_err(|_| IdentityCliError::GitUntrusted)?;
+        return Ok(Exec::Path(tool.path));
+    }
+    Err(IdentityCliError::GitUntrusted)
 }
 
 /// Run `git <args>` in `cwd` through the runner with the production descriptor policy

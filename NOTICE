@@ -2,11 +2,12 @@ kaban
 Copyright 2026 the kaban authors
 
 This product is licensed under the Apache License, Version 2.0 (see LICENSE).
-Third-party dependencies retain their own licences. Linux binary release archives
+Third-party dependencies retain their own licences. Linux and macOS binary release archives
 include third-party/THIRD_PARTY_LICENSES.txt and third-party/manifest.json for
-their resolved default-feature dependencies, native libraries and Rust runtime.
+their resolved full-profile dependencies (PDF and Markdown splitting), native
+libraries, font/data notices and Rust runtime.
 See docs/developer/THIRD_PARTY.md and licenses/release/README.md for collection
-provenance and the separate requirements of optional features and producer tools.
+provenance and the separate requirements of other source features and producer tools.
 
 Prior art (no code copied):
 - The denylist rule model (id / regex / secret_group / keywords / entropy / allowlists) follows

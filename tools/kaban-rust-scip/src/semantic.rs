@@ -22,7 +22,7 @@ pub(super) fn run(args: &[OsString], prepared: &Prepared) -> Result<()> {
     let scratch = Scratch::read().context(
         "clean scratch environment is required; semantic exporter qualification is incomplete",
     )?;
-    let environment = scratch.child_environment(prepared);
+    let environment = scratch.child_environment(prepared)?;
     if args[0] == "--load-prepared" {
         ensure!(
             std::env::vars_os().collect::<BTreeMap<_, _>>() == environment,
@@ -98,7 +98,7 @@ struct Scratch {
     tmp: PathBuf,
 }
 impl Scratch {
-    fn child_environment(&self, p: &Prepared) -> BTreeMap<OsString, OsString> {
+    fn child_environment(&self, p: &Prepared) -> Result<BTreeMap<OsString, OsString>> {
         let mut values: BTreeMap<OsString, OsString> = [
             ("CARGO", p.cargo.as_os_str()),
             ("RUSTC", p.rustc.as_os_str()),
@@ -138,6 +138,29 @@ impl Scratch {
         if let Some(directory) = p.linker.parent() {
             values.insert("COMPILER_PATH".into(), directory.as_os_str().to_owned());
         }
+        #[cfg(target_os = "macos")]
+        if p.target.ends_with("-apple-darwin") {
+            let apple = crate::apple::resources(&p.linker, &p.workspace)?;
+            values.insert("SDKROOT".into(), apple.sdk.into_os_string());
+            values.insert("DEVELOPER_DIR".into(), apple.developer.into_os_string());
+            // CoreFoundation otherwise adds this key during process initialization.
+            // Pin the real UID and encoding instead of accepting an ambient extra key.
+            values.insert(
+                "__CF_USER_TEXT_ENCODING".into(),
+                format!("0x{:X}:0x0:0x0", rustix::process::getuid().as_raw()).into(),
+            );
+            // Clang's own backend directory precedes both the Rust toolchain and /tools.
+            // A shadow ld/as there must never displace the admitted Apple tools.
+            values.insert(
+                "PATH".into(),
+                format!(
+                    "{}:{}:/tools:/usr/bin:/bin",
+                    apple.bin.display(),
+                    p.sysroot.join("bin").display()
+                )
+                .into(),
+            );
+        }
         for (key, value) in [
             ("CARGO_NET_OFFLINE", "true"),
             ("CARGO_BUILD_JOBS", "2"),
@@ -147,7 +170,7 @@ impl Scratch {
         ] {
             values.insert(key.into(), value.into());
         }
-        values
+        Ok(values)
     }
     fn read() -> Result<Self> {
         fn directory(name: &str) -> Result<PathBuf> {
@@ -836,7 +859,12 @@ mod tests {
         .into_iter()
         .map(|(k, v)| (k.into(), v.into()))
         .collect();
-        assert_eq!(scratch.child_environment(&prepared), expected);
+        assert_eq!(
+            scratch
+                .child_environment(&prepared)
+                .expect("child environment"),
+            expected
+        );
     }
 
     #[test]

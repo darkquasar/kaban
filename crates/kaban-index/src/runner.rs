@@ -5,7 +5,8 @@
 //! captured streams scanned through the policy before a single byte reaches
 //! `<repo-id>/<commit40>.<lang>.<a|b>.log` (0600, one per run, opened through the admitted
 //! directory handle).
-//! The `none` tier runs the indexer directly; the `namespaces` tier runs the trusted `unshare`
+//! The `none` tier uses the admitted cwd (Darwin: stdin handoff to a revalidated self-helper,
+//! fchdir and exec with null stdin). The `namespaces` tier runs the trusted `unshare`
 //! handle, which starts `kaban-index ns-helper` inside the new namespaces (`isolate::namespaces`);
 //! the `container` tier is deferred past 3.0.0 (OWN-68 SC-11) and refused with a fixed class.
 //!
@@ -26,7 +27,9 @@
 //! final `exec` into the indexer ([`exec_indexer`]) lives here for that reason.
 
 use std::ffi::OsString;
-use std::os::fd::{AsFd, AsRawFd};
+use std::os::fd::AsFd;
+#[cfg(target_os = "linux")]
+use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
 use std::sync::atomic::Ordering;
@@ -48,10 +51,13 @@ use crate::isolate::namespaces::{
 };
 use crate::isolate::{PathView, ResolvedWrapper, Scratch, Tier, WrapperError};
 use crate::language::rust;
-use crate::quota::{QUOTA_EXCEEDED, QUOTA_UNOBSERVABLE, QuotaMonitor, RssMonitor};
+use crate::quota::{QUOTA_EXCEEDED, QUOTA_UNOBSERVABLE, QuotaMonitor};
 use crate::tools::{self, AdmittedTool, ToolIdentity};
 use crate::writer::Commit;
 use kaban_codegraph::identity::{self as identity, DirHandle};
+
+#[cfg(target_os = "linux")]
+use crate::quota::RssMonitor;
 
 pub use crate::quota::QuotaCaps;
 
@@ -114,7 +120,7 @@ pub struct IndexerSpec<'a> {
     pub resource_dirs: Vec<PathBuf>,
     /// The checkout handle admitted at the start (U2 RU2-5): `repo_root` must still lead to
     /// this object at the spawn (`RunError::CheckoutReplaced`); on the `none` tier the child's
-    /// working directory is the object itself (`/proc/self/fd/<n>`), on the namespaces tier
+    /// working directory is the object itself (Linux procfs or native directory handoff); on the namespaces tier
     /// the helper re-checks the `(dev, ino)` of its bind source before mounting.
     pub checkout: Option<&'a DirHandle>,
 }
@@ -316,11 +322,12 @@ pub struct RunReport {
     pub killed: Option<KillReason>,
     /// `<repo-id>/<commit40>.<lang>.<a|b>.log`, gated, 0600.
     pub log_path: PathBuf,
-    /// `VmHWM` of the direct child in bytes (`None` when never sampled: `n/a`).
+    /// Linux `VmHWM` in bytes; `None` on Darwin (unavailable) or when never sampled.
+    /// Report-only: file and scratch quotas remain enforced on every native run.
     pub peak_rss_bytes: Option<u64>,
     /// The largest scratch total the quota monitor observed, in bytes.
     pub observed_scratch_bytes: u64,
-    /// One verdict per monitor (quota, then RSS).
+    /// One verdict per installed monitor (quota, then Linux report-only RSS).
     pub monitor_verdicts: Vec<MonitorVerdict>,
     /// The group still had a member when the join expired.
     pub descendants_survived: bool,
@@ -408,6 +415,9 @@ pub enum RunError {
     /// The clean Rust scratch could not be prepared.
     #[error("Rust scratch preparation failed")]
     RustScratch,
+    /// Native cwd helper admission or handoff failed; no partial success is permitted.
+    #[error("cwd helper refused")]
+    CwdHandoff,
 }
 
 /// Run one indexer per `spec` on its tier (see the module documentation).
@@ -452,7 +462,15 @@ pub fn run_indexer(spec: IndexerSpec<'_>) -> Result<RunReport, RunError> {
     // expected identity instead and binds only a matching source
     let cwd: PathBuf = match (spec.checkout, &spec.isolation) {
         (Some(handle), IsolationRun::None) => {
-            PathBuf::from(format!("/proc/self/fd/{}", handle.as_fd().as_raw_fd()))
+            #[cfg(target_os = "linux")]
+            {
+                PathBuf::from(format!("/proc/self/fd/{}", handle.as_fd().as_raw_fd()))
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                let _ = handle;
+                PathBuf::from("/")
+            }
         }
         _ => spec.repo_root.to_path_buf(),
     };
@@ -497,6 +515,45 @@ pub fn run_indexer(spec: IndexerSpec<'_>) -> Result<RunReport, RunError> {
             (ns.wrapper.exec, args, PathView::Namespaces, 1)
         }
     };
+    #[cfg(target_os = "macos")]
+    let native_handoff = tier == Tier::None && spec.checkout.is_some();
+    #[cfg(target_os = "macos")]
+    let (exec, args) = if native_handoff {
+        let expected = checkout_id.ok_or(RunError::CwdHandoff)?;
+        let indexer = match spec.indexer_identity {
+            Some(identity) => AdmittedTool {
+                path: spec.indexer.to_path_buf(),
+                identity,
+            },
+            None => {
+                tools::admit_executable(spec.indexer, &[]).map_err(|_| RunError::IndexerChanged)?
+            }
+        };
+        let helper = tools::admit_executable(
+            &std::env::current_exe().map_err(|_| RunError::CwdHandoff)?,
+            &[spec.repo_root, &spec.data_dir.path],
+        )
+        .map_err(|_| RunError::CwdHandoff)?;
+        let id = indexer.identity;
+        let mut helper_args: Vec<OsString> = vec![
+            "cwd-helper".into(),
+            "--directory".into(),
+            format!("{},{}", expected.0, expected.1).into(),
+            "--identity".into(),
+            format!(
+                "{},{},{},{},{}",
+                id.dev, id.ino, id.size, id.ctime_sec, id.ctime_nsec
+            )
+            .into(),
+            "--".into(),
+            indexer.path.into_os_string(),
+        ];
+        helper_args.extend(args);
+        tools::recheck(&helper).map_err(|_| RunError::CwdHandoff)?;
+        (Exec::Path(helper.path), helper_args)
+    } else {
+        (exec, args)
+    };
     let env = env_for(
         spec.lang,
         &spec.tool_dirs,
@@ -507,9 +564,18 @@ pub fn run_indexer(spec: IndexerSpec<'_>) -> Result<RunReport, RunError> {
     )?;
     let quota = QuotaMonitor::new(spec.scratch.writable_roots(), spec.quota);
     let observed = quota.observed_total();
-    let rss = RssMonitor::through(rss_hops);
-    let peak = rss.peak();
-    let outcome = kaban_core::process::run(Spec {
+    #[allow(unused_mut)] // Linux adds its report-only RSS observer.
+    let mut monitors: Vec<Box<dyn kaban_core::process::Monitor>> = vec![Box::new(quota)];
+    #[cfg(target_os = "linux")]
+    let peak = {
+        let rss = RssMonitor::through(rss_hops);
+        let peak = rss.peak();
+        monitors.push(Box::new(rss));
+        peak
+    };
+    #[cfg(not(target_os = "linux"))]
+    let _ = rss_hops; // Linux VmHWM is report-only; no native RSS observer is installed.
+    let process_spec = Spec {
         exec,
         args,
         cwd: &cwd,
@@ -517,10 +583,29 @@ pub fn run_indexer(spec: IndexerSpec<'_>) -> Result<RunReport, RunError> {
         deadline: spec.deadline,
         stdout_cap: spec.output_cap,
         stderr_cap: spec.output_cap,
-        monitors: vec![Box::new(quota), Box::new(rss)],
+        monitors,
         join_bound: JOIN_BOUND,
         inherited_fds: spec.inherited_fds,
-    })?;
+    };
+    #[cfg(target_os = "macos")]
+    let outcome = if native_handoff {
+        let directory = spec.checkout.ok_or(RunError::CwdHandoff)?;
+        kaban_core::process::run_with_directory_handoff(process_spec, directory.as_fd())?
+    } else {
+        kaban_core::process::run(process_spec)?
+    };
+    #[cfg(not(target_os = "macos"))]
+    let outcome = kaban_core::process::run(process_spec)?;
+    #[cfg(target_os = "macos")]
+    if native_handoff
+        && outcome.killed.is_none()
+        && outcome.status.and_then(|s| s.code()) == Some(i32::from(CWD_HELPER_EXIT))
+        && String::from_utf8_lossy(&outcome.stderr)
+            .lines()
+            .any(|l| l == CWD_HELPER_REFUSED)
+    {
+        return Err(RunError::CwdHandoff);
+    }
     // S5.7: scanned before any byte is written; the log is the only artifact of the run
     let log_name = format!(
         "{}.{}.{}.log",
@@ -539,7 +624,13 @@ pub fn run_indexer(spec: IndexerSpec<'_>) -> Result<RunReport, RunError> {
     } else {
         classify_outcome(&outcome)
     };
-    let peak_rss = peak.load(Ordering::Relaxed);
+    #[cfg(target_os = "linux")]
+    let peak_rss_bytes = {
+        let bytes = peak.load(Ordering::Relaxed);
+        (bytes > 0).then_some(bytes)
+    };
+    #[cfg(not(target_os = "linux"))]
+    let peak_rss_bytes = None; // explicitly unavailable, never a zero-success observation
     let warnings = Vec::new();
     Ok(RunReport {
         tier,
@@ -547,7 +638,7 @@ pub fn run_indexer(spec: IndexerSpec<'_>) -> Result<RunReport, RunError> {
         class,
         killed: outcome.killed,
         log_path,
-        peak_rss_bytes: (peak_rss > 0).then_some(peak_rss),
+        peak_rss_bytes,
         observed_scratch_bytes: observed.load(Ordering::Relaxed),
         monitor_verdicts: outcome.monitor_verdicts,
         descendants_survived: outcome.descendants_survived,
@@ -806,4 +897,67 @@ pub fn cgo_setting(view: PathView) -> &'static str {
         (None, PathView::Namespaces | PathView::Container) => "0",
         (None, PathView::Host) => "autodetect",
     }
+}
+
+/// Reserved native-helper failure status (not a producer status).
+pub const CWD_HELPER_EXIT: u8 = 125;
+/// Fixed native-helper marker, captured and gated by the runner.
+pub const CWD_HELPER_REFUSED: &str = "cwd_helper_refused";
+
+/// Validate the inherited directory, enter it in this child only, revalidate the complete
+/// producer identity, then replace this helper with that producer and null stdin.
+/// Returns only on refusal; diagnostics never include caller input.
+///
+/// # Errors
+/// A fixed helper refusal. Successful exec never returns.
+pub fn exec_cwd_helper(
+    directory: &str,
+    identity: &str,
+    exec: &[OsString],
+) -> Result<(), &'static str> {
+    use std::os::unix::fs::MetadataExt;
+    use std::os::unix::process::CommandExt;
+    let parse = || -> Option<((u64, u64), ToolIdentity)> {
+        let (dev, ino) = directory.split_once(',')?;
+        let fields: Vec<_> = identity.split(',').collect();
+        if fields.len() != 5 {
+            return None;
+        }
+        Some((
+            (dev.parse().ok()?, ino.parse().ok()?),
+            ToolIdentity {
+                dev: fields[0].parse().ok()?,
+                ino: fields[1].parse().ok()?,
+                size: fields[2].parse().ok()?,
+                ctime_sec: fields[3].parse().ok()?,
+                ctime_nsec: fields[4].parse().ok()?,
+            },
+        ))
+    };
+    let (expected, identity) = parse().ok_or(CWD_HELPER_REFUSED)?;
+    let (executable, args) = exec.split_first().ok_or(CWD_HELPER_REFUSED)?;
+    let input = std::io::stdin();
+    let st = rustix::fs::fstat(&input).map_err(|_| CWD_HELPER_REFUSED)?;
+    #[cfg(target_os = "macos")]
+    let dev = u64::from(u32::from_ne_bytes(st.st_dev.to_ne_bytes()));
+    #[cfg(not(target_os = "macos"))]
+    let dev = st.st_dev;
+    if !rustix::fs::FileType::from_raw_mode(st.st_mode).is_dir() || (dev, st.st_ino) != expected {
+        return Err(CWD_HELPER_REFUSED);
+    }
+    rustix::process::fchdir(&input).map_err(|_| CWD_HELPER_REFUSED)?;
+    let actual = std::fs::metadata(".").map_err(|_| CWD_HELPER_REFUSED)?;
+    if (actual.dev(), actual.ino()) != expected {
+        return Err(CWD_HELPER_REFUSED);
+    }
+    let tool = AdmittedTool {
+        path: PathBuf::from(executable),
+        identity,
+    };
+    tools::recheck(&tool).map_err(|_| CWD_HELPER_REFUSED)?;
+    let _error = std::process::Command::new(&tool.path)
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .exec();
+    Err(CWD_HELPER_REFUSED)
 }

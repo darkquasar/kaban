@@ -2,8 +2,8 @@
 
 use std::process::{Command, Output};
 
-/// The one host whose 21-profile qualification evidence exists (../specs/kaban/02-code-graph-v4/archive/evidence/ri2-evidence/).
-const QUALIFIED_HOST: &str = "aarch64-unknown-linux-gnu";
+/// Linux's historical oracle and Darwin's M4 semantic/operational/public-query qualification.
+const QUALIFIED_HOSTS: &[&str] = &["aarch64-unknown-linux-gnu", "aarch64-apple-darwin"];
 
 fn capabilities_probe() -> Output {
     Command::new(env!("CARGO_BIN_EXE_kaban-rust-scip"))
@@ -29,7 +29,9 @@ fn capabilities_are_bounded_and_do_not_advertise_unqualified_hosts() {
         .as_array()
         .expect("supported_host_triples is a list");
     assert!(
-        hosts.iter().all(|host| host == QUALIFIED_HOST),
+        hosts.iter().all(|host| host
+            .as_str()
+            .is_some_and(|host| QUALIFIED_HOSTS.contains(&host))),
         "an unqualified host is advertised: {hosts:?}"
     );
 }
@@ -38,7 +40,7 @@ fn capabilities_are_bounded_and_do_not_advertise_unqualified_hosts() {
 fn host_admission_lists_exactly_the_qualified_host() {
     assert_eq!(
         kaban_rust_scip::capabilities().supported_host_triples,
-        [QUALIFIED_HOST]
+        QUALIFIED_HOSTS
     );
     let output = capabilities_probe();
     assert!(output.status.success());
@@ -46,7 +48,7 @@ fn host_admission_lists_exactly_the_qualified_host() {
         serde_json::from_slice(&output.stdout).expect("capabilities JSON");
     assert_eq!(
         value["supported_host_triples"],
-        serde_json::json!([QUALIFIED_HOST])
+        serde_json::json!(QUALIFIED_HOSTS)
     );
 }
 

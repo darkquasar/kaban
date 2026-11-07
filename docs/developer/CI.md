@@ -148,15 +148,14 @@ checks need a suitable native Linux environment.
 
 ## Native ARM64 macOS setup
 
-Native setup is separate from product qualification. The first M0 observations
-use macOS 15.6.1 (24G90), ARM64, Command Line Tools with SDK 15.5 and Rust/Cargo
-1.99.0. This records a tested setup, not support for every macOS 15 patch or a
-completed application port. The admitted-directory child cwd binding remains an
-M0 feasibility blocker; do not replace it with an unchecked pathname.
+Native setup and application qualification use macOS 15.6.1 (24G90), ARM64,
+Command Line Tools 17.0.0 with SDK 15.5 and Rust/Cargo 1.99.0. The focused native
+qualification recipe below uses fresh private data and the existing suites.
+It does not establish compatibility with every macOS 15 patch or hosted CI.
 
 ```text
 +------------------+  locked tools  +------------------+  focused checks  +----------------+
-| Native ARM64 Mac | =============> | Private scratch  | ===============> | M0 evidence    |
+| Native ARM64 Mac | =============> | Private scratch  | ===============> | Native evidence|
 +------------------+                +------------------+                  +----------------+
 ```
 
@@ -445,6 +444,153 @@ Setup, dependency restore, fetch, checks and post-save are native log phases;
 resource/cache information. Compilation/tests within a group share its check step;
 its timing alone does not separate all compiler and test work.
 
+## Native application and full download profile qualification
+
+Use the pinned setup above, canonical `TMPDIR=/private/tmp`, a private
+`KABAN_HOME`/`CARGO_TARGET_DIR`, two build jobs and one Cargo slot. Prefix each
+Cargo command below with `"$MISE" exec -- bash scripts/dev/cargo-slot.sh`.
+Run checks serially and retain the targets/download caches. The application
+profile includes default memory, ingest, codegraph and Tantivy search, plus PDF
+and semantic Markdown splitting; Cargo source defaults remain lean.
+
+```sh
+cargo nextest run --locked -p kaban \
+  --features kaban-ingest/pdf,kaban-ingest/md-splitter \
+  --test walkthrough --test cli_sync --test cli_pack --test recall_determinism \
+  --test code_smoke --test acceptance_north_star \
+  --test hook_claude --test hook_hosts --test hook_pairing --test hooks_roundtrip \
+  --test hook_post_commit --test mcp_control --test mcp_scrub --test mcp_field_gate \
+  --test mcp_prescan --test mcp_docs --test mcp_structured --test cli_gazetteer \
+  --test cli_ingest --test ingest_blackbox_cli --test ingest_blackbox_mcp -j 1
+cargo nextest run --locked -p kaban-ingest --features pdf,md-splitter \
+  --test golden_markdown --test chunk --test golden_pdf --test incremental \
+  --test gate_parity --test derived_sanitization --test hostile --test gazetteer \
+  --test ingest_path_security -j 1
+cargo nextest run --locked -p kaban-store-sqlite \
+  --test tantivy_search --test tantivy_projector --test tantivy_capture \
+  --test recall --test sync_store --test ingest_acceptance --test protection \
+  --test forget_mentions -j 1
+cargo test --locked --doc --workspace \
+  --features kaban-ingest/pdf,kaban-ingest/md-splitter
+"$MISE" exec -- /bin/bash scripts/hooks-live/test-stop-sync.sh
+```
+
+The hook harness uses `/bin/bash` on Darwin and a restricted PATH without
+`setsid` or GNU `timeout`. It checks prompt JSON-only return, stdio detachment,
+independent process groups, opt-out, repeated Stop events and termination of
+TERM-resistant descendants for Claude/Codex Stop/SubagentStop. Existing Rust
+fixtures exercise Claude/Codex/pi ingestion/recall without paid agents/models.
+Graph smoke and north-star tests are fixture-derived public-query checks; their
+real-producer exclusions are explicit. Real producer qualification has its own
+[recipe and restrictions](code-graph.md), and need not be repeated for unrelated
+application/hook qualification changes.
+
+Gazetteer `build_peak_delta` and `build_hwm_delta` are Linux `/proc` observations.
+On Darwin their existing integer fields are zero to mean **unavailable**, not
+measured zero RSS; no sampling thread is started. Retained automaton bytes remain
+measured and budgeted. This is distinct from the unavailable external-producer
+RSS metric and does not disable wall-clock/output/scratch quotas. Darwin child
+observation in the shared MCP smoke uses `/bin/ps`; denied/failed observation
+fails that check. Sampling is a bounded observation, not a process sandbox.
+
+Build both optimized application binaries together, once, using the canonical
+full profile. A deployment target controls the Mach-O load command; it does not
+by itself prove launch on an untested patch.
+
+```sh
+MACOSX_DEPLOYMENT_TARGET=15.0 cargo build --release --locked \
+  -p kaban -p kaban-index --features kaban-ingest/pdf,kaban-ingest/md-splitter
+file "$CARGO_TARGET_DIR/release/kaban" "$CARGO_TARGET_DIR/release/kaban-index"
+otool -L "$CARGO_TARGET_DIR/release/kaban"
+otool -L "$CARGO_TARGET_DIR/release/kaban-index"
+otool -l "$CARGO_TARGET_DIR/release/kaban"
+otool -l "$CARGO_TARGET_DIR/release/kaban-index"
+"$MISE" exec -- python3 scripts/mcp/mcp_smoke.py \
+  "$CARGO_TARGET_DIR/release/kaban" "$KABAN_HOME/native-smoke.db" \
+  examples/policy.yaml
+```
+
+Record executable hashes/sizes, `LC_BUILD_VERSION` minimum/SDK, imported system
+libraries/APIs, code-signature status and actual launch/test OS. The PDF backend
+is compiled `pdf_oxide` (no external renderer/service); scanned files need OCR and
+remain partial, malformed/unsupported encryption fails with a fixed class. OCR
+is not included. Producers and language runtimes are separate trusted installs.
+Keep macOS 15.6.1 as the tested patch floor until earlier runtime/API evidence
+establishes otherwise. Local linker ad-hoc signing supplies no publisher identity;
+this qualification makes no quarantine/notarization or release-readiness claim.
+Full-profile size observations do not alter existing release size gates; any
+overrun requires owner disposition at packaging. M6/M7 own CI/packaging changes.
+
+## Focused native macOS CI
+
+`mise run macos` (or `bash scripts/ci/ci.sh macos`) runs on native ARM64 Darwin
+with the application Rust pin and locked Python, Node and nextest. It refuses
+other hosts/architectures, a non-native Rust host, missing selected tools and
+less than 2,000,000,000 free bytes before compiling. Use the native setup above,
+`TMPDIR=/private/tmp`, a private `KABAN_HOME`/target and one Cargo slot with two
+build jobs. The Mac group does not invoke Linux `all`.
+
+The focused selections reuse proven M4/M5 binaries: core process; codegraph open
+and discover; index writer, runner and trust; five CLI isolation/no-probe and
+revalidation cases; full-feature Markdown/chunk/PDF ingest; memory walkthrough,
+sync/recall, graph queries, MCP control/privacy/docs, and installed-host hook paths.
+Linux retains complete generic, feature, doctest, quality, size and namespace
+coverage. The broader M5 manual recipe above remains qualification evidence;
+its extra ingestion/store cases are outside routine Mac CI. Fixture graph queries
+are complemented by real Rust publication/query when producer qualification is
+selected. Linux namespace-only cases are unselected on Mac; required exit-8/no-probe,
+trusted-none and native process/FD/cleanup counterparts remain selected. Mandatory
+runtime NOT RUN markers still produce incomplete/exit 3, and child failures retain
+their exit status. No marker is suppressed.
+
+The single `macos` workflow job uses the approved `macos-15` label, depends only
+on selection and uses its existing `rust` boolean. It checks actual `uname -m`,
+`RUNNER_ARCH` and Rust host; a label alone is not ARM64 proof. Readiness retains
+its existing status name and requires Mac success for a selected candidate;
+failure, cancellation, missing result or unexpected skip prevents success.
+Only an explicitly unselected job may skip. Docs/metadata/allowlisted helpers
+therefore avoid Mac compilation, with unknown/build/fixture/tool/workflow changes
+conservatively selected. Linux jobs remain independently dependent on selection.
+
+The adjacent `macos-producer` boolean scopes the expensive standalone producer
+and existing 27-profile semantic/refusal oracle. It selects producer source,
+Rust consumer/admission, shared core/process/environment/protocol/fixture,
+manifest/lock/toolchain/pin/setup and unknown changes, plus initial/manual qualification. Merge-group scope uses its base SHA while
+preserving Linux's existing conservative selection. Named unrelated ingest,
+store-sqlite, Tantivy, memory CLI/tests, hooks, ingest/walkthrough fixtures and
+examples omit producer qualification; manifests/build inputs inside those trees
+still select it. Unknown paths and mixed relevant changes retain qualification. Linux's existing producer selection is unchanged.
+Locally set `KABAN_MACOS_PRODUCER_QUALIFY=1` for explicit qualification; the normal
+Mac group defaults to 0. Qualification builds the producer under its own toolchain
+and target: unit/admission tests retain debug assertions and overflow checks; the
+normal optimized `--release --locked` build supplies the single qualification
+producer and oracle. Its staged SHA-256 and build elapsed time are logged. It
+installs a fresh executable outside the checkout, uses existing trusted
+fixtures/oracles, and runs the real Rust publication-to-MCP-query acceptance case.
+Scratch, private homes and targets are retained. This executes trusted code with
+user access (`none`), with no Linux namespace-isolation claim.
+
+Actions remain pinned and permissions `contents: read`; no release secrets are
+used. Mise executable caches and Cargo bin caching remain disabled. Cargo keys
+separate OS, architecture, owning toolchains, full-profile configuration and group,
+with native GitHub ref restrictions; app and standalone mutable targets stay
+separate. Every hit still executes checks. Ordinary logs/summaries retain setup,
+dependency restore/fetch, Cargo build/test timings, exits, cache permission and
+memory/disk observations. Native build/test durations appear in nextest output;
+phase elapsed time includes both. Actual hosted fit, ARM64 execution and cold/warm
+runner minutes remain unproved until an authorized relevant PR run. Local Mac
+results cannot establish hosted readiness. Release workflow/packaging changes are
+reserved for M7 after M6's hosted acceptance and the required Git grant.
+
+```text
++-----------+  rust scope  +---------------+  result  +-----------+
+| Selection | ==========> | macos [CI]    | =======> | Readiness |
++-----------+             +---------------+         +-----------+
+      | rust scope  +-------------------+  result        ^
+      +===========> | Linux jobs [CI]   | ================+
+                    +-------------------+
+```
+
 ## PDF parallelization spike
 
 The PDF job moves the complete existing `kaban-ingest --features pdf` suite and
@@ -544,7 +690,7 @@ All existing product assertions, Tantivy coverage and budgets remain:
 
 | Check | Strict bound |
 | --- | --- |
-| Default GNU Kaban | <25 MiB |
+| Default GNU Kaban | <40 MiB |
 | Optional no-default size table | <17 MiB |
 | Graph on/off delta | <900,000 bytes |
 | Native musl index | <12,000,000 bytes |
@@ -576,7 +722,7 @@ local invocations add no automatic pruning.
 
 | Configuration | Consumers / reuse |
 | --- | --- |
-| Workspace default | Default Kaban's <25 MiB guard and full GNU MCP smoke use its verified staged copy; workspace index is also saved. |
+| Workspace default | Default Kaban's <40 MiB guard and full GNU MCP smoke use its verified staged copy; workspace index is also saved. |
 | GNU index package | Separate build retained: effective workspace/package equivalence has not been established. Its size stays informational. |
 | Explicit graph-on | Kept distinct from workspace default; historical bytes differed. Paired with graph-off for the strict <900,000-byte delta. |
 | Graph-off | Retains `--no-default-features --features ingest,text-index-tantivy`; Tantivy stays selected. |

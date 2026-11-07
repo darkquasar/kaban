@@ -83,29 +83,7 @@ fn repo_with_commit(dir: &Path, content: &str) {
 /// before the binary starts (the CG1.1 clean-process pattern), so the production descriptor
 /// policy of the binary's git calls (`InheritedFds::Refuse`, U2 RU2-4) sees a clean process.
 fn non_cloexec_fds() -> Vec<u32> {
-    const O_CLOEXEC: u64 = 0o2_000_000;
-    let mut out = Vec::new();
-    for entry in fs::read_dir("/proc/self/fd").expect("fd dir") {
-        let entry = entry.expect("entry");
-        let Ok(number) = entry.file_name().to_string_lossy().parse::<u32>() else {
-            continue;
-        };
-        if number <= 2 {
-            continue;
-        }
-        let Ok(info) = fs::read_to_string(format!("/proc/self/fdinfo/{number}")) else {
-            continue;
-        };
-        let flags = info
-            .lines()
-            .find_map(|l| l.strip_prefix("flags:"))
-            .and_then(|f| u64::from_str_radix(f.trim(), 8).ok())
-            .unwrap_or(0);
-        if flags & O_CLOEXEC == 0 {
-            out.push(number);
-        }
-    }
-    out
+    kaban_core::process::inheritable_fds().expect("descriptor observation is required")
 }
 
 /// Run the binary with `KABAN_HOME=<home>` in a child holding only the standard descriptors.
@@ -144,7 +122,7 @@ fn is_hex(s: &str, len: usize) -> bool {
             .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
 }
 
-/// Darwin opens tool descriptors read-only rather than with Linux O_PATH. A FIFO must
+/// Darwin opens tool descriptors read-only rather than with Linux `O_PATH`. A FIFO must
 /// still be rejected before waiting for a writer. Run the attempted admission in a child
 /// so a blocking regression is killed and reaped before the assertion fails.
 #[cfg(target_os = "macos")]

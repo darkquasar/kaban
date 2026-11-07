@@ -1,6 +1,7 @@
 //! The exec boundary: the executable as a path or a verified handle (OD-G1-4, RV-9), and the
 //! admission of the descriptors that would cross `execve` (RG1-2); see the module documentation.
 
+#[cfg(target_os = "linux")]
 use std::io::Read;
 use std::os::fd::OwnedFd;
 use std::path::{Path, PathBuf};
@@ -84,15 +85,15 @@ const O_CLOEXEC: u64 = 0o2_000_000;
 /// # Errors
 /// [`ProcessError::InheritedFd`] under [`InheritedFds::Refuse`] when the count is not zero;
 /// [`ProcessError::Spawn`] when `/proc/self/fd` cannot be read.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(super) fn admit_inherited_fds(policy: InheritedFds) -> Result<(), ProcessError> {
-    let (count, first) = non_cloexec_count().map_err(ProcessError::Spawn)?;
-    admit_count(policy, count, first)
+    let fds = inheritable_fds().map_err(ProcessError::Spawn)?;
+    admit_count(policy, fds.len(), fds.iter().copied().min())
 }
 
 /// Off Linux the flags cannot be read: `Refuse` fails closed (no number to name), `Tolerate`
 /// traces that the count is unknown and spawns.
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub(super) fn admit_inherited_fds(policy: InheritedFds) -> Result<(), ProcessError> {
     match policy {
         InheritedFds::Refuse => Err(ProcessError::InheritedFd { fd: None }),
@@ -119,11 +120,15 @@ fn admit_count(policy: InheritedFds, count: usize, first: Option<u32>) -> Result
     }
 }
 
-/// The descriptors above 2 without `O_CLOEXEC`: their count and the lowest number.
+/// Enumerate descriptors above 2 without `FD_CLOEXEC`, without changing their flags.
+///
+/// A point observation: callers must still keep newly opened descriptors CLOEXEC.
+///
+/// # Errors
+/// An unreadable descriptor table or malformed entry; unknown flags count as inheritable.
 #[cfg(target_os = "linux")]
-fn non_cloexec_count() -> std::io::Result<(usize, Option<u32>)> {
-    let mut count = 0;
-    let mut first: Option<u32> = None;
+pub fn inheritable_fds() -> std::io::Result<Vec<u32>> {
+    let mut fds = Vec::new();
     for entry in std::fs::read_dir("/proc/self/fd")? {
         let entry = entry?;
         let Ok(number) = entry.file_name().to_string_lossy().parse::<u32>() else {
@@ -139,11 +144,40 @@ fn non_cloexec_count() -> std::io::Result<(usize, Option<u32>)> {
             Ok(info) => !has_cloexec(&info),
         };
         if inherited {
-            count += 1;
-            first = Some(first.map_or(number, |f| f.min(number)));
+            fds.push(number);
         }
     }
-    Ok((count, first))
+    Ok(fds)
+}
+
+/// Enumerate the native descriptor table and query each original FD. Reopening a
+/// `/dev/fd/N` path would observe the flags of a different descriptor.
+///
+/// # Errors
+/// An unreadable descriptor table or malformed entry. Unknown flags fail closed.
+#[cfg(target_os = "macos")]
+pub fn inheritable_fds() -> std::io::Result<Vec<u32>> {
+    use nix::fcntl::{FcntlArg, FdFlag, fcntl};
+    let mut fds = Vec::new();
+    for entry in std::fs::read_dir("/dev/fd")? {
+        let entry = entry?;
+        let number = entry
+            .file_name()
+            .to_string_lossy()
+            .parse::<i32>()
+            .map_err(|_| std::io::Error::other("descriptor_entry"))?;
+        if number <= 2 {
+            continue;
+        }
+        match fcntl(number, FcntlArg::F_GETFD) {
+            Ok(flags) if flags & FdFlag::FD_CLOEXEC.bits() != 0 => (),
+            Err(nix::errno::Errno::EBADF) => (), // closed since listing
+            _ => fds.push(
+                u32::try_from(number).map_err(|_| std::io::Error::other("descriptor_entry"))?,
+            ),
+        }
+    }
+    Ok(fds)
 }
 
 /// Whether an `fdinfo` text has a `flags:` line whose octal value includes `O_CLOEXEC`.
