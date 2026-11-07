@@ -551,9 +551,7 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 90
     env:
-      MISE_DATA_DIR: ${{ runner.temp }}/kaban-mise
       CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-macos
-      KABAN_HOME: ${{ runner.temp }}/kaban-home
       TMPDIR: /private/tmp
       KABAN_CARGO_SLOTS: "1"
       TOKIO_WORKER_THREADS: "2"
@@ -564,6 +562,9 @@ jobs:
           persist-credentials: false
       - name: Verify native Mac runner and prepare private directories
         run: |
+          export MISE_DATA_DIR="$RUNNER_TEMP/kaban-mise"
+          export KABAN_HOME="$RUNNER_TEMP/kaban-home"
+          printf 'MISE_DATA_DIR=%s\nKABAN_HOME=%s\n' "$MISE_DATA_DIR" "$KABAN_HOME" >> "$GITHUB_ENV"
           echo "KABAN_MACOS_SETUP_START=$(date +%s)" >> "$GITHUB_ENV"
           test "$(uname -s)" = Darwin
           test "$(uname -m)" = arm64
