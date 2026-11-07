@@ -121,8 +121,6 @@ fn run_with_stdin(spec: Spec<'_>, stdin: Stdio) -> Result<Outcome, ProcessError>
         join_bound,
         inherited_fds,
     } = spec;
-    let admission_started = Instant::now();
-    let diagnostic = !monitors.is_empty();
     let mut command = command_for(&exec)?;
     admit_inherited_fds(inherited_fds)?;
     command
@@ -136,13 +134,6 @@ fn run_with_stdin(spec: Spec<'_>, stdin: Stdio) -> Result<Outcome, ProcessError>
         .process_group(0);
     let started = Instant::now();
     let mut child = command.spawn().map_err(ProcessError::Spawn)?;
-    if diagnostic {
-        eprintln!(
-            "M6_TIMING admission={:?} spawn={:?}",
-            started.duration_since(admission_started),
-            started.elapsed()
-        );
-    }
     // the handle did its job at execve; close it in the parent now
     drop(command);
     drop(exec);
@@ -154,22 +145,11 @@ fn run_with_stdin(spec: Spec<'_>, stdin: Stdio) -> Result<Outcome, ProcessError>
         .stderr
         .take()
         .map(|pipe| Reader::start(pipe, stderr_cap, Stream::Stderr));
-    let mut workers: Vec<MonitorWorker> = monitors
-        .into_iter()
-        .map(|m| MonitorWorker::start(m, started))
-        .collect();
-    if diagnostic {
-        eprintln!("M6_TIMING workers_ready={:?}", started.elapsed());
-    }
-    let mut last_poll = Instant::now();
-    let mut max_poll_gap = Duration::ZERO;
+    let mut workers: Vec<MonitorWorker> = monitors.into_iter().map(MonitorWorker::start).collect();
     let end = started + deadline;
 
     let mut status: Option<ExitStatus> = None;
     let killed = loop {
-        let now = Instant::now();
-        max_poll_gap = max_poll_gap.max(now.duration_since(last_poll));
-        last_poll = now;
         if status.is_none() {
             match child.try_wait() {
                 Ok(Some(st)) => status = Some(st),
@@ -205,12 +185,6 @@ fn run_with_stdin(spec: Spec<'_>, stdin: Stdio) -> Result<Outcome, ProcessError>
         std::thread::sleep(POLL);
     };
 
-    if diagnostic {
-        eprintln!(
-            "M6_TIMING kill_decision={:?} reason={killed:?} max_poll_gap={max_poll_gap:?}",
-            started.elapsed()
-        );
-    }
     let until = Instant::now() + join_bound;
     let mut kill_error = None;
     let mut descendants_survived = false;
@@ -220,15 +194,9 @@ fn run_with_stdin(spec: Spec<'_>, stdin: Stdio) -> Result<Outcome, ProcessError>
         kill_error = kill.error;
         descendants_survived = kill.descendants_survived;
     }
-    if diagnostic {
-        eprintln!("M6_TIMING kill_group_done={:?}", started.elapsed());
-    }
     let stdout = collect(out.take(), until);
     let stderr = collect(err.take(), until);
     let monitor_verdicts = stop_workers(workers, until);
-    if diagnostic {
-        eprintln!("M6_TIMING teardown_done={:?}", started.elapsed());
-    }
     Ok(Outcome {
         status,
         stdout,
@@ -328,7 +296,7 @@ fn collect(reader: Option<Reader>, until: Instant) -> Vec<u8> {
     if let Some(bytes) = reader.bytes {
         return bytes;
     }
-    if let Ok(bytes) = reader.rx.recv_timeout(remaining(until)) {
+    if let Ok(bytes) = recv_until(&reader.rx, Some(until)) {
         bytes
     } else {
         tracing::warn!(stream = ?reader.stream, "pipe still held after the group kill; reader thread abandoned");
@@ -339,6 +307,39 @@ fn collect(reader: Option<Reader>, until: Instant) -> Vec<u8> {
 /// On an error path: wait for the reader until `until`, keep nothing.
 fn abandon(reader: Option<Reader>, until: Instant) {
     let _ = collect(reader, until);
+}
+
+/// Receive within the existing absolute budget. Darwin channel timeout waits can wake much
+/// later than requested (hosted measurements: a roughly 15 ms remaining wait took 135 ms).
+/// Use the supervisor's short sleep/poll cadence there; a slow reader or monitor must not
+/// extend teardown. Scheduling can still delay a wakeup; this is not a real-time guarantee.
+fn recv_until<T>(
+    rx: &mpsc::Receiver<T>,
+    until: Option<Instant>,
+) -> Result<T, mpsc::RecvTimeoutError> {
+    // Preserve recv_timeout's unbounded wait for an interval beyond Instant's range.
+    let Some(until) = until else {
+        return rx.recv().map_err(|_| mpsc::RecvTimeoutError::Disconnected);
+    };
+    #[cfg(not(target_os = "macos"))]
+    {
+        rx.recv_timeout(remaining(until))
+    }
+    #[cfg(target_os = "macos")]
+    loop {
+        match rx.try_recv() {
+            Ok(value) => return Ok(value),
+            Err(mpsc::TryRecvError::Disconnected) => {
+                return Err(mpsc::RecvTimeoutError::Disconnected);
+            }
+            Err(mpsc::TryRecvError::Empty) => {}
+        }
+        let left = remaining(until);
+        if left.is_zero() {
+            return Err(mpsc::RecvTimeoutError::Timeout);
+        }
+        std::thread::sleep(POLL.min(left));
+    }
 }
 
 fn remaining(until: Instant) -> Duration {
@@ -441,23 +442,16 @@ struct MonitorWorker {
 }
 
 impl MonitorWorker {
-    fn start(mut monitor: Box<dyn Monitor>, started: Instant) -> Self {
+    fn start(mut monitor: Box<dyn Monitor>) -> Self {
         let (tx, rx) = mpsc::sync_channel::<Report>(1);
         let (stop_tx, stop_rx) = mpsc::sync_channel::<()>(0);
         std::thread::spawn(move || {
-            eprintln!("M6_TIMING worker_entry={:?}", started.elapsed());
             // an interval elapses (Timeout) between samples; the supervisor's drop of `stop`
             // ends the loop and asks for the final sample
             while let Err(mpsc::RecvTimeoutError::Timeout) =
-                stop_rx.recv_timeout(monitor.interval())
+                recv_until(&stop_rx, Instant::now().checked_add(monitor.interval()))
             {
-                eprintln!("M6_TIMING sample_start={:?}", started.elapsed());
-                let sample = monitor.sample();
-                eprintln!(
-                    "M6_TIMING sample_return={:?} result={sample:?}",
-                    started.elapsed()
-                );
-                if let Err(reason) = sample {
+                if let Err(reason) = monitor.sample() {
                     let _ = tx.send(Report::Kill(reason));
                     return;
                 }
@@ -491,7 +485,7 @@ impl MonitorWorker {
         if let Some(reason) = killed {
             return MonitorVerdict::Failed(reason);
         }
-        match rx.recv_timeout(remaining(until)) {
+        match recv_until(&rx, Some(until)) {
             Ok(Report::Final(Ok(()))) => MonitorVerdict::Ok,
             Ok(Report::Final(Err(reason)) | Report::Kill(reason)) => MonitorVerdict::Failed(reason),
             Err(mpsc::RecvTimeoutError::Disconnected) => {

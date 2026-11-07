@@ -117,6 +117,9 @@ fn crate_graph_acyclic() {
     let allowed: BTreeSet<&str> = [
         "kaban-core",
         "rusqlite",
+        "sqlite-vfs",
+        "tempfile",
+        "getrandom",
         "hmac",
         "sha2",
         "blake3",
