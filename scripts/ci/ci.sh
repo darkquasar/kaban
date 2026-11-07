@@ -7,12 +7,14 @@ cd "$kaban_ci_dir/../.." || exit
 
 if [ "$#" -eq 1 ] && [ "$1" = "--help" ]; then
   cat <<'HELP'
-Usage: bash scripts/ci/ci.sh [all|quality|helpers|functional|pdf|producer|gnu|musl]
+Usage: bash scripts/ci/ci.sh [all|quality|helpers|functional|pdf|macos|producer|gnu|musl]
 No argument means all: quality + helpers + functional + PDF + GNU + musl gates.
 quality: fmt, three Clippy variants, deny and dependency boundaries.
 helpers: Python build/catalog tests and shell syntax (no Rust tools needed).
 functional: workspace/no-default nextest suites and applicable default library doctests.
 pdf: full PDF-enabled ingest nextest suite and its library doctest.
+macos: focused native ARM64 boundaries, full-feature ingest and public app paths.
+KABAN_MACOS_PRODUCER_QUALIFY=1 adds Darwin producer qualification; default 0.
 producer: separate tools/kaban-rust-scip workspace/toolchain, fetch/fmt/Clippy/tests.
 gnu: release build, MCP smoke and sizes; musl: native musl build/size gates.
 Local core is quality + helpers + functional + PDF (mise run core).
@@ -35,7 +37,7 @@ if [ "$#" -gt 1 ]; then
 fi
 kaban_group=${1:-all}
 case "$kaban_group" in
-  all|quality|helpers|functional|pdf|producer|gnu|musl) ;;
+  all|quality|helpers|functional|pdf|macos|producer|gnu|musl) ;;
   *) echo "Unknown group: $kaban_group; see --help" >&2; exit 2 ;;
 esac
 # Native hosted step summaries retain incomplete status even though Actions marks
@@ -88,9 +90,13 @@ MAX_NO_DEFAULT_BYTES=$((17 * 1024 * 1024))
 missing=0
 
 step() {
+  local started=$SECONDS
   echo "==> $*"
   "$@"
   local rc=$?
+  if [ "$kaban_group" = macos ]; then
+    echo "macos phase elapsed: $((SECONDS - started))s; exit $rc: $*"
+  fi
   if [ $rc -ne 0 ]; then
     echo "FAILED (exit $rc): $*" >&2
     exit $rc
@@ -136,7 +142,24 @@ try:
         rustc = executable(os.environ.get("RUSTC", "rustc"))
         probe([rustc, "--version"], f"rustc {rust}")
         probe([sys.executable, "--version"], f"Python {pins['python']}")
-        if group in ("quality", "functional", "pdf"):
+        if group == "macos":
+            import shutil
+            if probe(["uname", "-s"]) != "Darwin" or probe(["uname", "-m"]) != "arm64":
+                incomplete("macos requires native Darwin ARM64; no cross-build qualification")
+            if "host: aarch64-apple-darwin" not in probe([rustc, "-vV"]).splitlines():
+                incomplete("macos requires the native aarch64-apple-darwin Rust host")
+            if shutil.disk_usage(root).free < 2_000_000_000:
+                incomplete("macos requires at least 2,000,000,000 free bytes")
+            if os.environ.get("KABAN_MACOS_PRODUCER_QUALIFY", "0") not in ("0", "1"):
+                incomplete("KABAN_MACOS_PRODUCER_QUALIFY must be 0 or 1")
+            if os.environ.get("KABAN_MACOS_PRODUCER_QUALIFY", "0") == "1":
+                producer_rust = tomllib.loads((root / "tools/kaban-rust-scip/rust-toolchain.toml").read_text())["toolchain"]["channel"]
+                rustup = executable("rustup")
+                toolchain = Path(probe([rustup, "run", producer_rust, "rustc", "--print", "sysroot"]))
+                for resource in ("lib/rustlib/src/rust/library/Cargo.toml", "libexec/rust-analyzer-proc-macro-srv"):
+                    if not (toolchain / resource).is_file():
+                        incomplete(f"producer resource absent: {toolchain / resource}; install pinned rust-src/toolchain")
+        if group in ("quality", "functional", "pdf", "macos"):
             commands = probe([cargo, "--list"])
             tool = "deny" if group == "quality" else "nextest"
             if tool not in [line.split()[0] for line in commands.splitlines() if line.split()]:
@@ -148,11 +171,12 @@ try:
             probe([cargo, "clippy", "--version"])
         if group == "quality":
             executable("jq")
-        if group in ("functional", "gnu"):
+        if group in ("functional", "gnu", "macos"):
             probe([executable("node"), "--version"], f"v{pins['node']}")
-            for tool in ("go", os.environ.get("SCIP_GO", "scip-go")):
-                executable(tool)
-        if group in ("functional", "pdf", "producer", "gnu", "musl"):
+            if group != "macos":
+                for tool in ("go", os.environ.get("SCIP_GO", "scip-go")):
+                    executable(tool)
+        if group in ("functional", "pdf", "producer", "gnu", "musl", "macos"):
             executable("cc")
         executable("git")
         if group in ("gnu", "musl"):
@@ -189,7 +213,7 @@ rust_runner() {
     | sed -E -e 's/^.*NOT RUN: ([A-Za-z0-9_]+):.*$/\1/' -e t \
       -e 's/^.*[^A-Za-z0-9_]([A-Za-z0-9_]+) NOT RUN:.*$/\1/' -e t -e 's/^[[:space:]]+//' \
     | sort -u)
-  count=$(printf '%s\n' "$names" | grep -c .)
+  count=$(printf '%s\n' "$names" | awk 'NF { n++ } END { print n+0 }') || return $?
   echo "mandatory_skips: $count"
   if [ "$count" -gt 0 ]; then
     printf '%s\n' "$names" | sed 's/^/  /'
@@ -290,6 +314,83 @@ pdf() {
   step rust_runner "${CARGO:-cargo}" nextest run -p kaban-ingest --features pdf --success-output immediate
   step rust_runner "${CARGO:-cargo}" test --doc --locked -p kaban-ingest --features pdf -- --show-output
 }
+
+# Native boundary binaries plus representative public paths already qualified in
+# M4/M5. Linux owns the complete generic/feature/namespace matrices.
+macos() {
+  local selection
+  selection='binary_id(=kaban-core::process) | binary_id(=kaban-codegraph::open) | binary_id(=kaban-codegraph::discover) | binary_id(=kaban-index::writer) | binary_id(=kaban-index::runner) | binary_id(=kaban-index::trust)'
+  selection="$selection | (binary_id(=kaban-index::cli) & (test(=cli_index_required_without_isolating_tier_is_exit_8) | test(=rust_required_unavailable_never_runs_native_producer_probes) | test(=trust_revalidated_before_each_spawn) | test(=indexer_replaced_after_admission_is_refused) | test(=checkout_replaced_between_revalidation_and_spawn_is_refused)))"
+  selection="$selection | (package(kaban-ingest) & (binary(golden_markdown) | binary(chunk) | binary(golden_pdf)))"
+  selection="$selection | (package(kaban) & (binary(walkthrough) | binary(cli_sync) | binary(recall_determinism) | binary(code_smoke) | binary(mcp_control) | binary(mcp_scrub) | binary(mcp_docs) | binary(hook_hosts) | binary(hooks_roundtrip)))"
+  step rust_runner "${CARGO:-cargo}" nextest run --locked \
+    -p kaban-core -p kaban-codegraph -p kaban-index -p kaban-ingest -p kaban \
+    --test process --test open --test discover --test writer --test runner --test trust --test cli \
+    --test golden_markdown --test chunk --test golden_pdf --test walkthrough --test cli_sync \
+    --test recall_determinism --test code_smoke --test mcp_control --test mcp_scrub --test mcp_docs \
+    --test hook_hosts --test hooks_roundtrip \
+    --features kaban-ingest/pdf,kaban-ingest/md-splitter \
+    -E "$selection" -j 1 --no-fail-fast --success-output immediate
+  if [ "${KABAN_MACOS_PRODUCER_QUALIFY:-0}" = 1 ]; then
+    step macos_producer_qualification
+  fi
+}
+
+# This costly qualification is selected only for producer/shared/setup changes or
+# explicit manual qualification. The trusted fixture campaign provides no sandbox.
+macos_producer_qualification() (
+  set -e
+  local scratch producer_target sysroot producer oracle profile expectation
+  scratch=$(mktemp -d /private/tmp/kaban-macos-producer.XXXXXXXX)
+  chmod 700 "$scratch"
+  case "$kaban_target_dir" in /*) ;; *) kaban_target_dir="$PWD/$kaban_target_dir" ;; esac
+  producer_target="$kaban_target_dir/producer"
+  # Own toolchain, tests and mutable target; no executable tool cache is restored.
+  CARGO_TARGET_DIR="$kaban_target_dir" bash scripts/ci/ci.sh producer
+  (
+    cd tools/kaban-rust-scip
+    CARGO_TARGET_DIR="$producer_target" "$CARGO" build --locked --bins --examples
+    rustc --print sysroot > "$scratch/sysroot"
+  )
+  sysroot=$(cat "$scratch/sysroot")
+  mkdir -m 700 "$scratch/bin"
+  install -m 755 "$producer_target/debug/kaban-rust-scip" "$scratch/bin/kaban-rust-scip"
+  producer="$scratch/bin/kaban-rust-scip"
+  oracle="$producer_target/debug/examples/qualify-output"
+  export PATH="$sysroot/bin:$PATH"
+  # The existing M4 oracle and loading fixtures, with no new case registry/framework.
+  for profile in minimal workspace target-contexts semantic-extra cargo-contexts local-contexts \
+    operator-ranges required-features block-references shared-contexts member-collisions \
+    cfg-conflict block-function block-impl block-generated block-attribute block-derive \
+    cfg-body-conflict shadow-backend derive-impls metadata-failure build-failure shared-root \
+    missing-server missing-sysroot sysroot-metadata-failure sysroot-manifest-failure; do
+    mkdir -m 700 "$scratch/$profile"
+    expectation=--expect-scip
+    case "$profile" in
+      metadata-failure|build-failure|shared-root|missing-server|missing-sysroot|sysroot-metadata-failure|sysroot-manifest-failure)
+        expectation=no-output ;;
+    esac
+    step bash tools/kaban-rust-scip/scripts/qualify-loading.sh \
+      "$producer" "$sysroot" "$profile" "$scratch/$profile" "$expectation"
+    if [ "$expectation" = --expect-scip ]; then
+      case "$profile" in
+        required-features|block-function|block-impl|block-generated|block-attribute|block-derive|cfg-body-conflict) ;;
+        *)
+          local decoded=$profile
+          [ "$profile" != shadow-backend ] || decoded=workspace
+          step "$oracle" "$decoded" "$scratch/$profile/out/index.scip" "$scratch/$profile/work" ;;
+      esac
+    fi
+  done
+  step "$CARGO" build --locked -p kaban-index
+  export KABAN_TEST_RUST_PRODUCER="$producer" KABAN_TEST_RUST_SYSROOT="$sysroot"
+  export KABAN_TEST_INDEX_BIN="$kaban_target_dir/debug/kaban-index"
+  step rust_runner "$CARGO" nextest run --locked -p kaban --test mcp_rust_acceptance \
+    --features kaban-ingest/pdf,kaban-ingest/md-splitter --run-ignored only \
+    -E 'test(=rust_snapshot_public_queries_through_the_mcp_server)' -j 1 --success-output immediate
+  [ "$missing" -eq 0 ] || exit 3
+  echo "Darwin producer qualification retained: $scratch (trusted none, no Linux namespace isolation)"
+)
 
 helpers() {
   (cd scripts/mcp && python3 -m unittest -v test_mcp_catalog) || return $?

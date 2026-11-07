@@ -521,6 +521,73 @@ this qualification makes no quarantine/notarization or release-readiness claim.
 Full-profile size observations do not alter existing release size gates; any
 overrun requires owner disposition at packaging. M6/M7 own CI/packaging changes.
 
+## Focused native macOS CI
+
+`mise run macos` (or `bash scripts/ci/ci.sh macos`) runs on native ARM64 Darwin
+with the application Rust pin and locked Python, Node and nextest. It refuses
+other hosts/architectures, a non-native Rust host, missing selected tools and
+less than 2,000,000,000 free bytes before compiling. Use the native setup above,
+`TMPDIR=/private/tmp`, a private `KABAN_HOME`/target and one Cargo slot with two
+build jobs. The Mac group does not invoke Linux `all`.
+
+The focused selections reuse proven M4/M5 binaries: core process; codegraph open
+and discover; index writer, runner and trust; five CLI isolation/no-probe and
+revalidation cases; full-feature Markdown/chunk/PDF ingest; memory walkthrough,
+sync/recall, graph queries, MCP control/privacy/docs, and installed-host hook paths.
+Linux retains complete generic, feature, doctest, quality, size and namespace
+coverage. The broader M5 manual recipe above remains qualification evidence;
+its extra ingestion/store cases are outside routine Mac CI. Fixture graph queries
+are complemented by real Rust publication/query when producer qualification is
+selected. Linux namespace-only cases are unselected on Mac; required exit-8/no-probe,
+trusted-none and native process/FD/cleanup counterparts remain selected. Mandatory
+runtime NOT RUN markers still produce incomplete/exit 3, and child failures retain
+their exit status. No marker is suppressed.
+
+The single `macos` workflow job uses the approved `macos-15` label, depends only
+on selection and uses its existing `rust` boolean. It checks actual `uname -m`,
+`RUNNER_ARCH` and Rust host; a label alone is not ARM64 proof. Readiness retains
+its existing status name and requires Mac success for a selected candidate;
+failure, cancellation, missing result or unexpected skip prevents success.
+Only an explicitly unselected job may skip. Docs/metadata/allowlisted helpers
+therefore avoid Mac compilation, with unknown/build/fixture/tool/workflow changes
+conservatively selected. Linux jobs remain independently dependent on selection.
+
+The adjacent `macos-producer` boolean scopes the expensive standalone producer
+and existing 27-profile semantic/refusal oracle. It selects producer source,
+Rust consumer/admission, shared core/process/environment/protocol/fixture,
+manifest/lock/toolchain/pin/setup and unknown changes, plus initial/manual qualification. Merge-group scope uses its base SHA while
+preserving Linux's existing conservative selection. Named unrelated ingest,
+store-sqlite, Tantivy, memory CLI/tests, hooks, ingest/walkthrough fixtures and
+examples omit producer qualification; manifests/build inputs inside those trees
+still select it. Unknown paths and mixed relevant changes retain qualification. Linux's existing producer selection is unchanged.
+Locally set `KABAN_MACOS_PRODUCER_QUALIFY=1` for explicit qualification; the normal
+Mac group defaults to 0. Qualification builds the producer under its own toolchain
+and target, installs a fresh executable outside the checkout, uses existing trusted
+fixtures/oracles, and runs the real Rust publication-to-MCP-query acceptance case.
+Scratch, private homes and targets are retained. This executes trusted code with
+user access (`none`), with no Linux namespace-isolation claim.
+
+Actions remain pinned and permissions `contents: read`; no release secrets are
+used. Mise executable caches and Cargo bin caching remain disabled. Cargo keys
+separate OS, architecture, owning toolchains, full-profile configuration and group,
+with native GitHub ref restrictions; app and standalone mutable targets stay
+separate. Every hit still executes checks. Ordinary logs/summaries retain setup,
+dependency restore/fetch, Cargo build/test timings, exits, cache permission and
+memory/disk observations. Native build/test durations appear in nextest output;
+phase elapsed time includes both. Actual hosted fit, ARM64 execution and cold/warm
+runner minutes remain unproved until an authorized relevant PR run. Local Mac
+results cannot establish hosted readiness. Release workflow/packaging changes are
+reserved for M7 after M6's hosted acceptance and the required Git grant.
+
+```text
++-----------+  rust scope  +---------------+  result  +-----------+
+| Selection | ==========> | macos [CI]    | =======> | Readiness |
++-----------+             +---------------+         +-----------+
+      | rust scope  +-------------------+  result        ^
+      +===========> | Linux jobs [CI]   | ================+
+                    +-------------------+
+```
+
 ## PDF parallelization spike
 
 The PDF job moves the complete existing `kaban-ingest --features pdf` suite and

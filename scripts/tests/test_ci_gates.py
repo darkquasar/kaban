@@ -15,7 +15,7 @@ BASH = shutil.which("bash")
 
 
 class CiToolSelection(unittest.TestCase):
-    def run_gate(self, *, tools=("nextest", "deny"), fail="nextest", color="always", inherited_fd=False, versions=None, cargo_override=None, args=(), missing_tool=None, target_present=True, marker="", runner_fail="", helper_fail=False, smoke_skip=False, size_table=False, artifact_scenario="", artifact_sizes=None, repeats=1, artifact_root=False, summary=False, isolation_split=False, hosted=True, isolation_probe="normal"):
+    def run_gate(self, *, tools=("nextest", "deny"), fail="nextest", color="always", inherited_fd=False, versions=None, cargo_override=None, args=(), missing_tool=None, target_present=True, marker="", runner_fail="", helper_fail=False, smoke_skip=False, size_table=False, artifact_scenario="", artifact_sizes=None, repeats=1, artifact_root=False, summary=False, isolation_split=False, hosted=True, isolation_probe="normal", platform="Linux", machine="x86_64", qualify="0", producer_resources=True, errexit=False):
         with tempfile.TemporaryDirectory(prefix="kaban-ci-tools-") as scratch:
             root = Path(scratch)
             script = root / "scripts/ci/ci.sh"
@@ -32,6 +32,12 @@ class CiToolSelection(unittest.TestCase):
                 '[target.x86_64-unknown-linux-musl]\nlinker = ' + json.dumps(str(root / 'bin/musl-gcc')) + '\n')
             if target_present:
                 (root / "sysroot/lib/rustlib/x86_64-unknown-linux-musl/lib").mkdir(parents=True)
+            if producer_resources:
+                for resource in ('lib/rustlib/src/rust/library/Cargo.toml',
+                                 'libexec/rust-analyzer-proc-macro-srv'):
+                    path = root / 'sysroot' / resource
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.touch()
             producer = root / "tools/kaban-rust-scip"
             producer.mkdir(parents=True)
             (producer / "rust-toolchain.toml").write_text('[toolchain]\nchannel = "1.91.0"\n')
@@ -61,7 +67,9 @@ class CiToolSelection(unittest.TestCase):
                 "tool = Path(sys.argv[0]).name\n"
                 "if tool in ('sudo', 'sysctl', 'unshare'):\n"
                 "    with open(os.environ['ISOLATION_CALLS'], 'a') as log: log.write(json.dumps([tool, *sys.argv[1:]]) + '\\n')\n"
-                "if tool == 'uname': print('x86_64' if '-m' in sys.argv else 'Linux')\n"
+                "if tool == 'uname': print(os.environ['FIXTURE_MACHINE'] if '-m' in sys.argv else os.environ['FIXTURE_PLATFORM'])\n"
+                "elif tool == 'rustup': print(os.environ['PRODUCER_SYSROOT'])\n"
+                "elif tool == 'rustc' and '-vV' in sys.argv: print('host: aarch64-apple-darwin')\n"
                 "elif tool == 'rustc' and '--print' in sys.argv: print(str(Path(os.environ['TARGET_LIB']).parents[3]) if 'sysroot' in sys.argv else os.environ['TARGET_LIB'])\n"
                 "elif tool == 'rustc': print(json.loads(os.environ['VERSIONS']).get('rustc', 'rustc ' + ('1.91.0' if Path.cwd().name == 'kaban-rust-scip' else '1.90.0') + ' (fixture)'))\n"
                 "elif tool == 'sudo':\n"
@@ -81,7 +89,7 @@ class CiToolSelection(unittest.TestCase):
                 "elif tool == 'node': print(json.loads(os.environ['VERSIONS']).get('node', 'v22.0.0'))\n"
                 "else: print(tool + ' fixture')\n")
             helper.chmod(0o700)
-            for name in ('uname', 'rustc', 'node', 'go', 'scip-go', 'cc', 'musl-gcc', 'git', 'strace', 'stat', 'sudo', 'sysctl', 'unshare'):
+            for name in ('uname', 'rustc', 'rustup', 'node', 'go', 'scip-go', 'cc', 'musl-gcc', 'git', 'strace', 'stat', 'sudo', 'sysctl', 'unshare'):
                 (bin_dir / name).symlink_to(helper)
             if missing_tool:
                 for name in ((missing_tool,) if isinstance(missing_tool, str) else missing_tool):
@@ -165,7 +173,7 @@ class CiToolSelection(unittest.TestCase):
                 "    sys.exit(97)\n"
             )
             cargo.chmod(0o700)
-            command = [BASH, str(script), *args]
+            command = [BASH, *(["-e"] if errexit else []), str(script), *args]
             if inherited_fd:
                 command = [BASH, "-c", 'exec 142>/dev/null\nexec "$@"', "bash", *command]
             runs = []
@@ -175,6 +183,9 @@ class CiToolSelection(unittest.TestCase):
                     env={
                         **os.environ,
                         "BASH_ENV": os.devnull,
+                        "FIXTURE_PLATFORM": platform, "FIXTURE_MACHINE": machine,
+                        "KABAN_MACOS_PRODUCER_QUALIFY": qualify,
+                        "PRODUCER_SYSROOT": str(root / "sysroot"),
                         "KABAN_CI_ISOLATION_SPLIT": "1" if isolation_split else "0",
                         "GITHUB_ACTIONS": "true" if hosted else "false",
                         "RUNNER_ENVIRONMENT": "github-hosted" if hosted else "self-hosted",
@@ -228,6 +239,49 @@ class CiToolSelection(unittest.TestCase):
                                       for path in configs for binary in path.iterdir()
                                       if binary.name in ("kaban", "kaban-index")}
             return result, [json.loads(line) for line in (calls.read_text().splitlines() if calls.exists() else [])]
+
+    def test_macos_runner_preserves_success_and_incomplete_under_errexit(self):
+        # Qualification uses errexit. Exercise the same public group/runner under
+        # that shell policy without replaying external producer fixtures here.
+        for marker, failure, expected in (('', '', 0), ('no-default', '', 3),
+                                          ('', 'no-default', 37)):
+            result, calls = self.run_gate(args=('macos',), platform='Darwin', machine='arm64',
+                fail='', marker=marker, runner_fail=failure, errexit=True)
+            self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
+
+
+    def test_macos_requires_native_arm64_before_compilation(self):
+        for platform, machine in (('Linux', 'aarch64'), ('Darwin', 'x86_64')):
+            result, calls = self.run_gate(args=('macos',), platform=platform, machine=machine)
+            self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+            self.assertFalse(any(c[:2] == ['nextest', 'run'] for c in calls))
+        result, calls = self.run_gate(args=('macos',), platform='Darwin', machine='arm64',
+                                      tools=(), fail='')
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertIn('cargo-nextest absent', result.stderr)
+
+    def test_macos_retains_runtime_marker_and_child_failure_semantics(self):
+        for marker, failure, expected in (('', '', 0), ('no-default', '', 3),
+                                           ('', 'no-default', 37)):
+            result, calls = self.run_gate(args=('macos',), platform='Darwin', machine='arm64',
+                fail='', marker=marker, runner_fail=failure, summary=True)
+            self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
+            self.assertFalse(any(c[0] in ('clippy', 'deny') or '--release' in c for c in calls))
+            self.assertFalse(any('--workspace' in c for c in calls))
+
+
+    def test_macos_producer_is_opt_in_and_missing_resources_are_incomplete(self):
+        result, calls = self.run_gate(args=('macos',), platform='Darwin', machine='arm64',
+            qualify='1', producer_resources=False, fail='')
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertIn('producer resource absent', result.stderr)
+        self.assertFalse(any(c[:2] == ['nextest', 'run'] for c in calls))
+        for qualify, expected in (('0', 0), ('1', 37)):
+            result, calls = self.run_gate(args=('macos',), platform='Darwin', machine='arm64',
+                qualify=qualify, fail='fetch')
+            self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
+            self.assertEqual(any(c[0] == 'fetch' for c in calls), qualify == '1')
+
 
     def test_hosted_isolation_split_reuses_build_and_restores_policy(self):
         result, calls = self.run_gate(args=("functional",), fail="", isolation_split=True)
