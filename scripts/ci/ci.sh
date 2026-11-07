@@ -341,7 +341,8 @@ macos() {
 macos_producer_qualification() (
   set -e
   local scratch producer_target sysroot producer oracle profile expectation
-  scratch=$(mktemp -d /private/tmp/kaban-macos-producer.XXXXXXXX)
+  scratch=$(mktemp -d "${TMPDIR:-/tmp}/kaban-macos-producer.XXXXXXXX")
+  scratch=$(cd "$scratch" && pwd -P)
   chmod 700 "$scratch"
   case "$kaban_target_dir" in /*) ;; *) kaban_target_dir="$PWD/$kaban_target_dir" ;; esac
   producer_target="$kaban_target_dir/producer"

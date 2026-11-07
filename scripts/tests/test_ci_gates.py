@@ -18,6 +18,7 @@ class CiToolSelection(unittest.TestCase):
     def run_gate(self, *, tools=("nextest", "deny"), fail="nextest", color="always", inherited_fd=False, versions=None, cargo_override=None, args=(), missing_tool=None, target_present=True, marker="", runner_fail="", helper_fail=False, smoke_skip=False, size_table=False, artifact_scenario="", artifact_sizes=None, repeats=1, artifact_root=False, summary=False, isolation_split=False, hosted=True, isolation_probe="normal", platform="Linux", machine="x86_64", qualify="0", producer_resources=True, errexit=False):
         with tempfile.TemporaryDirectory(prefix="kaban-ci-tools-") as scratch:
             root = Path(scratch)
+            (root / "tmp").mkdir(mode=0o700)
             script = root / "scripts/ci/ci.sh"
             script.parent.mkdir(parents=True)
             shutil.copyfile(ROOT / "scripts/ci/ci.sh", script)
@@ -183,6 +184,7 @@ class CiToolSelection(unittest.TestCase):
                     env={
                         **os.environ,
                         "BASH_ENV": os.devnull,
+                        "TMPDIR": str(root / "tmp"),
                         "FIXTURE_PLATFORM": platform, "FIXTURE_MACHINE": machine,
                         "KABAN_MACOS_PRODUCER_QUALIFY": qualify,
                         "PRODUCER_SYSROOT": str(root / "sysroot"),
@@ -221,6 +223,7 @@ class CiToolSelection(unittest.TestCase):
                     timeout=10,
                 )
                 runs.append(result)
+            result.qualifier_scratch_in_tmp = bool(list((root / "tmp").glob("kaban-macos-producer.*")))
             result.namespace_policy = policy.read_text()
             isolation_calls = root / "isolation-calls.jsonl"
             result.isolation_calls = [json.loads(line) for line in isolation_calls.read_text().splitlines()] if isolation_calls.exists() else []
@@ -281,6 +284,7 @@ class CiToolSelection(unittest.TestCase):
                 qualify=qualify, fail='fetch')
             self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
             self.assertEqual(any(c[0] == 'fetch' for c in calls), qualify == '1')
+            self.assertEqual(result.qualifier_scratch_in_tmp, qualify == '1')
 
 
     def test_hosted_isolation_split_reuses_build_and_restores_policy(self):
