@@ -1,5 +1,7 @@
 //! Public prepared-invocation boundary; invented resources are never executed.
 
+#[cfg(target_os = "macos")]
+use std::os::unix::fs::MetadataExt;
 use std::{
     fs,
     os::unix::fs::PermissionsExt,
@@ -9,6 +11,40 @@ use std::{
 };
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(target_os = "macos")]
+fn apple_path(tool: &str, args: &[&str]) -> PathBuf {
+    let output = Command::new(tool)
+        .args(args)
+        .env_clear()
+        .current_dir("/")
+        .output()
+        .expect("system Apple resource query");
+    assert!(output.status.success());
+    fs::canonicalize(String::from_utf8(output.stdout).expect("path UTF-8").trim())
+        .expect("canonical Apple resource")
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn repository_cannot_redirect_the_admitted_sdk() {
+    let fixture = Fixture::new();
+    fs::create_dir_all(fixture.root.join("repo/.cargo")).expect("config directory");
+    for text in [
+        "[env]\nSDKROOT = { value = '/invented/sdk', force = true }\n",
+        "[env]\nDEVELOPER_DIR = { value = '/invented/developer', force = true }\n",
+        "[env]\nTOOLCHAINS = 'invented'\n",
+        "[env]\nDYLD_INSERT_LIBRARIES = '/invented/library'\n",
+        "[env]\nRUSTC_WRAPPER = '/invented/proxy'\n",
+        "[env]\nRUSTC = { value = '/invented/rustc', force = true }\n",
+        "[build]\nrustc-wrapper = '/invented/proxy'\n",
+        "[target.aarch64-apple-darwin]\nrustflags = ['-C', 'link-arg=-isysroot/invented/sdk']\n",
+        "[build]\nrustflags = ['-C', 'link-arg=-fuse-ld=/invented/ld']\n",
+    ] {
+        fs::write(fixture.root.join("repo/.cargo/config.toml"), text).expect("config");
+        fixture.rejects(fixture.invoke(), "redirects the compiler backend");
+    }
+}
 
 struct Fixture {
     root: PathBuf,
@@ -51,6 +87,8 @@ impl Fixture {
         let linker = root.join("toolchain/bin/cc");
         fs::write(&linker, "invented linker, must never execute").expect("linker");
         fs::set_permissions(&linker, fs::Permissions::from_mode(0o755)).expect("executable");
+        #[cfg(target_os = "macos")]
+        let linker = apple_path("/usr/bin/xcrun", &["--find", "clang"]);
         let target = if cfg!(target_os = "macos") {
             "aarch64-apple-darwin"
         } else if cfg!(target_arch = "aarch64") {
@@ -475,14 +513,42 @@ fn child_environment_is_the_v1_set_plus_the_linker_as_target_linker_cc_and_backe
             .env("CARGO_INCREMENTAL", "0")
             .env("CARGO_PROFILE_DEV_DEBUG", "0")
             .env("LANG", "C.UTF-8");
+        #[cfg(target_os = "macos")]
+        command
+            .env(
+                "__CF_USER_TEXT_ENCODING",
+                format!(
+                    "0x{:X}:0x0:0x0",
+                    fs::metadata(&fixture.root).expect("fixture owner").uid()
+                ),
+            )
+            .env(
+                "SDKROOT",
+                apple_path("/usr/bin/xcrun", &["--show-sdk-path"]),
+            )
+            .env(
+                "DEVELOPER_DIR",
+                apple_path("/usr/bin/xcode-select", &["-p"]),
+            )
+            .env(
+                "PATH",
+                format!(
+                    "{}:{}:/tools:/usr/bin:/bin",
+                    Path::new(fixture.config["linker"].as_str().expect("linker"))
+                        .parent()
+                        .expect("compiler bin")
+                        .display(),
+                    sysroot.join("bin").display()
+                ),
+            );
         for (key, value) in extra {
             command.env(key, value);
         }
         command.output().expect("candidate starts")
     };
-    let linker = sysroot.join("bin/cc");
+    let linker = PathBuf::from(fixture.config["linker"].as_str().expect("linker"));
     let linker = linker.to_str().expect("UTF-8 linker path");
-    let linker_dir = sysroot.join("bin");
+    let linker_dir = Path::new(linker).parent().expect("compiler directory");
     let linker_dir = linker_dir.to_str().expect("UTF-8 linker directory");
     let output = dispatch(&[
         (&variable, linker),
@@ -516,6 +582,16 @@ fn child_environment_is_the_v1_set_plus_the_linker_as_target_linker_cc_and_backe
             ("CARGO_TARGET_OTHER_HOST_LINKER", linker),
             ("CC", linker),
             ("COMPILER_PATH", linker_dir),
+        ]),
+        "unclean semantic child environment",
+    );
+    #[cfg(target_os = "macos")]
+    fixture.rejects(
+        dispatch(&[
+            (&variable, linker),
+            ("CC", linker),
+            ("COMPILER_PATH", linker_dir),
+            ("SDKROOT", "/invented/hostile-sdk"),
         ]),
         "unclean semantic child environment",
     );

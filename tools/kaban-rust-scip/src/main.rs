@@ -3,6 +3,8 @@
 use std::io::{self, Write};
 
 mod admission;
+#[cfg(target_os = "macos")]
+mod apple;
 mod cargo_config;
 mod semantic;
 

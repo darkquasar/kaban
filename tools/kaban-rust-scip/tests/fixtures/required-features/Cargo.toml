@@ -7,4 +7,5 @@ edition = "2024"
 extra = []
 [[bin]]
 name = "gated"
+path = "src/gated.rs"
 required-features = ["extra"]

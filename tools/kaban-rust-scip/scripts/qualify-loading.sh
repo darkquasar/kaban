@@ -2,7 +2,8 @@
 # Trusted loading qualification only: not production runner isolation evidence.
 set -euo pipefail
 [ "$#" = 4 ] || [ "$#" = 5 ] || [ "$#" = 6 ] || exit 2
-[ "$(uname -s):$(uname -m)" = Linux:aarch64 ] || exit 2
+platform=$(uname -s):$(uname -m)
+case "$platform" in Linux:aarch64|Darwin:arm64) ;; *) exit 2;; esac
 producer=$1
 toolchain=$2
 fixture=$3
@@ -42,6 +43,11 @@ for binary in cargo rustc; do
   [ -x "$toolchain/bin/$binary" ] && [ ! -L "$toolchain/bin/$binary" ] || exit 2
 done
 [ -d "$scratch" ] && [ ! -L "$scratch" ] && [ -z "$(ls -A "$scratch")" ] || exit 2
+if [ "$platform" = Darwin:arm64 ]; then
+  # Ignore caller PYTHONOPTIMIZE/PYTHONPATH: qualification checks must stay active.
+  exec python3 -I "$(dirname "$0")/qualify-loading-macos.py" \
+    "$producer" "$toolchain" "$source" "$fixture" "$scratch" "$expect_output" "$checkout"
+fi
 cc=$(readlink -f /usr/bin/cc)
 umask 077
 mkdir "$scratch/home" "$scratch/tmp" "$scratch/out" "$scratch/cargo-home" "$scratch/target"

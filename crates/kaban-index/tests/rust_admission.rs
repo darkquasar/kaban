@@ -23,6 +23,59 @@ use serde_json::Value;
 // ---------------------------------------------------------------------------------------------
 // harness
 
+#[cfg(target_os = "macos")]
+#[test]
+fn darwin_repository_cannot_redirect_the_admitted_sdk() {
+    let scratch = Scratch::new("sdk-redirect");
+    fs::create_dir(scratch.path().join(".cargo")).unwrap();
+    for text in [
+        "[env]\nSDKROOT = { value = '/invented/sdk', force = true }\n",
+        "[env]\nDEVELOPER_DIR = { value = '/invented/developer', force = true }\n",
+        "[env]\nTOOLCHAINS = 'invented'\n",
+        "[env]\nDYLD_INSERT_LIBRARIES = '/invented/library'\n",
+        "[env]\nRUSTC_WRAPPER = '/invented/proxy'\n",
+        "[env]\nRUSTC = { value = '/invented/rustc', force = true }\n",
+        "[build]\nrustc-wrapper = '/invented/proxy'\n",
+        "[target.aarch64-apple-darwin]\nrustflags = ['-C', 'link-arg=-isysroot/invented/sdk']\n",
+        "[build]\nrustflags = ['-C', 'link-arg=-fuse-ld=/invented/ld']\n",
+    ] {
+        fs::write(scratch.path().join(".cargo/config.toml"), text).unwrap();
+        assert_eq!(
+            doctor::rust_repository_profile(scratch.path()),
+            Err("rust_cargo_config_redirects_backend"),
+            "{text}"
+        );
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn native_apple_linker_resources_are_admitted_outside_forbidden_roots() {
+    if rerun_native_test_with_clean_descriptors(
+        "native_apple_linker_resources_are_admitted_outside_forbidden_roots",
+    ) {
+        return;
+    }
+    let linker = doctor::rust_linker(Path::new("/usr/bin/cc"), &[], ProbeSite::Native)
+        .expect("admit native Apple Clang and SDK resources");
+    assert_eq!(linker.cc.path.file_name().unwrap(), "clang");
+    assert!(linker.helper_dir.join("include/stddef.h").is_file());
+    assert_eq!(
+        doctor::rust_linker(
+            Path::new("/usr/bin/cc"),
+            &[&linker.helper_dir],
+            ProbeSite::Native
+        )
+        .map(|_| ()),
+        Err("rust_linker_refused")
+    );
+    let inside = linker.helper_dir.join("invented-private-resource");
+    assert_eq!(
+        doctor::rust_linker(Path::new("/usr/bin/cc"), &[&inside], ProbeSite::Native).map(|_| ()),
+        Err("rust_linker_refused")
+    );
+}
+
 /// A scratch directory deleted on drop, test failure included.
 struct Scratch(PathBuf);
 
@@ -276,6 +329,22 @@ fn linker_variable() -> String {
     )
 }
 
+fn resolved_system_cc() -> PathBuf {
+    #[cfg(target_os = "macos")]
+    {
+        let out = Command::new("/usr/bin/xcrun")
+            .args(["--find", "clang"])
+            .env_clear()
+            .current_dir("/")
+            .output()
+            .expect("system compiler query");
+        assert!(out.status.success());
+        fs::canonicalize(String::from_utf8(out.stdout).unwrap().trim()).unwrap()
+    }
+    #[cfg(not(target_os = "macos"))]
+    fs::canonicalize("/usr/bin/cc").unwrap()
+}
+
 // ---------------------------------------------------------------------------------------------
 // DF-2: the host registry is an input of every Rust run; skipped targets reach the report
 
@@ -363,6 +432,7 @@ fn host_registry_is_an_input_of_the_rust_run_on_the_none_tier() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn host_registry_is_an_input_of_the_rust_run_on_the_selected_tier() {
     host_registry_is_an_input_of_the_rust_run(false);
 }
@@ -442,7 +512,7 @@ fn checkout_cc_is_never_the_linker(isolation_off: bool) {
         assert_eq!(check["linker"], "admitted", "{check}");
         assert!(stderr(&out).contains("indexer rust linker: admitted"));
     }
-    let system_cc = fs::canonicalize("/usr/bin/cc").unwrap_or_default();
+    let system_cc = resolved_system_cc();
     let doctor_text = stderr(&out);
     assert!(
         !doctor_text.contains(repo.to_str().unwrap())
@@ -491,7 +561,7 @@ fn checkout_cc_is_never_the_linker(isolation_off: bool) {
             .join(format!("{}.rust.a.log", head(&repo))),
     )
     .expect("the gated run log");
-    let system_cc = fs::canonicalize("/usr/bin/cc").unwrap();
+    let system_cc = resolved_system_cc();
     assert!(
         log.lines()
             .any(|l| l == format!("linker={}", system_cc.display())),
@@ -509,6 +579,7 @@ fn checkout_cc_on_path_is_never_the_linker_on_the_none_tier() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn checkout_cc_on_path_is_never_the_linker_on_the_selected_tier() {
     let s = Scratch::new("linker-tier");
     if doctor_selected_tier(&s.home()) != "namespaces" {
@@ -706,6 +777,7 @@ fn producer_answering_protocol_1_is_refused_through_doctor_and_index() {
 /// host the admitted helper directory is exactly the canonical parent of `cc1`, and a
 /// forbidden root over it refuses the linker as a whole.
 #[test]
+#[cfg(target_os = "linux")]
 fn linker_helpers_are_admitted_narrowly_and_under_the_same_forbidden_roots() {
     if rerun_native_test_with_clean_descriptors(
         "linker_helpers_are_admitted_narrowly_and_under_the_same_forbidden_roots",
@@ -774,6 +846,7 @@ fn linker_helpers_are_admitted_narrowly_and_under_the_same_forbidden_roots() {
 /// is a descendant of the real helper directory refuses the helper and the linker as a whole;
 /// the real `cc1` is admitted with exactly its canonical directory.
 #[test]
+#[cfg(target_os = "linux")]
 fn linker_helper_directory_is_one_gcc_leaf() {
     if rerun_native_test_with_clean_descriptors("linker_helper_directory_is_one_gcc_leaf") {
         return;
