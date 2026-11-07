@@ -1,36 +1,36 @@
-# Linux binary release notices
+# Full-profile binary release notices
 
-Each target directory contains `manifest.json` and
-`THIRD_PARTY_LICENSES.txt` plus `RUST_STANDARD_LIBRARY_NOTICES.html` for the default-feature `kaban` + `kaban-index`
-package selection. Release archives include the directory as `third-party/`.
+Each of the four target directories contains `manifest.json`,
+`THIRD_PARTY_LICENSES.txt` and `RUST_STANDARD_LIBRARY_NOTICES.html` for both `kaban`
+and `kaban-index` with defaults plus PDF and Markdown splitting. Archives include
+the selected directory as `third-party/`.
 
-To check a committed bundle without Cargo or network access:
-
-```sh
-python3 scripts/release/licenses.py check --target x86_64-unknown-linux-gnu
-```
-
-After a dependency, manifest, target configuration, collector, or toolchain change,
-review the affected upstream licences, update version-specific supplements if
-needed, and regenerate **all three** bundles:
+Check a committed bundle without Cargo or network access:
 
 ```sh
-cargo fetch --locked --target x86_64-unknown-linux-gnu
-cargo fetch --locked --target x86_64-unknown-linux-musl
-cargo fetch --locked --target aarch64-unknown-linux-gnu
-python3 scripts/release/licenses.py generate --target x86_64-unknown-linux-gnu
-python3 scripts/release/licenses.py generate --target x86_64-unknown-linux-musl
-python3 scripts/release/licenses.py generate --target aarch64-unknown-linux-gnu
+python3 scripts/release/licenses.py check --target aarch64-apple-darwin
 ```
 
-The collector reads cached crate sources and fails when a selected crate has no
-licence/notice text and no reviewed supplement. `upstream/sources.json` records
-supplement origins; these are required because some published crates omit their
-repository licence/NOTICE files. Keep those exact upstream texts, including native
-and runtime notices, when regenerating. Rust runtime notices must be refreshed
-when changing the pinned toolchain.
+After changing dependencies, manifests, target configuration, collector or toolchain,
+review upstream terms and regenerate all four exact closures using cached sources:
 
-Inspect the generated inventory and diff before committing. A successful checksum
-check establishes that the reviewed inputs and bundle match; it does not review
-new upstream licensing terms automatically. Details and collection decisions are
-in [THIRD_PARTY.md](../../docs/developer/THIRD_PARTY.md).
+```sh
+for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu \
+              x86_64-unknown-linux-musl aarch64-apple-darwin; do
+  cargo fetch --locked --target "$target"
+  python3 scripts/release/licenses.py generate --target "$target"
+done
+```
+
+The generator resolves `-p kaban -p kaban-index` and
+`--features kaban-ingest/pdf,kaban-ingest/md-splitter` for each target, including
+normal/build/proc-macro dependencies conservatively and excluding dev-only edges.
+A missing upstream notice fails generation. `upstream/sources.json` records exact
+revision provenance for omissions in published crates; version-specific supplements
+must be reviewed after upgrades. Source-header attribution and native/font/ICU data
+notices are retained unmodified, including their original whitespace. Runtime
+notices must be reviewed when changing Rust.
+
+Inspect the generated inventory and diff before committing. Hash checks establish
+that reviewed inputs/bundles match; they do not review new upstream terms.
+See [THIRD_PARTY.md](../../docs/developer/THIRD_PARTY.md) for collection decisions.

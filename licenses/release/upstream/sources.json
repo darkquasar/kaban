@@ -1,4 +1,10 @@
 {
+  "alloc-stdlib-0.3.0-LICENSE": "https://github.com/dropbox/rust-alloc-no-stdlib/blob/0a81fd6928ea3b33c8cd484aa4575d50ffb98012/LICENSE",
+  "brotli-9.0.0-LICENSE.MIT": {
+    "additional_attribution_source": "https://github.com/dropbox/rust-brotli-decompressor/blob/e4f3bf3326256a5dc23e5fa9276d803f6a4ad527/src/context.rs",
+    "note": "Complete upstream Brotli MIT terms conservatively retained for decompressor MIT-derived code; exact Google 2013 source attribution collected separately alongside Dropbox BSD terms.",
+    "text_source": "https://github.com/dropbox/rust-brotli/blob/a51b65e75f68e3485be12bc816118e523e95647d/LICENSE.MIT"
+  },
   "datasketches-0.2.0-LICENSE": "https://github.com/apache/datasketches-rust/blob/fdb38b85d22e6549ab283bf3b9b133659267d19f/LICENSE",
   "datasketches-0.2.0-NOTICE": "https://github.com/apache/datasketches-rust/blob/fdb38b85d22e6549ab283bf3b9b133659267d19f/NOTICE",
   "htmlescape-0.3.1-LICENSE-APACHE": {
@@ -20,6 +26,7 @@
     "source": "Rust 1.99.0 official rust-docs component, share/doc/rust/COPYRIGHT-library.html and licenses/*.txt"
   },
   "rust-1.99.0-COMPILER-BUILTINS-LICENSE.txt": "https://github.com/rust-lang/rust/blob/b940084d7eb6a299eb4bfeb8e34901bc051e7ac4/library/compiler-builtins/LICENSE.txt",
+  "taffy-0.14.0-LICENSE": "https://github.com/DioxusLabs/taffy/blob/77f385683c1d698c91a23a259f87fdddf26925fb/LICENSE",
   "tantivy-9e63fc5-LICENSE": "https://github.com/quickwit-oss/tantivy/blob/9e63fc508153ef770f9ff980c8fa2f11e8e2e6db/LICENSE",
   "whatlang-0.18.0-LICENSE": "https://github.com/greyblake/whatlang-rs/blob/584009bbdbd715681fc1c144ac986814104bedbc/LICENSE"
 }

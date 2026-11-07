@@ -337,7 +337,8 @@ macos() {
 }
 
 # This costly qualification is selected only for producer/shared/setup changes or
-# explicit manual qualification. The trusted fixture campaign provides no sandbox.
+# explicit manual qualification. Checked tests remain separate; this campaign uses
+# the installed producer's normal release profile. Trusted fixtures provide no sandbox.
 macos_producer_qualification() (
   set -e
   local scratch producer_target sysroot producer oracle profile expectation
@@ -350,14 +351,19 @@ macos_producer_qualification() (
   CARGO_TARGET_DIR="$kaban_target_dir" bash scripts/ci/ci.sh producer
   (
     cd tools/kaban-rust-scip
-    CARGO_TARGET_DIR="$producer_target" "$CARGO" build --locked --bins --examples
+    CARGO_TARGET_DIR="$producer_target" step "$CARGO" build --release --locked --bins --examples
     rustc --print sysroot > "$scratch/sysroot"
   )
   sysroot=$(cat "$scratch/sysroot")
   mkdir -m 700 "$scratch/bin"
-  install -m 755 "$producer_target/debug/kaban-rust-scip" "$scratch/bin/kaban-rust-scip"
+  install -m 755 "$producer_target/release/kaban-rust-scip" "$scratch/bin/kaban-rust-scip"
   producer="$scratch/bin/kaban-rust-scip"
-  oracle="$producer_target/debug/examples/qualify-output"
+  oracle="$producer_target/release/examples/qualify-output"
+  python3 - "$producer" <<'IDENTITY'
+import hashlib, pathlib, sys
+path = pathlib.Path(sys.argv[1])
+print(f"Darwin producer profile: release; sha256: {hashlib.sha256(path.read_bytes()).hexdigest()}")
+IDENTITY
   export PATH="$sysroot/bin:$PATH"
   # The existing M4 oracle and loading fixtures, with no new case registry/framework.
   for profile in minimal workspace target-contexts semantic-extra cargo-contexts local-contexts \

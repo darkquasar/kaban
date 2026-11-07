@@ -298,3 +298,8 @@ Dependency licenses and the exact inspected files are described in `NOTICE`.
 CodeQL's pinned Rust loader/translator were inspected as architecture precedents;
 their TRAP translation and absolute-path/dependency-hash crate identities are not
 reused. Direct public RA APIs supply the required semantic facts without that runtime.
+
+Native CI keeps unit/admission tests in the checked test profile. Loading/semantic/
+refusal qualification and the real producer-to-MCP case use one normal optimized
+`cargo build --release --locked --bins --examples` producer, matching installation.
+The staged producer hash is logged; no debug-artifact fallback is used.

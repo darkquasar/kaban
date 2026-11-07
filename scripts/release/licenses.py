@@ -15,9 +15,13 @@ import re
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[2]
-TARGETS = ("x86_64-unknown-linux-gnu", "x86_64-unknown-linux-musl", "aarch64-unknown-linux-gnu")
+TARGETS = ("x86_64-unknown-linux-gnu", "x86_64-unknown-linux-musl", "aarch64-unknown-linux-gnu", "aarch64-apple-darwin")
 SELECTED = ("kaban", "kaban-index")
+FEATURES = ["default", "kaban-ingest/pdf", "kaban-ingest/md-splitter"]
 SUPPLEMENTS = {
+    "alloc-stdlib": ("alloc-stdlib-0.3.0-LICENSE",),
+    "taffy": ("taffy-0.14.0-LICENSE",),
+    "brotli-decompressor": ("brotli-9.0.0-LICENSE.MIT",),
     "datasketches": ("datasketches-0.2.0-LICENSE", "datasketches-0.2.0-NOTICE"),
     "htmlescape": ("htmlescape-0.3.1-LICENSE-APACHE",),
     "ownedbytes": ("ownedbytes-0.9.0-LICENSE",),
@@ -30,6 +34,7 @@ SUPPLEMENTS = {
     )},
 }
 SUPPLEMENT_VERSIONS = {
+    "alloc-stdlib": "0.3.0", "taffy": "0.14.0", "brotli-decompressor": "6.0.1",
     "datasketches": "0.2.0", "htmlescape": "0.3.1", "ownedbytes": "0.9.0",
     "rmcp": "3.5.1", "rmcp-macros": "3.5.1", "whatlang": "0.18.0",
     **{name: "0.7.0" for name in SUPPLEMENTS if name.startswith("tantivy-")},
@@ -67,6 +72,23 @@ def collect_notices(package, upstream):
         start = source.index("/*\n** 2001 September 15")
         end = source.index("*/", start) + 2
         result.append({"path": "sqlite3/sqlite3.c (copyright disclaimer)", "text": source[start:end] + "\n"})
+    if package['name'] == 'brotli-decompressor':
+        # Its BSD LICENSE omits the MIT-derived context table's Google attribution.
+        source = (root/'src/context.rs').read_text()
+        header = re.search(r'// Copyright[^\n]*\n(?://[^\n]*\n)+', source)
+        if header is None or 'Distributed under MIT license.' not in header[0]:
+            raise ValueError('brotli-decompressor has a missing MIT attribution header')
+        result.append({'path': 'src/context.rs (MIT attribution)', 'text': header[0]})
+    if package['name'] == 'qcms':
+        # qcms ships complete MIT terms in source headers rather than a LICENSE file.
+        # Keep both Mozilla copyright variants and their original source association.
+        for name in ('matrix.rs', 'chain.rs', 'transform.rs', 'iccread.rs', 'transform_util.rs'):
+            source = (root/'src'/name).read_text()
+            header = re.match(r'(?:[^\S\n]*//[^\n]*\n)+', source)
+            if header is None or not all(term in header[0] for term in (
+                    'Copyright', 'Permission is hereby granted', 'THE SOFTWARE IS PROVIDED')):
+                raise ValueError(f'qcms has a missing or incomplete licence header: {name}')
+            result.append({'path': f'src/{name} (licence header)', 'text': header[0]})
     if not result:
         raise ValueError(f"No licence/notice text found for {package['name']} {package['version']}")
     return result
@@ -103,10 +125,10 @@ def selected_packages(tree):
 def generate(root, target):
     if not re.search(r'^channel\s*=\s*"1\.99\.0"', (root / "rust-toolchain.toml").read_text(), re.M):
         raise ValueError("Review Rust runtime notices for the changed toolchain before regeneration")
-    metadata = json.loads(cargo_output(root, "metadata", "--locked", "--offline", "--format-version", "1", "--filter-platform", target))
+    metadata = json.loads(cargo_output(root, "metadata", "--locked", "--offline", "--format-version", "1", "--filter-platform", target, "--features", ",".join(FEATURES[1:])))
     tree = cargo_output(root, "tree", "--locked", "--offline", "--target", target,
                         "-p", "kaban", "-p", "kaban-index", "--edges", "normal,build",
-                        "--prefix", "none", "--format", "{p}|{f}")
+                        "--prefix", "none", "--format", "{p}|{f}", "--features", ",".join(FEATURES[1:]))
     selected = selected_packages(tree)
     if not set(SELECTED) <= {name for name, _ in selected}:
         raise ValueError("Cargo tree did not include both selected release packages")
@@ -136,7 +158,7 @@ def generate(root, target):
         raise ValueError("Cargo tree selected no registry dependencies")
     bundle = [
         "Kaban third-party licences and notices\n",
-        f"Target: {target}; default features; cargo build --release --locked -p kaban -p kaban-index\n",
+        f"Target: {target}; default + PDF + Markdown splitting; cargo build --release --locked -p kaban -p kaban-index --features {','.join(FEATURES[1:])}\n",
         "Inventory includes normal and build/proc-macro dependencies conservatively; dev-only dependencies are excluded.\n",
         "Licence alternatives: prefer MIT, otherwise Apache-2.0 where offered; retain all AND obligations.\n",
         "Additional terms for bundled native code are retained alongside crate terms.\n",
@@ -154,7 +176,7 @@ def generate(root, target):
     bundle += ["=" * 72 + "\nRuntime notices\n",
                "Rust runtime notices include the upstream standard-library dependency inventory conservatively.\n",
                "See the accompanying RUST_STANDARD_LIBRARY_NOTICES.html for its original notices.\n",
-               "GNU system shared libraries are supplied by the host; their binaries are not bundled.\n"]
+               "System shared libraries are supplied by the host; their binaries are not bundled.\n"]
     for name in runtime_names:
         bundle += [f"\n--- {name} ---\n", (upstream / name).read_text(), "\n"]
     output = root / "licenses/release" / target
@@ -163,7 +185,7 @@ def generate(root, target):
     (output / "THIRD_PARTY_LICENSES.txt").write_bytes(data)
     runtime_html = (upstream / "rust-1.99.0-COPYRIGHT-library.html").read_bytes()
     (output / "RUST_STANDARD_LIBRARY_NOTICES.html").write_bytes(runtime_html)
-    manifest = {"schema": 1, "target": target, "packages": list(SELECTED), "features": "default",
+    manifest = {"schema": 1, "target": target, "packages": list(SELECTED), "features": FEATURES,
                 "dependency_edges": ["normal", "build"], "inputs": input_hashes(root),
                 "bundle_sha256": digest(data), "dependencies": packages,
                 "files": {"THIRD_PARTY_LICENSES.txt": digest(data),
@@ -177,7 +199,7 @@ def check(root, target):
     """Refuse stale or damaged package notices without invoking Cargo or the network."""
     output = root / "licenses/release" / target
     manifest = json.loads((output / "manifest.json").read_text())
-    if (manifest.get("schema"), manifest.get("target"), manifest.get("packages"), manifest.get("features"), manifest.get("dependency_edges")) != (1, target, list(SELECTED), "default", ["normal", "build"]):
+    if (manifest.get("schema"), manifest.get("target"), manifest.get("packages"), manifest.get("features"), manifest.get("dependency_edges")) != (1, target, list(SELECTED), FEATURES, ["normal", "build"]):
         raise ValueError("Licence bundle configuration does not match the release profile")
     if manifest["inputs"] != input_hashes(root):
         raise ValueError("Licence bundle inputs changed; regenerate and review before publishing")

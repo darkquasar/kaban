@@ -74,7 +74,7 @@ jobs:
       - name: Install package prerequisites
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends binutils strace
+          sudo apt-get install -y --no-install-recommends binutils file strace
       - name: Prepare pinned Rust toolchain
         run: |
           channel=$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')
@@ -118,7 +118,7 @@ jobs:
       - name: Install package prerequisites
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends musl-tools binutils strace
+          sudo apt-get install -y --no-install-recommends musl-tools binutils file strace
       - name: Prepare pinned Rust toolchain
         run: |
           channel=$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')
@@ -146,8 +146,71 @@ jobs:
           compression-level: 0
           retention-days: 7
 
+  macos:
+    needs: authorize
+    if: ${{ !cancelled() && (github.event_name == 'pull_request' || needs.authorize.result == 'success') }}
+    name: Package aarch64-apple-darwin
+    runs-on: macos-15
+    timeout-minutes: 45
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target/release-macos
+      TMPDIR: /private/tmp
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Verify native Mac and prepare private tool directory
+        shell: bash
+        run: |
+          test "$(uname -s)" = Darwin
+          test "$(uname -m)" = arm64
+          test "$RUNNER_ARCH" = ARM64
+          export MISE_DATA_DIR="$RUNNER_TEMP/kaban-release-mise"
+          mkdir -m 700 "$MISE_DATA_DIR"
+          printf 'MISE_DATA_DIR=%s\n' "$MISE_DATA_DIR" >> "$GITHUB_ENV"
+          { sw_vers; xcode-select -p; xcrun --show-sdk-version; } >> "$GITHUB_STEP_SUMMARY"
+      - name: Install pinned package Python (no executable cache)
+        uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4
+        with:
+          version: 2026.10.24
+          cache: false
+          install_args: --locked python
+      - name: Prepare pinned native Rust toolchain
+        run: |
+          channel=$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')
+          rustup toolchain install "$channel" --profile minimal
+          rustc -vV
+          cargo --version
+      - name: Restore compatible Mac full-profile Cargo dependencies
+        id: cargo-cache
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          prefix-key: release-v1-macos-full
+          workspaces: . -> target/release-macos
+          key: ${{ runner.os }}-${{ runner.arch }}-macos-full-${{ hashFiles('mise.toml', 'mise.lock', 'rust-toolchain.toml', '.cargo/config.toml') }}
+          cache-bin: false
+          save-if: false
+      - name: Build once, extract and check shipped executables
+        run: bash scripts/release/build.sh aarch64-apple-darwin
+      - name: Mac package resources and cache observation
+        if: ${{ always() }}
+        run: |
+          {
+            echo 'Exact Cargo cache hit: ${{ steps.cargo-cache.outputs.cache-hit }}; package jobs never save caches.'
+            echo 'Unsigned/ad-hoc release under OD-1; no Developer ID or notarization.'
+            sysctl -n hw.memsize
+            df -h . "$RUNNER_TEMP"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: package-aarch64-apple-darwin
+          path: dist/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
   publish:
-    needs: [authorize, gnu, musl]
+    needs: [authorize, gnu, musl, macos]
     if: >-
       github.repository == 'darkquasar/kaban' && github.event_name == 'push' &&
       startsWith(github.ref, 'refs/tags/v') && github.actor == 'darkquasar' &&

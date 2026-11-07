@@ -1524,7 +1524,7 @@ dependencies = [
 
 [[package]]
 name = "kaban"
-version = "3.0.0-alpha.1"
+version = "3.0.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1551,7 +1551,7 @@ dependencies = [
 
 [[package]]
 name = "kaban-api"
-version = "3.0.0-alpha.1"
+version = "3.0.0"
 dependencies = [
  "blake3",
  "getrandom 0.3.4",
@@ -1580,7 +1580,7 @@ dependencies = [
 
 [[package]]
 name = "kaban-codegraph"
-version = "3.0.0-alpha.1"
+version = "3.0.0"
 dependencies = [
  "anyhow",
  "getrandom 0.3.4",
@@ -1601,7 +1601,7 @@ dependencies = [
 
 [[package]]
 name = "kaban-core"
-version = "3.0.0-alpha.1"
+version = "3.0.0"
 dependencies = [
  "blake3",
  "nix 0.29.0",
@@ -1619,7 +1619,7 @@ dependencies = [
 
 [[package]]
 name = "kaban-index"
-version = "3.0.0-alpha.1"
+version = "3.0.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1640,7 +1640,7 @@ dependencies = [
 
 [[package]]
 name = "kaban-index-tantivy"
-version = "3.0.0-alpha.1"
+version = "3.0.0"
 dependencies = [
  "kaban-core",
  "kaban-store-sqlite",
@@ -1654,7 +1654,7 @@ dependencies = [
 
 [[package]]
 name = "kaban-ingest"
-version = "3.0.0-alpha.1"
+version = "3.0.0"
 dependencies = [
  "aho-corasick",
  "blake3",
@@ -1688,7 +1688,7 @@ dependencies = [
 
 [[package]]
 name = "kaban-policy"
-version = "3.0.0-alpha.1"
+version = "3.0.0"
 dependencies = [
  "aho-corasick",
  "getrandom 0.3.4",
@@ -1709,7 +1709,7 @@ dependencies = [
 
 [[package]]
 name = "kaban-store-sqlite"
-version = "3.0.0-alpha.1"
+version = "3.0.0"
 dependencies = [
  "crc32fast",
  "kaban-codegraph",

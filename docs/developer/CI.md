@@ -562,7 +562,10 @@ examples omit producer qualification; manifests/build inputs inside those trees
 still select it. Unknown paths and mixed relevant changes retain qualification. Linux's existing producer selection is unchanged.
 Locally set `KABAN_MACOS_PRODUCER_QUALIFY=1` for explicit qualification; the normal
 Mac group defaults to 0. Qualification builds the producer under its own toolchain
-and target, installs a fresh executable outside the checkout, uses existing trusted
+and target: unit/admission tests retain debug assertions and overflow checks; the
+normal optimized `--release --locked` build supplies the single qualification
+producer and oracle. Its staged SHA-256 and build elapsed time are logged. It
+installs a fresh executable outside the checkout, uses existing trusted
 fixtures/oracles, and runs the real Rust publication-to-MCP-query acceptance case.
 Scratch, private homes and targets are retained. This executes trusted code with
 user access (`none`), with no Linux namespace-isolation claim.
