@@ -18,7 +18,7 @@ counts:symbols	45
 indexer:typescript	scip-typescript 0.4.0
 isolation	none
 isolation_detail	test
-kaban_index_version	3.0.0-alpha.1
+kaban_index_version	3.0.0
 languages	typescript
 policy_version	test
 repo_id	0123456789abcdef0123456789abcdef
