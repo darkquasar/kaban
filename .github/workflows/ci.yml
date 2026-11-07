@@ -577,6 +577,26 @@ jobs:
             xcrun --show-sdk-version
             pkgutil --pkg-info com.apple.pkg.CLTools_Executables
           } | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Observe Apple resource ownership for producer qualification
+        if: ${{ env.KABAN_MACOS_PRODUCER_QUALIFY == '1' }}
+        run: |
+          /usr/bin/python3 - <<'PYAPPLE'
+          import pathlib, stat, subprocess
+          def query(command):
+              return pathlib.Path(subprocess.check_output(command, text=True).strip()).resolve()
+          paths = [query(['/usr/bin/xcrun', '--find', 'clang']), query(['/usr/bin/xcrun', '--show-sdk-path']), query(['/usr/bin/xcode-select', '-p'])]
+          clt = pathlib.Path('/Library/Developer/CommandLineTools')
+          if clt.exists():
+              paths.extend([clt, clt / 'usr/bin/clang', clt / 'SDKs/MacOSX.sdk'])
+          seen = set()
+          for resource in paths:
+              for path in [resource.resolve(), *resource.resolve().parents]:
+                  if path in seen:
+                      continue
+                  seen.add(path)
+                  meta = path.stat()
+                  print(f'APPLE_RESOURCE uid={meta.st_uid} gid={meta.st_gid} mode={stat.filemode(meta.st_mode)} path={path}', flush=True)
+          PYAPPLE
       - name: Install pinned Mac tools (no executable cache)
         uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4
         with:
