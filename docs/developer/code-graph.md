@@ -108,10 +108,11 @@ wrong figure), `gc_failed`.
 
 Cargo package and workspace roots (`Cargo.toml`) and `--languages rust` use `kaban-rust-scip`
 (contract v2: `protocol_version: 2`, profile `kaban-rust-v1`, `ra_ap_version` 0.0.358, one
-advertised host `aarch64-unknown-linux-gnu`; `rust_capabilities_refused` otherwise). Admission
+qualified hosts `aarch64-unknown-linux-gnu` and `aarch64-apple-darwin`;
+`rust_capabilities_refused` otherwise). Admission
 (`language::rust`): the `rustc` on `PATH` must be the real Rust 1.99.0 for the native host (not a
 rustup proxy: put the toolchain's `bin` first on `PATH`), its sysroot is the admitted toolchain
-root; the system C compiler `/usr/bin/cc` is resolved canonically, admitted only under
+root. On Linux the system C compiler `/usr/bin/cc` is resolved canonically, admitted only under
 `/usr/bin` and outside the checkout and the data directory, its helper directory
 (`cc1`, `collect2`, `crt1.o`) is bound read-only into the view and its backend chain pinned
 (`CARGO_TARGET_<TRIPLE>_LINKER`, `CC`, `COMPILER_PATH`), `rust_linker_refused` otherwise;
@@ -126,6 +127,79 @@ ancestor `.cargo/config[.toml]` is accepted except for the keys that redirect th
 compiler backend (`rust_cargo_config_redirects_backend`: `[target.*] linker`, `rustflags` with
 `-C linker=`, `-C link-self-contained` or `-B`/`-specs` link arguments, forced `[env]` on `CC`,
 `PATH`, `COMPILER_PATH` or the linker variable, any `LD_*` or `GCC_EXEC_PREFIX` entry).
+
+On Darwin, a clean `/usr/bin/xcrun --find clang` selects the system Apple compiler;
+caller `SDKROOT` and `DEVELOPER_DIR` are ignored. Admission accepts the standard
+`/Library/Developer/CommandLineTools` or `/Applications/<name>.app/Contents/Developer`
+layout, root-owned developer/SDK directories without group/other write access, the
+canonical Clang, its `ld`/`as` backends and builtin headers, outside forbidden roots.
+The unchanged seven-field v2 configuration carries that canonical Clang as `linker`.
+The producer derives bounded `SDKROOT` and `DEVELOPER_DIR` from it and puts its backend
+directory first on the clean child's `PATH`. CoreFoundation's text-encoding variable
+is set from the real UID and checked exactly, rather than permitting an ambient extra key.
+Forced SDK/developer/compiler overrides, dynamic-loader/backend search overrides,
+compiler proxies and linker flags redirecting the SDK/backend are refused in both
+consumer and producer Cargo-config admission. Linux's GCC selection and environment stay
+unchanged.
+
+### Native ARM64 macOS producer setup and qualification
+
+The M4 qualification used macOS 15.6.1 (24G90), CLT Apple Clang 17.0.0 and SDK 15.5:
+Go 1.26.0/scip-go 0.2.7, Node 22.23.4/scip-typescript 0.4.0/TypeScript 5.9.3, and
+Rust 1.99.0/ra_ap 0.0.358/producer 0.1.0-dev. All three produced fresh snapshots
+queried through MCP for known definitions, references, implementations and test filtering.
+Rust also passed all 27 semantic/refusal profiles, build/proc-macro/LTO markers,
+backend-shadow refusal, repeated-output determinism and output-collision preservation.
+This is producer qualification; it establishes neither the exact macOS 15.0 floor nor
+release/hosted-CI readiness. Xcode layouts are admitted, but this run used CLT.
+
+Use the pinned native tools from [CI setup](CI.md#native-arm64-macos-setup), retaining
+the external npm package lock. Install producers outside both the indexed checkout and
+`KABAN_HOME`; they are separate from the two application binaries. Build the Rust source
+with its own pinned workspace/toolchain and a private target, for example from the
+application checkout (the destination must be new):
+
+```sh
+kaban_tools="$HOME/.local/share/kaban-tools/macos-arm64"
+test ! -e "$kaban_tools/rust-producer-src"
+cp -R tools/kaban-rust-scip "$kaban_tools/rust-producer-src"
+export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 KABAN_CARGO_SLOTS=1
+export CARGO_TARGET_DIR="$kaban_tools/rust-producer-target"
+(cd "$kaban_tools/rust-producer-src" && cargo build --release --locked)
+install -m 755 "$CARGO_TARGET_DIR/release/kaban-rust-scip" "$kaban_tools/bin/kaban-rust-scip"
+```
+
+Use a distinct target directory for each producer source root; retain caches. Put the
+real Rust 1.99.0 toolchain's `bin` before rustup proxies on `PATH`, with matching `rust-src`
+and proc-macro server installed. Keep at least 2,000,000,000 bytes free and one heavy Cargo
+slot. `bash scripts/ci/ci.sh producer` runs standalone unit/admission gates separately
+from the semantic oracle. From the application checkout, the existing loading script runs
+trusted disposable Darwin copies without claiming isolation; Linux retains bwrap:
+
+```sh
+scratch=$(mktemp -d /private/tmp/kaban-producer-qualification.XXXXXXXX)
+bash tools/kaban-rust-scip/scripts/qualify-loading.sh \
+  "$kaban_tools/bin/kaban-rust-scip" \
+  "$HOME/.rustup/toolchains/1.99.0-aarch64-apple-darwin" minimal "$scratch" --expect-scip
+```
+
+The complete profiles use the existing `qualify-output` example and fixture oracles;
+seven refusal profiles must exit 1 without output. The native recipe retains scratch
+and copied resources, including masks of the missing-tool/sysroot cases. It never alters
+the installed toolchain. Qualification fixtures are trusted code: `none` runs with your
+user's access. macOS `preferred` warns and selects `none`; `off` selects `none`; `required`
+refuses with exit 8 before producer probes. Linux namespaces remain unchanged.
+
+The actual public acceptance targets are the two ignored Rust CLI cases in
+`kaban-index/tests/cli.rs`, and the ignored `rust_snapshot_public_queries_through_the_mcp_server`
+and `go_and_typescript_snapshots_support_public_queries` in `kaban/tests/mcp_rust_acceptance.rs`.
+Set `KABAN_TEST_RUST_PRODUCER`, `KABAN_TEST_RUST_SYSROOT`, `KABAN_TEST_INDEX_BIN`, `SCIP_GO`,
+`KABAN_TEST_GO_ROOT`, `KABAN_TEST_TS_PRODUCER` and `KABAN_TEST_NODE_ROOT` to those trusted
+installs; select them with `cargo test ... -- --ignored --exact --nocapture`.
+`index_go_drivers_real` is an ordinary CLI test. Missing required inputs are incomplete,
+even if an existing optional test prints `NOT RUN` and returns success. The other application
+targets (Linux x86-64 GNU/musl) do not imply a qualified Rust producer host; the Rust host
+list remains limited to ARM64 GNU Linux and ARM64 Darwin.
 
 What the producer skips and counts instead of refusing (DF-2, R-3, FIX-G): member targets
 whose `required-features` are inactive, proc-macro crates the build did not produce, items

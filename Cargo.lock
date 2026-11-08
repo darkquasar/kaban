@@ -1524,7 +1524,7 @@ dependencies = [
 
 [[package]]
 name = "kaban"
-version = "3.0.0-alpha.1"
+version = "3.0.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1551,7 +1551,7 @@ dependencies = [
 
 [[package]]
 name = "kaban-api"
-version = "3.0.0-alpha.1"
+version = "3.0.0"
 dependencies = [
  "blake3",
  "getrandom 0.3.4",
@@ -1580,13 +1580,14 @@ dependencies = [
 
 [[package]]
 name = "kaban-codegraph"
-version = "3.0.0-alpha.1"
+version = "3.0.0"
 dependencies = [
  "anyhow",
  "getrandom 0.3.4",
  "hmac",
  "kaban-codegraph",
  "kaban-core",
+ "nix 0.29.0",
  "proptest",
  "rusqlite",
  "rustix",
@@ -1600,9 +1601,10 @@ dependencies = [
 
 [[package]]
 name = "kaban-core"
-version = "3.0.0-alpha.1"
+version = "3.0.0"
 dependencies = [
  "blake3",
+ "nix 0.29.0",
  "regex",
  "rustix",
  "schemars",
@@ -1617,7 +1619,7 @@ dependencies = [
 
 [[package]]
 name = "kaban-index"
-version = "3.0.0-alpha.1"
+version = "3.0.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1638,7 +1640,7 @@ dependencies = [
 
 [[package]]
 name = "kaban-index-tantivy"
-version = "3.0.0-alpha.1"
+version = "3.0.0"
 dependencies = [
  "kaban-core",
  "kaban-store-sqlite",
@@ -1652,7 +1654,7 @@ dependencies = [
 
 [[package]]
 name = "kaban-ingest"
-version = "3.0.0-alpha.1"
+version = "3.0.0"
 dependencies = [
  "aho-corasick",
  "blake3",
@@ -1686,7 +1688,7 @@ dependencies = [
 
 [[package]]
 name = "kaban-policy"
-version = "3.0.0-alpha.1"
+version = "3.0.0"
 dependencies = [
  "aho-corasick",
  "getrandom 0.3.4",
@@ -1707,7 +1709,7 @@ dependencies = [
 
 [[package]]
 name = "kaban-store-sqlite"
-version = "3.0.0-alpha.1"
+version = "3.0.0"
 dependencies = [
  "crc32fast",
  "kaban-codegraph",
@@ -1912,6 +1914,18 @@ name = "murmurhash32"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2195bf6aa996a481483b29d62a7663eed3fe39600c460e323f8ff41e90bdd89b"
+
+[[package]]
+name = "nix"
+version = "0.29.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "71e2746dc3a24dd78b3cfcb7be93368c6de9963d30f43a6a73998a9cf4b17b46"
+dependencies = [
+ "bitflags 2.13.2",
+ "cfg-if",
+ "cfg_aliases",
+ "libc",
+]
 
 [[package]]
 name = "nix"
@@ -3867,7 +3881,7 @@ dependencies = [
  "getrandom 0.4.3",
  "indexmap",
  "memchr",
- "nix",
+ "nix 0.31.3",
  "typed-path",
  "windows-sys 0.61.2",
  "zopfli",

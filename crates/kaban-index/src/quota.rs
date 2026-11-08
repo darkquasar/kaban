@@ -174,6 +174,7 @@ impl Monitor for QuotaMonitor {
 /// links down (the `namespaces` tier runs `unshare --fork`, whose one child is the helper
 /// that `exec`s into the indexer: one hop; CG4.4). The container tier has no process to read
 /// (`n/a`).
+#[cfg(target_os = "linux")]
 #[derive(Debug)]
 pub struct RssMonitor {
     pid: Option<u32>,
@@ -181,12 +182,14 @@ pub struct RssMonitor {
     peak: Arc<AtomicU64>,
 }
 
+#[cfg(target_os = "linux")]
 impl Default for RssMonitor {
     fn default() -> Self {
         Self::new()
     }
 }
 
+#[cfg(target_os = "linux")]
 impl RssMonitor {
     /// A monitor that binds to the runner's direct child at its first sample.
     #[must_use]
@@ -224,12 +227,14 @@ pub fn vm_hwm_bytes(status: &str) -> Option<u64> {
 
 /// The pid of the one live process whose parent is this process and which leads its own
 /// process group (`/proc/<pid>/stat` fields 4 and 5 after the parenthesised `comm`).
+#[cfg(target_os = "linux")]
 fn group_leader_child() -> Option<u32> {
     child_of(std::process::id(), true)
 }
 
 /// The one live child of `parent` (`leader`: that also leads its own process group); `None`
 /// when there is none or more than one (ambiguous: bind at a later sample).
+#[cfg(target_os = "linux")]
 fn child_of(parent_pid: u32, leader: bool) -> Option<u32> {
     let mut found = None;
     for entry in std::fs::read_dir("/proc").ok()?.flatten() {
@@ -262,6 +267,7 @@ fn child_of(parent_pid: u32, leader: bool) -> Option<u32> {
     found
 }
 
+#[cfg(target_os = "linux")]
 impl Monitor for RssMonitor {
     fn sample(&mut self) -> Result<(), KillReason> {
         if self.pid.is_none() {

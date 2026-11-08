@@ -110,6 +110,35 @@ fn pages_become_sections_with_headings_nested_under_them_and_chunks_carry_the_pa
     }
 }
 
+/// Unsupported encryption must fail with a content-free class, never succeed as
+/// an empty/scanned document. Reuse a valid small fixture with an unsupported
+/// encryption dictionary in its trailer (object offsets and startxref stay valid).
+#[test]
+fn unsupported_pdf_encryption_fails_without_exposing_document_content() {
+    let mut bytes = fixture("born1.pdf");
+    let trailer = b"trailer\n<<";
+    let at = bytes
+        .windows(trailer.len())
+        .position(|part| part == trailer)
+        .unwrap()
+        + trailer.len();
+    bytes.splice(
+        at..at,
+        b"/Encrypt <</Filter /InventedM5Encryption>>"
+            .iter()
+            .copied(),
+    );
+    let err = PdfOxideExtractor::new()
+        .extract(&bytes, &ctx("unsupported.pdf"))
+        .unwrap_err();
+    let ExtractError::Format { class, .. } = &err else {
+        panic!("expected a fixed Format error, got {err:?}");
+    };
+    assert!(matches!(*class, "pdf parse error" | "pdf page error"));
+    assert!(!err.to_string().contains("Born One"));
+    assert!(!err.to_string().contains("InventedM5Encryption"));
+}
+
 /// D8: a truncated file is a fixed-class `Format` error whose text names no content, with the
 /// parser's error behind `source()`.
 #[test]

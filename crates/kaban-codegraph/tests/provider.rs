@@ -55,13 +55,8 @@ fn too_new_file(dir: &Path, commit: &str) -> PathBuf {
 
 /// How many descriptors of this process are open on `path` (one per read-only connection).
 /// nextest runs each test in its own process, so no other test's connections are counted.
-fn open_fds_to(path: &Path) -> usize {
-    let target = std::fs::canonicalize(path).unwrap();
-    std::fs::read_dir("/proc/self/fd")
-        .unwrap()
-        .filter_map(Result::ok)
-        .filter(|e| std::fs::read_link(e.path()).is_ok_and(|l| l == target))
-        .count()
+fn open_fds_to(path: &std::path::Path) -> usize {
+    builder::open_fds_to(path)
 }
 
 /// Resolve through the trait object, as the engine's adapter does.

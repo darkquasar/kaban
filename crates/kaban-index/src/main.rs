@@ -201,6 +201,14 @@ fn main() -> ExitCode {
     if let Some(Verb::NsHelper(args)) = cli.verb {
         return ns_helper(args);
     }
+    if let Some(Verb::CwdHelper(args)) = cli.verb {
+        let _ = kaban_index::runner::exec_cwd_helper(&args.directory, &args.identity, &args.exec);
+        #[allow(clippy::print_stderr)]
+        {
+            eprintln!("{}", kaban_index::runner::CWD_HELPER_REFUSED);
+        }
+        return ExitCode::from(kaban_index::runner::CWD_HELPER_EXIT);
+    }
     // the policy before anything is printed: every later text passes through it (U2 RU2-8)
     let (policy, outcome) = match load_policy(cli.policy.as_deref()) {
         Ok(policy) => {
@@ -391,7 +399,7 @@ fn run(policy: &Policy, cli: Cli) -> Result<Report, Box<Failure>> {
         Some(Verb::Untrust { repo }) => untrust_verb(policy, repo),
         Some(Verb::Doctor { repo, indexer }) => doctor_verb(policy, repo.as_deref(), &indexer),
         // dispatched in `main` before any report; kept for the exhaustive match
-        Some(Verb::NsHelper(_)) => Err(Box::new(Failure::new(
+        Some(Verb::NsHelper(_) | Verb::CwdHelper(_)) => Err(Box::new(Failure::new(
             "ns-helper",
             "usage",
             "ns-helper runs without a report".to_owned(),
@@ -1650,6 +1658,11 @@ fn run_error(ctx: &Ctx, e: &RunError) -> Box<Failure> {
             "log_write_failed",
             "the gated log could not be written in the data directory",
             5,
+        ),
+        RunError::CwdHandoff => ctx.fail(
+            "cwd_helper_refused",
+            "the admitted cwd helper refused the producer handoff",
+            4,
         ),
         RunError::IndexerChanged => ctx.fail(
             "indexer_changed",

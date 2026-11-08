@@ -24,5 +24,9 @@ time.workspace = true
 rustix.workspace = true     # process group kill, O_PATH handles, fstat without unsafe (v4 CG1.1)
 tracing.workspace = true    # the runner's abandoned-reader warning (v4 CG1.1)
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# Safe F_GETFD on enumerated, unowned raw FDs; newer nix requires an owned borrow.
+nix = { version = "=0.29.0", default-features = false, features = ["fs"] }
+
 [lints]
 workspace = true

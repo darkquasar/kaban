@@ -28,22 +28,24 @@ pub(crate) struct AdmittedToolchain {
 }
 
 /// The system C compiler the pinned toolchain links with, admitted as one more toolchain
-/// resource (never taken from `PATH` or the repository): cargo is told its canonical path,
-/// the directory of its helpers (`cc1`, `collect2`) is bound read-only in the view.
+/// resource (never taken from `PATH` or the repository): cargo is told its canonical path.
+/// Linux binds the GCC helpers read-only; Darwin admits Apple Clang and its SDK.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Linker {
     /// The admitted canonical compiler (`CARGO_TARGET_<TRIPLE>_LINKER`).
     pub cc: AdmittedTool,
-    /// The directory holding `cc1`, a read-only resource of the run; nothing under `/etc`.
+    /// GCC's helper directory or Apple Clang's builtin resource directory; never `/etc`.
     pub helper_dir: PathBuf,
 }
 
-/// Admit the system C compiler at `cc` (production: [`SYSTEM_CC`]): canonical under
+/// Admit the system C compiler at `cc` (production: [`SYSTEM_CC`]). Linux: canonical under
 /// `/usr/bin` and admitted by [`tools::admit_executable`] outside every `forbidden` root,
 /// then probed at `site`: `-print-search-dirs` names its program prefixes and the first
 /// holding a `cc1` admitted by [`linker_helper`] is the helper directory; with exactly that
 /// canonical directory bound as a resource, `-print-prog-name=cc1` must resolve there and
-/// `-print-file-name=crt1.o` to an admitted start object. One behaviour on both tiers.
+/// `-print-file-name=crt1.o` to an admitted start object. Darwin: clean system `xcrun`
+/// selection, canonical Apple compiler/backend paths, bounded root-owned developer/SDK
+/// directories outside forbidden roots and the compiler's builtin header resource.
 ///
 /// # Errors
 /// `rust_linker_refused` for every resolution and answer failure; the probe's own classes
@@ -53,6 +55,15 @@ pub fn rust_linker(
     forbidden: &[&Path],
     site: ProbeSite<'_>,
 ) -> Result<Linker, &'static str> {
+    #[cfg(target_os = "macos")]
+    return apple_linker(cc, forbidden, site);
+
+    #[cfg(not(target_os = "macos"))]
+    gcc_linker(cc, forbidden, site)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn gcc_linker(cc: &Path, forbidden: &[&Path], site: ProbeSite<'_>) -> Result<Linker, &'static str> {
     let canonical = std::fs::canonicalize(cc).map_err(|_| LINKER_REFUSED)?;
     if !canonical.starts_with("/usr/bin") {
         return Err(LINKER_REFUSED);
@@ -82,6 +93,94 @@ pub fn rust_linker(
         forbidden,
     )?;
     Ok(Linker { cc, helper_dir })
+}
+
+#[cfg(target_os = "macos")]
+fn apple_linker(
+    cc: &Path,
+    forbidden: &[&Path],
+    site: ProbeSite<'_>,
+) -> Result<Linker, &'static str> {
+    // xcrun runs with an empty environment and cwd /: caller SDKROOT/DEVELOPER_DIR,
+    // PATH and repository-local selection cannot influence the system selection.
+    let path = if cc == Path::new(SYSTEM_CC) {
+        let xcrun = tools::admit_executable(Path::new("/usr/bin/xcrun"), forbidden)
+            .map_err(|_| LINKER_REFUSED)?;
+        let answer = probe(site, &xcrun.path, &["--find", "clang"])?;
+        // probe appends stderr after stdout; xcrun can warn about its temporary
+        // directory under an empty environment. Only its first output line is a path.
+        PathBuf::from(answer.lines().next().ok_or(LINKER_REFUSED)?.trim())
+    } else {
+        cc.to_path_buf()
+    };
+    let cc = tools::admit_executable(&path, forbidden).map_err(|_| LINKER_REFUSED)?;
+    let developer = apple_developer(&cc.path).ok_or(LINKER_REFUSED)?;
+    let sdk_base = if developer == Path::new("/Library/Developer/CommandLineTools") {
+        developer.join("SDKs")
+    } else {
+        developer.join("Platforms/MacOSX.platform/Developer/SDKs")
+    };
+    let sdk = apple_resource(&sdk_base.join("MacOSX.sdk"), &developer, forbidden)?;
+    if !sdk.starts_with(&sdk_base) || !sdk.join("usr/lib/libSystem.tbd").is_file() {
+        return Err(LINKER_REFUSED);
+    }
+    let helper_dir = apple_resource(
+        Path::new(probe(site, &cc.path, &["-print-resource-dir"])?.trim()),
+        &developer,
+        forbidden,
+    )?;
+    if !helper_dir.join("include/stddef.h").is_file() {
+        return Err(LINKER_REFUSED);
+    }
+    let bin = cc.path.parent().ok_or(LINKER_REFUSED)?;
+    for backend in ["ld", "as"] {
+        tools::admit_executable(&bin.join(backend), forbidden).map_err(|_| LINKER_REFUSED)?;
+    }
+    Ok(Linker { cc, helper_dir })
+}
+
+/// Standard Apple developer layouts only; never a compiler proxy or workspace path.
+#[cfg(target_os = "macos")]
+fn apple_developer(cc: &Path) -> Option<PathBuf> {
+    if cc == Path::new("/Library/Developer/CommandLineTools/usr/bin/clang") {
+        return Some(PathBuf::from("/Library/Developer/CommandLineTools"));
+    }
+    let developer = Path::new(
+        cc.to_str()?
+            .strip_suffix("/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang")?,
+    );
+    let app = Path::new(developer.to_str()?.strip_suffix("/Contents/Developer")?);
+    let name = app.strip_prefix("/Applications").ok()?;
+    (name.components().count() == 1 && name.extension().is_some_and(|e| e == "app"))
+        .then(|| developer.to_path_buf())
+}
+
+#[cfg(target_os = "macos")]
+fn apple_resource(
+    path: &Path,
+    developer: &Path,
+    forbidden: &[&Path],
+) -> Result<PathBuf, &'static str> {
+    use std::os::unix::fs::MetadataExt;
+    let canonical = path.canonicalize().map_err(|_| LINKER_REFUSED)?;
+    if !path.is_absolute()
+        || !canonical.starts_with(developer)
+        || forbidden
+            .iter()
+            .any(|root| canonical.starts_with(root) || root.starts_with(&canonical))
+    {
+        return Err(LINKER_REFUSED);
+    }
+    for dir in canonical
+        .ancestors()
+        .take_while(|p| p.starts_with(developer))
+    {
+        let meta = dir.metadata().map_err(|_| LINKER_REFUSED)?;
+        if !meta.is_dir() || meta.uid() != 0 || meta.mode() & 0o022 != 0 {
+            return Err(LINKER_REFUSED);
+        }
+    }
+    Ok(canonical)
 }
 
 /// The roots GCC installs its helpers under; a helper directory is a leaf strictly below one
@@ -115,6 +214,7 @@ pub fn linker_helper(answer: &Path, forbidden: &[&Path]) -> Result<PathBuf, &'st
 /// Admit the linker's start object (`crt1.o`) named by a compiler `answer`: a canonical regular
 /// file under `/usr/lib` outside every `forbidden` root. It is read through the `/usr/lib`
 /// resource every view carries, never bound on its own, so no directory rule applies.
+#[cfg(not(target_os = "macos"))]
 fn linker_object(answer: &Path, forbidden: &[&Path]) -> Result<PathBuf, &'static str> {
     linker_file(answer, &["/usr/lib"], forbidden)
 }

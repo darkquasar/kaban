@@ -8,6 +8,10 @@ It does not call a hosted model or run a network listener.
 [Kaban 3.0.0-alpha.1 is available as a Linux prerelease](https://github.com/darkquasar/kaban/releases/tag/v3.0.0-alpha.1).
 Packages target Linux x86-64 GNU, x86-64 musl and ARM64 GNU. Each archive includes
 the separate `kaban` and `kaban-index` executables.
+Version 3.0.0 provides full-profile packages for all three Linux targets and native
+Apple Silicon. See the [releases page](https://github.com/darkquasar/kaban/releases)
+for available downloads. Checksum-verified two-binary installation,
+unsigned macOS approval and updates are in the release guide.
 See [release workflow, runtime requirements and limitations](docs/developer/RELEASE.md).
 For contributor orientation and preserved branch/evidence state, see [CODEBASE.md](CODEBASE.md).
 
@@ -17,7 +21,8 @@ Use the Rust toolchain pinned in `rust-toolchain.toml` (1.99.0, also the MSRV)
 and a native C compiler for bundled SQLite. From this checkout:
 
 ```sh
-cargo build --release --locked -p kaban -p kaban-index
+cargo build --release --locked -p kaban -p kaban-index \
+  --features kaban-ingest/pdf,kaban-ingest/md-splitter
 
 # Run from your project directory; supply a policy you have reviewed.
 # The database is created on first open.
@@ -58,8 +63,9 @@ and optionally install the [host/git hooks](hooks/README.md).
   `serve`, hooks and sync never launch the indexer. Without a matching snapshot,
   code tools report `no_snapshot`.
 
-Default binary features are `ingest` (Markdown/plain text) and `code-graph`.
-PDF extraction is opt-in:
+Stable download builds include PDF and semantic Markdown splitting. Cargo source
+defaults remain `ingest` (Markdown/plain text) and `code-graph`; PDF/splitting are
+explicit source feature choices:
 
 ```sh
 cargo build --release -p kaban --features kaban-ingest/pdf

@@ -34,7 +34,14 @@ if [ "${KABAN_HOOK_SYNC:-1}" != "0" ]; then
       ( sleep "$grace"; kill -TERM -- "-$pid"; sleep 5; kill -KILL -- "-$pid" ) </dev/null >/dev/null 2>&1 &
       killer=$!
       wait "$pid"
-      kill -KILL -- "-$killer"
+      # TERM may end the leader before a TERM-resistant descendant. Keep the
+      # escalation alive until the remaining group is killed; cancel it only
+      # after the entire sync group is gone.
+      if kill -0 -- "-$pid" 2>/dev/null; then
+        wait "$killer"
+      else
+        kill -KILL -- "-$killer" 2>/dev/null
+      fi
     ) </dev/null >/dev/null 2>&1 &
   fi
 fi

@@ -299,7 +299,7 @@ impl Scratch {
     /// [`ScratchError::Io`].
     pub fn create(dir: &AdmittedDir) -> Result<Self, ScratchError> {
         use std::os::unix::fs::DirBuilderExt;
-        sweep_leftovers(&dir.path);
+        let _ = crate::gc::sweep_leftovers(dir);
         let root = dir.path.join(format!("{RUN_PREFIX}{}", std::process::id()));
         if root.exists() {
             std::fs::remove_dir_all(&root).map_err(|_| ScratchError::Io("remove_leftover"))?;
@@ -525,7 +525,21 @@ impl Drop for Scratch {
 /// Remove `name` under `parent` recursively through handles: `statat(NOFOLLOW)` decides (a
 /// symlink is unlinked, never followed), a directory first gets the owner's `rwx` back, is
 /// opened `O_DIRECTORY|O_NOFOLLOW`, emptied entry by entry, then removed. Absence is success.
-fn remove_tree(parent: BorrowedFd<'_>, name: &OsStr) -> Result<(), Errno> {
+pub(crate) fn remove_tree(parent: BorrowedFd<'_>, name: &OsStr) -> Result<(), Errno> {
+    remove_tree_inner(parent, name, true)
+}
+
+/// Cross-run cleanup cannot assume a dead runner's producers have stopped. Never
+/// recover permissions here; leave inaccessible entries for a later safe cleanup.
+pub(crate) fn remove_leftover_tree(parent: BorrowedFd<'_>, name: &OsStr) -> Result<(), Errno> {
+    remove_tree_inner(parent, name, false)
+}
+
+fn remove_tree_inner(
+    parent: BorrowedFd<'_>,
+    name: &OsStr,
+    recover_permissions: bool,
+) -> Result<(), Errno> {
     let st = match rustix::fs::statat(parent, name, AtFlags::SYMLINK_NOFOLLOW) {
         Ok(st) => st,
         Err(Errno::NOENT) => return Ok(()),
@@ -537,10 +551,12 @@ fn remove_tree(parent: BorrowedFd<'_>, name: &OsStr) -> Result<(), Errno> {
             Err(e) => Err(e),
         };
     }
-    // the owner's bits, so a mode-000 directory can be listed (the entry is a directory, not
-    // a link: the stat above did not follow one; the child that could race this is dead)
-    let mode = Mode::from_raw_mode(st.st_mode & 0o7777) | Mode::RWXU;
-    rustix::fs::chmodat(parent, name, mode, AtFlags::empty())?;
+    // Owned-run teardown follows producer settlement. A cross-run sweep observes
+    // only the runner PID, so it must never enter this symlink-following recovery.
+    if recover_permissions {
+        let mode = Mode::from_raw_mode(st.st_mode & 0o7777) | Mode::RWXU;
+        rustix::fs::chmodat(parent, name, mode, AtFlags::empty())?;
+    }
     let dir = rustix::fs::openat(
         parent,
         name,
@@ -557,31 +573,11 @@ fn remove_tree(parent: BorrowedFd<'_>, name: &OsStr) -> Result<(), Errno> {
         children.push(OsStr::from_bytes(bytes).to_owned());
     }
     for child in &children {
-        remove_tree(dir.as_fd(), child)?;
+        remove_tree_inner(dir.as_fd(), child, recover_permissions)?;
     }
     drop(dir);
     match rustix::fs::unlinkat(parent, name, AtFlags::REMOVEDIR) {
         Ok(()) | Err(Errno::NOENT) => Ok(()),
         Err(e) => Err(e),
-    }
-}
-
-/// Remove `run-<pid>` entries of `dir` whose pid is not a live process.
-fn sweep_leftovers(dir: &Path) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let Some(pid) = name
-            .to_str()
-            .and_then(|n| n.strip_prefix(RUN_PREFIX))
-            .and_then(|p| p.parse::<u32>().ok())
-        else {
-            continue;
-        };
-        if pid != std::process::id() && !Path::new(&format!("/proc/{pid}")).exists() {
-            let _ = std::fs::remove_dir_all(entry.path());
-        }
     }
 }

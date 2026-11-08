@@ -34,6 +34,10 @@ run = "bash scripts/ci/ci.sh functional"
 description = "Full PDF-enabled ingest suite and doctest"
 run = "bash scripts/ci/ci.sh pdf"
 
+[tasks.macos]
+description = "Focused native ARM64 macOS boundaries and public behavior"
+run = "bash scripts/ci/ci.sh macos"
+
 [tasks.producer]
 description = "Standalone Rust SCIP producer under its own toolchain"
 run = "bash scripts/ci/ci.sh producer"

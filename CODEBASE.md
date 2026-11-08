@@ -1,8 +1,10 @@
 # Kaban codebase map
 
 Kaban provides a local memory service through CLI commands and an MCP stdio server.
-The workspace version is `3.0.0-alpha.1`. SQLite stores records and governance state;
-Tantivy provides the text index. `kaban-index` explicitly produces SCIP code snapshots.
+The workspace version is `3.0.0`; see the [releases page](https://github.com/darkquasar/kaban/releases)
+for available downloads. SQLite stores records
+and governance state; Tantivy provides the text index. `kaban-index` explicitly
+produces SCIP code snapshots.
 
 ## Workspace
 

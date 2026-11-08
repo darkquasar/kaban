@@ -85,6 +85,30 @@ const POLL: Duration = Duration::from_millis(1);
 /// [`InheritedFds::Refuse`]); [`ProcessError::Spawn`] when the spawn or a `try_wait` poll fails
 /// (the group is killed first).
 pub fn run(spec: Spec<'_>) -> Result<Outcome, ProcessError> {
+    run_with_stdin(spec, Stdio::null())
+}
+
+/// Internal helper handoff: pass a retained directory as stdin to an admitted helper.
+/// The helper must validate its identity, fchdir, and reset stdin to null before exec.
+/// Ordinary callers retain [`run`]'s null stdin and unchanged [`Spec`].
+///
+/// # Errors
+/// A non-directory, descriptor clone error, or the same errors as [`run`].
+pub fn run_with_directory_handoff(
+    spec: Spec<'_>,
+    directory: std::os::fd::BorrowedFd<'_>,
+) -> Result<Outcome, ProcessError> {
+    let stat = rustix::fs::fstat(directory).map_err(|e| ProcessError::Spawn(e.into()))?;
+    if !rustix::fs::FileType::from_raw_mode(stat.st_mode).is_dir() {
+        return Err(ProcessError::Env("cwd_not_directory"));
+    }
+    let owned = directory
+        .try_clone_to_owned()
+        .map_err(ProcessError::Spawn)?;
+    run_with_stdin(spec, Stdio::from(owned))
+}
+
+fn run_with_stdin(spec: Spec<'_>, stdin: Stdio) -> Result<Outcome, ProcessError> {
     let Spec {
         exec,
         args,
@@ -104,7 +128,7 @@ pub fn run(spec: Spec<'_>) -> Result<Outcome, ProcessError> {
         .current_dir(cwd)
         .env_clear()
         .envs(env.iter())
-        .stdin(Stdio::null())
+        .stdin(stdin)
         .stdout(stdio_for(stdout_cap))
         .stderr(stdio_for(stderr_cap))
         .process_group(0);
@@ -272,7 +296,7 @@ fn collect(reader: Option<Reader>, until: Instant) -> Vec<u8> {
     if let Some(bytes) = reader.bytes {
         return bytes;
     }
-    if let Ok(bytes) = reader.rx.recv_timeout(remaining(until)) {
+    if let Ok(bytes) = recv_until(&reader.rx, Some(until)) {
         bytes
     } else {
         tracing::warn!(stream = ?reader.stream, "pipe still held after the group kill; reader thread abandoned");
@@ -283,6 +307,39 @@ fn collect(reader: Option<Reader>, until: Instant) -> Vec<u8> {
 /// On an error path: wait for the reader until `until`, keep nothing.
 fn abandon(reader: Option<Reader>, until: Instant) {
     let _ = collect(reader, until);
+}
+
+/// Receive within the existing absolute budget. Darwin channel timeout waits can wake much
+/// later than requested (hosted measurements: a roughly 15 ms remaining wait took 135 ms).
+/// Use the supervisor's short sleep/poll cadence there; a slow reader or monitor must not
+/// extend teardown. Scheduling can still delay a wakeup; this is not a real-time guarantee.
+fn recv_until<T>(
+    rx: &mpsc::Receiver<T>,
+    until: Option<Instant>,
+) -> Result<T, mpsc::RecvTimeoutError> {
+    // Preserve recv_timeout's unbounded wait for an interval beyond Instant's range.
+    let Some(until) = until else {
+        return rx.recv().map_err(|_| mpsc::RecvTimeoutError::Disconnected);
+    };
+    #[cfg(not(target_os = "macos"))]
+    {
+        rx.recv_timeout(remaining(until))
+    }
+    #[cfg(target_os = "macos")]
+    loop {
+        match rx.try_recv() {
+            Ok(value) => return Ok(value),
+            Err(mpsc::TryRecvError::Disconnected) => {
+                return Err(mpsc::RecvTimeoutError::Disconnected);
+            }
+            Err(mpsc::TryRecvError::Empty) => {}
+        }
+        let left = remaining(until);
+        if left.is_zero() {
+            return Err(mpsc::RecvTimeoutError::Timeout);
+        }
+        std::thread::sleep(POLL.min(left));
+    }
 }
 
 fn remaining(until: Instant) -> Duration {
@@ -392,7 +449,7 @@ impl MonitorWorker {
             // an interval elapses (Timeout) between samples; the supervisor's drop of `stop`
             // ends the loop and asks for the final sample
             while let Err(mpsc::RecvTimeoutError::Timeout) =
-                stop_rx.recv_timeout(monitor.interval())
+                recv_until(&stop_rx, Instant::now().checked_add(monitor.interval()))
             {
                 if let Err(reason) = monitor.sample() {
                     let _ = tx.send(Report::Kill(reason));
@@ -428,7 +485,7 @@ impl MonitorWorker {
         if let Some(reason) = killed {
             return MonitorVerdict::Failed(reason);
         }
-        match rx.recv_timeout(remaining(until)) {
+        match recv_until(&rx, Some(until)) {
             Ok(Report::Final(Ok(()))) => MonitorVerdict::Ok,
             Ok(Report::Final(Err(reason)) | Report::Kill(reason)) => MonitorVerdict::Failed(reason),
             Err(mpsc::RecvTimeoutError::Disconnected) => {

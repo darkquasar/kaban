@@ -44,6 +44,17 @@ kaban-rust-scip    0.1.0-dev Apache-2.0 isolated rust-drivers/workspace R2-r/2-f
 #   derived_impls_generic_skipped coverage key) reproduces minimal and workspace byte-identically (d09fbf52..., 27b305c0...): no
 #   regeneration. All 27 qualification profiles pass twice in independent clean processes with byte-identical output; the 19 other output
 #   hashes equal R-3's and derive-impls changed with its fixture (02d24c91...; ../specs/kaban/02-code-graph-v4/archive/evidence/fixg-evidence/hashes.sha256, delta.md).
+# Native M4 qualification (2026-11-07): macOS 15.6.1 ARM64, CLT Apple Clang 17.0.0/SDK 15.5;
+#   Go 1.26.0 + scip-go 0.2.7; Node 22.23.4 + scip-typescript 0.4.0 + TypeScript 5.9.3;
+#   Rust 1.99.0 + ra_ap 0.0.358 + kaban-rust-scip 0.1.0-dev, unchanged prepared protocol 2.
+#   Fresh producer -> snapshot -> CLI/MCP query proofs passed for all three languages. Rust's
+#   current 27 profiles (20 outputs, 7 refusals) passed, with real build/proc-macro/LTO markers
+#   and no shadow backend. The required-features fixture now names src/gated.rs explicitly:
+#   its old implicit src/bin/gated.rs was absent under the repository's bin/ ignore rule.
+#   Committed SCIP/goldens above are retained; native absolute project roots differ by fixture
+#   copy. Repeating identical native inputs is byte-identical and collisions preserve output.
+#   Exact commands, binary/source/output hashes and reports live in the macos-arm64 M4 archive
+#   in the specs repository. This does not qualify another Rust host or publish a release.
 # rust-drivers after PROD-2 (prod/2 ed3fd1b on the FIX-G merge 0e583ae, 2026-10-26): the release producer
 #   3a5300ad60b0fb7c3f6469974c99e79e9b8ccf905b2a8704e816a90a2cbe0888 (lifetime predicates keep an impl conditional (fixg-1), derived
 #   anonymous-const identities from syntax slots `$const<i>-<m>-<d>-<k>` (fixg-2), attribute-expanded anonymous consts traversed (fixg-3),

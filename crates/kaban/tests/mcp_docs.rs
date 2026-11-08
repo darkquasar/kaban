@@ -16,6 +16,13 @@ use std::time::Duration;
 /// The committed fixtures, relative to the repository root (the server's workspace root).
 const FIXTURES: &str = "crates/kaban-ingest/tests/fixtures/md";
 
+// The transferred qualification source need not be a Git checkout. Bind the
+// fixture root explicitly instead of relying on nextest's crate-directory cwd.
+fn server(scratch: &Scratch) -> Server {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    Server::start_at(scratch, &root)
+}
+
 fn call_raw(srv: &mut Server, tool: &str, args: &Value) -> Value {
     let id = srv.request("tools/call", &json!({"name": tool, "arguments": args}));
     srv.response(id, Duration::from_secs(60)).unwrap()["result"].clone()
@@ -40,7 +47,7 @@ fn read_resource(srv: &mut Server, uri: &str) -> Value {
 fn index_docs_and_index_status_are_listed_with_their_hints() {
     // Arrange
     let s = Scratch::new("kaban-mcp-docs", "list");
-    let mut srv = Server::start(&s);
+    let mut srv = server(&s);
 
     // Act
     let id = srv.request("tools/list", &json!({}));
@@ -78,7 +85,7 @@ fn index_docs_and_index_status_are_listed_with_their_hints() {
 fn index_docs_over_the_fixtures_then_status_resource_and_a_chunk_card() {
     // Arrange
     let s = Scratch::new("kaban-mcp-docs", "run");
-    let mut srv = Server::start(&s);
+    let mut srv = server(&s);
 
     // Act
     let report = call(&mut srv, "index_docs", &json!({"paths": [FIXTURES]}));
@@ -114,6 +121,19 @@ fn index_docs_over_the_fixtures_then_status_resource_and_a_chunk_card() {
     assert!(status.get("table_unknown_chunks").is_none(), "{status}");
     status["last_run"] = json!("[last_run]");
     status["outbox_lag"] = json!("[outbox_lag]");
+    // This suite also qualifies the full download profile; assert the actual optional
+    // extractor before comparing the feature-independent status shape.
+    let extractors = status["extractors"].as_array_mut().unwrap();
+    let pdf = extractors
+        .iter()
+        .position(|value| value == "pdf_oxide@0.3.78");
+    assert_eq!(
+        pdf.is_some(),
+        kaban_ingest::extractor_for(kaban_ingest::Format::Pdf).is_some()
+    );
+    if let Some(index) = pdf {
+        extractors.remove(index);
+    }
     insta::assert_json_snapshot!("index_status_fixtures", status);
     // the resource: status plus the listing (the store's id order), paginated
     assert_eq!(
@@ -157,9 +177,9 @@ fn index_docs_over_the_fixtures_then_status_resource_and_a_chunk_card() {
 fn two_concurrent_index_docs_calls_over_one_workspace_serialise() {
     // Arrange: a server for the pair and a reference server for the single call
     let s = Scratch::new("kaban-mcp-docs", "concurrent");
-    let mut srv = Server::start(&s);
+    let mut srv = server(&s);
     let r = Scratch::new("kaban-mcp-docs", "concurrent-ref");
-    let mut reference = Server::start(&r);
+    let mut reference = server(&r);
     // the listing (path, status, chunks per document) stands for the graph: ids are derived
     let listing = |srv: &mut Server| -> Value {
         let mut body = read_resource(srv, "kaban://documents?limit=500");

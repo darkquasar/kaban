@@ -811,6 +811,14 @@ fn relabel(v: &Value, root: &str, labels: &mut HashMap<String, String>) -> Value
                 .map(|(k, x)| {
                     let x = if OBSERVATION_KEYS.contains(&k.as_str()) {
                         json!("<observed>")
+                    } else if k == "author_date" {
+                        // Git versions spell UTC as either Z or +00:00. Preserve the
+                        // instant while comparing the existing RFC 3339 fixture.
+                        let date = x.as_str().unwrap();
+                        json!(
+                            date.strip_suffix("+00:00")
+                                .map_or_else(|| date.to_owned(), |utc| format!("{utc}Z"))
+                        )
                     } else {
                         relabel(x, root, labels)
                     };

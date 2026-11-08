@@ -199,6 +199,7 @@ fn cargo_config_admits(dir: &Path, target: &str) -> Result<(), &'static str> {
 /// of another triple is inert and accepted. Read without a TOML implementation (module doc):
 /// headers, dotted keys, quoted keys, inline tables, strings and arrays over several lines.
 fn cargo_config_redirect(text: &str, target: &str) -> Option<String> {
+    let darwin = target.ends_with("-apple-darwin");
     let linker_variable = format!(
         "CARGO_TARGET_{}_LINKER",
         target.to_ascii_uppercase().replace('-', "_")
@@ -220,28 +221,63 @@ fn cargo_config_redirect(text: &str, target: &str) -> Option<String> {
                 } else {
                     inline_table_entry(&value, "force").is_some_and(|v| v == "true")
                 };
-                let pin =
-                    matches!(*name, "COMPILER_PATH" | "CC" | "PATH") || *name == linker_variable;
+                let pin = matches!(*name, "COMPILER_PATH" | "CC" | "PATH")
+                    || *name == linker_variable
+                    || (darwin
+                        && matches!(
+                            *name,
+                            "SDKROOT" | "DEVELOPER_DIR" | "CARGO" | "RUSTC" | "RUSTDOC"
+                        ));
                 if pin && forced {
                     return Some(format!(
                         "[env] {name} with force = true redirects the compiler backend; remove it to index"
                     ));
                 }
-                if name.starts_with("LD_") || *name == "GCC_EXEC_PREFIX" {
+                if name.starts_with("LD_")
+                    || *name == "GCC_EXEC_PREFIX"
+                    || (darwin
+                        && (name.starts_with("DYLD_")
+                            || matches!(
+                                *name,
+                                "TOOLCHAINS"
+                                    | "CCC_OVERRIDE_OPTIONS"
+                                    | "CPATH"
+                                    | "C_INCLUDE_PATH"
+                                    | "CPLUS_INCLUDE_PATH"
+                                    | "OBJC_INCLUDE_PATH"
+                                    | "LIBRARY_PATH"
+                                    | "CXX"
+                                    | "AR"
+                                    | "AS"
+                                    | "LD"
+                                    | "RUSTC_WRAPPER"
+                                    | "RUSTC_WORKSPACE_WRAPPER"
+                                    | "RUSTUP_TOOLCHAIN"
+                            )))
+                {
                     return Some(format!(
                         "[env] {name} redirects the compiler backend; remove it to index"
                     ));
                 }
             }
+            [
+                "build",
+                "rustc" | "rustc-wrapper" | "rustc-workspace-wrapper",
+            ] if darwin => {
+                return Some(
+                    "[build] compiler proxy redirects the compiler backend; remove it to index"
+                        .to_owned(),
+                );
+            }
             ["build", "rustflags"] => {
-                if let Some(flag) = backend_flag(&value) {
+                if let Some(flag) = backend_flag(&value, darwin) {
                     return Some(format!(
                         "[build] rustflags carries {flag}, which redirects the compiler backend; remove it to index"
                     ));
                 }
             }
             ["target", name, "rustflags"] if *name == target || name.starts_with("cfg(") => {
-                if let Some(flag) = backend_flag(&value) {
+                if let Some(flag) = backend_flag(&value, darwin) {
                     return Some(format!(
                         "[target.{name}] rustflags carries {flag}, which redirects the compiler backend; remove it to index"
                     ));
@@ -260,7 +296,7 @@ fn cargo_config_redirect(text: &str, target: &str) -> Option<String> {
 
 /// The flag of a `rustflags` value (a string or an array of strings) that redirects the
 /// compiler backend, spelled as cargo would pass it, or `None`.
-fn backend_flag(value: &str) -> Option<String> {
+fn backend_flag(value: &str, darwin: bool) -> Option<String> {
     let value = value.trim();
     let tokens: Vec<String> = if value.starts_with('[') {
         quoted_strings(value)
@@ -292,6 +328,23 @@ fn backend_flag(value: &str) -> Option<String> {
                         arg.starts_with("-B")
                             || arg.starts_with("-specs")
                             || arg.starts_with("--specs")
+                            || (darwin
+                                && [
+                                    "-isysroot",
+                                    "--sysroot",
+                                    "-syslibroot",
+                                    "-Wl,-syslibroot",
+                                    "-fuse-ld=",
+                                    "--ld-path=",
+                                    "-resource-dir",
+                                    "--config",
+                                    "-Xclang",
+                                    "-Xlinker",
+                                    "@",
+                                    "-Wl,@",
+                                ]
+                                .iter()
+                                .any(|prefix| arg.starts_with(prefix)))
                     })
                 });
         if redirects {

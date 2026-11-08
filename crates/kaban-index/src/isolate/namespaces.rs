@@ -636,7 +636,7 @@ pub fn run_tool_in_view(
 /// No namespace tool execution is available on this target.
 ///
 /// # Errors
-/// Always handle_exec_unsupported, before any tool or procfs access.
+/// Always `handle_exec_unsupported`, before any tool or procfs access.
 #[cfg(not(target_os = "linux"))]
 pub fn run_tool_in_view(
     _helper: &Path,

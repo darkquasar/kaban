@@ -128,28 +128,7 @@ fn git(root: &Path, args: &[&str]) -> String {
 /// from an ancestor (nextest under `flock(1)` leaks its lock fd): closed in the shell before
 /// `kaban-index` starts, so its `Refuse` descriptor policy holds (`kaban-index/tests/cli.rs`).
 fn non_cloexec_fds() -> Vec<u32> {
-    const O_CLOEXEC: u64 = 0o2_000_000;
-    let mut out = Vec::new();
-    for entry in std::fs::read_dir("/proc/self/fd").unwrap() {
-        let entry = entry.unwrap();
-        let Ok(number) = entry.file_name().to_string_lossy().parse::<u32>() else {
-            continue;
-        };
-        if number <= 2 {
-            continue;
-        }
-        let info =
-            std::fs::read_to_string(format!("/proc/self/fdinfo/{number}")).unwrap_or_default();
-        let flags = info
-            .lines()
-            .find_map(|l| l.strip_prefix("flags:"))
-            .and_then(|f| u64::from_str_radix(f.trim(), 8).ok())
-            .unwrap_or(0);
-        if flags & O_CLOEXEC == 0 {
-            out.push(number);
-        }
-    }
-    out
+    kaban_core::process::inheritable_fds().expect("descriptor observation is required")
 }
 
 /// `kaban-index <args>` with the real toolchain first on `PATH` and `KABAN_HOME = <home>`, in
@@ -194,11 +173,21 @@ struct Published {
 /// `<home>/codegraph/<repo-id>` exactly as `kaban-index/tests/cli.rs` does (isolation off:
 /// the tier matrix is Task 1's).
 fn publish(inputs: &Inputs, s: &Scratch, fixture: &str) -> Published {
+    publish_language(inputs, s, &fixtures_dir().join(fixture), fixture, "rust")
+}
+
+fn publish_language(
+    inputs: &Inputs,
+    s: &Scratch,
+    source: &Path,
+    fixture: &str,
+    lang: &str,
+) -> Published {
     let home = s.home();
     std::fs::create_dir_all(&home).unwrap();
     std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700)).unwrap();
     let repo = s.0.join(fixture);
-    copy_tree(&fixtures_dir().join(fixture), &repo);
+    copy_tree(source, &repo);
     let repo = std::fs::canonicalize(&repo).unwrap();
     git(&repo, &["init", "-q", "-b", "main"]);
     git(&repo, &["add", "-A"]);
@@ -210,7 +199,7 @@ fn publish(inputs: &Inputs, s: &Scratch, fixture: &str) -> Published {
         "trust",
     );
     let repo_id = trusted["repo_id"].as_str().unwrap().to_owned();
-    let override_arg = format!("rust={}", inputs.producer.display());
+    let override_arg = format!("{lang}={}", inputs.producer.display());
     let report = json(
         &kaban_index(
             inputs,
@@ -220,7 +209,7 @@ fn publish(inputs: &Inputs, s: &Scratch, fixture: &str) -> Published {
                 "--repo",
                 repo_s,
                 "--lang",
-                "rust",
+                lang,
                 "--indexer",
                 &override_arg,
                 "--isolation",
@@ -229,7 +218,7 @@ fn publish(inputs: &Inputs, s: &Scratch, fixture: &str) -> Published {
         ),
         "index",
     );
-    assert_eq!(report["languages"], json!(["rust"]), "{fixture}: {report}");
+    assert_eq!(report["languages"], json!([lang]), "{fixture}: {report}");
     let snapshot = home
         .join("codegraph")
         .join(repo_id)
@@ -281,6 +270,113 @@ fn names<'a>(cards: impl Iterator<Item = &'a Value>) -> BTreeSet<String> {
 /// One reference site of the `include_tests` check: (enclosing name, enclosing `is_test`, site
 /// path, site start line).
 type Site = (String, bool, String, u64);
+
+#[test]
+#[ignore = "requires installed Go/TypeScript producers, their toolchains and a built kaban-index"]
+fn go_and_typescript_snapshots_support_public_queries() {
+    let required = |key: &str| {
+        PathBuf::from(
+            std::env::var_os(key)
+                .unwrap_or_else(|| panic!("set {key} to the trusted qualification input")),
+        )
+    };
+    for (lang, producer_key, toolchain_key, definition_path, trait_path, test_path) in [
+        (
+            "go",
+            "SCIP_GO",
+            "KABAN_TEST_GO_ROOT",
+            "drivers/postgres.go",
+            "drivers/driver.go",
+            "drivers/postgres_test.go",
+        ),
+        (
+            "typescript",
+            "KABAN_TEST_TS_PRODUCER",
+            "KABAN_TEST_NODE_ROOT",
+            "src/postgres.ts",
+            "src/driver.ts",
+            "src/postgres.test.ts",
+        ),
+    ] {
+        let inputs = Inputs {
+            producer: required(producer_key),
+            sysroot: required(toolchain_key),
+            index_bin: required("KABAN_TEST_INDEX_BIN"),
+        };
+        let s = Scratch::new("kaban-native-producer-mcp", lang);
+        let fixture = if lang == "go" {
+            "go-drivers"
+        } else {
+            "ts-drivers"
+        };
+        let source = fixtures_dir().parent().unwrap().join(fixture).join("repo");
+        let published = publish_language(&inputs, &s, &source, fixture, lang);
+        let label = label_of(&published.snapshot, definition_path, "PostgresDriver");
+        let trait_label = label_of(&published.snapshot, trait_path, "DatabaseDriver");
+        let mut c = start(&s, &published.repo);
+        let mut latencies = Vec::new();
+        let definition = call(
+            &mut c,
+            &mut latencies,
+            "code_definition",
+            &json!({"target": {"label": label, "name": "PostgresDriver"}}),
+        );
+        assert_eq!(
+            definition["definition"]["path"], definition_path,
+            "{lang}: {definition}"
+        );
+        assert_eq!(
+            definition["definition"]["name"], "PostgresDriver",
+            "{definition}"
+        );
+        assert_eq!(definition["definition"]["is_test"], false, "{definition}");
+        let implementers = call(
+            &mut c,
+            &mut latencies,
+            "code_implementers",
+            &json!({"target": {"label": trait_label, "name": "DatabaseDriver"}}),
+        );
+        assert!(
+            names(implementers["results"].as_array().unwrap().iter()).contains("PostgresDriver"),
+            "{lang}: {implementers}"
+        );
+        for include_tests in [false, true] {
+            let references = call(
+                &mut c,
+                &mut latencies,
+                "code_references",
+                &json!({"target": {"label": label, "name": "PostgresDriver"}, "include_tests": include_tests}),
+            );
+            let groups = references["by_enclosing"].as_array().unwrap();
+            let test_sites: Vec<_> = groups
+                .iter()
+                .flat_map(|group| group["sites"].as_array().unwrap())
+                .filter(|site| site["path"] == test_path)
+                .collect();
+            if include_tests {
+                assert!(
+                    test_sites
+                        .iter()
+                        .any(|site| site["site"]["start_line"] == 4),
+                    "{lang}: source-derived test reference: {references}"
+                );
+            } else {
+                assert!(test_sites.is_empty(), "{lang}: {references}");
+                assert!(
+                    groups
+                        .iter()
+                        .all(|group| group["enclosing"]["is_test"] == false),
+                    "{references}"
+                );
+            }
+        }
+        let finished = c.finish();
+        assert!(finished.status.success(), "{}", finished.stderr);
+        eprintln!(
+            "{lang}: actual producer -> published snapshot -> MCP definition/references/implementers and test filtering passed"
+        );
+    }
+}
 
 #[test]
 #[ignore = "requires the installed Rust producer, the real toolchain and a built kaban-index"]

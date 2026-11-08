@@ -223,3 +223,7 @@ SECURITY/20261029 pulldown-cmark 0.13.5
 
 # SECURITY/20261104: owner-approved pulldown-cmark patch for RUSTSEC-2026-0433.
 SECURITY/20261104 pulldown-cmark 0.13.6
+
+# MACOS/M1-M21: accepted native descriptor admission/tests and bounded snapshot persistence.
+MACOS/M1-M21 nix 0.29.0
+MACOS/M1-M21 sqlite-vfs 0.2.0

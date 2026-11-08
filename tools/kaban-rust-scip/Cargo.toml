@@ -33,6 +33,10 @@ ra_ap_project_model = "=0.0.358"
 ra_ap_vfs = "=0.0.358"
 ra_ap_syntax = "=0.0.358"
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# Safe real-UID observation for CoreFoundation's fixed child text-encoding setting.
+rustix = { version = "=1.1.5", default-features = false, features = ["process", "std"] }
+
 [workspace.lints.rust]
 unsafe_code = "forbid"
 missing_docs = "warn"
