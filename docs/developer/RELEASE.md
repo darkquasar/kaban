@@ -1,9 +1,10 @@
 # Full-profile Linux and Apple Silicon packages
 
-The candidate workspace version is **3.0.0**. Only the historical
-[3.0.0-alpha.1 Linux prerelease](https://github.com/darkquasar/kaban/releases/tag/v3.0.0-alpha.1)
-is published today. The stable download commands below apply **after** a separately
-authorized stable publication; preparing packages or merging a PR publishes nothing.
+The workspace version is **3.0.0**. See the
+[releases page](https://github.com/darkquasar/kaban/releases) for available downloads.
+The historical [3.0.0-alpha.1 Linux prerelease](https://github.com/darkquasar/kaban/releases/tag/v3.0.0-alpha.1)
+uses a different lean Linux profile. Publication requires the authorized release
+workflow; preparing packages or merging a PR publishes nothing.
 
 Each target uses one canonical build:
 

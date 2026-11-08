@@ -8,8 +8,9 @@ It does not call a hosted model or run a network listener.
 [Kaban 3.0.0-alpha.1 is available as a Linux prerelease](https://github.com/darkquasar/kaban/releases/tag/v3.0.0-alpha.1).
 Packages target Linux x86-64 GNU, x86-64 musl and ARM64 GNU. Each archive includes
 the separate `kaban` and `kaban-index` executables.
-The 3.0.0 candidate adds full-profile packages for all three Linux targets and native
-Apple Silicon; it is not yet published. Checksum-verified two-binary installation,
+Version 3.0.0 provides full-profile packages for all three Linux targets and native
+Apple Silicon. See the [releases page](https://github.com/darkquasar/kaban/releases)
+for available downloads. Checksum-verified two-binary installation,
 unsigned macOS approval and updates are in the release guide.
 See [release workflow, runtime requirements and limitations](docs/developer/RELEASE.md).
 For contributor orientation and preserved branch/evidence state, see [CODEBASE.md](CODEBASE.md).

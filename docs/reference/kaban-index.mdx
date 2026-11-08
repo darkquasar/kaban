@@ -3,12 +3,13 @@ title: "kaban-index CLI"
 description: "Verbs, flags, the JSON report, doctor rows, exit codes and the fixed classes of the code-graph producer."
 ---
 
-`kaban-index` (3.0.0, an unpublished candidate) writes per-commit code-graph snapshots
+`kaban-index` (3.0.0) writes per-commit code-graph snapshots
 under `$KABAN_HOME/codegraph/<repo-id>/` and never runs unless you call it. Every verb
 prints one JSON report on stdout and fixed texts on stderr: no repository path,
 commit argument, indexer output or configuration value is echoed by an error, and
 everything printed passes the policy in effect first. This page is the reference;
-the [guide](../guides/code-graph.mdx) explains the flow.
+the [guide](../guides/code-graph.mdx) explains the flow. See the
+[releases page](https://github.com/darkquasar/kaban/releases) for available downloads.
 
 ## Verbs
 
