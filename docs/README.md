@@ -27,8 +27,8 @@ publish the rest of the repository or its release evidence.
 ## Scope and source of truth
 
 Examples describe the implemented CLI and stdio MCP service, not an executed
-tutorial. The product remains `3.0.0-alpha.1`, with a local, unpublished M7 package.
-The frozen M7 package is unchanged by this documentation folder.
+tutorial. The workspace and validated four-target package candidate are `3.0.0`,
+which remains unpublished. The published Linux prerelease is `3.0.0-alpha.1`.
 [Release scope](developer/RELEASE.md) and [third-party limits](developer/THIRD_PARTY.md) remain
 separate from rendering and publication readiness.
 
