@@ -5,13 +5,13 @@
 //! fields. Nothing is stored: a hit's `rid`, `revision` and `kind` come from fast columns, the
 //! record UUID is the delete key, and the record body lives in SQLite only.
 
-use crate::analyzers::{FOLDED, IDENT, STEMMED};
+use crate::analyzers::{CODE_IDENT, CODE_NAME, FOLDED, IDENT, STEMMED};
 use tantivy::schema::{
     FAST, Field, INDEXED, IndexRecordOption, STRING, Schema, TextFieldIndexing, TextOptions,
 };
 
 /// Bumped when the field set or an option changes; part of the payload's compatibility.
-pub(crate) const SCHEMA_VERSION: u32 = 1;
+pub(crate) const SCHEMA_VERSION: u32 = 2;
 
 /// The fast columns a hit is read from.
 pub(crate) const RID: &str = "rid";
@@ -44,6 +44,11 @@ pub(crate) struct Fields {
     pub(crate) content: [Field; 4],
     /// The unstemmed, folded copy of text and summary the fuzzy terms run against.
     pub(crate) fuzzy: Field,
+    /// The first identifier value whole and lowercased (an exact-name match) and the code
+    /// parts of every identifier value ([`CODE_IDENT`], phrases possible), both fed from
+    /// `ident_values`. A code row's path facet rides on `workspace`.
+    pub(crate) name: Field,
+    pub(crate) code: Field,
 }
 
 /// The schema and its fields.
@@ -72,6 +77,8 @@ pub(crate) fn schema() -> (Schema, Fields) {
             builder.add_text_field(CONTENT[3], text(IDENT, positions)),
         ],
         fuzzy: builder.add_text_field("fuzzy", text(FOLDED, IndexRecordOption::WithFreqs)),
+        name: builder.add_text_field("name", text(CODE_NAME, IndexRecordOption::WithFreqs)),
+        code: builder.add_text_field("code", text(CODE_IDENT, positions)),
     };
     (builder.build(), fields)
 }

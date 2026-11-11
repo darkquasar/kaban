@@ -45,6 +45,9 @@ pub enum MatchMode {
     Lexical,
     /// Misspelling-tolerant matching.
     Fuzzy,
+    /// The whole query text, lowercased, equals an indexed name (an identifier value) exactly:
+    /// a term lookup, no ranking beyond `rid` order. The caller revalidates case.
+    Exact,
 }
 
 /// The record filters a seed search must honour, borrowed from the recall request.
@@ -407,7 +410,7 @@ pub mod fake {
     impl TextIndex for FakeIndex {
         fn search(&self, query: &TextQuery<'_>) -> Result<Searched> {
             let hits = match query.mode {
-                MatchMode::Lexical => &self.lexical,
+                MatchMode::Lexical | MatchMode::Exact => &self.lexical,
                 MatchMode::Fuzzy => &self.fuzzy,
             };
             Ok(hits.as_ref().map_or(Searched::Unavailable, |all| {

@@ -61,7 +61,7 @@ use kaban_index::status::{self, Purged, SnapshotState, SnapshotStatus, TrustStat
 use kaban_index::tools::{self, TOOLCHAIN_ROOT_REFUSED, Toolchain};
 use kaban_index::trust::{self, TRUST_TEXT, TrustError};
 use kaban_index::writer::{self, Commit, Meta, Provenance, PublishError, Rows};
-use kaban_index::{IndexError, admit_index, decode_and_gate};
+use kaban_index::IndexError;
 use kaban_policy::Policy;
 use serde::Serialize;
 use serde_json::Value;
@@ -1369,40 +1369,27 @@ fn index_verb(policy: &Policy, args: IndexArgs) -> Result<Report, Box<Failure>> 
     }
     let output = &outputs[0];
 
-    // decode and gate (CG3.1), project root (RS-5), derive (CG3.2/3.3), publish (CG3.2)
-    let a = decode_and_gate(&output.a, scan).map_err(|e| gate_failure(&ctx, &e))?;
-    let b = output
-        .b
-        .as_deref()
-        .map(|bytes| decode_and_gate(bytes, scan))
-        .transpose()
-        .map_err(|e| gate_failure(&ctx, &e))?;
-    // the root is validated as an identity parsed before the gate (df23-6): a meta hit on its
-    // text is masked and counted by admission below, never a refusal
-    for gated in std::iter::once(&a).chain(b.as_ref()) {
-        kaban_index::derive::check_project_root(&gated.metadata().project_root_identity, &repo)
-            .map_err(|_| {
-                ctx.fail_with_reason(
-                    "indexer_failed",
-                    "project_root_mismatch",
-                    "the index names another project root; the snapshot is refused",
-                    6,
-                )
-            })?;
+    // decode and gate (CG3.1), project root (RS-5), derive (CG3.2/3.3), snippets (CG8.2): the
+    // library's `Rows::from_scip` (S0 §7 I-8)
+    if let Some(dir) = std::env::var_os("KABAN_SPIKE_DUMP_SCIP") {
+        // SPIKE S3 HOOK: keep the raw index.scip for the layers prototype, then stop before publish
+        let d = std::path::Path::new(&dir);
+        std::fs::write(d.join(format!("{commit}.scip")), &output.a).expect("dump");
+        if let Some(b) = output.b.as_deref() {
+            std::fs::write(d.join(format!("{commit}.b.scip")), b).expect("dump b");
+        }
+        std::process::exit(0);
     }
-    let admitted_a = admit_index(&a);
-    let admitted_b = b.as_ref().map(admit_index);
-    let mut rows = Rows::derive_committed(&admitted_a, admitted_b.as_ref(), scan, &repo, &commit)
-        .map_err(|e| gate_failure(&ctx, &e))?;
-    // CG8.2: the snippets come from `git show <commit>:<path>` through the pinned git (kaban's
-    // own child, outside the isolation tier, after the indexers and before publish; never the
-    // working tree), gated as free fields before they are rows
-    rows.set_snippets(kaban_index::snippets::collect(
-        &repo,
-        commit.as_str(),
-        &rows,
-        scan,
-    ));
+    let mut rows = Rows::from_scip(&output.a, output.b.as_deref(), scan, &repo, &commit)
+        .map_err(|e| match e {
+            writer::DeriveError::Gate(e) => gate_failure(&ctx, &e),
+            writer::DeriveError::ProjectRoot => ctx.fail_with_reason(
+                "indexer_failed",
+                "project_root_mismatch",
+                "the index names another project root; the snapshot is refused",
+                6,
+            ),
+        })?;
     if let Some(coverage) = output.coverage.clone() {
         rows.set_coverage(coverage);
     }

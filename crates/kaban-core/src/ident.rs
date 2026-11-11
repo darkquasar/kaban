@@ -48,6 +48,38 @@ fn camel_boundary(text: &str) -> bool {
         })
 }
 
+/// The one identifier splitter: the alphanumeric runs of `s` (Unicode; every other character,
+/// `_` `:` `.` `/` `-` included, separates), each further split on case boundaries: before an
+/// uppercase letter that follows a lowercase letter or a digit (`parseURL` -> `parse`, `URL`),
+/// and before the last uppercase letter of an uppercase run that is followed by a lowercase
+/// letter (`HTTPServer` -> `HTTP`, `Server`). [`ident_terms`] and the code analyzer share it.
+#[must_use]
+pub fn split_terms(s: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    for run in s.split(|c: char| !c.is_alphanumeric()) {
+        if run.is_empty() {
+            continue;
+        }
+        let chars: Vec<(usize, char)> = run.char_indices().collect();
+        let mut start = 0;
+        for i in 1..chars.len() {
+            let (at, c) = chars[i];
+            let prev = chars[i - 1].1;
+            let next = chars.get(i + 1).map(|&(_, n)| n);
+            let boundary = c.is_uppercase()
+                && (prev.is_lowercase()
+                    || prev.is_numeric()
+                    || (prev.is_uppercase() && next.is_some_and(char::is_lowercase)));
+            if boundary {
+                out.push(&run[start..at]);
+                start = at;
+            }
+        }
+        out.push(&run[start..]);
+    }
+    out
+}
+
 /// Derive whole identifiers, separator/camel parts and lowercase copies, in first-seen order.
 /// Plain prose and short tokens do not inflate the derived column. Inputs are already gated.
 #[must_use]
@@ -86,20 +118,8 @@ pub fn ident_terms(
             push(token);
             for segment in token.split([':', '.', '/', '-']).filter(|s| !s.is_empty()) {
                 push(segment);
-                for piece in segment.split('_').filter(|s| !s.is_empty()) {
-                    let bytes = piece.as_bytes();
-                    let mut start = 0;
-                    for i in 1..bytes.len() {
-                        let boundary = bytes[i].is_ascii_uppercase()
-                            && (bytes[i - 1].is_ascii_lowercase()
-                                || (bytes[i - 1].is_ascii_uppercase()
-                                    && bytes.get(i + 1).is_some_and(u8::is_ascii_lowercase)));
-                        if boundary {
-                            push(&piece[start..i]);
-                            start = i;
-                        }
-                    }
-                    push(&piece[start..]);
+                for part in split_terms(segment) {
+                    push(part);
                 }
             }
         }

@@ -32,6 +32,11 @@ fn derive(purpose: &str, fields: &[&[u8]]) -> NodeId {
     NodeId::try_from(uuid).expect("a v7-shaped uuid is a valid NodeId")
 }
 
+/// SPIKE S5: the same derivation for caller-chosen purposes (`Commit`, `Hunk`, `Symbol` ids).
+pub fn derived_id(purpose: &str, fields: &[&[u8]]) -> NodeId {
+    derive(purpose, fields)
+}
+
 /// The current `Document` node of a source: stable across content edits, so links, `PART_OF`
 /// edges and recall cards keep pointing at it (D2, SR-6).
 pub fn document_id(source: &SourceId) -> NodeId {

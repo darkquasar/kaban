@@ -316,6 +316,20 @@ pub fn build_dictionary(
             after_id = next;
         }
     }
+    finish_dictionary(patterns, sources, document_count, document_frequency, cfg)
+}
+
+type PatternMap = BTreeMap<String, BTreeMap<String, (NodeId, Method, String)>>;
+
+/// SPIKE S5 (extracted from `build_dictionary`, no behaviour change): the gate, automaton and
+/// fingerprint half, shared with [`dictionary_from_terms`].
+fn finish_dictionary(
+    patterns: PatternMap,
+    sources: BTreeSet<DictSource>,
+    document_count: u32,
+    document_frequency: BTreeMap<String, u32>,
+    cfg: &Gazetteer,
+) -> Result<Dictionary, crate::IngestError> {
     let patterns: Vec<Pattern> = patterns
         .into_iter()
         .filter(|(normalized, targets)| {
@@ -376,6 +390,27 @@ pub fn build_dictionary(
         sources: sources.into_iter().collect(),
         fingerprint: digest.finalize().to_hex().to_string(),
     })
+}
+
+/// SPIKE S5: a dictionary straight from `(surface, target)` pairs (symbol names -> symbol node
+/// ids), no store read. Same admission, stopword, min-length and ambiguity rules as
+/// [`build_dictionary`] because it shares [`finish_dictionary`].
+///
+/// # Errors
+/// An automaton construction failure.
+pub fn dictionary_from_terms(
+    policy: &Policy,
+    cfg: &Gazetteer,
+    terms: impl IntoIterator<Item = (String, NodeId)>,
+) -> Result<Dictionary, crate::IngestError> {
+    let mut patterns = PatternMap::new();
+    for (raw, target) in terms {
+        let Some(safe) = admitted(policy, &raw) else { continue };
+        let normalized = norm_term(&safe, true);
+        if normalized.len() < cfg.min_pattern_len as usize { continue; }
+        patterns.entry(normalized).or_default().entry(target.to_string()).or_insert_with(|| (target.clone(), Method::Symbol, safe));
+    }
+    finish_dictionary(patterns, BTreeSet::from([DictSource::V4Symbols]), 0, BTreeMap::new(), cfg)
 }
 
 #[cfg(target_os = "linux")]
@@ -530,9 +565,9 @@ pub fn find_mentions(dict: &Dictionary, chunk: &NodeId, text: &str) -> Vec<Menti
     mentions.into_iter().map(|(mention, _)| mention).collect()
 }
 
-pub(crate) fn append_mentions(batch: &mut WriteBatch, mentions: &[Mention], source_id: &str) {
-    // A triple is one claim, not one competing claim per occurrence. Prefer the
-    // strongest occurrence, breaking ties by the first original byte position.
+/// One claim per `(chunk, target)`: the strongest occurrence, ties broken by the first original
+/// byte position; ambiguous candidates never become edges.
+fn strongest(mentions: &[Mention]) -> Vec<&Mention> {
     let mut selected = BTreeMap::new();
     for mention in mentions.iter().filter(|m| !m.ambiguous) {
         selected
@@ -546,7 +581,21 @@ pub(crate) fn append_mentions(batch: &mut WriteBatch, mentions: &[Mention], sour
             })
             .or_insert(mention);
     }
-    for mention in selected.into_values() {
+    selected.into_values().collect()
+}
+
+/// SPIKE S5: the edge half of [`append_mentions`] alone (what survives dropping governance,
+/// 07 section 7): one `MENTIONS` `Op::UpsertEdge` per selected mention, no assertion.
+#[must_use]
+pub fn mention_edge_ops(mentions: &[Mention]) -> Vec<Op> {
+    strongest(mentions)
+        .into_iter()
+        .map(|mention| Op::UpsertEdge { src: mention.chunk.clone(), dst: mention.target.clone(), rel: "MENTIONS".into(), props: Some(json!({"owner": "kaban-ingest", "method": mention.method.as_str(), "offset": mention.offset, "len": mention.len, "score": mention.score.0})) })
+        .collect()
+}
+
+pub(crate) fn append_mentions(batch: &mut WriteBatch, mentions: &[Mention], source_id: &str) {
+    for mention in strongest(mentions) {
         let value = json!({"method": mention.method.as_str(), "offset": mention.offset, "len": mention.len, "score": mention.score.0});
         batch.assertions.push(BatchAssertion {
             subject: BatchSubject::Edge {

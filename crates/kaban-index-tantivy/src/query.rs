@@ -33,6 +33,9 @@ use tantivy::{DocAddress, DocId, Index, Score, Searcher, SegmentReader, Term};
 
 /// EN-F29 defaults for [`CONTENT`], as `recall.rs` has them.
 const DEFAULT_COLUMN_WEIGHTS: [f64; 4] = [1.0, 1.5, 1.0, 2.0];
+/// Code text boosts: the whole lowercased name over its parts over the stemmed prose fields.
+const NAME_BOOST: f32 = 4.0;
+const CODE_BOOST: f32 = 2.0;
 /// A query longer than this is cut (Turso's guard; the grammar is linear, the cut is a cap).
 const MAX_QUERY_BYTES: usize = 16 * 1024;
 /// At most this many operands take part.
@@ -158,6 +161,13 @@ fn raw_term(field: Field, value: &str) -> Box<dyn Query> {
     ))
 }
 
+fn raw_term_with(field: Field, value: Option<&String>) -> Box<dyn Query> {
+    value.map_or_else(
+        || Box::new(EmptyQuery) as Box<dyn Query>,
+        |v| raw_term(field, v),
+    )
+}
+
 fn any_of(field: Field, values: &[String]) -> Box<dyn Query> {
     Box::new(BooleanQuery::new(
         values
@@ -267,16 +277,33 @@ fn content(
 ) -> Result<Option<Box<dyn Query>>> {
     let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
     for op in ops {
-        let tokens = tokens(searcher.index(), fields.content[0], &op.words)?;
-        if tokens.is_empty() {
+        let stemmed = tokens(searcher.index(), fields.content[0], &op.words)?;
+        if stemmed.is_empty() {
             continue;
         }
-        let mut per_field: Vec<(Occur, Box<dyn Query>)> = Vec::with_capacity(CONTENT.len());
+        let mut per_field: Vec<(Occur, Box<dyn Query>)> = Vec::with_capacity(CONTENT.len() + 2);
+        // code text: the whole name (exact, strongest) and its parts as a phrase or prefix
+        let name = tokens(searcher.index(), fields.name, &op.words)?;
+        let code = tokens(searcher.index(), fields.code, &op.words)?;
+        for (field, tokens, boost) in [
+            (fields.name, name, NAME_BOOST),
+            (fields.code, code, CODE_BOOST),
+        ] {
+            if !tokens.is_empty() {
+                per_field.push((
+                    Occur::Should,
+                    Box::new(BoostQuery::new(
+                        operand_on(searcher, field, &tokens, op.prefix)?,
+                        boost,
+                    )),
+                ));
+            }
+        }
         for (field, weight) in fields.content.iter().zip(weights) {
             per_field.push((
                 Occur::Should,
                 Box::new(BoostQuery::new(
-                    operand_on(searcher, *field, &tokens, op.prefix)?,
+                    operand_on(searcher, *field, &stemmed, op.prefix)?,
                     weight,
                 )),
             ));
@@ -551,6 +578,18 @@ pub(crate) fn run(
                     None => strict_hits.into_iter().skip(q.skip).collect(),
                 }
             }
+        }
+        MatchMode::Exact => {
+            let name = tokens(searcher.index(), fields.name, q.text.trim())?;
+            let mut all = filters(fields, &q.filter);
+            all.push((Occur::Must, raw_term_with(fields.name, name.first())));
+            top(
+                searcher,
+                fields,
+                &BooleanQuery::new(all),
+                q.skip,
+                q.limit + 1,
+            )?
         }
         MatchMode::Fuzzy => {
             let Some(query) = fuzzy(searcher, fields, q.text, &q.filter)? else {

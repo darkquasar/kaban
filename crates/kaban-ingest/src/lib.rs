@@ -68,11 +68,12 @@ pub use hash::{
 };
 pub use ids::{
     PIPELINE_VERSION, blocked_document_id, chunk_id, document_id, document_version_id, section_id,
-    tag_id,
+    derived_id, tag_id,
 };
 pub use ingestor::{IngestConfig, Ingestor, PoolMetrics, PrepareInput, Preparer};
 pub use mentions::{
-    DictSource, Dictionary, Mention, SnapshotSource, build_dictionary, find_mentions,
+    DictSource, Dictionary, Mention, SnapshotSource, build_dictionary, dictionary_from_terms,
+    find_mentions, mention_edge_ops,
 };
 pub use model::{
     ChunkKind, ChunkNode, ChunkProps, DocStatus, DocumentNode, DocumentProps, Format, IngestError,

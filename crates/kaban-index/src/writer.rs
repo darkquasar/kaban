@@ -201,6 +201,38 @@ impl Rows {
         )
     }
 
+    /// The whole DB-free pipeline from `index.scip` bytes to rows (S0 §7 I-8; extracted from the
+    /// `index` verb): decode and gate run A (and run B), check the project root, admit, derive
+    /// with the committed-source test classification, then collect the snippets.
+    ///
+    /// # Errors
+    /// [`DeriveError::Gate`] for decode or classification, [`DeriveError::ProjectRoot`] when an
+    /// index names another root.
+    pub fn from_scip(
+        a: &[u8],
+        b: Option<&[u8]>,
+        policy: &Policy,
+        repo: &Path,
+        commit: &Commit,
+    ) -> Result<Self, DeriveError> {
+        let a = crate::scip_read::decode_and_gate(a, policy).map_err(DeriveError::Gate)?;
+        let b = b
+            .map(|bytes| crate::scip_read::decode_and_gate(bytes, policy))
+            .transpose()
+            .map_err(DeriveError::Gate)?;
+        for gated in std::iter::once(&a).chain(b.as_ref()) {
+            derive::check_project_root(&gated.metadata().project_root_identity, repo)
+                .map_err(|_| DeriveError::ProjectRoot)?;
+        }
+        let admitted_a = gate::admit_index(&a);
+        let admitted_b = b.as_ref().map(gate::admit_index);
+        let mut rows = Self::derive_committed(&admitted_a, admitted_b.as_ref(), policy, repo, commit)
+            .map_err(DeriveError::Gate)?;
+        let snippets = crate::snippets::collect(repo, commit.as_str(), &rows, policy);
+        rows.set_snippets(snippets);
+        Ok(rows)
+    }
+
     /// [`Self::derive_committed`] with an explicit git descriptor policy for in-process
     /// tests running under a build lock. Production uses [`Self::derive_committed`].
     ///
@@ -569,6 +601,17 @@ impl Rows {
         }
         rows.into_iter().collect()
     }
+}
+
+/// Why [`Rows::from_scip`] failed.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum DeriveError {
+    /// Decode or committed-source classification failed.
+    #[error("index decode or classification failed")]
+    Gate(crate::IndexError),
+    /// An index names another project root.
+    #[error("project root mismatch")]
+    ProjectRoot,
 }
 
 /// A formed JSON list meta value (compact, the items in their order).

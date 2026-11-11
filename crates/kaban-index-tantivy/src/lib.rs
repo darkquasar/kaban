@@ -516,6 +516,13 @@ fn document(fields: &Fields, row: &IndexRow) -> TantivyDocument {
         doc.add_text(ident, input);
     }
     doc.add_text(fields.fuzzy, &row.text);
+    if let Some(name) = row.ident_values.first() {
+        doc.add_text(fields.name, name);
+        doc.add_text(fields.fuzzy, name);
+    }
+    for value in &row.ident_values {
+        doc.add_text(fields.code, value);
+    }
     if let Some(stored) = &row.stored_summary {
         doc.add_text(fields.fuzzy, stored);
     }
