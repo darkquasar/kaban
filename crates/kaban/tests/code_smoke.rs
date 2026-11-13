@@ -256,7 +256,6 @@ fn code_implementers_over_stdio_fixture_derived() {
         cwd: &repo,
         policy: Some(&policy_file),
         workspace: WORKSPACE,
-        audit_export: None,
     });
     let first = implementers_of_database_driver(&mut c);
     assert_ne!(first["result"]["isError"], json!(true), "{first}");
@@ -333,7 +332,6 @@ fn code_implementers_without_snapshot_is_no_snapshot() {
         cwd: &repo,
         policy: Some(&policy_file),
         workspace: WORKSPACE,
-        audit_export: None,
     });
     let text = c.call_err(
         "code_implementers",
@@ -380,7 +378,6 @@ fn coverage_in_every_answer_and_in_the_index_resource_fixture_derived() {
         cwd: &repo,
         policy: Some(&policy_file),
         workspace: WORKSPACE,
-        audit_export: None,
     });
     let calls = [
         (
@@ -465,7 +462,6 @@ fn coverage_in_every_answer_and_in_the_index_resource_fixture_derived() {
         cwd: &other,
         policy: Some(&policy_file),
         workspace: WORKSPACE,
-        audit_export: None,
     });
     let body: Value = serde_json::from_str(
         implementers_of_database_driver(&mut c)["result"]["content"][0]["text"]

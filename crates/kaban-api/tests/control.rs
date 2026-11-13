@@ -604,9 +604,8 @@ const CODE_CONTROL_ALLOWANCE: &[(&str, Direction, &str)] = &[
 /// moves or the path is named here. Free strings stay content by default (OWN-10).
 ///
 /// The response-side closed vocabularies kaban itself emits (card `lifecycle`, `governance`
-/// and `provenance.store`, `signer_kind`, the `follow_ups[].tool` names, the `why` currency
-/// and match words, `explain`'s status words, `remember`/`accept` `status`, `stats.stores[]`,
-/// `anchored[].kind`, the `why` `code`) are content on purpose: the response gate scans them
+/// and `provenance.store`, the `follow_ups[].tool` names, `remember` `status`, `stats.stores[]`,
+/// `anchored[].kind`) are content on purpose: the response gate scans them
 /// as text and the adapter withholds a result whose enum value a redaction reshaped
 /// (`crates/kaban/src/mcp/mod.rs`, review R3-9), so a policy word rule is honoured on every
 /// string that leaves. Rowing them would make them unmaskable: an owner decision, not a lane's
@@ -652,37 +651,6 @@ const CONTENT_ENUM_ALLOWANCE: &[(&str, Direction, &str)] = &[
     ("code_references", Direction::Response, "follow_ups[].tool"),
     ("code_tests_for", Direction::Response, "follow_ups[].tool"),
     ("code_context", Direction::Response, "follow_ups[].tool"),
-    ("code_context", Direction::Response, "governing[].code"),
-    (
-        "code_context",
-        Direction::Response,
-        "governing[].currency.state",
-    ),
-    (
-        "code_context",
-        Direction::Response,
-        "governing[].governance",
-    ),
-    (
-        "code_context",
-        Direction::Response,
-        "governing[].matched_by",
-    ),
-    (
-        "code_context",
-        Direction::Response,
-        "governing[].node.governance",
-    ),
-    (
-        "code_context",
-        Direction::Response,
-        "governing[].node.lifecycle",
-    ),
-    (
-        "code_context",
-        Direction::Response,
-        "governing[].node.provenance.store",
-    ),
 ];
 
 /// Whether `(tool, direction, path)` is named in [`CONTENT_ENUM_ALLOWANCE`].

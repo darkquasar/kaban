@@ -456,10 +456,10 @@ and semantic Markdown splitting; Cargo source defaults remain lean.
 ```sh
 cargo nextest run --locked -p kaban \
   --features kaban-ingest/pdf,kaban-ingest/md-splitter \
-  --test walkthrough --test cli_sync --test cli_pack --test recall_determinism \
+  --test walkthrough --test recall_determinism \
   --test code_smoke --test acceptance_north_star \
   --test hook_claude --test hook_hosts --test hook_pairing --test hooks_roundtrip \
-  --test hook_post_commit --test mcp_control --test mcp_scrub --test mcp_field_gate \
+  --test mcp_control --test mcp_scrub --test mcp_field_gate \
   --test mcp_prescan --test mcp_docs --test mcp_structured --test cli_gazetteer \
   --test cli_ingest --test ingest_blackbox_cli --test ingest_blackbox_mcp -j 1
 cargo nextest run --locked -p kaban-ingest --features pdf,md-splitter \
@@ -472,14 +472,9 @@ cargo nextest run --locked -p kaban-store-sqlite \
   --test forget_mentions -j 1
 cargo test --locked --doc --workspace \
   --features kaban-ingest/pdf,kaban-ingest/md-splitter
-"$MISE" exec -- /bin/bash scripts/hooks-live/test-stop-sync.sh
 ```
 
-The hook harness uses `/bin/bash` on Darwin and a restricted PATH without
-`setsid` or GNU `timeout`. It checks prompt JSON-only return, stdio detachment,
-independent process groups, opt-out, repeated Stop events and termination of
-TERM-resistant descendants for Claude/Codex Stop/SubagentStop. Existing Rust
-fixtures exercise Claude/Codex/pi ingestion/recall without paid agents/models.
+Existing Rust fixtures exercise Claude/Codex/pi ingestion/recall without paid agents/models.
 Graph smoke and north-star tests are fixture-derived public-query checks; their
 real-producer exclusions are explicit. Real producer qualification has its own
 [recipe and restrictions](code-graph.md), and need not be repeated for unrelated

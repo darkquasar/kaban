@@ -238,8 +238,7 @@ fn codex_apply_patch_paths_come_from_the_patch_headers_and_stop_uses_decision_bl
 /// `content[].text` is the error output); `isError: false` records nothing new and is
 /// evidence; `tool_call` for `edit` records the edit and injects nothing (path from
 /// `input.path`, `args.path` accepted too, the edit content never read); `agent_before_settle`
-/// carries the
-/// prompt in the `decision: block` shape for the extension's one continuation.
+/// carries the prompt in the `decision: block` shape for the extension's one continuation.
 #[test]
 fn pi_is_error_records_a_failure_and_the_pi_events_echo_their_own_names() {
     let s = HookScratch::new("pi");
@@ -294,8 +293,12 @@ fn pi_is_error_records_a_failure_and_the_pi_events_echo_their_own_names() {
     let run = hook(&s, "pre-tool-use", Some("pi"), &args_shape);
     assert_eq!(run.code(), Some(0), "{}", run.stderr());
     assert_eq!(run.json(), empty(), "{}", run.stdout());
+    let edits: Vec<_> = session_rows(&s, "sess-pi-0001")
+        .into_iter()
+        .filter(|(kind, _)| kind == "edit")
+        .collect();
     assert_eq!(
-        session_rows(&s, "sess-pi-0001"),
+        edits,
         vec![
             ("edit".to_owned(), "src/store/sqlite.rs".to_owned()),
             ("edit".to_owned(), "src/store/sqlite.rs".to_owned()),

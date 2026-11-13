@@ -2,7 +2,7 @@
 //! outgoing string by the adapter's response gate (core-spec S1; review R1-3, coordinator
 //! decision: option A). Table-driven black-box over stdio with `RUST_LOG=trace`: a redact-class
 //! canary is sent in one field at a time and must appear neither in the JSON-RPC response, nor
-//! in stderr, nor in the db/-wal/-shm/audit-export bytes.
+//! in stderr, nor in the db/-wal/-shm bytes.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // test code: failures are the assertion
 
@@ -14,16 +14,12 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 
-/// Field-gate view of the scratch home: the audit export target and everything persisted.
+/// Field-gate view of the scratch home: everything persisted.
 trait ScratchExt {
-    fn export(&self) -> PathBuf;
-    /// Every byte SQLite and the export may have written (main file, WAL, SHM, JSONL).
+    /// Every byte SQLite may have written (main file, WAL, SHM).
     fn persisted_bytes(&self) -> Vec<u8>;
 }
 impl ScratchExt for Scratch {
-    fn export(&self) -> PathBuf {
-        self.0.join("audit-export.jsonl")
-    }
     fn persisted_bytes(&self) -> Vec<u8> {
         let mut out = Vec::new();
         for f in std::fs::read_dir(&self.0).unwrap() {
@@ -54,9 +50,7 @@ impl Server {
         cmd.env("KABAN_HOME", s.0.join("home"))
             .env("RUST_LOG", "trace")
             .arg("--db")
-            .arg(s.db())
-            .arg("--audit-export")
-            .arg(s.export());
+            .arg(s.db());
         if with_policy {
             cmd.arg("--policy").arg(policy);
         }
@@ -272,22 +266,6 @@ fn table(fact: &str, other: &str) -> Vec<(&'static str, &'static str, Value)> {
             json!({"kind": "label", "name": "Thing", "description": "d", "props_schema": {"title": "{C}"}}),
         ),
         ("stats", "workspace_id", json!({"workspace_id": "{C}"})),
-        ("accept", "id", json!({"id": "{C}"})),
-        (
-            "accept",
-            "reason",
-            json!({"id": fact, "reason": "{C}", "path_scope": ["src/**"]}),
-        ),
-        (
-            "accept",
-            "path_scope",
-            json!({"id": fact, "reason": "r", "path_scope": ["{C}"]}),
-        ),
-        (
-            "accept",
-            "signer",
-            json!({"id": fact, "reason": "r", "path_scope": ["src/**"], "signer": "{C}"}),
-        ),
     ]
 }
 
@@ -360,7 +338,7 @@ fn a_redact_class_canary_in_any_argument_field_of_any_tool_never_leaves_the_serv
     let stats = srv.call_ok("stats", &json!({}));
     assert!(stats["nodes"].as_u64().unwrap() >= 3, "{stats}");
     // the legacy note is the one place the term legitimately persisted: purge it through the
-    // server, then every byte left behind (db, -wal, -shm, export) must be free of the canary
+    // server, then every byte left behind (db, -wal, -shm) must be free of the canary
     srv.call_ok("forget", &json!({"id": legacy_id, "mode": "purge"}));
     let stderr = srv.finish();
     assert!(
@@ -375,10 +353,9 @@ fn a_redact_class_canary_in_any_argument_field_of_any_tool_never_leaves_the_serv
         "stderr expected at RUST_LOG=trace"
     );
     let bytes = s.persisted_bytes();
-    assert!(bytes.len() > 1024, "database and export expected on disk");
+    assert!(bytes.len() > 1024, "database expected on disk");
     assert!(
         !bytes_contain_ci(&bytes, CANARY),
-        "canary in db/-wal/-shm/audit-export bytes"
+        "canary in db/-wal/-shm bytes"
     );
-    assert!(s.export().is_file(), "redactions were exported");
 }

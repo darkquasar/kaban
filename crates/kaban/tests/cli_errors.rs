@@ -1,6 +1,6 @@
 //! Review RM-1 (core-spec S1): a storage backend failure never renders the driver's text on a
 //! CLI boundary. The driver message of the real SQLite backend may quote SQL text or bound
-//! values, so the open paths (`serve`, `rescan`, `accept`, `verify-audit`, `bench`) print only
+//! values, so the open paths (`serve`, `rescan`, `remember`, `bench`) print only
 //! the safe outer message, never a chained `{:#}` rendering, and never hand a store-backed
 //! `anyhow::Error` to Rust's top-level reporter (which prints the whole chain).
 //!
@@ -69,18 +69,8 @@ fn a_driver_error_on_open_never_reaches_stderr_on_any_cli_path() {
 
     assert_safe_failure(&kaban(&s, &["rescan"]), "rescan");
     assert_safe_failure(
-        &kaban(
-            &s,
-            &[
-                "accept",
-                "01a17a03-5cbc-7000-8000-000000000000",
-                "--reason",
-                "r",
-                "--path-scope",
-                "src",
-            ],
-        ),
-        "accept",
+        &kaban(&s, &["remember", "Fact", "a plain note"]),
+        "remember",
     );
     assert_safe_failure(&kaban(&s, &["serve"]), "serve");
     // `bench` recreates its database, so the poisoned file cannot reach its open path; its

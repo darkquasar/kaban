@@ -141,7 +141,7 @@ fn ask_is_absent_from_the_catalog_the_registry_and_the_cli() {
     );
     // the one verb that does exist beside it still parses (the negative is not a broken CLI)
     assert!(
-        text.lines().any(|l| l.trim_start().starts_with("explain")),
+        text.lines().any(|l| l.trim_start().starts_with("recall")),
         "{text}"
     );
     let ask = Command::new(env!("CARGO_BIN_EXE_kaban"))

@@ -348,25 +348,6 @@ esac
     }
 }
 
-/// Run `args` with `body` on stdin (`--stdin-json` commands).
-fn run_with_stdin(s: &Scratch, cwd: &std::path::Path, args: &[&str], body: &Value) -> Output {
-    let mut child = kaban(s)
-        .current_dir(cwd)
-        .args(args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(body.to_string().as_bytes())
-        .unwrap();
-    child.wait_with_output().unwrap()
-}
-
 /// The texts of a recall's cards.
 fn recalled(s: &Scratch, query: &str) -> Vec<String> {
     document(&run(s, &["recall", query]))["results"]
@@ -378,12 +359,12 @@ fn recalled(s: &Scratch, query: &str) -> Vec<String> {
 }
 
 /// Every public write path runs the barrier under activation (T2 review t2-3, SS-10): an
-/// ordinary `ingest` (the CLI and MCP `index_docs` entry point) and an `accept` return the
-/// typed receipt, and their rows are recall hits at once (a lone writer publishes inside
-/// the barrier) or the receipt says pending. Before, both returned without a receipt and the
-/// rows stayed unsearchable indefinitely.
+/// ordinary `ingest` (the CLI and MCP `index_docs` entry point) returns the typed receipt,
+/// and its rows are recall hits at once (a lone writer publishes inside the barrier) or the
+/// receipt says pending. Before, it returned without a receipt and the rows stayed
+/// unsearchable indefinitely.
 #[test]
-fn an_ingest_and_an_acceptance_carry_a_receipt_and_are_searchable_under_activation() {
+fn an_ingest_carries_a_receipt_and_is_searchable_under_activation() {
     let s = Scratch::new("kaban-barrier", "entry-points");
     let seeded = run(&s, &["remember", "Fact", "a seeded note"]);
     assert_eq!(seeded.status.code(), Some(0), "{seeded:?}");
@@ -409,28 +390,6 @@ fn an_ingest_and_an_acceptance_carry_a_receipt_and_are_searchable_under_activati
             // the ingested rows (the document's section, its chunk) are hits at once
             let texts = recalled(&s, "nightjar WAL");
             assert!(!texts.is_empty(), "an ingested row is a hit once committed");
-        }
-        (Some(6), Some("committed_not_yet_searchable")) => {}
-        other => panic!("a typed receipt and its status: {other:?}: {doc}"),
-    }
-
-    let created = document(&run(&s, &["remember", "Convention", "ship on mondays"]));
-    let id = created["id"].as_str().unwrap().to_owned();
-    let out = run_with_stdin(
-        &s,
-        &root,
-        &["accept", "--stdin-json"],
-        &json!({"id": id, "reason": "agreed in review", "path_scope": ["src/"]}),
-    );
-    let doc = document(&out);
-    let outcome = doc["receipt"]["outcome"].as_str().map(str::to_owned);
-    match (out.status.code(), outcome.as_deref()) {
-        (Some(0), Some("committed")) => {
-            let texts = recalled(&s, "ship mondays");
-            assert!(
-                texts.iter().any(|t| t == "ship on mondays"),
-                "the accepted record is a hit once committed: {texts:?}"
-            );
         }
         (Some(6), Some("committed_not_yet_searchable")) => {}
         other => panic!("a typed receipt and its status: {other:?}: {doc}"),

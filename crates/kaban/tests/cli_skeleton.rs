@@ -1,10 +1,8 @@
 //! The C4.1a CLI skeleton (core-spec F7, §6; core-plan C4.1 as amended by M4-1, M4-2, M4-4),
 //! black-box through the binary: a usage error prints a fixed text (no argument value) and
-//! exits 4 while help and version exit 0; the unshipped subcommands and flags exit 4 with "not
-//! available in this build" (`sync`, `import` and `resolve` shipped with C5.1b and are covered
-//! by `cli_sync.rs`; `export` shipped with C5.2 and is covered by `kaban-api/tests/export.rs`);
-//! `--json` prints one compact JSON document; `--stdin-json` is bounded at 1 MiB and exclusive
-//! with argument flags.
+//! exits 4 while help and version exit 0; the unshipped flags exit 4 with "not available in
+//! this build"; `--json` prints one compact JSON document; `--stdin-json` is bounded at 1 MiB
+//! and exclusive with argument flags.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // test code: failures are the assertion
 
@@ -69,34 +67,16 @@ fn a_usage_error_exits_4_with_a_fixed_text_and_never_echoes_the_argument() {
     // help and version are not errors
     let help = kaban(&s).arg("--help").output().unwrap();
     assert_eq!(help.status.code(), Some(0), "{}", stderr(&help));
-    assert!(String::from_utf8_lossy(&help.stdout).contains("verify-audit"));
+    assert!(String::from_utf8_lossy(&help.stdout).contains("recall"));
     let version = kaban(&s).arg("--version").output().unwrap();
     assert_eq!(version.status.code(), Some(0));
     assert!(String::from_utf8_lossy(&version.stdout).starts_with("kaban "));
 }
 
 #[test]
-fn unshipped_subcommands_and_flags_exit_4_without_silent_success() {
+fn unshipped_flags_exit_4_without_silent_success() {
     let s = Scratch::new("kaban-cli-skel", "stubs");
-    // a repository root for the repository-bound M5 shapes (a `.git` entry is what counts)
-    let repo = s.0.join("repo");
-    std::fs::create_dir_all(repo.join(".git")).unwrap();
-    let repo = repo.to_str().unwrap();
-    // `hook` (C4.3), `doctor` (C4.2), `sync`, `import`, `resolve` (C5.1b) and `export` (C5.2)
-    // have shipped; `ingest-decisions` waits for the assisted ingestion spec (OWN-26)
-    let stubs: [&[&str]; 4] = [
-        &["promote", "01a17a03-5cbc-7000-8000-000000000000"],
-        &[
-            "ingest-decisions",
-            "--repo",
-            repo,
-            "--dir",
-            "docs/adr",
-            "--no-markers",
-        ],
-        &["serve", "--http"],
-        &["--global-db", "global.db", "serve"],
-    ];
+    let stubs: [&[&str]; 2] = [&["serve", "--http"], &["--global-db", "global.db", "serve"]];
     for args in stubs {
         let out = kaban(&s).args(args).output().unwrap();
         let err = stderr(&out);
@@ -108,124 +88,14 @@ fn unshipped_subcommands_and_flags_exit_4_without_silent_success() {
         assert!(out.stdout.is_empty(), "{args:?}: stdout stays empty");
     }
     assert!(!s.db().exists(), "a stub never creates the database");
-    let ingest = kaban(&s)
-        .args(["ingest-decisions", "--repo", repo])
-        .output()
-        .unwrap();
-    assert!(
-        stderr(&ingest).contains("assisted ingestion spec pending"),
-        "{}",
-        stderr(&ingest)
-    );
-
-    // the typed shapes refuse what the trailing-args stubs swallowed: an unknown flag, a
-    // missing `--take`, a bad `--format`, a stray positional, each with the fixed clap text
-    // and no echo
-    for args in [
-        &["sync", "--force", "--repo", repo][..],
-        &[
-            "resolve",
-            "01a17a03-5cbc-7000-8000-000000000000",
-            "--repo",
-            repo,
-        ][..],
-        &["export", "--format", CANARY][..],
-        &["import", CANARY][..],
-    ] {
-        let out = kaban(&s).args(args).output().unwrap();
-        let err = stderr(&out);
-        assert_eq!(out.status.code(), Some(4), "{args:?}: {err}");
-        assert!(
-            err.contains("--help") && !err.contains(CANARY),
-            "{args:?}: {err}"
-        );
-    }
-    // `resolve` without an id prints its fixed text
-    let no_id = kaban(&s)
-        .args(["resolve", "--take", "db", "--repo", repo])
-        .output()
-        .unwrap();
-    assert_eq!(no_id.status.code(), Some(4), "{}", stderr(&no_id));
-    assert!(
-        stderr(&no_id).contains("resolve needs the node id"),
-        "{}",
-        stderr(&no_id)
-    );
-    // outside a git repository the repository-bound ones exit 4 with a fixed text that never
-    // echoes the path, even as placeholders; `export` is not repository-bound
-    let plain = s.0.join(format!("plain-{CANARY}"));
-    std::fs::create_dir_all(&plain).unwrap();
-    for args in [
-        &["sync", "--repo"][..],
-        &["import", "--repo"][..],
-        &[
-            "resolve",
-            "01a17a03-5cbc-7000-8000-000000000000",
-            "--take",
-            "db",
-            "--repo",
-        ][..],
-    ] {
-        let out = kaban(&s)
-            .args(args)
-            .arg(&plain)
-            .current_dir(&plain)
-            .output()
-            .unwrap();
-        let err = stderr(&out);
-        assert_eq!(out.status.code(), Some(4), "{args:?}: {err}");
-        assert!(err.contains("needs a git repository"), "{args:?}: {err}");
-        assert!(
-            !err.contains(CANARY),
-            "{args:?}: the path was echoed: {err}"
-        );
-        assert_eq!(out.stdout.len(), 0, "{args:?}: stdout stays empty");
-    }
-    // without `--repo` the enclosing repository of the current directory is used (a real
-    // run inside one is `cli_sync.rs`'s); outside one the fixed text
-    let outside = kaban(&s)
-        .args(["sync"])
-        .current_dir(&plain)
-        .output()
-        .unwrap();
-    assert!(
-        stderr(&outside).contains("needs a git repository"),
-        "{}",
-        stderr(&outside)
-    );
-    // `--stdin-json` stays refused for all five (M4-4; `resolve` with its required `--take`
-    // so clap's own refusal does not come first)
-    for sub in [
-        &["sync"][..],
-        &["import"][..],
-        &["resolve", "--take", "db"][..],
-        &["export"][..],
-        &["ingest-decisions"][..],
-    ] {
-        let out = with_stdin(
-            {
-                let mut c = kaban(&s);
-                c.arg("--stdin-json").args(sub);
-                c
-            },
-            b"{}",
-        );
-        assert_eq!(out.status.code(), Some(4), "{sub:?}: {}", stderr(&out));
-        assert!(
-            stderr(&out).contains("--stdin-json is not accepted"),
-            "{sub:?}: {}",
-            stderr(&out)
-        );
-    }
-    assert!(!s.db().exists(), "no refused M5 shape creates the database");
 }
 
 #[test]
 fn json_prints_one_compact_document_and_the_default_one_pretty_document() {
     let s = Scratch::new("kaban-cli-skel", "json");
-    // `scan` needs no database; `verify-audit` goes through the store
+    // `scan` needs no database; `recall` goes through the store
     drop(kaban_store_sqlite::SqliteStore::open(&s.db(), &s.home().join("keys")).unwrap());
-    for args in [&["scan"][..], &["verify-audit"][..]] {
+    for args in [&["scan"][..], &["recall", "anything"][..]] {
         let compact = with_stdin(
             {
                 let mut c = kaban(&s);
@@ -266,7 +136,7 @@ fn stdin_json_is_bounded_at_one_mebibyte_and_exclusive_with_arguments() {
     let over = with_stdin(
         {
             let mut c = kaban(&s);
-            c.args(["--stdin-json", "accept"]);
+            c.args(["--stdin-json", "forget"]);
             c
         },
         &body,
@@ -284,7 +154,7 @@ fn stdin_json_is_bounded_at_one_mebibyte_and_exclusive_with_arguments() {
     let both = with_stdin(
         {
             let mut c = kaban(&s);
-            c.args(["--stdin-json", "accept", "--reason", "r"]);
+            c.args(["--stdin-json", "forget", "--mode", "archive"]);
             c
         },
         b"{}",
@@ -300,7 +170,7 @@ fn stdin_json_is_bounded_at_one_mebibyte_and_exclusive_with_arguments() {
     let not_object = with_stdin(
         {
             let mut c = kaban(&s);
-            c.args(["--stdin-json", "accept"]);
+            c.args(["--stdin-json", "forget"]);
             c
         },
         format!("[\"{CANARY}\"]").as_bytes(),
@@ -310,11 +180,11 @@ fn stdin_json_is_bounded_at_one_mebibyte_and_exclusive_with_arguments() {
     assert!(!err.contains(CANARY), "{err}");
 
     // a well-formed body reaches the seam like the MCP adapter would: an unknown id is 3
-    let body = r#"{"id": "01a17a03-5cbc-7000-8000-000000000000", "reason": "reviewed", "path_scope": ["src"]}"#;
+    let body = r#"{"id": "01a17a03-5cbc-7000-8000-000000000000", "mode": "archive"}"#;
     let not_found = with_stdin(
         {
             let mut c = kaban(&s);
-            c.args(["--stdin-json", "accept"]);
+            c.args(["--stdin-json", "forget"]);
             c
         },
         body.as_bytes(),

@@ -1,7 +1,7 @@
 //! The global `--actor-id` option (spec 05 SS-26): one writer identity per process, `local`
 //! when unset, set by the flag or `KABAN_ACTOR_ID` for the CLI and for `kaban serve` (MCP)
-//! alike, and stamped on the records and change rows the process writes. `verify-audit` still
-//! verifies the chain.
+//! alike, and stamped on the records and change rows the process writes. The audit chain still
+//! verifies.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // test code: failures are the assertion
 
@@ -138,12 +138,14 @@ fn the_cli_stamps_local_by_default_and_the_flag_or_env_otherwise() {
     assert_eq!(stamped(&s, &flag), by("agent-a"));
     assert_eq!(stamped(&s, &env), by("agent-b"));
     assert_eq!(stamped(&s, &both), by("agent-c"));
-    let verify = kaban(&s, &[], None).arg("verify-audit").output().unwrap();
-    assert_eq!(
-        verify.status.code(),
-        Some(0),
-        "the audit chain still verifies"
-    );
+    let store = kaban_store_sqlite::SqliteStore::open_existing_key(
+        &s.db(),
+        &s.home().join("keys"),
+        &kaban_core::ActorId::default(),
+    )
+    .unwrap();
+    let verify = kaban_core::AuditStore::audit_verify(&store).unwrap();
+    assert!(verify.ok, "the audit chain still verifies: {verify:?}");
 }
 
 #[test]

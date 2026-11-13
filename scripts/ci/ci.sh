@@ -322,11 +322,11 @@ macos() {
   selection='binary_id(=kaban-core::process) | binary_id(=kaban-codegraph::open) | binary_id(=kaban-codegraph::discover) | binary_id(=kaban-index::writer) | binary_id(=kaban-index::runner) | binary_id(=kaban-index::trust)'
   selection="$selection | (binary_id(=kaban-index::cli) & (test(=cli_index_required_without_isolating_tier_is_exit_8) | test(=rust_required_unavailable_never_runs_native_producer_probes) | test(=trust_revalidated_before_each_spawn) | test(=indexer_replaced_after_admission_is_refused) | test(=checkout_replaced_between_revalidation_and_spawn_is_refused)))"
   selection="$selection | (package(kaban-ingest) & (binary(golden_markdown) | binary(chunk) | binary(golden_pdf)))"
-  selection="$selection | (package(kaban) & (binary(walkthrough) | binary(cli_sync) | binary(recall_determinism) | binary(code_smoke) | binary(mcp_control) | binary(mcp_scrub) | binary(mcp_docs) | binary(hook_hosts) | binary(hooks_roundtrip)))"
+  selection="$selection | (package(kaban) & (binary(walkthrough) | binary(recall_determinism) | binary(code_smoke) | binary(mcp_control) | binary(mcp_scrub) | binary(mcp_docs) | binary(hook_hosts) | binary(hooks_roundtrip)))"
   step rust_runner "${CARGO:-cargo}" nextest run --locked \
     -p kaban-core -p kaban-codegraph -p kaban-index -p kaban-ingest -p kaban \
     --test process --test open --test discover --test writer --test runner --test trust --test cli \
-    --test golden_markdown --test chunk --test golden_pdf --test walkthrough --test cli_sync \
+    --test golden_markdown --test chunk --test golden_pdf --test walkthrough \
     --test recall_determinism --test code_smoke --test mcp_control --test mcp_scrub --test mcp_docs \
     --test hook_hosts --test hooks_roundtrip \
     --features kaban-ingest/pdf,kaban-ingest/md-splitter \

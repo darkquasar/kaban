@@ -81,20 +81,6 @@ impl Server {
         Self::spawn(s, args, Duration::from_secs(10), true, &json!({})).0
     }
 
-    /// [`Self::start_traced`] as a client that declares form elicitation at `initialize`
-    /// (an empty `elicitation` object; the server's `elicitation/create` requests arrive
-    /// through [`Self::server_request`]).
-    pub(crate) fn start_elicitation_client(s: &Scratch, args: &[&str]) -> Self {
-        Self::spawn(
-            s,
-            args,
-            Duration::from_secs(10),
-            true,
-            &json!({"elicitation": {}}),
-        )
-        .0
-    }
-
     fn spawn(
         s: &Scratch,
         args: &[&str],
@@ -188,16 +174,6 @@ impl Server {
         self.wait_for(timeout, |v| {
             v.get("method").is_none() && v["id"] == json!(id)
         })
-    }
-
-    /// Wait up to `timeout` for a request the server sends to the client (`method` set).
-    pub(crate) fn server_request(&mut self, method: &str, timeout: Duration) -> Option<Value> {
-        self.wait_for(timeout, |v| v["method"] == json!(method))
-    }
-
-    /// Answer a server request with `result`.
-    pub(crate) fn reply(&mut self, request: &Value, result: &Value) {
-        self.send(&json!({"jsonrpc": "2.0", "id": request["id"], "result": result}));
     }
 
     fn wait_for(&mut self, timeout: Duration, pred: impl Fn(&Value) -> bool) -> Option<Value> {
