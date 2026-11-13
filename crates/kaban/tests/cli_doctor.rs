@@ -16,8 +16,8 @@ mod mcp_client;
 
 use common::Scratch;
 use kaban_core::{
-    Actor, ChangeLogStore, ForgetMode, IngestStore, LeaseStore, MemoryStore, NewNode, NodeId,
-    RememberOutcome, WorkspaceId, WriteCtx,
+    Actor, ForgetMode, IngestStore, MemoryStore, NewNode, NodeId, RememberOutcome, WorkspaceId,
+    WriteCtx,
 };
 use kaban_store_sqlite::SqliteStore;
 use serde_json::Value;
