@@ -16,8 +16,8 @@ use kaban_api::{
     WriteOutcome, WriteReceipt,
 };
 use kaban_core::{
-    Actor, ChangeLogStore, GovernanceStore, IndexMeta, IngestStore, LeaseStore, MemoryStore,
-    NodeId, PendingFailuresQuery, PendingScope,
+    Actor, ChangeLogStore, IndexMeta, IngestStore, LeaseStore, MemoryStore, NodeId,
+    PendingFailuresQuery, PendingScope, SessionStore,
 };
 use kaban_policy::Policy;
 use kaban_store_sqlite::SqliteStore;

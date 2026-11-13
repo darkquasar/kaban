@@ -11,7 +11,7 @@ use kaban_api::control::{
 use kaban_api::{
     ApiError, ForgetRequest, KabanApi, LinkRequest, LinkSpec, RememberRequest, TraverseRequest,
 };
-use kaban_core::{AssertionStatus, ClaimClass, Layer, Method, NodeId, Rank};
+use kaban_core::{Layer, Method, NodeId};
 use kaban_policy::Policy;
 use kaban_store_sqlite::SqliteStore;
 use schemars::{JsonSchema, schema_for};
@@ -977,7 +977,7 @@ fn vocabulary_schema<T: JsonSchema>() -> BTreeSet<String> {
     values
 }
 
-/// EN-E7: every `kaban-core` vocabulary has `schemars` output equal to its `ALL` spellings,
+/// EN-E7: every surviving `kaban-core` vocabulary (the claim ones went with governance) has `schemars` output equal to its `ALL` spellings,
 /// and the `traverse` `edge_filter.layers[]` / `methods[]` rows spell exactly those lists, so
 /// adding a variant fails here until the row moves. The spec's `layer` list (`fts`, `fuzzy`
 /// included) is the one asserted.
@@ -989,17 +989,10 @@ fn vocabularies_have_schema_output_equal_to_their_spellings_and_the_traverse_row
     fn set(v: &[String]) -> BTreeSet<String> {
         v.iter().cloned().collect()
     }
-    let classes = spellings(ClaimClass::ALL, ClaimClass::as_str);
-    assert_eq!(vocabulary_schema::<ClaimClass>(), set(&classes));
-    assert_eq!(classes.len(), ClaimClass::ALL.len());
-    let ranks = spellings(Rank::ALL, Rank::as_str);
-    assert_eq!(vocabulary_schema::<Rank>(), set(&ranks));
     let layers = spellings(Layer::ALL, Layer::as_str);
     assert_eq!(vocabulary_schema::<Layer>(), set(&layers));
     let methods = spellings(Method::ALL, Method::as_str);
     assert_eq!(vocabulary_schema::<Method>(), set(&methods));
-    let statuses = spellings(AssertionStatus::ALL, AssertionStatus::as_str);
-    assert_eq!(vocabulary_schema::<AssertionStatus>(), set(&statuses));
     assert_eq!(LAYER_VALUES, layers);
     assert_eq!(METHOD_VALUES, methods);
     for s in [

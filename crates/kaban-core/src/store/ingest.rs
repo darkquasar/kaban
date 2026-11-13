@@ -1,6 +1,6 @@
 //! [`IngestStore`]: the bulk and maintenance write role trait, with the types only it uses.
 
-use crate::audit::{Actor, AuditEntry, WorkspaceId, WriteCtx};
+use crate::audit::{Actor, WorkspaceId, WriteCtx};
 use crate::config::PromoteWhen;
 use crate::error::Result;
 use crate::ids::NodeId;
@@ -9,7 +9,6 @@ use crate::model::{
     WriteBatch,
 };
 use crate::ontology::Qualified;
-use serde_json::Value;
 use std::time::Duration;
 
 /// One `failed` document of a [`DocumentIndexSummary`]: the gated path and the recorded error.
@@ -259,119 +258,6 @@ pub trait IngestStore: Send + Sync {
         batch: usize,
         f: &mut dyn FnMut(&Node) -> RescanAction,
     ) -> Result<RescanReport>;
-    /// Re-judge every stored claim value under `policy_version` in one write transaction
-    /// (engine-spec EN-S9 "rescan covers `assertion.value`"; engine-plan E2.2 item 11): `f`
-    /// sees each claim whose `value` is not null and returns the masked value when the policy
-    /// redacts or rejects a string in it (`None` keeps the row), pushing its audit entries. A
-    /// masked claim has its `value` column rewritten and is retired for good: `rank` becomes
-    /// `deprecated` with `rank_reason` `policy:<rule ids>` (the rules of the entries `f`
-    /// pushed for it, else `policy:<policy_version>`), its status is set to `rejected`, and
-    /// every touched conflict group is re-decided over its remaining supporters, the way the
-    /// replay seam does, so a masked claim neither votes nor projects, now or after any later
-    /// decide or replay. The pass is keyed by two DB-scoped `index_meta` rows (claim rows
-    /// carry no per-row stamp): `assertion_policy_hash`, the version the last pass ran
-    /// under, and `assertion_policy_hw`, the greatest claim id it reached. An equal version
-    /// judges the claims above the high-water id only (rows another process inserted since
-    /// the last pass; none means nothing is touched and `f` is never called); another
-    /// version judges every claim. Both rows are written at the end of a pass, in its
-    /// transaction; a purge of claim rows lowers the high-water id to the greatest
-    /// surviving one. The report counts claims: `scanned`, `kept`, `rejected` (masked);
-    /// `redacted` stays `0`. `f` must not call back into the store.
-    ///
-    /// # Errors
-    /// Backend errors; the transaction is rolled back and both rows are left unchanged.
-    fn rescan_assertions(
-        &self,
-        policy_version: &str,
-        f: &mut dyn FnMut(&crate::reconcile::Assertion, &mut Vec<AuditEntry>) -> Option<Value>,
-    ) -> Result<RescanReport>;
-    /// A human sets one claim's rank to `deprecated` with `reason` (engine-spec EN-F12b, the
-    /// `kaban explain <key> --deprecate` action; engine-plan E2.3 item 5) and the claim's
-    /// conflict group is re-decided in the same transaction without its vote (the rank is
-    /// outside the identity key, EN-F12a (2): an update, never a new row; the gated `reason`
-    /// is stored as `rank_reason`). The claim is looked up inside `ctx.workspace_id` (S6: a
-    /// key of another workspace is `NotFound`, the same refusal an unknown key gets) and
-    /// `ctx.audit` is appended in the same transaction. Returns the claim's status after the
-    /// re-decide. The caller judges the actor and the reason; the store judges neither.
-    ///
-    /// # Errors
-    /// `NotFound` for an unknown or foreign key; backend errors (the transaction is rolled
-    /// back).
-    fn deprecate_assertion(
-        &self,
-        key: &str,
-        reason: &str,
-        ctx: &WriteCtx,
-    ) -> Result<crate::reconcile::AssertionStatus>;
-    /// A human names the winner of one of `node`'s outstanding candidate groups (engine-plan
-    /// E2.5 `kaban resolve <id> --winner <value> [--group <key>]`; EN-F5a, EN-F12c; wave-3
-    /// review RW3-3): one human `preferred` claim carrying `value` joins the node's
-    /// `candidate` group named by `group`, or its only one when `group` is `None`; the group
-    /// is re-decided and projected, the node's candidate row is released, and `ctx.audit` is
-    /// appended, all in one store transaction (the status write and the `DELETE FROM
-    /// node_candidate` commit together or not at all). The group's subject, class and
-    /// predicate are read from the group itself; `value` is the caller's gated string. The
-    /// node is looked up in `workspace` (S6). The caller judges the actor; the store judges
-    /// neither the actor nor the value. Returns the group key.
-    ///
-    /// # Errors
-    /// `NotFound` for an unknown node, one of another workspace, one with no candidate group
-    /// or a `group` that is not one of the node's candidate groups; `InvalidName("group",
-    /// "ambiguous_group")` when the node has several candidate groups and none is named;
-    /// backend errors (the transaction is rolled back).
-    fn resolve_winner(
-        &self,
-        workspace: &str,
-        node: &NodeId,
-        value: &str,
-        group: Option<&str>,
-        ctx: &WriteCtx,
-    ) -> Result<String>;
-    /// A human re-targets a `CodeRef` whose anchored symbol the resolved snapshot no longer
-    /// holds (engine-plan E2.5 `kaban resolve <coderef-id> --symbol <key>`, SO-6): one human
-    /// `preferred` `prop_value` claim with predicate `symbol` carrying `key` is recorded and
-    /// decided, the node's `props.symbol` becomes `key` and its `symbol` anchor row follows
-    /// (EN-F10 anchor maintenance on write), and `ctx.audit` is appended, all in one store
-    /// transaction. The node is looked up in `workspace` (S6). The caller judges the actor and
-    /// the key's form (the normalised key of stage1-spec §4.2); the store judges neither.
-    ///
-    /// # Errors
-    /// `NotFound` for an unknown node, one of another workspace, one that is not an active
-    /// `CodeRef`; backend errors (the transaction is rolled back).
-    fn resolve_symbol(
-        &self,
-        workspace: &str,
-        node: &NodeId,
-        key: &str,
-        ctx: &WriteCtx,
-    ) -> Result<()>;
-    /// Count a human verdict on the reconciled claims of `node` (engine-spec EN-F16; engine-plan
-    /// E2.4): in the `priors_obs` table (created on first use, no migration) the
-    /// `(layer, method, claim_class)` counter named by `outcome` moves by one for every claim
-    /// of the node's conflict groups whose status is `winner` or `candidate` and whose layer is
-    /// not `human` (a person's own claim is no evidence about a layer). No edge, claim or
-    /// status row changes; `calibration_version` stays 0 (v1 never applies the counters).
-    /// Returns how many claims were counted.
-    ///
-    /// # Errors
-    /// `NotFound` for an unknown or purged node; backend errors.
-    fn priors_obs_bump(
-        &self,
-        node: &NodeId,
-        outcome: crate::reconcile::PriorsOutcome,
-    ) -> Result<u32>;
-    /// Every configured prior with its counters (zero before any observation), in the
-    /// vocabulary order of `(layer, method, claim_class)`: what `doctor --priors` prints.
-    ///
-    /// # Errors
-    /// Backend errors.
-    fn priors_obs(&self) -> Result<Vec<crate::reconcile::PriorsObs>>;
-    /// The group keys of `workspace` holding at least one `unresolved` claim (EN-F12b: the
-    /// groups only a human action resolves), ascending.
-    ///
-    /// # Errors
-    /// Backend errors.
-    fn unresolved_groups(&self, workspace: &str) -> Result<Vec<String>>;
     /// Every `index_meta` entry (DB-scoped bookkeeping: schema version, `db_id`, policy hash).
     ///
     /// # Errors

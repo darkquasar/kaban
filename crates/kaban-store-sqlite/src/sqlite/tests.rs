@@ -246,18 +246,6 @@ fn filters_apply_before_limit_and_supersedes_archives_the_target() {
         })
         .unwrap();
     assert_eq!(hits.len(), 1);
-    // only an accepted Decision can be superseded (core-spec §4; wave A Q1 = option B)
-    s.transition(
-        &NodeId::parse(&t.id).unwrap(),
-        Governance::Accepted,
-        NewEvent {
-            reason: "seeded".into(),
-            signer_kind: kaban_core::SignerKind::System,
-            ..Default::default()
-        },
-        &ctx(),
-    )
-    .unwrap();
     let newer = match s
         .remember(
             NewNode {
@@ -276,14 +264,10 @@ fn filters_apply_before_limit_and_supersedes_archives_the_target() {
         RememberOutcome::Created(n) => n,
         RememberOutcome::Existing { .. } => panic!(),
     };
-    // the superseded Decision is archived with governance superseded and an event
+    // the superseded Decision is archived (by lifecycle; governance states are gone)
     let old = s.get(&nid(&t.id), false).unwrap().unwrap();
-    assert_eq!(
-        (old.lifecycle, old.governance),
-        (Lifecycle::Archived, Governance::Superseded)
-    );
-    assert_eq!(old.rev, 3, "rev bumped by both transitions");
-    assert_eq!(s.events(&NodeId::parse(&t.id).unwrap()).unwrap().len(), 2);
+    assert_eq!(old.lifecycle, Lifecycle::Archived);
+    assert_eq!(old.rev, 2, "rev bumped by the archive");
     assert!(old.valid_to.is_some());
     assert!(
         s.recall(&RecallQuery {

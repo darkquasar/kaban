@@ -2,7 +2,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 mod common;
 use kaban_api::KabanApi;
-use kaban_core::{AuditStore, IngestStore, JobId, Lifecycle, MemoryStore, NodeId};
+use kaban_core::{IngestStore, JobId, Lifecycle, MemoryStore, NodeId};
 use kaban_ingest::jobs::{brief::brief, submit::submit, types::IngestOpts};
 use kaban_policy::Policy;
 use serde_json::json;
@@ -50,7 +50,6 @@ async fn credential_and_prompt_rejection_precede_parsing_and_never_publish_succe
             .windows(20)
             .any(|part| part == b"AKIAQWERTYUIOPASDFGH")
     );
-    assert!(rig.store.audit_verify().unwrap().ok);
 }
 
 #[tokio::test]

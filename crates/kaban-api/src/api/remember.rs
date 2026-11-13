@@ -8,12 +8,11 @@ use crate::error::ApiError;
 use crate::ontology::validate_kind_props;
 use crate::types::{CodeRefWire, RememberRequest, RememberResponse, RememberStatus};
 use kaban_codegraph::{CodeGraphReader, HeadInput, Resolved};
-use kaban_core::ontology::meta::{Dedup, Stamp};
+use kaban_core::ontology::meta::Dedup;
 use kaban_core::ontology::resolve::normalise_stored;
 use kaban_core::{
     CodeRef, LinkReq, NewNode, NodeId, RememberOutcome, StoreScope, WorkspaceId, WriteCtx,
 };
-use kaban_core::{StoreError, UnstampedReason};
 use std::sync::Arc;
 
 const MAX_TAGS: usize = 32;
@@ -279,26 +278,7 @@ impl KabanApi {
         self.export_audit(&ctx.audit);
         match outcome {
             RememberOutcome::Created(node) => {
-                // OWN-65 (engine-spec §3.1 "Sources that are not repositories"): a record of a
-                // `stamp: commit` kind written where no stamp can come records why; never an
-                // error: the record committed, so a failure here is logged and the receipt
-                // stands at the record's own position (SS-10); when the row is written, the
-                // call's terminal position is its transaction's
-                let mut seq = ctx.terminal_seq();
-                if let Some(reason) = self.unstamped_reason(&node.kind) {
-                    match NodeId::parse(&node.id)
-                        .map_err(|e| ApiError::from(StoreError::from(e)))
-                        .and_then(|id| {
-                            Ok(self
-                                .store
-                                .record_unstamped(&id, &node.workspace_id, reason)?)
-                        }) {
-                        Ok(terminal) => seq = Some(terminal),
-                        Err(e) => {
-                            tracing::warn!(error = %e, "the unstamped event failed after the record committed");
-                        }
-                    }
-                }
+                let seq = ctx.terminal_seq();
                 // candidates are records of the same kind (the key is title and scope only)
                 let candidate_duplicates = match &node.dup_key {
                     Some(k) => self
@@ -341,20 +321,6 @@ impl KabanApi {
                 // a no-op write holds at the head like any other (SS-10)
                 receipt: self.committed_receipt(ctx.terminal_seq()),
             }),
-        }
-    }
-
-    /// OWN-65: why a record of `kind` written now gets no commit sha: the process runs outside
-    /// any repository (`repo_root` unset). Repository history is not queried on this write
-    /// path: doctor reports its current availability on demand. An unknown kind keeps the
-    /// spec default `commit`.
-    fn unstamped_reason(&self, kind: &str) -> Option<UnstampedReason> {
-        if self.registry.index_policy(kind).unwrap_or(Stamp::Commit) != Stamp::Commit {
-            return None;
-        }
-        match self.config.repo_root.as_deref() {
-            None => Some(UnstampedReason::NoRepository),
-            Some(_) => None,
         }
     }
 

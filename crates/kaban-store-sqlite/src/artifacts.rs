@@ -1,8 +1,6 @@
 //! Transaction-local source publication and Gazetteer complete-set state.
 
 pub(super) struct MaintenanceContext<'a> {
-    pub(super) setup: &'a crate::reconcile::Setup,
-    pub(super) signer: &'a dyn kaban_policy::AuditSigner,
     pub(super) write: &'a WriteCtx,
 }
 
@@ -36,54 +34,11 @@ pub(super) fn retire_producer(
     if invalid_source {
         return Err(StoreError::EdgeRequiresAssertion);
     }
-    // Every live candidate is inspected before the first write. Current legacy claims are
-    // known current authority, not evidence for any hypothetical historical producer.
-    let preflight_head: i64 = conn
-        .query_row(
-            "SELECT COALESCE(max(id),0) FROM assertion WHERE workspace_id=?1 AND layer='gazetteer'",
-            [workspace.as_str()],
-            |r| r.get(0),
-        )
-        .sql()?;
-    let mut after = 0;
-    let mut untracked = 0;
-    loop {
-        let ids = conn.prepare_cached("SELECT id FROM assertion WHERE layer='gazetteer' AND workspace_id=?1 AND id>?2 ORDER BY id LIMIT ?3").sql()?.query_map(params![workspace.as_str(),after,batch_rows],|r|r.get::<_,i64>(0)).sql()?.collect::<rusqlite::Result<Vec<_>>>().sql()?;
-        if ids.is_empty() {
-            break;
-        }
-        for id in ids {
-            after = id;
-            if let Some(claim) = persist::load_claim(conn, id)? {
-                if let Some(source) = legacy_document(conn, &claim)? {
-                    let candidate: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM derived_artifact d JOIN node n ON n.rid=d.source_rid WHERE d.workspace_id=?1 AND d.layer='gazetteer' AND d.producer_id=?2 AND n.id=?3)",params![workspace.as_str(),old_producer,source.as_str()],|r|r.get(0)).sql()?;
-                    if candidate {
-                        untracked += 1;
-                    }
-                } else {
-                    untracked += 1;
-                }
-            }
-        }
-    }
-    if untracked != 0 {
-        return Ok(RetireReport {
-            refused: Some(MaintenanceRefusal::UntrackedProducer),
-            untracked,
-            ..RetireReport::default()
-        });
-    }
     let mut report = RetireReport::default();
     loop {
         let tx = conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .sql()?;
-        // Recheck candidate claims under the writer lock. A concurrent unknown claim cannot
-        // turn artifact-only retirement into unsupported claim retirement.
-        let current_head: i64 = tx.query_row("SELECT COALESCE(max(id),0) FROM assertion WHERE workspace_id=?1 AND layer='gazetteer'",[workspace.as_str()],|r|r.get(0)).sql()?;
-        if current_head != preflight_head {
-            return Err(StoreError::EdgeRequiresAssertion);
-        }
         let keys = tx.prepare_cached("SELECT d.artifact_key FROM derived_artifact d JOIN node n ON n.rid=d.source_rid WHERE d.workspace_id=?1 AND d.layer='gazetteer' AND d.producer_id=?2 AND n.workspace_id=?1 AND n.kind='Document' AND json_extract(n.props,'$.owner')='kaban-ingest' ORDER BY d.artifact_key LIMIT ?3").sql()?.query_map(params![workspace.as_str(),old_producer,batch_rows],|r|r.get::<_,String>(0)).sql()?.collect::<rusqlite::Result<Vec<_>>>().sql()?;
         if keys.is_empty() {
             tx.rollback().sql()?;
@@ -91,9 +46,6 @@ pub(super) fn retire_producer(
         }
         for key in &keys {
             tx.execute("DELETE FROM derived_artifact WHERE artifact_key=?1 AND workspace_id=?2 AND layer='gazetteer' AND producer_id=?3",params![key,workspace.as_str(),old_producer]).sql()?;
-        }
-        if report.transactions == 0 {
-            crate::audit_table::append(&tx, context.signer, &context.write.audit)?;
         }
         tx.commit().sql()?;
         report.transactions += 1;
@@ -105,7 +57,9 @@ pub(super) fn retire_producer(
 pub(super) fn maintain_layer(
     conn: &mut Connection,
     context: &MaintenanceContext<'_>,
-    authority: kaban_core::CurrentProducerAuthority,
+    // the current-producer check was a claim check; the bridge until `forget_layer` goes
+    // (OD-P1, T3 slice B) keeps the parameter
+    _authority: kaban_core::CurrentProducerAuthority,
     operation: kaban_core::LayerMaintenance,
     document_path: Option<&str>,
     batch_rows: u32,
@@ -116,88 +70,23 @@ pub(super) fn maintain_layer(
     }
     let mut report = kaban_core::RetireReport::default();
     let mut reset_documents = BTreeSet::new();
-    let mut audited = false;
     let document: Option<String> = if let Some(path) = document_path {
         Some(conn.query_row("SELECT id FROM node WHERE workspace_id=?1 AND kind='Document' AND json_extract(props,'$.owner')='kaban-ingest' AND json_extract(props,'$.path')=?2",params![ctx.workspace_id.as_str(),path],|r|r.get(0)).optional().sql()?.ok_or_else(||StoreError::NotFound("document".into()))?)
     } else {
         None
     };
-    // Preflight the exact immutable population read-only: an unknown producer mapping
-    // must refuse the request before any earlier page has been retired.
-    let mut after = 0;
+    // the layer's mention edges go first, in bounded transactions
     loop {
-        let ids = layer_claim_page(conn, &ctx.workspace_id, after, batch_rows)?;
-        if ids.is_empty() {
-            break;
-        }
-        for id in ids {
-            after = id;
-            if let Some(claim) = persist::load_claim(conn, id)?
-                && legacy_document(conn, &claim)?.is_none()
-            {
-                report.untracked += 1;
-            }
-        }
-    }
-    if report.untracked != 0 {
-        report.refused = Some(kaban_core::MaintenanceRefusal::UntrackedProducer);
-        return Ok(report);
-    }
-    after = 0;
-    loop {
-        // Resolve the bounded page outside the write transaction. The historical source-id
-        // lookup has no dedicated index; only exact node keys are revalidated under IMMEDIATE.
-        let ids = layer_claim_page(conn, &ctx.workspace_id, after, batch_rows)?;
-        if ids.is_empty() {
-            break;
-        }
-        let mut resolved = Vec::with_capacity(ids.len());
-        for id in ids {
-            let claim = persist::load_claim(conn, id)?.ok_or(StoreError::EdgeRequiresAssertion)?;
-            let source = legacy_document(conn, &claim)?.ok_or(StoreError::EdgeRequiresAssertion)?;
-            resolved.push((id, source));
-        }
         let tx = conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .sql()?;
-        let mut touched = BTreeSet::new();
-        let mut rows = 0;
-        for (id, source) in resolved {
-            after = id;
-            let claim = persist::load_claim(&tx, id)?.ok_or(StoreError::EdgeRequiresAssertion)?;
-            if claim.rank == kaban_core::Rank::Deprecated {
-                continue;
-            }
-            if claim.layer != kaban_core::Layer::Gazetteer
-                || authority.producer() != kaban_core::BuiltinProducer::Gazetteer
-            {
-                return Err(StoreError::EdgeRequiresAssertion);
-            }
-            if !validate_legacy_document(&tx, &claim, &source)? {
-                return Err(StoreError::EdgeRequiresAssertion);
-            }
-            if document
-                .as_ref()
-                .is_some_and(|selected| selected != source.as_str())
-            {
-                continue;
-            }
-            mark_retired(&tx, &claim, operation)?;
-            let key = kaban_core::group_key(&claim);
-            persist::ensure_status(&tx, id, &key, persist::now_unix())?;
-            touched.insert(key);
-            rows += 1;
-        }
-        reconcile::decide_groups(&tx, context.setup, &touched, persist::now_unix(), None)?;
-        if rows != 0 && !audited {
-            crate::audit_table::append(&tx, context.signer, &ctx.audit)?;
-            audited = true;
-        }
+        let rows = tx.execute("DELETE FROM edge WHERE rowid IN (SELECT e.rowid FROM edge e WHERE e.workspace_id=?1 AND e.layer='gazetteer' AND (?2 IS NULL OR e.source_id=(SELECT json_extract(props,'$.source_id') FROM node WHERE id=?2 AND workspace_id=?1)) LIMIT ?3)", params![ctx.workspace_id.as_str(), document, batch_rows]).sql()?;
         tx.commit().sql()?;
-        if rows != 0 {
-            report.transactions += 1;
-            report.rows += rows;
+        if rows == 0 {
+            break;
         }
+        report.transactions += 1;
+        report.rows += rows as u64;
     }
     loop {
         let tx = conn
@@ -223,10 +112,6 @@ pub(super) fn maintain_layer(
                 params![key, ctx.workspace_id.as_str()],
             )
             .sql()?;
-        }
-        if !audited {
-            crate::audit_table::append(&tx, context.signer, &ctx.audit)?;
-            audited = true;
         }
         tx.commit().sql()?;
         report.transactions += 1;
@@ -264,10 +149,6 @@ pub(super) fn maintain_layer(
                     changed = true;
                 }
             }
-            if changed && !audited {
-                crate::audit_table::append(&tx, context.signer, &ctx.audit)?;
-                audited = true;
-            }
             tx.commit().sql()?;
             if changed {
                 report.transactions += 1;
@@ -277,13 +158,11 @@ pub(super) fn maintain_layer(
     Ok(report)
 }
 
-use crate::reconcile::{self, persist};
 use crate::sql_error::SqlResultExt;
 use kaban_core::WriteCtx;
 use kaban_core::{
-    BatchSubject, BuiltinProducer, DerivedArtifact, GazetteerClaimSet, GovernedSet, Layer,
-    Lifecycle, NodeId, Op, Owner, Result, SourceRev, StoreError, WorkspaceId, WriteBatch,
-    artifact_key, canonical_json,
+    BuiltinProducer, DerivedArtifact, GazetteerClaimSet, GovernedSet, Layer, Lifecycle, NodeId, Op,
+    Owner, Result, SourceRev, StoreError, WorkspaceId, WriteBatch, artifact_key, canonical_json,
 };
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
@@ -295,47 +174,6 @@ struct ProducerState {
     fingerprint: String,
     source_rev: Option<SourceRev>,
     policy_version: Option<String>,
-}
-
-fn retirement_key(key: &str, workspace: &str) -> String {
-    format!(
-        "gazetteer-set-retired:{}",
-        artifact_key(
-            &SourceRev {
-                content_hash: key.to_owned(),
-                rev: 0
-            },
-            Layer::Gazetteer,
-            "kaban-ingest:retirement:1",
-            workspace,
-            "provenance:1"
-        )
-        .as_str()
-    )
-}
-
-/// Machine provenance is private metadata, never inferred from caller-controlled reasons.
-pub(crate) fn machine_retired(conn: &Connection, key: &str, workspace: &str) -> Result<bool> {
-    conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM index_meta WHERE key=?1 AND value='1')",
-        [retirement_key(key, workspace)],
-        |r| r.get(0),
-    )
-    .sql()
-}
-
-/// An explicit human deprecation supersedes any prior machine retirement provenance.
-pub(crate) fn clear_machine_retirement(
-    conn: &Connection,
-    key: &str,
-    workspace: &str,
-) -> Result<()> {
-    conn.execute(
-        "DELETE FROM index_meta WHERE key=?1",
-        [retirement_key(key, workspace)],
-    )
-    .sql()?;
-    Ok(())
 }
 
 /// Source-indexed invalidation after a canonical source write, in that write's transaction.
@@ -466,67 +304,6 @@ pub(super) fn set_fresh(conn: &Connection, id: &NodeId, workspace: &WorkspaceId)
         && state.policy_version.as_deref() == Some(policy.as_str()))
 }
 
-/// Validate a historical v1 claim's exact source, tenant and ingest-owned chunk scope.
-pub(super) fn legacy_document(
-    conn: &Connection,
-    claim: &kaban_core::Assertion,
-) -> Result<Option<NodeId>> {
-    if !BuiltinProducer::Gazetteer.matches_legacy_assertion(
-        claim.layer,
-        claim.extractor_id.as_deref(),
-        claim.extractor_version.as_deref(),
-    ) {
-        return Ok(None);
-    }
-    let (Some(source), kaban_core::Subject::Edge { src, rel, .. }) =
-        (&claim.source_id, &claim.subject)
-    else {
-        return Ok(None);
-    };
-    if rel != "MENTIONS" || claim.lineage_id != format!("gazetteer:{source}") {
-        return Ok(None);
-    }
-    let chunk: Option<String> = conn.query_row("SELECT id FROM node WHERE rid=?1 AND workspace_id=?2 AND kind='Chunk' AND json_extract(props,'$.owner')='kaban-ingest'",params![src,claim.workspace_id.as_str()],|r|r.get(0)).optional().sql()?;
-    let Some(chunk) = chunk else {
-        return Ok(None);
-    };
-    let mut statement=conn.prepare_cached("SELECT id FROM node WHERE workspace_id=?1 AND kind='Document' AND json_extract(props,'$.owner')='kaban-ingest' AND json_extract(props,'$.source_id')=?2 AND EXISTS(SELECT 1 FROM json_each(json_extract(props,'$.chunk_ids')) WHERE value=?3) LIMIT 2").sql()?;
-    let documents = statement
-        .query_map(params![claim.workspace_id.as_str(), source, chunk], |r| {
-            r.get::<_, String>(0)
-        })
-        .sql()?
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .sql()?;
-    if documents.len() != 1 {
-        return Ok(None);
-    }
-    Ok(Some(NodeId::parse(&documents[0])?))
-}
-
-/// Indexed exact-key post-resolution validation; never scan the Document population in a write.
-fn validate_legacy_document(
-    conn: &Connection,
-    claim: &kaban_core::Assertion,
-    document: &NodeId,
-) -> Result<bool> {
-    let (Some(source), kaban_core::Subject::Edge { src, rel, .. }) =
-        (&claim.source_id, &claim.subject)
-    else {
-        return Ok(false);
-    };
-    if !BuiltinProducer::Gazetteer.matches_legacy_assertion(
-        claim.layer,
-        claim.extractor_id.as_deref(),
-        claim.extractor_version.as_deref(),
-    ) || rel != "MENTIONS"
-        || claim.lineage_id != format!("gazetteer:{source}")
-    {
-        return Ok(false);
-    }
-    conn.query_row("SELECT EXISTS(SELECT 1 FROM node d JOIN node c ON c.rid=?1 WHERE d.id=?2 AND d.workspace_id=?3 AND c.workspace_id=?3 AND d.kind='Document' AND c.kind='Chunk' AND json_extract(d.props,'$.owner')='kaban-ingest' AND json_extract(c.props,'$.owner')='kaban-ingest' AND json_extract(d.props,'$.source_id')=?4 AND EXISTS(SELECT 1 FROM json_each(json_extract(d.props,'$.chunk_ids')) WHERE value=c.id))",params![src,document.as_str(),claim.workspace_id.as_str(),source],|r|r.get(0)).sql()
-}
-
 /// Explicit replay invalidates the optimistic set generation without changing source nodes.
 pub(super) fn reset_set(
     conn: &Connection,
@@ -543,43 +320,7 @@ pub(super) fn reset_set(
     Ok(())
 }
 
-/// Indexed page of historical machine claims, independent of missing statuses.
-pub(super) fn layer_claim_page(
-    conn: &Connection,
-    workspace: &WorkspaceId,
-    after: i64,
-    limit: u32,
-) -> Result<Vec<i64>> {
-    conn.prepare_cached("SELECT id FROM assertion WHERE layer='gazetteer' AND workspace_id=?1 AND id>?2 AND rank<>'deprecated' ORDER BY id LIMIT ?3").sql()?.query_map(params![workspace.as_str(),after,limit],|r|r.get(0)).sql()?.collect::<rusqlite::Result<Vec<_>>>().sql()
-}
-
-pub(super) fn mark_retired(
-    conn: &Connection,
-    claim: &kaban_core::Assertion,
-    operation: kaban_core::LayerMaintenance,
-) -> Result<()> {
-    let reason = match operation {
-        kaban_core::LayerMaintenance::Reindex => "producer-set:retired",
-        kaban_core::LayerMaintenance::Forget => "layer:forgotten",
-    };
-    conn.execute(
-        "UPDATE assertion SET rank='deprecated',rank_reason=?2 WHERE key=?1 AND rank<>'deprecated'",
-        params![claim.key.0, reason],
-    )
-    .sql()?;
-    if operation == kaban_core::LayerMaintenance::Reindex {
-        conn.execute(
-            "INSERT INTO index_meta(key,value) VALUES(?1,'1') ON CONFLICT(key) DO NOTHING",
-            [retirement_key(&claim.key.0, claim.workspace_id.as_str())],
-        )
-        .sql()?;
-    } else {
-        clear_machine_retirement(conn, &claim.key.0, claim.workspace_id.as_str())?;
-    }
-    Ok(())
-}
-
-/// All optimistic guards run before the audit or any batch write.
+/// All optimistic guards run before any batch write.
 pub(super) fn stale_sources(
     conn: &Connection,
     batch: &WriteBatch,
@@ -668,11 +409,11 @@ pub(super) fn stale_sources(
     Ok(u32::try_from(stale.len()).unwrap_or(u32::MAX))
 }
 
-/// Validate post-upsert ownership, derive stable set state, and stamp claim identities.
+/// Validate post-upsert ownership and derive stable set state from the batch's mention edges.
 pub(super) fn prepare_sets(
     conn: &Connection,
     batch: &mut WriteBatch,
-) -> Result<Vec<(GazetteerClaimSet, String, String)>> {
+) -> Result<Vec<(GazetteerClaimSet, String)>> {
     let mut prepared = Vec::new();
     for set in &batch.gazetteer_claim_sets {
         let (revision, props) = document(conn, &set.document, &batch.workspace_id, false)?
@@ -680,47 +421,36 @@ pub(super) fn prepare_sets(
         if props["source_id"] != set.source_id {
             return Err(StoreError::EdgeRequiresAssertion);
         }
-        let lineage = format!("gazetteer:{}", set.source_id);
         let mut identities = Vec::new();
-        for claim in &batch.assertions {
-            if claim.layer == Layer::Gazetteer
-                && claim.source_id.as_deref() == Some(set.source_id.as_str())
-                && claim.lineage_id != lineage
-            {
-                return Err(StoreError::EdgeRequiresAssertion);
-            }
-            if claim.layer != Layer::Gazetteer || claim.lineage_id != lineage {
+        for op in &batch.ops {
+            let Op::UpsertEdge {
+                src,
+                rel,
+                props: Some(props),
+                ..
+            } = op
+            else {
+                continue;
+            };
+            if props["layer"] != Layer::Gazetteer.as_str() || props["source_id"] != set.source_id {
                 continue;
             }
-            if claim.source_id.as_deref() != Some(set.source_id.as_str()) {
-                return Err(StoreError::EdgeRequiresAssertion);
-            }
-            // Complete-set callers submit the closed v1 extractor. Generation stamping
-            // is store-owned and must never disguise an unknown producer as this builtin.
-            if claim.extractor_id.is_some() || claim.extractor_version.as_deref() != Some("1") {
-                return Err(StoreError::EdgeRequiresAssertion);
-            }
-            let chunk = match &claim.subject {
-                BatchSubject::Edge { src, rel, .. } if rel == "MENTIONS" => src,
-                _ => return Err(StoreError::EdgeRequiresAssertion),
-            };
-            if !props["chunk_ids"]
-                .as_array()
-                .is_some_and(|ids| ids.iter().any(|id| id.as_str() == Some(chunk.as_str())))
+            if rel != "MENTIONS"
+                || !props_chunk(&props_of(conn, &set.document, &batch.workspace_id)?, src)
             {
                 return Err(StoreError::EdgeRequiresAssertion);
             }
-            let owned: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM node WHERE id=?1 AND workspace_id=?2 AND kind='Chunk' AND lifecycle='active' AND json_extract(props,'$.owner')='kaban-ingest')", params![chunk.as_str(), batch.workspace_id.as_str()], |r| r.get(0)).sql()?;
+            let owned: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM node WHERE id=?1 AND workspace_id=?2 AND kind='Chunk' AND lifecycle='active' AND json_extract(props,'$.owner')='kaban-ingest')", params![src.as_str(), batch.workspace_id.as_str()], |r| r.get(0)).sql()?;
             if !owned {
                 return Err(StoreError::EdgeRequiresAssertion);
             }
-            identities.push(canonical_json(&serde_json::to_value(claim)?));
+            identities.push(canonical_json(&serde_json::to_value(op)?));
         }
         identities.sort();
         identities.dedup();
         let nonempty = !identities.is_empty();
         let canonical = canonical_json(
-            &json!({"source":set.source_id,"revision":revision,"config":set.config_hash,"claims":identities}),
+            &json!({"source":set.source_id,"revision":revision,"config":set.config_hash,"edges":identities}),
         );
         let fingerprint = artifact_key(
             &SourceRev {
@@ -743,14 +473,6 @@ pub(super) fn prepare_sets(
                 .checked_add(1)
                 .ok_or(StoreError::EdgeRequiresAssertion)?
         };
-        for claim in &mut batch.assertions {
-            if claim.layer == Layer::Gazetteer && claim.lineage_id == lineage {
-                claim.extractor_version = Some(format!(
-                    "{}:set:{generation}",
-                    claim.extractor_version.as_deref().unwrap_or("1")
-                ));
-            }
-        }
         let (rid, policy): (i64, String) = conn
             .query_row(
                 "SELECT rid,policy_version FROM node WHERE id=?1 AND workspace_id=?2",
@@ -780,46 +502,53 @@ pub(super) fn prepare_sets(
                 source_rev: revision,
                 config_hash: set.config_hash.clone(),
                 policy_version: policy,
-                published_at: persist::now_unix(),
+                published_at: crate::edge_write::now_unix(),
             });
         } else {
             conn.execute("DELETE FROM derived_artifact WHERE source_rid=?1 AND layer='gazetteer' AND workspace_id=?2",params![rid,batch.workspace_id.as_str()]).sql()?;
         }
-        prepared.push((set.clone(), lineage, encoded));
+        prepared.push((set.clone(), encoded));
     }
     Ok(prepared)
 }
 
-/// Retire only this tenant's declared Gazetteer lineage, keeping submitted claim keys.
-pub(super) fn retire_sets(
+/// Record each set's state and delete this tenant's Gazetteer mention edges of the set's source
+/// that the batch did not name (`kept`: the batch's edge triples by row id).
+pub(super) fn record_sets(
     conn: &Connection,
     workspace: &WorkspaceId,
-    prepared: &[(GazetteerClaimSet, String, String)],
-    kept: &BTreeSet<String>,
-    touched: &mut BTreeSet<String>,
-    now: i64,
+    prepared: &[(GazetteerClaimSet, String)],
+    kept: &[(i64, i64, String)],
 ) -> Result<()> {
-    for (set, lineage, encoded) in prepared {
-        let rows: Vec<(i64, String)> = conn.prepare_cached("SELECT id,key FROM assertion WHERE lineage_id=?1 AND workspace_id=?2 AND layer='gazetteer'").sql()?.query_map(params![lineage, workspace.as_str()], |r| Ok((r.get(0)?, r.get(1)?))).sql()?.collect::<rusqlite::Result<_>>().sql()?;
-        for (id, key) in rows {
-            if kept.contains(&key)
-                || crate::pruning_protection::claim(conn, workspace.as_str(), id)?
-            {
+    for (set, encoded) in prepared {
+        let rows: Vec<(i64, i64, String)> = conn.prepare_cached("SELECT src,dst,rel FROM edge WHERE workspace_id=?1 AND rel='MENTIONS' AND layer='gazetteer' AND source_id=?2").sql()?.query_map(params![workspace.as_str(), set.source_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).sql()?.collect::<rusqlite::Result<_>>().sql()?;
+        for row in rows {
+            if kept.contains(&row) {
                 continue;
             }
-            if let Some(claim) = persist::load_claim(conn, id)? {
-                touched.insert(kaban_core::group_key(&claim));
-                let changed=conn.execute("UPDATE assertion SET rank='deprecated',rank_reason='producer-set:retired' WHERE id=?1 AND rank <> 'deprecated'", [id]).sql()?;
-                if changed != 0 {
-                    conn.execute("INSERT INTO index_meta(key,value) VALUES(?1,'1') ON CONFLICT(key) DO NOTHING",[retirement_key(&key,workspace.as_str())]).sql()?;
-                }
-                persist::ensure_status(conn, id, &kaban_core::group_key(&claim), now)?;
-                persist::set_status(conn, id, kaban_core::AssertionStatus::Rejected, now)?;
-            }
+            conn.execute(
+                "DELETE FROM edge WHERE src=?1 AND dst=?2 AND rel=?3",
+                params![row.0, row.1, row.2],
+            )
+            .sql()?;
         }
         conn.execute("INSERT INTO index_meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE value <> excluded.value", params![state_key(&set.document, workspace), encoded]).sql()?;
     }
     Ok(())
+}
+
+/// The stored props of an ingest Document (empty when it is not one).
+fn props_of(conn: &Connection, document: &NodeId, workspace: &WorkspaceId) -> Result<Value> {
+    Ok(self::document(conn, document, workspace, false)?
+        .map(|(_, props)| props)
+        .unwrap_or(Value::Null))
+}
+
+/// Whether `chunk` is one of the Document `props`' `chunk_ids`.
+fn props_chunk(props: &Value, chunk: &NodeId) -> bool {
+    props["chunk_ids"]
+        .as_array()
+        .is_some_and(|ids| ids.iter().any(|id| id.as_str() == Some(chunk.as_str())))
 }
 
 pub(super) fn publish(conn: &Connection, artifacts: &[DerivedArtifact]) -> Result<()> {

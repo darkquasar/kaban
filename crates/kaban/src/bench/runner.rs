@@ -8,8 +8,7 @@ use kaban_api::{
     RememberStatus, TraverseRequest,
 };
 use kaban_core::{
-    Actor, ActorId, ForgetMode, Governance, GraphStore, Location, NewEvent, NodeId, RecallQuery,
-    TraverseQuery, WorkspaceId, WriteCtx,
+    ActorId, ForgetMode, GraphStore, Location, NodeId, RecallQuery, TraverseQuery, WorkspaceId,
 };
 use kaban_policy::Policy;
 use kaban_store_sqlite::{LATEST_SCHEMA_VERSION, SqliteStore};
@@ -329,7 +328,7 @@ pub(crate) fn run(
     // the fixture repository: a 50-commit repository beside the database; every accepted
     // Decision is stamped with its commit 25 and the fixture's root name (M3-22, M3-23)
     let fixture = db.with_file_name("bench-fixture-repo");
-    let fixture_commit = fixture_repo(&fixture, &corpus)?;
+    fixture_repo(&fixture, &corpus)?;
     let api = Arc::new(KabanApi::with_config(
         store.clone(),
         policy,
@@ -342,7 +341,6 @@ pub(crate) fn run(
             ..Default::default()
         },
     ));
-    let policy_version = api.policy_version();
     let mut ops = Vec::new();
     let mut counts = serde_json::Map::new();
     let bump = |counts: &mut serde_json::Map<String, Value>, key: &str| {
@@ -355,7 +353,6 @@ pub(crate) fn run(
     let mut lat = Vec::with_capacity(20_000);
     let mut by_ws: Vec<Vec<String>> = vec![Vec::new(); WORKSPACES.len()];
     let mut all_ids: Vec<String> = Vec::with_capacity(n);
-    let mut decisions: Vec<(String, bool)> = Vec::new();
     let mut to_forget: Vec<(String, ForgetMode)> = Vec::new();
     let mut rejected_writes = 0usize;
     for i in 0..n {
@@ -388,9 +385,6 @@ pub(crate) fn run(
             .unwrap_or(0);
         by_ws[ws].push(out.id.clone());
         all_ids.push(out.id.clone());
-        if spec.kind == Kind::Decision {
-            decisions.push((out.id.clone(), spec.accepted));
-        }
         match spec.life {
             Life::Active => bump(&mut counts, "lifecycle_active"),
             Life::Archived => to_forget.push((out.id, ForgetMode::Archive)),
@@ -399,30 +393,6 @@ pub(crate) fn run(
     }
     let remember_total_s = phase.elapsed().as_secs_f64();
     ops.push(summarize("remember", "api", lat));
-
-    // governance: acceptance is a store call until C3.2 (`accept` tool)
-    let phase = Instant::now();
-    let ctx = WriteCtx::new(policy_version.clone(), WorkspaceId::default(), Actor::Agent);
-    let mut accept_lat = Vec::new();
-    for (id, accepted) in &decisions {
-        if *accepted {
-            let s = Instant::now();
-            store.transition(
-                &NodeId::parse(id)?,
-                Governance::Accepted,
-                NewEvent {
-                    reason: "bench-accept".into(),
-                    commit_sha: Some(fixture_commit.clone()),
-                    ..Default::default()
-                },
-                &ctx,
-            )?;
-            accept_lat.push(s.elapsed().as_secs_f64() * 1e6);
-            bump(&mut counts, "decisions_accepted");
-        }
-    }
-    ops.push(summarize("accept_transition", "store", accept_lat));
-    let governance_total_s = phase.elapsed().as_secs_f64();
 
     // ---- edges: `epn` per node inside its workspace, through the full path ----
     let phase = Instant::now();
@@ -554,7 +524,7 @@ pub(crate) fn run(
         "corpus": {
             "counts": counts, "rejected_writes": rejected_writes,
             "links_created": links_created, "links_skipped": links_skipped,
-            "remember_total_s": remember_total_s, "governance_total_s": governance_total_s,
+            "remember_total_s": remember_total_s,
             "link_total_s": link_total_s, "lifecycle_total_s": lifecycle_total_s,
             "inserts_per_s": (n as f64 / remember_total_s).round(),
             "links_per_s": (total_links as f64 / link_total_s).round(),

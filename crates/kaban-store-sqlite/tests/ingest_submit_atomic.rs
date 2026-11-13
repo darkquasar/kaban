@@ -2,10 +2,9 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)] // public behavior assertions
 
 use kaban_core::{
-    Actor, AuditEntry, AuditOp, AuditStore, BatchAssertion, BatchReport, BatchSubject,
-    ChangeLogStore, ClaimClass, EdgeDiff, Fixed, IngestJob, IngestStore, JobId, JobStatus,
-    JobSubmitContract, JobSubmitRequest, JobSubmitStateUpdate, Layer, MemoryStore, Method, NewNode,
-    NodeId, Op, Rank, SourceRev, StoreError, WorkspaceId, WriteBatch, WriteCtx,
+    Actor, AuditEntry, AuditOp, BatchReport, ChangeLogStore, EdgeDiff, IngestJob, IngestStore,
+    JobId, JobStatus, JobSubmitContract, JobSubmitRequest, JobSubmitStateUpdate, MemoryStore,
+    NewNode, NodeId, Op, SourceRev, StoreError, WorkspaceId, WriteBatch, WriteCtx,
 };
 use kaban_store_sqlite::SqliteStore;
 use serde_json::json;
@@ -35,146 +34,6 @@ fn batch(ops: Vec<Op>) -> WriteBatch {
     let mut batch = WriteBatch::new(WorkspaceId::default(), ops);
     batch.edge_diff = EdgeDiff::None;
     batch
-}
-
-#[test]
-fn ordinary_owned_and_complete_batches_cannot_delete_claim_backed_projection() {
-    for complete in [false, true] {
-        for (method, layer, owner) in [
-            (
-                Method::Remember,
-                Layer::Llm,
-                kaban_core::Owner::KabanReconcile,
-            ),
-            (
-                Method::IngestSubmit,
-                Layer::Llm,
-                kaban_core::Owner::KabanParse,
-            ),
-            (
-                Method::IngestSubmit,
-                Layer::Gliner,
-                kaban_core::Owner::KabanParse,
-            ),
-            (Method::IngestSubmit, Layer::Human, kaban_core::Owner::Human),
-        ] {
-            let store = SqliteStore::open_memory().unwrap();
-            let ctx = WriteCtx::new("policy", WorkspaceId::default(), Actor::Agent);
-            let src = NodeId::new();
-            let dst = NodeId::new();
-            let mut initial = batch(vec![
-                node(&src, "Fact", "source", json!({})),
-                node(&dst, "Fact", "target", json!({})),
-            ]);
-            initial.assertions.push(BatchAssertion {
-                subject: BatchSubject::Edge {
-                    src: src.clone(),
-                    rel: "RELATES_TO".into(),
-                    dst: dst.clone(),
-                },
-                claim_class: ClaimClass::Edge,
-                predicate: None,
-                object: None,
-                value: json!({}),
-                layer,
-                method,
-                extractor_id: None,
-                extractor_version: None,
-                source_id: None,
-                lineage_id: "fixture".into(),
-                raw_score: Fixed::ONE,
-                rank: Rank::Normal,
-                rank_reason: None,
-                calibration_version: 0,
-                supersedes: None,
-            });
-            store.apply_batch(initial, &ctx).unwrap();
-            let query = kaban_core::TraverseQuery {
-                start_ids: vec![src.clone()],
-                rels: vec!["RELATES_TO".into()],
-                ..Default::default()
-            };
-            let before = store.traverse(&query).unwrap().edges;
-            assert_eq!(before.len(), 1);
-            assert_eq!(before[0].props["owner"], owner.as_str());
-            let mut ordinary = batch(vec![node(&src, "Fact", "source", json!({}))]);
-            ordinary.edge_diff = if complete {
-                EdgeDiff::Complete { producer: owner }
-            } else {
-                EdgeDiff::Owned { owner }
-            };
-            store.apply_batch(ordinary, &ctx).unwrap();
-            assert_eq!(
-                serde_json::to_value(store.traverse(&query).unwrap().edges).unwrap(),
-                serde_json::to_value(before).unwrap(),
-                "ordinary edge deletion must preserve claim-backed projection"
-            );
-        }
-    }
-}
-
-#[test]
-fn ingest_method_never_bypasses_governed_semantics_candidate_decision() {
-    let mut ontology = kaban_core::shipped::resolved().unwrap();
-    ontology
-        .rels
-        .values_mut()
-        .find(|rel| rel.id.name == "RELATES_TO")
-        .unwrap()
-        .governed_semantics = true;
-    let store = SqliteStore::open_memory()
-        .unwrap()
-        .with_ontology(std::sync::Arc::new(ontology))
-        .unwrap();
-    let ctx = WriteCtx::new("policy", WorkspaceId::default(), Actor::Agent);
-    let src = NodeId::new();
-    let dst = NodeId::new();
-    let mut request = batch(vec![
-        node(&src, "Fact", "source", json!({})),
-        node(&dst, "Fact", "target", json!({})),
-    ]);
-    request.assertions.push(BatchAssertion {
-        subject: BatchSubject::Edge {
-            src: src.clone(),
-            rel: "RELATES_TO".into(),
-            dst,
-        },
-        claim_class: ClaimClass::Edge,
-        predicate: None,
-        object: None,
-        value: json!({"owner":"kaban-parse"}),
-        layer: Layer::Llm,
-        method: Method::IngestSubmit,
-        extractor_id: None,
-        extractor_version: None,
-        source_id: None,
-        lineage_id: "fixture".into(),
-        raw_score: Fixed::ONE,
-        rank: Rank::Normal,
-        rank_reason: None,
-        calibration_version: 0,
-        supersedes: None,
-    });
-    let report = store.apply_batch(request, &ctx).unwrap();
-    assert_eq!(report.assertions_inserted, 1);
-    assert_eq!(
-        report.verdicts.get(&kaban_core::AssertionStatus::Candidate),
-        Some(&1)
-    );
-    assert!(
-        store
-            .traverse(&kaban_core::TraverseQuery {
-                start_ids: vec![src],
-                rels: vec!["RELATES_TO".into()],
-                filters: kaban_core::ReadFilters {
-                    include_candidates: true
-                },
-                ..Default::default()
-            })
-            .unwrap()
-            .edges
-            .is_empty()
-    );
 }
 
 fn fixture() -> Fixture {
@@ -306,7 +165,6 @@ fn graph_audit_and_actual_counters_commit_together_and_repeat_is_unchanged() {
         ),
         (1, 1, 1, 1)
     );
-    assert_eq!(f.store.audit_verify().unwrap().entries, 1);
     let changes = f.store.changes_read(0, 10_000).unwrap();
     let repeated = f
         .store
@@ -358,7 +216,6 @@ fn accumulation_failure_rolls_back_graph_audit_and_counters() {
             .unwrap(),
         f.job
     );
-    assert_eq!(f.store.audit_verify().unwrap().entries, 0);
     assert_eq!(f.store.changes_read(0, 10_000).unwrap(), changes);
 }
 
@@ -505,70 +362,5 @@ fn present_expiry_and_counter_overflow_never_publish_or_call_successfully() {
                 .unwrap(),
             f.job
         );
-    }
-}
-
-#[test]
-fn l3_claim_method_rank_and_lineage_commit_or_rollback_with_the_job() {
-    for fail in [false, true] {
-        let f = fixture();
-        let id = NodeId::new();
-        let mut req = request(
-            &f,
-            vec![node(&id, "Fact", "masked claim record", json!({}))],
-        );
-        req.batch.assertions.push(BatchAssertion {
-            subject: BatchSubject::Record(id),
-            claim_class: ClaimClass::KindOfRecord,
-            predicate: None,
-            object: None,
-            value: json!({"kind":"Fact", "props":{}}),
-            layer: Layer::Llm,
-            method: Method::IngestSubmit,
-            extractor_id: Some("llm".into()),
-            extractor_version: Some("1".into()),
-            source_id: Some(f.job.source_id.clone()),
-            lineage_id: "invented-brief-and-extractor".into(),
-            raw_score: Fixed::new(8000).unwrap(),
-            rank: Rank::Normal,
-            rank_reason: None,
-            calibration_version: 0,
-            supersedes: None,
-        });
-        let mut callback = |job: &IngestJob, report: &BatchReport| {
-            assert_eq!(report.assertions_inserted, 1);
-            if fail {
-                Err(StoreError::InvalidName("submit".into(), "injected_failure"))
-            } else {
-                accumulate(job, report)
-            }
-        };
-        let result = f.store.job_submit(req, &f.ctx, &mut callback);
-        assert_eq!(result.is_err(), fail);
-        let mut observed = Vec::new();
-        f.store
-            .rescan_assertions("policy", &mut |claim, _| {
-                observed.push((
-                    claim.method.as_str().to_owned(),
-                    claim.rank,
-                    claim.lineage_id.clone(),
-                    claim.raw_score,
-                ));
-                Some(claim.value.as_value().clone())
-            })
-            .unwrap();
-        if fail {
-            assert!(observed.is_empty(), "no claim survives failed accumulation");
-        } else {
-            assert_eq!(
-                observed,
-                vec![(
-                    "ingest_submit".into(),
-                    Rank::Normal,
-                    "invented-brief-and-extractor".into(),
-                    Fixed::new(8000).unwrap()
-                )]
-            );
-        }
     }
 }

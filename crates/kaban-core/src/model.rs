@@ -3,7 +3,6 @@
 use crate::audit::{AuditEntry, WorkspaceId};
 use crate::ids::NodeId;
 use crate::lifecycle::{Governance, Lifecycle, StoreScope};
-use crate::reconcile::{Fixed, Layer, Method};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -842,6 +841,26 @@ impl AnchoredRow {
     }
 }
 
+/// What `forget` left behind.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForgetOutcome {
+    /// Lifecycle after the call.
+    pub lifecycle: Lifecycle,
+    /// Highest `changes.seq` written by this call (F11).
+    pub outbox_seq: u64,
+    /// A purge committed: the content is unavailable to every read from now on (core-spec S5).
+    /// The other modes keep the content and revoke nothing.
+    pub revoked: bool,
+    /// The purge's freed pages were reclaimed by this call. The post-commit cleanup (index
+    /// segments merged, the WAL folded into the main file and truncated) reclaims none, so a
+    /// purge reports `false` with `cleanup` naming the residue; `false` for the other modes.
+    pub physically_cleaned: bool,
+    /// Why a purge is not physically cleaned: the free-page residue a VACUUM removes (`kaban
+    /// doctor --optimize --vacuum`), after `busy` (a reader still held the WAL or the lock) or
+    /// the failure findings when a cleanup step did not run through. The revocation stands.
+    pub cleanup: Option<String>,
+}
+
 /// How to forget a node (core-spec F5).
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize, schemars::JsonSchema,
@@ -849,11 +868,9 @@ impl AnchoredRow {
 #[serde(rename_all = "lowercase")]
 pub enum ForgetMode {
     /// Keep history, hide from every default read, never re-propose as a duplicate (default).
-    /// Lifecycle only: governance is untouched and no event is written.
     #[default]
     Tombstone,
-    /// Tombstone and, for governed kinds, mark the record `invalidated` with an event (OD-4:
-    /// non-governed kinds get the event too).
+    /// The same lifecycle effect as `Tombstone`: the record is hidden from default reads.
     Invalidate,
     /// Archive: reachable by id and through graph expansion, out of the text index.
     Archive,
@@ -878,8 +895,8 @@ pub struct LinkReq {
 /// One transaction's worth of ingestion writes (core-spec F16 store side, core-plan C2.6): the
 /// single-committer entry point docs-ingest uses, one batch per Document. Plain serializable
 /// data (engine-spec EN-E10a; engine-plan E2.11): no handles, so a batch built on one node can
-/// be shipped to a store elsewhere; `assertions` and `edge_diff` default when absent, so a
-/// batch written before they existed still parses.
+/// be shipped to a store elsewhere; `edge_diff` defaults when absent, so a batch written
+/// before it existed still parses.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WriteBatch {
     /// Tenant of every row the batch touches (F17). A node's own `workspace_id` field is
@@ -887,12 +904,6 @@ pub struct WriteBatch {
     pub workspace_id: WorkspaceId,
     /// Operations, applied node ops first (in order), then edge ops, then the edge diff.
     pub ops: Vec<Op>,
-    /// Claims the batch asserts (engine-spec EN-F8; engine-plan E2.2): inserted as immutable
-    /// `assertion` rows after the node ops, then reconciled group by group at the end of the
-    /// batch; the projection of the verdicts writes the edges. Empty for every producer that
-    /// has not opted in ([`WriteBatch::new`]).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub assertions: Vec<BatchAssertion>,
     /// Source-bound publications, validated before any batch side effects.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifacts: Vec<crate::DerivedArtifact>,
@@ -908,97 +919,17 @@ pub struct WriteBatch {
 }
 
 impl WriteBatch {
-    /// A batch under the default [`EdgeDiff::None`] rule (no deletion), without assertions.
+    /// A batch under the default [`EdgeDiff::None`] rule (no deletion).
     #[must_use]
     pub fn new(workspace_id: WorkspaceId, ops: Vec<Op>) -> Self {
         Self {
             workspace_id,
             ops,
-            assertions: Vec::new(),
             artifacts: Vec::new(),
             gazetteer_claim_sets: Vec::new(),
             edge_diff: EdgeDiff::None,
         }
     }
-}
-
-/// What a batch claim is about, in producer coordinates (engine-plan E2.2): producers name
-/// nodes by their [`NodeId`]; the store resolves every id inside the batch's workspace (F17)
-/// and builds the storage-coordinate [`crate::Subject`] inside the transaction.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-#[non_exhaustive]
-pub enum BatchSubject {
-    /// An exact mention span of a chunk.
-    Span {
-        /// The chunk node.
-        chunk: NodeId,
-        /// Byte offset.
-        offset: u32,
-        /// Byte length.
-        len: u32,
-    },
-    /// An existing node.
-    Node(NodeId),
-    /// An edge triple; the `edge` claim class.
-    Edge {
-        /// Source node.
-        src: NodeId,
-        /// Stored relationship name.
-        rel: String,
-        /// Target node.
-        dst: NodeId,
-    },
-    /// A record whose kind is being proposed.
-    Record(NodeId),
-}
-
-/// One claim inside a [`WriteBatch`] (engine-spec EN-F8, EN-F12a): the fields of a
-/// [`crate::Assertion`] a producer knows. The store assigns the key (`Assertion::with_key`),
-/// the workspace and the timestamp, and canonicalises `value`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BatchAssertion {
-    /// What the claim is about.
-    pub subject: BatchSubject,
-    /// Conflict class.
-    pub claim_class: crate::ClaimClass,
-    /// Property or relationship name (`Edge` subjects carry it in the subject).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub predicate: Option<String>,
-    /// Target node of a `canonical_id` claim, if any (`Edge` subjects carry it in the subject).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub object: Option<NodeId>,
-    /// Claim value: a kind name, an id, a number or an already gated prop value, never
-    /// surface text (EN-S9).
-    pub value: Value,
-    /// Source layer.
-    pub layer: crate::Layer,
-    /// Extraction method.
-    pub method: crate::Method,
-    /// Extractor identity.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub extractor_id: Option<String>,
-    /// Extractor version.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub extractor_version: Option<String>,
-    /// Source identity.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_id: Option<String>,
-    /// Shared evidence lineage (EN-F12b).
-    pub lineage_id: String,
-    /// Raw confidence in units of 1/10000.
-    pub raw_score: crate::Fixed,
-    /// Rank partition (E2.3 applies it).
-    pub rank: crate::Rank,
-    /// Why the rank was changed, when it was.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub rank_reason: Option<String>,
-    /// Calibration version, excluded from the identity.
-    #[serde(default)]
-    pub calibration_version: u32,
-    /// The claim this one supersedes, by key.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub supersedes: Option<crate::AssertionKey>,
 }
 
 /// Who wrote an edge (engine-spec EN-E4): the `props.owner` vocabulary [`EdgeDiff::Owned`]
@@ -1204,16 +1135,6 @@ pub struct BatchReport {
     /// Per node op, in batch order, what the store did (DI1.8, RD2-8).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub outcomes: Vec<OpOutcome>,
-    /// Claim rows the batch inserted (engine-spec EN-F8; E2.2).
-    #[serde(default, skip_serializing_if = "is_zero")]
-    pub assertions_inserted: u32,
-    /// Claims re-submitted with an existing key: no row, no `ChangeLog` row (EN-F12a N5).
-    #[serde(default, skip_serializing_if = "is_zero")]
-    pub assertions_noop: u32,
-    /// Verdicts of the end-of-batch reconciliation pass, counted by the disposition their
-    /// statuses received (EN-E9, EN-F12): one entry per decided group.
-    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
-    pub verdicts: std::collections::BTreeMap<crate::AssertionStatus, u32>,
     /// First outbox `seq` written by the batch's transaction, if any.
     pub outbox_first_seq: Option<u64>,
     /// Last outbox `seq` written by the batch's transaction, if any.
@@ -1337,82 +1258,6 @@ impl std::ops::AddAssign for RescanReport {
         self.redacted += rhs.redacted;
         self.rejected += rhs.rejected;
     }
-}
-
-/// A record as a `.kaban/<dir>/<id>.md` file carries it, ready for `SyncStore::import_record`
-/// (core-spec F13; core-plan C5.1 as amended by `reviews/m5-prep.md` M5-18): every content
-/// column the file decides, with the file's `rev`. Every string has passed the denylist gate
-/// and the typed parse (the importer's job); the store writes, it does not judge. The
-/// workspace is the write context's (OWN-25: files carry none), `store_scope` is `project`.
-#[derive(Debug, Clone)]
-pub struct ImportedRecord {
-    /// The node id (the file name).
-    pub id: NodeId,
-    /// Node kind (the directory); immutable per id.
-    pub kind: String,
-    /// The memory text (the body).
-    pub text: String,
-    /// One-line summary.
-    pub summary: Option<String>,
-    /// Tags in file order.
-    pub tags: Vec<String>,
-    /// 0..1.
-    pub confidence: Option<f64>,
-    /// 0..1.
-    pub importance: Option<f64>,
-    /// Storage visibility the file declares (never `purged`: that is `import_purged`).
-    pub lifecycle: Lifecycle,
-    /// Governance state the file declares.
-    pub governance: Governance,
-    /// Canonical path scope.
-    pub path_scope: Vec<String>,
-    /// Kind props (`{}` when none).
-    pub props: Value,
-    /// The file's revision: becomes both `rev` and `serialized_rev`.
-    pub rev: i64,
-    /// Creation time (RFC 3339).
-    pub created_at: String,
-    /// Last update time (RFC 3339).
-    pub updated_at: String,
-    /// Validity start.
-    pub valid_from: Option<String>,
-    /// Validity end.
-    pub valid_to: Option<String>,
-    /// Commit at acceptance.
-    pub accepted_commit: Option<String>,
-    /// Provenance: agent.
-    pub agent_id: Option<String>,
-    /// Provenance: session.
-    pub session_id: Option<String>,
-    /// Provenance: repository identity.
-    pub repo: Option<String>,
-    /// Provenance: stamped commit.
-    pub commit_sha: Option<String>,
-    /// Near-duplicate key, recomputed by the importer (F1).
-    pub dup_key: Option<String>,
-    /// The event to append when the import moves the record's governance (reason, signer and
-    /// provenance decided by the importer: `human-pr` or `proposed`, OD-15). `None` lets the
-    /// store write a `system` event with reason `import`.
-    pub event: Option<crate::events::NewEvent>,
-}
-
-/// One `conflicts` row (core-spec F13 "equal rev with different content hash"; M5-5): the
-/// file and the database disagree at the same `rev`, resolved by a human (`kaban resolve`).
-/// The table is DB-scoped (F17); the workspace comes from the node.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ConflictRow {
-    /// The record in conflict.
-    pub node_id: String,
-    /// The file's `rev`.
-    pub file_rev: i64,
-    /// The database's `rev`.
-    pub db_rev: i64,
-    /// Record hash of the file (`serialize::record_hash`).
-    pub file_hash: String,
-    /// Record hash of the database record.
-    pub db_hash: String,
-    /// Unix seconds when the conflict was detected (last upsert).
-    pub detected_at: i64,
 }
 
 /// The database's bookkeeping entries (`index_meta`, DB-scoped: schema version, `db_id`,
@@ -1540,4 +1385,122 @@ pub struct PruneReport {
     /// Labels refused at the cap so far in the workspace (`discovered_overflow.n_rejected`;
     /// reported, never reset).
     pub n_rejected: u64,
+}
+
+// Producer vocabulary moved out of the deleted reconciliation module (T3, PC-16). Slice B
+// replaces `Layer` with `Producer`; `Method` stays here.
+macro_rules! vocabulary {
+    ($name:ident, $doc:literal, {$($variant:ident => $text:literal),+ $(,)?}) => {
+        #[doc = $doc]
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, schemars::JsonSchema)]
+        #[non_exhaustive]
+        pub enum $name { $(#[doc = concat!("`", $text, "`")] #[serde(rename = $text)] $variant),+ }
+        impl $name {
+            /// The stored vocabulary spelling.
+            pub const fn as_str(self) -> &'static str { match self { $(Self::$variant => $text),+ } }
+            /// Parse only a known stored spelling.
+            pub fn parse(value: &str) -> Option<Self> { match value { $($text => Some(Self::$variant)),+, _ => None } }
+            /// All currently supported vocabulary values.
+            pub const ALL: &'static [Self] = &[$(Self::$variant),+];
+        }
+    };
+}
+vocabulary!(
+    Layer,
+    "Assertion source layers in strongest-source order (engine-spec EN-E7); the text index layers `fts` and `fuzzy` (EN-F22, spec 05 OWN-M) close the list.",
+    {
+        Human => "human",
+        V4 => "v4",
+        Reconcile => "reconcile",
+        Script => "script",
+        Llm => "llm",
+        Gliner => "gliner",
+        Gazetteer => "gazetteer",
+        Embed => "embed",
+        Fts => "fts",
+        Fuzzy => "fuzzy",
+    }
+);
+vocabulary!(
+    Method,
+    "Closed assertion method vocabulary.",
+    {
+        Id => "id",
+        Path => "path",
+        Exact => "exact",
+        Alias => "alias",
+        Symbol => "symbol",
+        Tag => "tag",
+        Embed => "embed",
+        Gliner => "gliner",
+        Llm => "llm",
+        Human => "human",
+        Measured => "measured",
+        Rule => "rule",
+        Heuristic => "heuristic",
+        Link => "link",
+        Accept => "accept",
+        Remember => "remember",
+        Er => "er",
+        ErJudge => "er_judge",
+        Reconciled => "reconciled",
+        IngestSubmit => "ingest_submit",
+    }
+);
+
+/// A confidence in units of 1/10000. Use `new` or `from_f64` at input seams.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(try_from = "u32", into = "u32")]
+pub struct Fixed(pub u32);
+
+/// An invalid confidence or signed weight at the input seam.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("fixed_point_out_of_range")]
+pub struct FixedError;
+
+impl Fixed {
+    /// Zero confidence.
+    pub const ZERO: Self = Self(0);
+    /// Unit confidence.
+    pub const ONE: Self = Self(10_000);
+
+    /// Validate integer confidence without clamping.
+    /// # Errors
+    /// Returns `FixedError` above 10000.
+    pub const fn new(value: u32) -> Result<Self, FixedError> {
+        if value <= 10_000 {
+            Ok(Self(value))
+        } else {
+            Err(FixedError)
+        }
+    }
+
+    /// Round half to even once at the floating input seam.
+    /// # Errors
+    /// Rejects non-finite values and values outside [0, 1].
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    pub fn from_f64(value: f64) -> Result<Self, FixedError> {
+        if !(0.0..=1.0).contains(&value) {
+            return Err(FixedError);
+        }
+        Self::new((value * 10_000.0).round_ties_even() as u32)
+    }
+}
+/// The four-decimal rendering of EN-F12a (`6556` is `0.6556`, `10000` is `1.0000`): the one
+/// text form of a weight in `explain` and `doctor`; the integer stays the compared value.
+impl std::fmt::Display for Fixed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}.{:04}", self.0 / 10_000, self.0 % 10_000)
+    }
+}
+impl TryFrom<u32> for Fixed {
+    type Error = FixedError;
+    fn try_from(value: u32) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+impl From<Fixed> for u32 {
+    fn from(value: Fixed) -> Self {
+        value.0
+    }
 }

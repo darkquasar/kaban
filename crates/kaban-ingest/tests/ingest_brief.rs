@@ -7,8 +7,7 @@ use kaban_core::WorkspaceId;
 use kaban_core::{IngestStore, JobId, MemoryStore, NodeId};
 use kaban_ingest::jobs::next::PageBudget;
 use kaban_ingest::jobs::types::{
-    IngestDialect, JobEnvelope, PairJudgement, PairRef, PreparationOptions, StructuredReturn,
-    job_id,
+    IngestDialect, JobEnvelope, PreparationOptions, StructuredReturn, job_id,
 };
 use kaban_ingest::jobs::{brief::brief, types::IngestOpts};
 use serde_json::json;
@@ -87,24 +86,6 @@ fn canonical_wire_alias_and_schema_preserve_folded_field_names() {
             .is_some()
     );
     assert_eq!(schema["$defs"]["LinkDraft"]["additionalProperties"], false);
-}
-
-#[test]
-fn pair_conversion_preserves_exact_core_judgement_shape() {
-    let a = NodeId::new().to_string();
-    let b = NodeId::new().to_string();
-    let wire = PairJudgement {
-        pair: PairRef {
-            a: a.clone(),
-            b: b.clone(),
-        },
-        same: false,
-    };
-    let core: kaban_core::PairJudgement = wire.clone().into();
-    assert_eq!(
-        serde_json::to_value(wire).unwrap(),
-        serde_json::to_value(core).unwrap()
-    );
 }
 
 #[test]

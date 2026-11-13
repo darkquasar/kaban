@@ -4,7 +4,7 @@ use kaban_core::{
     Actor, EdgeDiff, ForgetMode, IngestJob, IngestStore, JobId, JobStatus, MemoryStore, NewNode,
     NodeId, Op, WorkspaceId, WriteBatch, WriteCtx,
 };
-use kaban_core::{ImportedRecord, Lifecycle, RescanAction, SyncStore};
+use kaban_core::{Lifecycle, RescanAction};
 use kaban_store_sqlite::SqliteStore;
 use serde_json::json;
 
@@ -110,45 +110,6 @@ fn batch_tombstone_and_rescan_reject_revoke_and_failed_batch_rolls_back() {
                 Lifecycle::Tombstoned
             }
         );
-    }
-}
-
-#[test]
-fn imported_terminal_document_and_purged_import_revoke_the_job() {
-    for purge in [false, true] {
-        let (store, document, job, ctx) = fixture();
-        if purge {
-            store.import_purged(&document, "Document", 2, &ctx).unwrap();
-        } else {
-            let n = store.get(&document, true).unwrap().unwrap();
-            let record = ImportedRecord {
-                id: document,
-                kind: n.kind,
-                text: n.text,
-                summary: n.summary,
-                tags: n.tags,
-                confidence: n.confidence,
-                importance: n.importance,
-                lifecycle: Lifecycle::Tombstoned,
-                governance: n.governance,
-                path_scope: n.path_scope,
-                props: n.props,
-                rev: n.rev + 1,
-                created_at: n.created_at,
-                updated_at: n.updated_at,
-                valid_from: n.valid_from,
-                valid_to: n.valid_to,
-                accepted_commit: n.accepted_commit,
-                agent_id: n.agent_id,
-                session_id: n.session_id,
-                repo: n.repo,
-                commit_sha: n.commit_sha,
-                dup_key: n.dup_key,
-                event: None,
-            };
-            store.import_record(&record, &ctx).unwrap();
-        }
-        assert!(store.job_get(&job.job, &job.workspace).unwrap().is_none());
     }
 }
 

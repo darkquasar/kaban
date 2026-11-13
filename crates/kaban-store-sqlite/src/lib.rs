@@ -10,15 +10,12 @@
 //! refuse-newer; migration 0013 needs the database to itself.
 
 mod anchors;
-mod audit_table;
 mod body_codec;
 mod candidates;
 mod changelog;
-mod confirmations;
 mod connection;
 mod doctor;
-mod events;
-mod explain;
+mod edge_write;
 mod ident;
 pub mod index_rows;
 mod jobs;
@@ -26,7 +23,6 @@ mod layers;
 mod leases;
 mod ontology;
 mod projector_thread;
-mod pruning_protection;
 mod recall;
 mod rows;
 mod schema;
@@ -34,11 +30,8 @@ mod session;
 mod sql_error;
 mod sqlite;
 mod stamp;
-mod sync;
 mod tantivy;
 mod traverse;
-
-mod reconcile;
 
 pub use connection::{ExclusiveHold, exclusive_hold};
 

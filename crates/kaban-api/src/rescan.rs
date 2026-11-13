@@ -26,9 +26,8 @@
 use crate::api::KabanApi;
 use crate::error::ApiError;
 use crate::types::{RescanOutcome, RescanStatus};
-use kaban_core::{Assertion, AuditEntry, Node, RescanAction, RescanReport, WorkspaceId};
+use kaban_core::{Node, RescanAction, RescanReport, WorkspaceId};
 use kaban_policy::Policy;
-use serde_json::Value;
 use std::sync::{Arc, RwLock};
 use tokio_util::sync::CancellationToken;
 
@@ -69,20 +68,6 @@ impl KabanApi {
             redacted: 0,
             rejected: 0,
         };
-        // the same policy-version step covers the claim values (EN-S9): one pass, keyed by the
-        // store's claim-side marker, before the node batches; its counts are logged, not
-        // folded into the node figures of the outcome
-        let claims = self
-            .store
-            .rescan_assertions(&version, &mut |claim, audit| self.judge_claim(claim, audit))?;
-        if claims.scanned > 0 {
-            tracing::info!(
-                policy_version = %version,
-                scanned = claims.scanned,
-                masked = claims.rejected,
-                "claim values re-judged under the loaded policy"
-            );
-        }
         // the database-wide marker is informational (MD-19, R2-3): the decision rests on the
         // stale-row query the store runs under its write lock on every start, so a node another
         // process stamped with an older policy after the marker was recorded is still found;
@@ -157,28 +142,5 @@ impl KabanApi {
             },
             Ok(_) => RescanAction::Keep,
         }
-    }
-
-    /// Judge one stored claim value against the loaded policy (EN-S9): the same JSON gate the
-    /// props of a node go through (keys, `key=value` views, string leaves). A redact hit
-    /// returns the masked value; a reject hit has no masked form, so the whole value becomes
-    /// one `[REDACTED:<rules>]` string, the shape of the redact mask; a clean value returns
-    /// `None`. The verdict's audit entries are pushed to `audit` (no node id: a claim is not a
-    /// node). Runs inside the store's transaction and must not call back into the store.
-    fn judge_claim(&self, claim: &Assertion, audit: &mut Vec<AuditEntry>) -> Option<Value> {
-        let value = claim.value.as_value();
-        let mut ctx = self.write_ctx(Some(claim.workspace_id.as_str()));
-        let mut red = Vec::new();
-        let masked = match self.scan_json(&mut ctx, TOOL, "assertion.value", value, &mut red) {
-            Ok(masked) if masked == *value => None,
-            Ok(masked) => Some(masked),
-            Err(ApiError::Rejected { rules, .. }) => {
-                Some(Value::String(format!("[REDACTED:{}]", rules.join(","))))
-            }
-            // a masked key colliding with another: the value cannot be rebuilt, so it goes whole
-            Err(_) => Some(Value::String("[REDACTED:assertion.value]".into())),
-        };
-        audit.append(&mut ctx.audit);
-        masked
     }
 }

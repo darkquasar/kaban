@@ -1055,7 +1055,8 @@ mod tests {
         let RememberOutcome::Created(node) = outcome else {
             panic!("fresh store: {outcome:?}");
         };
-        assert_eq!(node.governance, Governance::Proposed);
+        // a fresh record starts ungoverned whatever its kind (REC-08, T3)
+        assert_eq!(node.governance, Governance::None);
     }
 
     /// E1.5: the registry is the one owner of the loaded ontology: a load through the

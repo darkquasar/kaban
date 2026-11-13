@@ -554,14 +554,6 @@ impl KabanApi {
         if ctx.audit.is_empty() {
             return Ok(());
         }
-        if let Err(e) = self.store.audit_append(&ctx.audit) {
-            tracing::error!(error = %e, "audit append failed; failing closed");
-            ctx.audit.clear();
-            return Err(ApiError::Rejected {
-                field: "audit".into(),
-                rules: vec![AUDIT_UNAVAILABLE.into()],
-            });
-        }
         self.export_audit(&ctx.audit);
         ctx.audit.clear();
         Ok(())
@@ -874,7 +866,7 @@ impl IngestSubmitGate<'_> {
     /// # Errors
     /// Ungated/mutated batch, changed policy/authority or transactional publication failure.
     pub fn publish(
-        mut self,
+        self,
         request: kaban_core::JobSubmitRequest,
         accumulate: &mut dyn FnMut(
             &kaban_core::IngestJob,
@@ -899,21 +891,6 @@ impl IngestSubmitGate<'_> {
                 _ => false,
             };
             if !admitted {
-                return Err(ApiError::Invalid("ungated_batch".into()));
-            }
-        }
-        for claim in &request.batch.assertions {
-            if claim.rank != kaban_core::Rank::Normal
-                || !matches!(
-                    claim.layer,
-                    kaban_core::Layer::Llm | kaban_core::Layer::Gliner | kaban_core::Layer::Script
-                )
-                || !matches!(
-                    claim.method,
-                    kaban_core::Method::IngestSubmit | kaban_core::Method::ErJudge
-                )
-                || self.props(&claim.value)? != claim.value
-            {
                 return Err(ApiError::Invalid("ungated_batch".into()));
             }
         }

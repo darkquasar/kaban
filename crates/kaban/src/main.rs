@@ -365,14 +365,12 @@ fn open_api(
     // store's startup seam (E2.10 boundary review BR-7): an invalid section is a config error
     // (exit 4) naming the loader's category and the field path, never a value
     let engine = load_engine()?;
-    let er = er_priors(&engine.er)?;
     // the store owns its text index (spec 05 OWN-M): opened, admitted or rebuilt by the open,
     // published by the store; a serving process runs the store's projector thread (SS-21; the
     // caller says which, since `cli.cmd` was taken by the dispatch: fix11), every other
     // command publishes its own commits inline and exits
     let store = kaban_store_sqlite::SqliteStore::open_as(&cli.db, &keys_dir, &cli.actor_id)
         .map_err(OpenError::Store)?
-        .with_er_priors(er)
         .with_recall_config(engine.recall.clone())
         .map_err(OpenError::Store)?;
     let store = Arc::new(store.serving(serving).map_err(OpenError::Store)?);
@@ -427,21 +425,6 @@ fn load_engine() -> Result<kaban_core::config::EngineConfig, OpenError> {
     config_path()
         .and_then(|path| kaban_core::config::load(&path).map_err(anyhow::Error::from))
         .map_err(OpenError::Config)
-}
-
-/// Freeze the loaded `[er]` section for the store's startup seam (BR-7): the loader's error
-/// category (`er_unknown_field`, `er_probability_out_of_range`, `er_threshold_invalid`) and
-/// its field path under `er.` are the config error's text (exit 4); no value is printed.
-fn er_priors(er: &kaban_core::config::Er) -> Result<kaban_core::ErPriors, OpenError> {
-    kaban_core::ErPriors::from_config(er).map_err(|e| {
-        let path = match &e {
-            // RW4-5: an unknown key never crosses the error boundary; the table names the hole
-            kaban_core::ErConfigError::UnknownField { table } => table.unknown_path().to_owned(),
-            kaban_core::ErConfigError::OutOfRange { path }
-            | kaban_core::ErConfigError::Threshold { path } => path.clone(),
-        };
-        OpenError::Config(anyhow::anyhow!("config key invalid: er.{path} ({e})"))
-    })
 }
 
 /// [`assemble_api`] over an already loaded engine configuration.

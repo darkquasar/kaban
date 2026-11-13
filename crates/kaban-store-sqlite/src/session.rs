@@ -12,7 +12,6 @@ use kaban_core::{
     FailurePatch, Node, PendingFailuresQuery, PendingScope, Result, SessionEdit, SessionEditKind,
     StoreError,
 };
-use rusqlite::types::ToSql;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::Value;
 
@@ -87,40 +86,6 @@ pub(crate) fn prune(conn: &Connection, older_than_ts: i64, limit: usize) -> Resu
         )
         .sql()?;
     Ok(u64::try_from(n).unwrap_or(0))
-}
-
-/// Active, accepted records of the kinds in `kinds` (the caller's stored names from the loaded
-/// ontologies, engine-plan E1.6; the shipped `adr.yaml`: Decisions and Conventions) of a
-/// workspace by importance, newest first, then id (N5), at most `limit` (M4-17). The names
-/// are bound as `?` placeholders, one each, never interpolated.
-pub(crate) fn briefing(
-    conn: &Connection,
-    kinds: &[&str],
-    workspace_id: &str,
-    limit: usize,
-) -> Result<Vec<Node>> {
-    if limit == 0 || kinds.is_empty() {
-        return Ok(Vec::new());
-    }
-    let placeholders = vec!["?"; kinds.len()].join(", ");
-    let mut st = conn
-        .prepare_cached(&format!(
-            "SELECT {NODE_COLS} FROM node
-             WHERE lifecycle = 'active' AND governance = 'accepted'
-               AND kind IN ({placeholders}) AND workspace_id = ?
-             ORDER BY COALESCE(importance, 0) DESC, created_at DESC, id LIMIT ?"
-        ))
-        .sql()?;
-    let limit = i64::try_from(limit).unwrap_or(i64::MAX);
-    let mut args: Vec<&dyn ToSql> = kinds.iter().map(|k| k as &dyn ToSql).collect();
-    args.push(&workspace_id);
-    args.push(&limit);
-    let rows = st
-        .query_map(args.as_slice(), row_node)
-        .sql()?
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .sql()?;
-    Ok(rows)
 }
 
 /// Pending Failures (M4-14): active Failures of the workspace with no outgoing `FIXED_BY` edge

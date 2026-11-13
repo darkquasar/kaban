@@ -565,7 +565,7 @@ pub(super) fn run(
     let sqlite =
         Arc::new(SqliteStore::open_as(db, keys, actor)?.with_recall_config(engine.recall.clone())?);
     let mut corpus = Corpus::new(SEED);
-    let commit = fixture_repo(&fixture, &corpus)?;
+    fixture_repo(&fixture, &corpus)?;
     let api = Arc::new(KabanApi::with_config(
         sqlite.clone(),
         policy,
@@ -586,7 +586,6 @@ pub(super) fn run(
         args.n,
         args.edges_per_node,
         &mut corpus,
-        &commit,
     )?;
     let classes: BTreeSet<QueryClass> = fixtures.queries.iter().map(|q| q.class).collect();
     let rig = Rig {

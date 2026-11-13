@@ -448,50 +448,12 @@ fn fuse(
     let mut st = conn
         .prepare_cached(&format!("SELECT {NODE_COLS} FROM node WHERE rid=?"))
         .sql()?;
-    // EN-F51 (5): a merged node reads as its canonical, returned once (the first, highest
-    // ranked, occurrence keeps its score) and only when the canonical itself passes the
-    // workspace and candidate checks below; a `canonical_rid NULL` row (purged canonical,
-    // `persist::purge_claims_of_node`) is no redirect; a store without the engine tables has none
-    let redirects = crate::reconcile::engine_tables(conn)?;
-    let mut identity = if redirects {
-        Some(
-            conn.prepare_cached("SELECT canonical_rid FROM node_identity WHERE rid = ?1")
-                .sql()?,
-        )
-    } else {
-        None
-    };
-    // EN-F49 re-applied to the resolved canonical (E2.10b BR-5): the hit passed the exclusion
-    // as itself; the node it reads as may still be a candidate, and a visible alias never
-    // exposes one (`include_candidates` empties the predicate, so nothing is checked)
-    let mut canonical_visible = if redirects && !exclude.is_empty() {
-        Some(
-            conn.prepare_cached(&format!("SELECT 1 FROM node n WHERE n.rid = ?1{exclude}"))
-                .sql()?,
-        )
-    } else {
-        None
-    };
     let identifier = classify(&q.query) == QueryClass::Identifier;
     let mut seen: HashSet<i64> = HashSet::new();
     let mut out: Vec<Hit> = Vec::new();
     for (hit, s, mut why) in ranked {
-        let rid = match identity.as_mut() {
-            Some(st) => st
-                .query_row([hit], |r| r.get::<_, Option<i64>>(0))
-                .optional()
-                .sql()?
-                .flatten()
-                .unwrap_or(hit),
-            None => hit,
-        };
+        let rid = hit;
         if !seen.insert(rid) {
-            continue;
-        }
-        if rid != hit
-            && let Some(st) = canonical_visible.as_mut()
-            && st.query_row([rid], |_| Ok(())).optional().sql()?.is_none()
-        {
             continue;
         }
         let Some(node) = st.query_row([rid], row_node).optional().sql()? else {
@@ -772,4 +734,37 @@ mod tests {
         );
         assert!(hits.unwrap().is_empty());
     }
+}
+
+/// The most chunks of one path a `<path>:<offset>` lookup examines
+/// (`MemoryStore::chunk_covering`, RW2-6): the path's chunks in id order up to this many are
+/// the candidates, so one document's size bounds the cost and the other documents never
+/// enter it. A document split into more chunks than this answers from its first
+/// `MAX_SPAN_SCAN` only.
+pub(crate) const MAX_SPAN_SCAN: usize = 4096;
+
+/// The active chunk of `ws` from `path` covering byte `offset`
+/// (`MemoryStore::chunk_covering`): the path's first `MAX_SPAN_SCAN` chunks by id are the
+/// candidates (the inner select), the covering one with the lowest id is decoded; no other
+/// row is read into a `Node`.
+pub(crate) fn chunk_covering(
+    conn: &Connection,
+    ws: &str,
+    path: &str,
+    offset: u64,
+) -> Result<Option<kaban_core::Node>> {
+    let offset = i64::try_from(offset).unwrap_or(i64::MAX);
+    let bound = i64::try_from(MAX_SPAN_SCAN).unwrap_or(i64::MAX);
+    let mut st = conn
+        .prepare_cached(&format!(
+            "SELECT {NODE_COLS} FROM (
+               SELECT n.* FROM node n WHERE n.kind = 'Chunk' AND {WS_COL} = ?1 AND n.lifecycle = 'active'
+                 AND json_extract(n.props, '$.path') = ?2 ORDER BY n.id LIMIT ?4) n
+             WHERE json_extract(n.props, '$.byte_start') <= ?3 AND json_extract(n.props, '$.byte_end') > ?3
+             ORDER BY n.id LIMIT 1"
+        ))
+        .sql()?;
+    st.query_row(params![ws, path, offset, bound], row_node)
+        .optional()
+        .sql()
 }

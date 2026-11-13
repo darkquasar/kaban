@@ -7,8 +7,8 @@
 
 use kaban_api::{ApiError, KabanApi, RememberRequest};
 use kaban_core::{
-    Actor, BatchAssertion, BatchSubject, ClaimClass, EdgeDiff, Fixed, GraphStore, IngestStore,
-    Layer, Method, NewNode, NodeId, Op, Owner, Rank, StoreError, WorkspaceId, WriteBatch, WriteCtx,
+    Actor, EdgeDiff, GraphStore, IngestStore, NewNode, NodeId, Op, Owner, StoreError, WorkspaceId,
+    WriteBatch, WriteCtx,
 };
 use kaban_policy::Policy;
 use kaban_store_sqlite::SqliteStore;
@@ -104,33 +104,18 @@ fn scored() -> Scored {
                 rel: "RELATES_TO".into(),
                 props: None,
             },
+            // an extractor's edge, its scoring in the props (written directly, T3)
+            Op::UpsertEdge {
+                src: a_id,
+                dst: claimed.clone(),
+                rel: "RELATES_TO".into(),
+                props: Some(json!({"layer": "gliner", "method": "gliner", "score": 6000})),
+            },
         ],
     );
     b.edge_diff = EdgeDiff::Owned {
         owner: Owner::KabanIngest,
     };
-    b.assertions = vec![BatchAssertion {
-        subject: BatchSubject::Edge {
-            src: a_id,
-            rel: "RELATES_TO".into(),
-            dst: claimed.clone(),
-        },
-        claim_class: ClaimClass::Edge,
-        predicate: None,
-        object: None,
-        value: json!({}),
-        layer: Layer::Gliner,
-        method: Method::Gliner,
-        extractor_id: Some("fixture".into()),
-        extractor_version: Some("1".into()),
-        source_id: None,
-        lineage_id: "gliner:1".into(),
-        raw_score: Fixed::new(6000).unwrap(),
-        rank: Rank::Normal,
-        rank_reason: None,
-        calibration_version: 1,
-        supersedes: None,
-    }];
     store
         .apply_batch(
             b,

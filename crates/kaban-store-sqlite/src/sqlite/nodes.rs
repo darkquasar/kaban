@@ -5,10 +5,8 @@
 //! `redacted_content_hash`) plus `ignored_fields`. Split out of `sqlite.rs` (OWN-79).
 
 use crate::anchors;
-use crate::audit_table;
 use crate::candidates::{self, Placement};
 use crate::changelog;
-use crate::reconcile;
 use crate::rows::{NODE_COLS, row_node};
 use crate::sql_error::SqlResultExt;
 use kaban_core::Result;
@@ -44,7 +42,6 @@ impl SqliteStore {
         let tx = conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .sql()?;
-        audit_table::append(&tx, self.signer.as_ref(), &ctx.audit)?;
         let workspace_id = n
             .workspace_id
             .as_deref()
@@ -63,16 +60,8 @@ impl SqliteStore {
         if let Some(existing) = Self::active_by_hash(&tx, &hash)? {
             // m2 N5: a retry still attaches its links (and refs); metadata differences are
             // reported, not applied
-            let links_created =
-                Self::attach_links(&tx, &self.reconcile, &tenant, &existing.id, links)?;
-            Self::attach_refs(
-                &tx,
-                &self.reconcile,
-                &tenant,
-                &existing.id,
-                refs,
-                policy_version,
-            )?;
+            let links_created = Self::attach_links(&tx, &tenant, &existing.id, links)?;
+            Self::attach_refs(&tx, &tenant, &existing.id, refs, policy_version)?;
             let fields_ignored = ignored_fields(&n, &existing);
             changelog::record_terminal(&tx, ctx)?;
             tx.commit().sql()?;
@@ -85,8 +74,8 @@ impl SqliteStore {
         let id = Self::insert_node(&tx, &tenant, &placement, &n, &hash, policy_version)?;
         // a new node has no edges yet, so every distinct link is an insert; the API reports
         // the distinct count (review R1-8)
-        Self::attach_links(&tx, &self.reconcile, &tenant, &id, links)?;
-        Self::attach_refs(&tx, &self.reconcile, &tenant, &id, refs, policy_version)?;
+        Self::attach_links(&tx, &tenant, &id, links)?;
+        Self::attach_refs(&tx, &tenant, &id, refs, policy_version)?;
         let node = tx
             .query_row(
                 &format!("SELECT {NODE_COLS} FROM node WHERE id=?"),
@@ -103,7 +92,6 @@ impl SqliteStore {
     /// refreshed and not counted; review R1-8).
     fn attach_links(
         conn: &Connection,
-        setup: &reconcile::Setup,
         tenant: &Tenant<'_>,
         id: &str,
         links: &[LinkReq],
@@ -117,7 +105,6 @@ impl SqliteStore {
             };
             let (_, inserted) = Self::link_in(
                 conn,
-                setup,
                 tenant,
                 from,
                 to,
@@ -178,7 +165,7 @@ impl SqliteStore {
         stored_kind: &str,
         n: &NewNode,
     ) -> Result<()> {
-        if !reconcile::engine_tables(conn)? {
+        if !crate::edge_write::scoring_columns(conn)? {
             return Ok(());
         }
         let empty = json!({});
@@ -210,7 +197,6 @@ impl SqliteStore {
     /// hash, in `workspace_id`) and link the note `ABOUT` each of them (M3-2).
     fn attach_refs(
         conn: &Connection,
-        setup: &reconcile::Setup,
         tenant: &Tenant<'_>,
         id: &str,
         refs: &[NewNode],
@@ -226,7 +212,6 @@ impl SqliteStore {
             };
             Self::link_in(
                 conn,
-                setup,
                 tenant,
                 id,
                 &ref_id,

@@ -15,9 +15,7 @@ mod shop_rows;
 
 use common::Scratch;
 use kaban_core::{
-    Actor, AssertionStatus, BatchAssertion, BatchSubject, ChangeLogStore, ClaimClass, Fixed,
-    IngestStore, Layer, MemoryStore, Method, NewNode, NodeId, Op, Rank, WorkspaceId, WriteBatch,
-    WriteCtx,
+    Actor, ChangeLogStore, IngestStore, NewNode, NodeId, Op, WorkspaceId, WriteBatch, WriteCtx,
 };
 use kaban_policy::Policy;
 use kaban_store_sqlite::SqliteStore;
@@ -146,35 +144,6 @@ fn changes(s: &Scratch) -> u64 {
     }
 }
 
-fn claim(
-    subject: BatchSubject,
-    class: ClaimClass,
-    value: Value,
-    layer: Layer,
-    method: Method,
-    score: u32,
-    lineage: &str,
-) -> BatchAssertion {
-    BatchAssertion {
-        subject,
-        claim_class: class,
-        predicate: None,
-        object: None,
-        value,
-        layer,
-        method,
-        extractor_id: Some("walkthrough".into()),
-        extractor_version: Some("1".into()),
-        source_id: Some(ARCH.into()),
-        lineage_id: lineage.into(),
-        raw_score: Fixed::new(score).unwrap(),
-        rank: Rank::Normal,
-        rank_reason: None,
-        calibration_version: 1,
-        supersedes: None,
-    }
-}
-
 fn mentions(mcp: &mut McpClient, chunk: &str) -> Value {
     mcp.call(
         "traverse",
@@ -235,28 +204,14 @@ fn step3(s: &Scratch, _root: &Path, mcp: &mut McpClient, arch: &str, adr: &str) 
         mcp.call("ingest_finish", &json!({"job":brief["job"]})),
         finish
     );
-    let mut batch = WriteBatch::new(WorkspaceId::default(), vec![]);
-    batch.assertions.push(claim(
-        BatchSubject::Edge {
-            src: NodeId::parse(&decision.id).unwrap(),
-            rel: "GOVERNS".into(),
-            dst: NodeId::parse(&code.id).unwrap(),
-        },
-        ClaimClass::Edge,
-        json!({}),
-        Layer::Llm,
-        Method::Llm,
-        10_000,
-        "machine-governs",
-    ));
-    let report = store(s).apply_batch(batch, &ctx()).unwrap();
-    assert_eq!(report.verdicts.get(&AssertionStatus::Candidate), Some(&1));
-    let governs =
-        |mcp: &mut McpClient| {
-            mcp.call("traverse",&json!({
-        "start_ids":[decision.id],"rels":["GOVERNS"],"max_depth":1,"include_candidates":true
-    }))
-        };
+    let governs = |mcp: &mut McpClient| {
+        mcp.call(
+            "traverse",
+            &json!({
+                "start_ids":[decision.id],"rels":["GOVERNS"],"max_depth":1
+            }),
+        )
+    };
     assert_eq!(governs(mcp)["edges"], json!([]));
     // Explicitly human-authorized link request.
     mcp.call(
@@ -272,7 +227,7 @@ fn step3(s: &Scratch, _root: &Path, mcp: &mut McpClient, arch: &str, adr: &str) 
     assert_eq!(human["edges"].as_array().unwrap().len(), 1, "{human}");
     let evidence = mcp.call(
         "traverse",
-        &json!({"start_ids":[decision.id],"rels":["EVIDENCE_FOR"],"max_depth":1,"direction":"in","include_candidates":true}),
+        &json!({"start_ids":[decision.id],"rels":["EVIDENCE_FOR"],"max_depth":1,"direction":"in"}),
     );
     for id in [arch, adr] {
         assert!(
@@ -303,13 +258,7 @@ fn step4(s: &Scratch, mcp: &mut McpClient, arch: &str) -> Value {
     );
     mcp.call("ingest_finish", &json!({"job":brief["job"]}));
     let org = fixed_id(100);
-    let text = store(s)
-        .get(&NodeId::parse(arch).unwrap(), false)
-        .unwrap()
-        .unwrap()
-        .text;
-    let offset = u32::try_from(text.find("Cart").unwrap()).unwrap();
-    let mut batch = WriteBatch::new(
+    let batch = WriteBatch::new(
         WorkspaceId::default(),
         vec![Op::UpsertNode {
             id: org.clone(),
@@ -320,27 +269,7 @@ fn step4(s: &Scratch, mcp: &mut McpClient, arch: &str) -> Value {
             },
         }],
     );
-    let mut span = claim(
-        BatchSubject::Span {
-            chunk: NodeId::parse(arch).unwrap(),
-            offset,
-            len: 4,
-        },
-        ClaimClass::Type,
-        json!("x:Org"),
-        Layer::Gliner,
-        Method::Gliner,
-        6100,
-        "gliner-cart",
-    );
-    span.object = Some(org.clone());
-    batch.assertions.push(span);
     let report = store(s).apply_batch(batch, &ctx()).unwrap();
-    assert!(
-        report.verdicts.contains_key(&AssertionStatus::Candidate)
-            || report.verdicts.contains_key(&AssertionStatus::Unresolved),
-        "{report:?}"
-    );
     let stats = store(s).kind_stats(&WorkspaceId::default()).unwrap();
     let stat = stats
         .iter()
@@ -362,7 +291,7 @@ fn step4(s: &Scratch, mcp: &mut McpClient, arch: &str) -> Value {
 fn step5(mcp: &mut McpClient, decision: &str, arch: &str, adr: &str) -> Value {
     let evidence = mcp.call(
         "traverse",
-        &json!({"start_ids":[decision],"rels":["EVIDENCE_FOR"],"direction":"in","max_depth":1,"include_candidates":true}),
+        &json!({"start_ids":[decision],"rels":["EVIDENCE_FOR"],"direction":"in","max_depth":1}),
     );
     for id in [arch, adr] {
         assert!(
@@ -463,7 +392,7 @@ fn step6(s: &Scratch, root: &Path, mcp: &mut McpClient, dir: &Path, decision: &s
     let finished = mcp.call("ingest_finish", &json!({"job":brief["job"]}));
     let supersedes = mcp.call(
         "traverse",
-        &json!({"start_ids":[decision],"rels":["SUPERSEDES"],"max_depth":1,"include_candidates":true}),
+        &json!({"start_ids":[decision],"rels":["SUPERSEDES"],"max_depth":1}),
     );
     assert_eq!(supersedes["edges"], json!([]));
     json!({"commit":commit,"doctor":doctor,"new_symbol":new,

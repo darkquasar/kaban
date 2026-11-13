@@ -1,13 +1,13 @@
-//! Transactional source-owned derived claim publication and retirement.
+//! Transactional source-owned derived artifact publication and Gazetteer set retirement: a
+//! set's mention edges are written directly (`props.layer = gazetteer`, the scoring in the props).
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod common;
 
 use common::Scratch;
 use kaban_core::ActorId;
 use kaban_core::{
-    Actor, BatchAssertion, BatchSubject, ClaimClass, EdgeDiff, Fixed, GazetteerClaimSet,
-    IngestStore, Layer, MemoryStore, Method, NewNode, NodeId, Op, Owner, Rank, SourceRev,
-    TraverseQuery, WorkspaceId, WriteBatch, WriteCtx,
+    Actor, EdgeDiff, GazetteerClaimSet, IngestStore, Layer, MemoryStore, NewNode, NodeId, Op,
+    Owner, SourceRev, TraverseQuery, WorkspaceId, WriteBatch, WriteCtx,
 };
 use kaban_store_sqlite::SqliteStore;
 use serde_json::json;
@@ -28,28 +28,23 @@ fn node(id: &NodeId, kind: &str, text: &str, props: serde_json::Value) -> Op {
     }
 }
 
-fn claim(chunk: &NodeId, target: &NodeId) -> BatchAssertion {
-    BatchAssertion {
-        subject: BatchSubject::Edge {
-            src: chunk.clone(),
-            rel: "MENTIONS".into(),
-            dst: target.clone(),
-        },
-        claim_class: ClaimClass::Edge,
-        predicate: None,
-        object: None,
-        value: json!({"method": "exact", "offset": 0, "len": 10, "score": 9000}),
-        layer: Layer::Gazetteer,
-        method: Method::Exact,
-        extractor_id: None,
-        extractor_version: Some("1".into()),
-        source_id: Some("doc-fixture".into()),
-        lineage_id: "gazetteer:doc-fixture".into(),
-        raw_score: Fixed(9000),
-        rank: Rank::Normal,
-        rank_reason: None,
-        calibration_version: 0,
-        supersedes: None,
+/// A Gazetteer `MENTIONS` edge of the fixture source as the gazetteer writes it.
+fn claim(chunk: &NodeId, target: &NodeId) -> Op {
+    mention(chunk, target, json!({}))
+}
+
+/// [`claim`] with `extra` merged into its props (another layer, source or score).
+fn mention(chunk: &NodeId, target: &NodeId, extra: serde_json::Value) -> Op {
+    let mut props = json!({"layer": "gazetteer", "method": "exact", "offset": 0, "len": 10,
+        "score": 9000, "source_id": "doc-fixture"});
+    for (k, v) in extra.as_object().unwrap() {
+        props[k] = v.clone();
+    }
+    Op::UpsertEdge {
+        src: chunk.clone(),
+        dst: target.clone(),
+        rel: "MENTIONS".into(),
+        props: Some(props),
     }
 }
 
@@ -92,7 +87,7 @@ fn empty_complete_gazetteer_set_retires_prior_claim_projection() {
     first.edge_diff = EdgeDiff::Owned {
         owner: Owner::KabanIngest,
     };
-    first.assertions.push(claim(&chunk, &target));
+    first.ops.push(claim(&chunk, &target));
     store.apply_batch(first, &ctx()).unwrap();
     assert_eq!(hits(&store, &chunk), 1);
     // Base parses and ignores this additive field: the red uses existing public APIs.
@@ -115,14 +110,13 @@ fn empty_complete_gazetteer_set_retires_prior_claim_projection() {
 fn complete(
     store: &SqliteStore,
     document: &NodeId,
-    assertions: Vec<BatchAssertion>,
+    mentions: Vec<Op>,
     enabled: bool,
 ) -> WriteBatch {
-    let mut batch = WriteBatch::new(WorkspaceId::default(), vec![]);
+    let mut batch = WriteBatch::new(WorkspaceId::default(), mentions);
     batch.edge_diff = EdgeDiff::Owned {
         owner: Owner::KabanIngest,
     };
-    batch.assertions = assertions;
     batch.gazetteer_claim_sets.push(GazetteerClaimSet {
         document: document.clone(),
         source_id: "doc-fixture".into(),
@@ -226,7 +220,7 @@ fn complete_set_publishes_canonical_artifact_and_empty_set_cleans_only_its_sourc
     let store = SqliteStore::open(&scratch.db(), &scratch.keys()).unwrap();
     let (document, chunk, target) = (NodeId::new(), NodeId::new(), NodeId::new());
     let mut first = complete(&store, &document, vec![claim(&chunk, &target)], true);
-    first.ops = vec![
+    first.ops.extend([
         node(
             &document,
             "Document",
@@ -240,7 +234,7 @@ fn complete_set_publishes_canonical_artifact_and_empty_set_cleans_only_its_sourc
             json!({"owner":"kaban-ingest"}),
         ),
         node(&target, "Fact", "Architecture", json!({})),
-    ];
+    ]);
     store.apply_batch(first, &ctx()).unwrap();
     let conn = rusqlite::Connection::open(scratch.db()).unwrap();
     let count: i64 = conn
@@ -272,9 +266,10 @@ fn complete_set_publishes_canonical_artifact_and_empty_set_cleans_only_its_sourc
         conn.query_row("SELECT max(seq) FROM changes", [], |r| r.get::<_, i64>(0))
             .unwrap()
     );
-    let mut unknown = complete(&store, &document, vec![claim(&chunk, &target)], true);
-    unknown.assertions[0].extractor_version = Some("unknown".into());
-    assert!(store.apply_batch(unknown, &ctx()).is_err());
+    // a set's mention must come from one of the Document's chunks (was: an unknown
+    // extractor version, a claim field)
+    let foreign_chunk = complete(&store, &document, vec![claim(&target, &chunk)], true);
+    assert!(store.apply_batch(foreign_chunk, &ctx()).is_err());
     assert_eq!(
         before,
         conn.query_row("SELECT max(seq) FROM changes", [], |r| r.get::<_, i64>(0))
@@ -366,7 +361,7 @@ fn layer_reset_rejects_prepared_batch_after_empty_prior_set() {
     let store = SqliteStore::open(&scratch.db(), &scratch.keys()).unwrap();
     let (document, chunk, target) = (NodeId::new(), NodeId::new(), NodeId::new());
     let mut first = complete(&store, &document, vec![], false);
-    first.ops = vec![
+    first.ops.extend([
         node(
             &document,
             "Document",
@@ -380,7 +375,7 @@ fn layer_reset_rejects_prepared_batch_after_empty_prior_set() {
             json!({"owner":"kaban-ingest"}),
         ),
         node(&target, "Fact", "Architecture", json!({})),
-    ];
+    ]);
     store.apply_batch(first, &ctx()).unwrap();
     let stale = complete(&store, &document, vec![claim(&chunk, &target)], true);
     let authority =
@@ -408,13 +403,13 @@ fn layer_reset_rejects_prepared_batch_after_empty_prior_set() {
 }
 
 #[test]
-fn bounded_layer_reindex_and_forget_preserve_human_authority_and_immutable_claims() {
+fn bounded_layer_reindex_and_forget_preserve_a_human_edge() {
     use kaban_core::{CurrentProducerAuthority, LayerMaintenance, config::EngineConfig};
     let scratch = Scratch::new("artifacts", "layer-maintenance");
     let store = SqliteStore::open(&scratch.db(), &scratch.keys()).unwrap();
     let (document, chunk, target) = (NodeId::new(), NodeId::new(), NodeId::new());
     let mut batch = complete(&store, &document, vec![claim(&chunk, &target)], true);
-    batch.ops = vec![
+    batch.ops.extend([
         node(
             &document,
             "Document",
@@ -428,18 +423,10 @@ fn bounded_layer_reindex_and_forget_preserve_human_authority_and_immutable_claim
             json!({"owner":"kaban-ingest"}),
         ),
         node(&target, "Fact", "Architecture", json!({})),
-    ];
+    ]);
     store.apply_batch(batch, &ctx()).unwrap();
     let authority =
         CurrentProducerAuthority::from_config(&EngineConfig::default(), Layer::Gazetteer).unwrap();
-    let conn = rusqlite::Connection::open(scratch.db()).unwrap();
-    let before: String = conn
-        .query_row(
-            "SELECT value FROM assertion WHERE layer='gazetteer'",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap();
     let stale = complete(&store, &document, vec![claim(&chunk, &target)], true);
     let reindex = store
         .maintain_layer(
@@ -468,7 +455,8 @@ fn bounded_layer_reindex_and_forget_preserve_human_authority_and_immutable_claim
     let forgotten = store
         .maintain_layer(authority, LayerMaintenance::Forget, None, 1, &ctx())
         .unwrap();
-    assert_eq!(forgotten.rows, 2);
+    // the human link took the triple over: only the artifact is the layer's to forget
+    assert_eq!(forgotten.rows, 1);
     let snapshot = serde_json::to_value(&linked).unwrap();
     store
         .apply_batch(
@@ -485,26 +473,10 @@ fn bounded_layer_reindex_and_forget_preserve_human_authority_and_immutable_claim
         })
         .unwrap()
         .edges;
-    assert_eq!(serde_json::to_value(&edges[0]).unwrap(), snapshot);
-    let standing: i64 = conn
-        .query_row(
-            "SELECT count(*) FROM assertion WHERE layer='gazetteer' AND rank<>'deprecated'",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap();
     assert_eq!(
-        standing, 0,
-        "forget-layer must not resurrect identical machine authority on replay"
-    );
-    assert_eq!(
-        before,
-        conn.query_row(
-            "SELECT value FROM assertion WHERE layer='gazetteer' ORDER BY id LIMIT 1",
-            [],
-            |r| r.get::<_, String>(0)
-        )
-        .unwrap()
+        serde_json::to_value(&edges[0]).unwrap(),
+        snapshot,
+        "a producer replay never overwrites a human's edge"
     );
     assert!(
         store
@@ -526,7 +498,7 @@ fn offline_artifact_diagnostics_report_stale_retired_and_cursor_counts_without_w
     let store = SqliteStore::open(&scratch.db(), &scratch.keys()).unwrap();
     let (document, chunk, target) = (NodeId::new(), NodeId::new(), NodeId::new());
     let mut batch = complete(&store, &document, vec![claim(&chunk, &target)], true);
-    batch.ops = vec![
+    batch.ops.extend([
         node(
             &document,
             "Document",
@@ -540,7 +512,7 @@ fn offline_artifact_diagnostics_report_stale_retired_and_cursor_counts_without_w
             json!({"owner":"kaban-ingest"}),
         ),
         node(&target, "Fact", "Architecture", json!({})),
-    ];
+    ]);
     store.apply_batch(batch, &ctx()).unwrap();
     let authority =
         CurrentProducerAuthority::from_config(&EngineConfig::default(), Layer::Gazetteer).unwrap();
@@ -587,76 +559,6 @@ fn offline_artifact_diagnostics_report_stale_retired_and_cursor_counts_without_w
             .get::<_, String>(0))
             .unwrap(),
         "malformed"
-    );
-}
-
-#[test]
-fn unknown_legacy_layer_mapping_refuses_without_retiring_any_prior_page() {
-    use kaban_core::{
-        CurrentProducerAuthority, LayerMaintenance, MaintenanceRefusal, config::EngineConfig,
-    };
-    let scratch = Scratch::new("artifacts", "untracked-layer");
-    let store = SqliteStore::open(&scratch.db(), &scratch.keys()).unwrap();
-    let (document, chunk, target) = (NodeId::new(), NodeId::new(), NodeId::new());
-    let mut known = claim(&chunk, &target);
-    let mut unknown = known.clone();
-    unknown.extractor_version = Some("unknown".into());
-    unknown.value = json!({"unknown":true});
-    known.value = json!({"known":true});
-    let mut batch = WriteBatch::new(
-        WorkspaceId::default(),
-        vec![
-            node(
-                &document,
-                "Document",
-                "Fixture",
-                json!({"owner":"kaban-ingest","source_id":"doc-fixture","chunk_ids":[chunk]}),
-            ),
-            node(
-                &chunk,
-                "Chunk",
-                "Architecture",
-                json!({"owner":"kaban-ingest"}),
-            ),
-            node(&target, "Fact", "Architecture", json!({})),
-        ],
-    );
-    batch.assertions = vec![known, unknown];
-    store.apply_batch(batch, &ctx()).unwrap();
-    let conn = rusqlite::Connection::open(scratch.db()).unwrap();
-    let before: i64 = conn
-        .query_row("SELECT max(seq) FROM changes", [], |r| r.get(0))
-        .unwrap();
-    let authority =
-        CurrentProducerAuthority::from_config(&EngineConfig::default(), Layer::Gazetteer).unwrap();
-    let result = store
-        .maintain_layer(authority, LayerMaintenance::Forget, None, 1, &ctx())
-        .unwrap();
-    assert_eq!(result.refused, Some(MaintenanceRefusal::UntrackedProducer));
-    assert_eq!(result.untracked, 1);
-    assert_eq!(result.rows, 0);
-    assert_eq!(result.transactions, 0);
-    conn.execute("INSERT INTO derived_artifact SELECT 'obsolete-fixture',workspace_id,'gazetteer','obsolete-fixture',rid,json_object('content_hash',content_hash,'rev',rev),'fixture',policy_version,0 FROM node WHERE id=?1",[document.as_str()]).unwrap();
-    let retired = store
-        .retire_producer(authority, "obsolete-fixture", 1, &ctx())
-        .unwrap();
-    assert_eq!(retired.refused, Some(MaintenanceRefusal::UntrackedProducer));
-    assert!(retired.untracked > 0);
-    assert_eq!(retired.rows, 0);
-    assert_eq!(retired.transactions, 0);
-    assert_eq!(
-        before,
-        conn.query_row("SELECT max(seq) FROM changes", [], |r| r.get::<_, i64>(0))
-            .unwrap()
-    );
-    assert_eq!(
-        conn.query_row(
-            "SELECT count(*) FROM assertion WHERE rank='deprecated'",
-            [],
-            |r| r.get::<_, i64>(0)
-        )
-        .unwrap(),
-        0
     );
 }
 
@@ -820,7 +722,7 @@ fn unchanged_on_off_on_has_fresh_claims_and_old_batches_cannot_resurrect() {
     let store = SqliteStore::open(&scratch.db(), &scratch.keys()).unwrap();
     let (document, chunk, target) = (NodeId::new(), NodeId::new(), NodeId::new());
     let mut on = complete(&store, &document, vec![claim(&chunk, &target)], true);
-    on.ops = vec![
+    on.ops.extend([
         node(
             &document,
             "Document",
@@ -834,7 +736,7 @@ fn unchanged_on_off_on_has_fresh_claims_and_old_batches_cannot_resurrect() {
             json!({"owner":"kaban-ingest"}),
         ),
         node(&target, "Fact", "Architecture", json!({})),
-    ];
+    ]);
     store.apply_batch(on.clone(), &ctx()).unwrap();
     assert_eq!(hits(&store, &chunk), 1);
     let revision = SourceRev::from(&store.get(&document, false).unwrap().unwrap());
@@ -846,8 +748,10 @@ fn unchanged_on_off_on_has_fresh_claims_and_old_batches_cannot_resurrect() {
     );
     let same = complete(&store, &document, vec![claim(&chunk, &target)], true);
     let report = store.apply_batch(same, &ctx()).unwrap();
-    assert_eq!(report.assertions_inserted, 0);
-    assert_eq!(report.assertions_noop, 1);
+    assert_eq!(
+        report.outbox_first_seq, None,
+        "an unchanged set writes nothing"
+    );
     assert_eq!(
         store
             .gazetteer_generation(&document, &WorkspaceId::default())
@@ -947,7 +851,7 @@ fn complete_set_rejects_foreign_document_producer_source_and_rolls_back() {
     let (document, chunk, target, sentinel) =
         (NodeId::new(), NodeId::new(), NodeId::new(), NodeId::new());
     let mut first = complete(&store, &document, vec![claim(&chunk, &target)], true);
-    first.ops = vec![
+    first.ops.extend([
         node(
             &document,
             "Document",
@@ -961,7 +865,7 @@ fn complete_set_rejects_foreign_document_producer_source_and_rolls_back() {
             json!({"owner":"kaban-ingest"}),
         ),
         node(&target, "Fact", "Architecture", json!({})),
-    ];
+    ]);
     store.apply_batch(first, &ctx()).unwrap();
     let mut forged = complete(&store, &document, vec![], false);
     forged.gazetteer_claim_sets[0].source_id = "foreign-source".into();
@@ -1011,17 +915,22 @@ fn empty_set_preserves_human_other_layer_and_foreign_lineage() {
     let document = NodeId::new();
     let chunks = [NodeId::new(), NodeId::new(), NodeId::new(), NodeId::new()];
     let targets = [NodeId::new(), NodeId::new(), NodeId::new(), NodeId::new()];
-    let mut own = claim(&chunks[0], &targets[0]);
-    let mut human = claim(&chunks[1], &targets[1]);
-    human.layer = Layer::Human;
-    human.lineage_id = "human:fixture".into();
-    let mut script = claim(&chunks[2], &targets[2]);
-    script.layer = Layer::V4;
-    script.method = Method::Measured;
-    let mut other = claim(&chunks[3], &targets[3]);
-    other.lineage_id = "gazetteer:foreign-source".into();
-    other.source_id = Some("foreign-source".into());
-    own.raw_score = Fixed(9999);
+    let own = mention(&chunks[0], &targets[0], json!({"score": 9999}));
+    let human = mention(
+        &chunks[1],
+        &targets[1],
+        json!({"layer": "human", "method": "human"}),
+    );
+    let script = mention(
+        &chunks[2],
+        &targets[2],
+        json!({"layer": "v4", "method": "measured"}),
+    );
+    let other = mention(
+        &chunks[3],
+        &targets[3],
+        json!({"source_id": "foreign-source"}),
+    );
     let mut first = complete(&store, &document, vec![own, human, script, other], true);
     first.ops.push(node(
         &document,
@@ -1052,12 +961,6 @@ fn empty_set_preserves_human_other_layer_and_foreign_lineage() {
             "other authority must remain projected"
         );
     }
-    // An old raw assertion replay cannot restore the retired own lineage.
-    let mut replay = WriteBatch::new(WorkspaceId::default(), vec![]);
-    replay.assertions.push(claim(&chunks[0], &targets[0]));
-    replay.assertions[0].extractor_version = Some("1:set:1".into());
-    store.apply_batch(replay, &ctx()).unwrap();
-    assert_eq!(hits(&store, &chunks[0]), 0);
 }
 
 #[test]
@@ -1231,7 +1134,7 @@ fn parse_artifact_publication_is_idempotent_and_refuses_owner_or_foreign_key_col
 }
 
 #[test]
-fn artifact_retirement_queries_use_existing_lineage_and_source_indexes() {
+fn artifact_retirement_queries_use_existing_edge_and_source_indexes() {
     let scratch = Scratch::new("artifacts", "index-plans");
     let store = SqliteStore::open(&scratch.db(), &scratch.keys()).unwrap();
     let (document, chunk, target) = (NodeId::new(), NodeId::new(), NodeId::new());
@@ -1253,11 +1156,7 @@ fn artifact_retirement_queries_use_existing_lineage_and_source_indexes() {
             node(&target, "Fact", "Architecture", json!({})),
         ],
     );
-    for i in 0..128 {
-        let mut assertion = claim(&chunk, &target);
-        assertion.value = json!({"fixture":i});
-        batch.assertions.push(assertion);
-    }
+    batch.ops.push(claim(&chunk, &target));
     store.apply_batch(batch, &ctx()).unwrap();
     let conn = rusqlite::Connection::open(scratch.db()).unwrap();
     let rid: i64 = conn
@@ -1272,16 +1171,12 @@ fn artifact_retirement_queries_use_existing_lineage_and_source_indexes() {
     }
     for (sql, index) in [
         (
-            "EXPLAIN QUERY PLAN SELECT id,key FROM assertion WHERE lineage_id='gazetteer:fixture' AND workspace_id='default' AND layer='gazetteer'",
-            "assertion_lineage",
+            "EXPLAIN QUERY PLAN SELECT src,dst,rel FROM edge WHERE workspace_id='default' AND rel='MENTIONS' AND layer='gazetteer' AND source_id='doc-fixture'",
+            "edge_rel_layer",
         ),
         (
             "EXPLAIN QUERY PLAN DELETE FROM derived_artifact WHERE source_rid=1 AND (source_rev <> '{}' OR policy_version <> 'v1')",
             "derived_artifact_source",
-        ),
-        (
-            "EXPLAIN QUERY PLAN SELECT id FROM assertion WHERE layer='gazetteer' AND workspace_id='default' AND id>0 AND rank<>'deprecated' ORDER BY id LIMIT 3",
-            "assertion_layer",
         ),
         (
             "EXPLAIN QUERY PLAN SELECT artifact_key FROM derived_artifact WHERE workspace_id='default' AND layer='gazetteer' AND producer_id='retired-fixture' LIMIT 3",
@@ -1359,76 +1254,4 @@ fn artifact_source_coordinates_hide_foreign_unknown_and_nonactive_sources() {
             .unwrap(),
         None
     );
-}
-
-#[test]
-fn human_deprecated_gazetteer_claim_is_not_resurrected_by_on_off_on() {
-    for (reason, after_off) in [
-        ("incorrect mention", false),
-        ("producer-set:manual", false),
-        ("producer-set:retired", false),
-        ("producer-set:retired", true),
-        ("policy:fixture", true),
-    ] {
-        let scratch = Scratch::new("artifacts", reason);
-        let store = SqliteStore::open(&scratch.db(), &scratch.keys()).unwrap();
-        let (document, chunk, target) = (NodeId::new(), NodeId::new(), NodeId::new());
-        let mut first = complete(&store, &document, vec![claim(&chunk, &target)], true);
-        first.ops = vec![
-            node(
-                &document,
-                "Document",
-                "Fixture document",
-                json!({"owner":"kaban-ingest","source_id":"doc-fixture","chunk_ids":[chunk]}),
-            ),
-            node(
-                &chunk,
-                "Chunk",
-                "Architecture",
-                json!({"owner":"kaban-ingest"}),
-            ),
-            node(&target, "Fact", "Architecture", json!({})),
-        ];
-        store.apply_batch(first, &ctx()).unwrap();
-        let conn = rusqlite::Connection::open(scratch.db()).unwrap();
-        let key: String = conn
-            .query_row(
-                "SELECT key FROM assertion WHERE lineage_id='gazetteer:doc-fixture'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        let human_ctx = WriteCtx::new("v1", WorkspaceId::default(), Actor::HumanCli);
-        if after_off {
-            store
-                .apply_batch(complete(&store, &document, vec![], false), &ctx())
-                .unwrap();
-        }
-        if reason == "policy:fixture" {
-            store
-                .rescan_assertions("v2", &mut |claim, _audit| {
-                    Some(claim.value.as_value().clone())
-                })
-                .unwrap();
-        } else {
-            store.deprecate_assertion(&key, reason, &human_ctx).unwrap();
-        }
-        assert_eq!(hits(&store, &chunk), 0);
-        if !after_off {
-            store
-                .apply_batch(complete(&store, &document, vec![], false), &ctx())
-                .unwrap();
-        }
-        store
-            .apply_batch(
-                complete(&store, &document, vec![claim(&chunk, &target)], true),
-                &ctx(),
-            )
-            .unwrap();
-        assert_eq!(
-            hits(&store, &chunk),
-            0,
-            "producer generation must not resurrect a human-deprecated Gazetteer claim (reason={reason})"
-        );
-    }
 }

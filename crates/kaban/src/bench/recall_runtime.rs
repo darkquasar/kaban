@@ -14,15 +14,14 @@ use kaban_api::{
     RememberStatus, TraverseRequest,
 };
 use kaban_core::{
-    Actor, ActorId, ForgetMode, Governance, GraphStore, NewEvent, NodeId, TraverseDirection,
-    WorkspaceId, WriteCtx, config::EngineConfig,
+    ActorId, ForgetMode, GraphStore, NodeId, TraverseDirection, WorkspaceId, config::EngineConfig,
 };
 use kaban_policy::Policy;
 use kaban_store_sqlite::SqliteStore;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use super::corpus::{Corpus, Kind, Life, RELS, SEED, WORKSPACES, fixture_repo};
+use super::corpus::{Corpus, Life, RELS, SEED, WORKSPACES, fixture_repo};
 use super::recall_classes::{Fixtures, JudgedQuery, Pair, QueryClass, edge_precision, ndcg_at_10};
 
 /// Recall runs require a new database; `--n` is small only for harness checks.
@@ -261,7 +260,6 @@ pub(super) fn materialize(
     n: usize,
     edges_per_node: usize,
     corpus: &mut Corpus,
-    commit: &str,
 ) -> Result<SourceMap> {
     let catalog: BTreeMap<_, _> = fixtures
         .sources
@@ -271,7 +269,6 @@ pub(super) fn materialize(
     let mut map = SourceMap::default();
     let mut by_ws: Vec<Vec<String>> = vec![Vec::new(); WORKSPACES.len()];
     let mut lifecycle = Vec::new();
-    let mut decisions = Vec::new();
     for ordinal in 0..n {
         let (spec, request) = super::runner::corpus_request(corpus, ordinal);
         let stable = format!("corpus:{ordinal}");
@@ -296,30 +293,11 @@ pub(super) fn materialize(
             .position(|(name, _)| *name == spec.workspace)
             .context("unknown corpus workspace")?;
         by_ws[ws].push(out.id.clone());
-        if spec.kind == Kind::Decision && spec.accepted {
-            decisions.push((out.id.clone(), spec.workspace));
-        }
         match spec.life {
             Life::Active => {}
             Life::Archived => lifecycle.push((out.id, ForgetMode::Archive)),
             Life::Tombstoned => lifecycle.push((out.id, ForgetMode::Tombstone)),
         }
-    }
-    for (id, workspace) in decisions {
-        store.transition(
-            &NodeId::parse(&id)?,
-            Governance::Accepted,
-            NewEvent {
-                reason: "bench-accept".into(),
-                commit_sha: Some(commit.into()),
-                ..Default::default()
-            },
-            &WriteCtx::new(
-                api.policy_version(),
-                WorkspaceId::new(workspace),
-                Actor::Agent,
-            ),
-        )?;
     }
     for ordinal in 0..n
         .checked_mul(edges_per_node)
@@ -680,7 +658,7 @@ fn recall(
     let store = SqliteStore::open_as(db, keys, actor)?.with_recall_config(engine.recall.clone())?;
     let sqlite = Arc::new(store);
     let mut corpus = Corpus::new(SEED);
-    let commit = fixture_repo(&fixture, &corpus)?;
+    fixture_repo(&fixture, &corpus)?;
     let config = ApiConfig {
         workspace: WorkspaceId::new("ws1"),
         repo_root: Some(fixture),
@@ -701,7 +679,6 @@ fn recall(
         args.n,
         args.edges_per_node,
         &mut corpus,
-        &commit,
     )?;
     let rows = sets
         .iter()
@@ -858,10 +835,7 @@ fn publish(result: &Value, out: Option<&Path>) -> Result<ExitCode> {
 mod tests {
     use super::super::recall_classes::{EdgeJudgment, Source};
     use super::*;
-    use kaban_core::{
-        BatchAssertion, BatchSubject, ClaimClass, Fixed, IngestStore, Layer, Method, Rank,
-        WriteBatch,
-    };
+    use kaban_core::{Actor, IngestStore, Op, WriteBatch, WriteCtx};
 
     fn fixtures() -> Fixtures {
         Fixtures::load(
@@ -899,7 +873,6 @@ mod tests {
             5,
             0,
             &mut Corpus::new(SEED),
-            "0123456789abcdef0123456789abcdef0123456789",
         )
         .unwrap();
         assert_eq!(
@@ -966,18 +939,7 @@ mod tests {
             .find(|source| source.id == "corpus:0")
             .unwrap()
             .text = "different".into();
-        assert!(
-            materialize(
-                &api,
-                store.as_ref(),
-                &bad,
-                5,
-                0,
-                &mut Corpus::new(SEED),
-                "unused"
-            )
-            .is_err()
-        );
+        assert!(materialize(&api, store.as_ref(), &bad, 5, 0, &mut Corpus::new(SEED),).is_err());
         let (store, api) = service();
         assert!(
             materialize(
@@ -987,7 +949,6 @@ mod tests {
                 2,
                 0,
                 &mut Corpus::new(SEED),
-                "unused"
             )
             .is_err()
         );
@@ -1014,7 +975,6 @@ mod tests {
             5,
             0,
             &mut Corpus::new(SEED),
-            "unused",
         )
         .unwrap();
         let id = map.resolve("ws1", "w:architecture").unwrap();
@@ -1053,27 +1013,12 @@ mod tests {
         let src = NodeId::parse(map.resolve("ws1", "from").unwrap()).unwrap();
         let mut batch = WriteBatch::new(WorkspaceId::new("ws1"), vec![]);
         for target in ["correct", "wrong", "unknown"] {
-            batch.assertions.push(BatchAssertion {
-                subject: BatchSubject::Edge {
-                    src: src.clone(),
-                    rel: "MENTIONS".into(),
-                    dst: NodeId::parse(map.resolve("ws1", target).unwrap()).unwrap(),
-                },
-                claim_class: ClaimClass::Edge,
-                predicate: None,
-                object: None,
-                value: json!({"method":"exact", "offset":0, "len":3, "score":9000}),
-                layer: Layer::Gazetteer,
-                method: Method::Exact,
-                extractor_id: None,
-                extractor_version: Some("1".into()),
-                source_id: Some("synthetic".into()),
-                lineage_id: format!("synthetic:{target}"),
-                raw_score: Fixed(9000),
-                rank: Rank::Normal,
-                rank_reason: None,
-                calibration_version: 0,
-                supersedes: None,
+            batch.ops.push(Op::UpsertEdge {
+                src: src.clone(),
+                dst: NodeId::parse(map.resolve("ws1", target).unwrap()).unwrap(),
+                rel: "MENTIONS".into(),
+                props: Some(json!({"layer": "gazetteer", "method": "exact", "offset": 0,
+                    "len": 3, "score": 9000, "source_id": "synthetic"})),
             });
         }
         store
@@ -1131,7 +1076,6 @@ mod tests {
             5,
             1,
             &mut Corpus::new(SEED),
-            "unused",
         )
         .unwrap();
         let result = paired(&api, &fixtures, &map, 30, 1, 5, false).unwrap();

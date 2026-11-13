@@ -138,14 +138,6 @@ fn the_cli_stamps_local_by_default_and_the_flag_or_env_otherwise() {
     assert_eq!(stamped(&s, &flag), by("agent-a"));
     assert_eq!(stamped(&s, &env), by("agent-b"));
     assert_eq!(stamped(&s, &both), by("agent-c"));
-    let store = kaban_store_sqlite::SqliteStore::open_existing_key(
-        &s.db(),
-        &s.home().join("keys"),
-        &kaban_core::ActorId::default(),
-    )
-    .unwrap();
-    let verify = kaban_core::AuditStore::audit_verify(&store).unwrap();
-    assert!(verify.ok, "the audit chain still verifies: {verify:?}");
 }
 
 #[test]

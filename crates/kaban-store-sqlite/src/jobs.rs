@@ -259,7 +259,7 @@ pub(crate) fn done_artifact(
         source_rev: request.source_rev.clone(),
         config_hash,
         policy_version: ctx.policy_version.clone(),
-        published_at: crate::reconcile::persist::now_unix(),
+        published_at: crate::edge_write::now_unix(),
     };
     Ok(artifact)
 }
@@ -277,7 +277,7 @@ pub(crate) fn release(conn: &Connection, job: &IngestJob) -> Result<()> {
 
 /// Revoke only the exact Document/source binding, before purge clears its props.
 pub(crate) fn revoke_document(conn: &Connection, document: &str, workspace: &str) -> Result<u32> {
-    if !crate::reconcile::engine_tables(conn)? {
+    if !crate::edge_write::scoring_columns(conn)? {
         return Ok(0);
     }
     conn.execute("UPDATE leases SET expires_at=unixepoch()-1 WHERE name IN (SELECT json_extract(plan,'$.lease.name') FROM ingest_jobs WHERE workspace_id=?2 AND json_extract(plan,'$.document_id')=?1)",params![document,workspace]).sql()?;
@@ -526,68 +526,6 @@ fn add_count(a: u64, b: u64) -> Result<u64> {
         .ok_or(StoreError::InvalidName("submit".into(), "too_large"))
 }
 
-/// Only an explicitly reindexed exact edge claim may be re-derived by a new checked job.
-/// Generic batch replay, finish/policy/forget retirement and human deprecation stay immutable.
-pub(crate) fn restore_reindexed(
-    conn: &Connection,
-    job: &IngestJob,
-    claims: &[kaban_core::BatchAssertion],
-) -> Result<bool> {
-    let mut changed = false;
-    for claim in claims {
-        let kaban_core::BatchSubject::Edge { src, rel, dst } = &claim.subject else {
-            continue;
-        };
-        if claim.layer != layer(&job.dialect)?
-            || claim.method != kaban_core::Method::IngestSubmit
-            || claim.source_id.as_deref() != Some(job.source_id.as_str())
-            || claim.value["owner"] != "kaban-parse"
-        {
-            continue;
-        }
-        let rid = |id: &kaban_core::NodeId| -> Result<Option<i64>> {
-            conn.query_row(
-                "SELECT rid FROM node WHERE id=?1 AND workspace_id=?2 AND lifecycle='active'",
-                params![id.as_str(), job.workspace.as_str()],
-                |r| r.get(0),
-            )
-            .optional()
-            .sql()
-        };
-        let (Some(src), Some(dst)) = (rid(src)?, rid(dst)?) else {
-            continue;
-        };
-        let assertion = kaban_core::Assertion {
-            key: kaban_core::AssertionKey::default(),
-            workspace_id: job.workspace.clone(),
-            subject: kaban_core::Subject::Edge {
-                src,
-                rel: rel.clone(),
-                dst,
-            },
-            claim_class: claim.claim_class,
-            predicate: claim.predicate.clone(),
-            object_rid: None,
-            value: kaban_core::CanonicalJson::new(claim.value.clone()),
-            layer: claim.layer,
-            method: claim.method,
-            extractor_id: claim.extractor_id.clone(),
-            extractor_version: claim.extractor_version.clone(),
-            source_id: claim.source_id.clone(),
-            lineage_id: claim.lineage_id.clone(),
-            raw_score: claim.raw_score,
-            rank: claim.rank,
-            rank_reason: claim.rank_reason.clone(),
-            calibration_version: claim.calibration_version,
-            supersedes: claim.supersedes.clone(),
-            ts: 0,
-        }
-        .with_key()?;
-        changed |= conn.execute("UPDATE assertion SET rank='normal',rank_reason=NULL WHERE key=?1 AND workspace_id=?2 AND rank='deprecated' AND rank_reason='producer-set:reindex'",params![assertion.key.0,job.workspace.as_str()]).sql()? != 0;
-    }
-    Ok(changed)
-}
-
 /// Persist only successful transaction outcomes; callers cannot replace scalar counters.
 pub(crate) fn record_submit(
     conn: &Connection,
@@ -652,7 +590,6 @@ type FinishEdge = (i64, i64, String, String, String);
 /// Bounded complete population, collected before any retirement or edge deletion.
 pub(crate) struct FinishPopulation {
     pub(crate) edges: Vec<FinishEdge>,
-    pub(crate) claims: Vec<i64>,
     pub(crate) orphans: Vec<kaban_core::NodeId>,
     pub(crate) skipped_cap: bool,
 }
@@ -680,24 +617,9 @@ pub(crate) fn finish_population(
         SELECT e.src,e.dst,e.rel,s.id,d.id FROM edge e JOIN node s ON s.rid=e.src JOIN node d ON d.rid=e.dst
         WHERE e.workspace_id=?2 AND s.workspace_id=?2 AND d.workspace_id=?2
         AND json_extract(e.props,'$.owner')='kaban-parse'
-        AND (e.layer IS NULL OR e.layer IN ('llm','gliner','script'))
         AND (e.source_id IS NULL OR e.source_id=?3)
         AND (e.src IN records OR (e.rel='EVIDENCE_FOR' AND e.src IN chunks))
         ORDER BY s.id,d.id,e.rel LIMIT ?4")).sql()?.query_map(args, |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).sql()?.collect::<rusqlite::Result<Vec<FinishEdge>>>().sql()?;
-    let claims = conn
-        .prepare(&format!(
-            "{FINISH_SCOPE}
-        SELECT a.id FROM assertion a WHERE a.workspace_id=?2 AND a.source_id=?3
-        AND a.subject_kind='edge' AND a.claim_class='edge' AND a.method='ingest_submit'
-        AND a.layer IN ('llm','gliner','script') AND json_extract(a.value,'$.owner')='kaban-parse'
-        AND (a.subject_rid IN records OR (a.predicate='EVIDENCE_FOR' AND a.subject_rid IN chunks))
-        ORDER BY a.id LIMIT ?4"
-        ))
-        .sql()?
-        .query_map(args, |r| r.get(0))
-        .sql()?
-        .collect::<rusqlite::Result<Vec<i64>>>()
-        .sql()?;
     let scoped_records = conn
         .prepare(&format!(
             "{FINISH_SCOPE}
@@ -724,8 +646,7 @@ pub(crate) fn finish_population(
     let mut all_records = records.clone();
     all_records.extend(scoped_records.iter().map(|(id, _)| id.clone()));
     let skipped_cap = plan["submit_state"]["overflow"].as_bool().unwrap_or(false)
-        || names.len().saturating_add(all_records.len()) > request.finish_cap as usize
-        || claims.len() > request.finish_cap as usize;
+        || names.len().saturating_add(all_records.len()) > request.finish_cap as usize;
     let orphans = if skipped_cap {
         Vec::new()
     } else {
@@ -740,7 +661,6 @@ pub(crate) fn finish_population(
     };
     Ok(FinishPopulation {
         edges,
-        claims,
         orphans,
         skipped_cap,
     })

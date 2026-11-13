@@ -173,12 +173,12 @@ fn strings_forbidden_by_a_newer_policy_are_masked_or_hidden_on_every_read_surfac
 
 /// Spec 05 SS-11 (correction fix8b): the read gate decides eligibility inside the store's
 /// recall, where the store holds its own connection, so the predicate reads no store state
-/// and the hidden read's audit row is written after the recall returns. A higher-ranked
+/// (the hidden read's DB audit row went with the audit chain, T3). A higher-ranked
 /// record the policy rejects is skipped and the eligible one delivered. Under a timeout: a
 /// recall blocked on its own store is a failure to report, never one to wait out (the first
 /// predicate audited from inside the lock and hung every policy recall that hid a record).
 #[test]
-fn a_recall_that_hides_a_record_returns_the_eligible_one_and_audits_the_hidden_read() {
+fn a_recall_that_hides_a_record_returns_the_eligible_one() {
     let s = Scratch::new("kaban-api-read-gate", "hidden-refill");
     let store = Arc::new(SqliteStore::open(&s.db(), &s.keys()).unwrap());
     let lax = api_with(&store, "", "ws");
@@ -211,22 +211,4 @@ fn a_recall_that_hides_a_record_returns_the_eligible_one_and_audits_the_hidden_r
         .expect("the recall did not return within 3 s: a lock held across the read gate")
         .unwrap();
     assert_eq!(ids, vec![shown], "hidden {hidden}");
-    // the hidden read is audited once, by its reject verdict, after the recall
-    let raw = rusqlite::Connection::open(s.db()).unwrap();
-    let ops: Vec<String> = raw
-        .prepare("SELECT op FROM audit ORDER BY seq")
-        .unwrap()
-        .query_map([], |r| r.get(0))
-        .unwrap()
-        .collect::<Result<_, _>>()
-        .unwrap();
-    assert_eq!(ops, vec!["reject".to_string()]);
-    let seen: Vec<String> = raw
-        .prepare("SELECT node_id FROM read_audit_seen")
-        .unwrap()
-        .query_map([], |r| r.get(0))
-        .unwrap()
-        .collect::<Result<_, _>>()
-        .unwrap();
-    assert_eq!(seen, vec![hidden]);
 }

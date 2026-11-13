@@ -1,14 +1,11 @@
 //! The transport-neutral write path (engine-spec EN-E10a; engine-plan E2.11): a `WriteBatch`
-//! is plain serializable data. Every `Op` variant and an assertion survive JSON and back equal;
+//! is plain serializable data. Every `Op` variant survives JSON and back equal;
 //! the bounds a remote `GraphStore` needs hold at compile time; a batch written before
-//! `assertions` and `edge_diff` existed still parses; an unknown `op` tag is refused.
+//! `edge_diff` existed still parses; an unknown `op` tag is refused.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // test code: failures are the assertion
 
-use kaban_core::{
-    BatchAssertion, BatchSubject, ClaimClass, EdgeDiff, Fixed, Layer, Method, NewNode, NodeId, Op,
-    Owner, Rank, WorkspaceId, WriteBatch,
-};
+use kaban_core::{EdgeDiff, NewNode, NodeId, Op, Owner, WorkspaceId, WriteBatch};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::json;
@@ -46,28 +43,6 @@ fn sample() -> WriteBatch {
             },
             Op::Reactivate { id: c.clone() },
         ],
-        assertions: vec![BatchAssertion {
-            subject: BatchSubject::Edge {
-                src: a,
-                rel: "RELATES_TO".into(),
-                dst: b,
-            },
-            claim_class: ClaimClass::Edge,
-            predicate: Some("RELATES_TO".into()),
-            object: Some(c),
-            value: json!({"score": 0.75}),
-            layer: Layer::Script,
-            method: Method::Rule,
-            extractor_id: Some("x".into()),
-            extractor_version: Some("1".into()),
-            source_id: None,
-            lineage_id: "script:rule:1".into(),
-            raw_score: Fixed(7_500),
-            rank: Rank::Normal,
-            rank_reason: None,
-            calibration_version: 0,
-            supersedes: None,
-        }],
         edge_diff: EdgeDiff::Owned {
             owner: Owner::KabanIngest,
         },
@@ -77,7 +52,7 @@ fn sample() -> WriteBatch {
 }
 
 #[test]
-fn a_batch_with_every_op_variant_and_an_assertion_survives_json_and_back_equal() {
+fn a_batch_with_every_op_variant_survives_json_and_back_equal() {
     assert_bounds::<WriteBatch>();
     assert_bounds::<Op>();
     let batch = sample();

@@ -488,12 +488,6 @@ fn a_canary_in_a_description_is_rejected_with_rule_ids_only_and_nothing_is_store
     );
     assert!(repo.meta("ontology_hash:incidents").is_none());
     assert!(repo.registry.kind("incidents:Decision").is_none());
-    // the rejection is audited (rule ids and keyed hashes only), never the value
-    let audit = kaban_core::AuditStore::audit_verify(&*repo.store).unwrap();
-    assert!(
-        audit.ok && audit.entries >= 1,
-        "the rejection is on the chain: {audit:?}"
-    );
     assert!(!repo.disk_bytes().contains(SECRET_CANARY), "canary on disk");
 }
 

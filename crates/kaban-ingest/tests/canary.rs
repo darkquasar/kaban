@@ -956,7 +956,7 @@ fn commit(
 /// `recall` over the index and the trace log; the stubbed chunk's `PART_OF` edge exists.
 #[test]
 fn canaries_are_absent_from_db_wal_shm_audit_recall_and_logs() {
-    use kaban_core::{AuditStore, MemoryStore, RecallQuery};
+    use kaban_core::{MemoryStore, RecallQuery};
     let root = common::Scratch::new("kaban-ingest-canary", "blackbox");
     let db = root.join("kaban.db");
     let store = SqliteStore::open(&db, &root.join("keys")).unwrap();
@@ -1050,8 +1050,6 @@ fn canaries_are_absent_from_db_wal_shm_audit_recall_and_logs() {
     for needle in [CANARY, aws, host] {
         assert!(!contains(&disk, needle), "{needle} in db/wal/shm bytes");
     }
-    let audit = store.audit_verify().unwrap();
-    assert!(audit.ok && audit.entries >= 3, "{audit:?}");
     for (_, ids) in &written {
         for id in ids {
             let n = store.get(id, true).unwrap().unwrap();
@@ -1331,7 +1329,7 @@ fn contains_bytes(hay: &[u8], needle: &str) -> bool {
 /// the text) is present and chains.
 #[test]
 fn every_rule_family_leaves_the_secret_out_of_graph_bytes_and_audit_with_a_keyed_receipt() {
-    use kaban_core::{AuditStore, MemoryStore, RecallQuery};
+    use kaban_core::{MemoryStore, RecallQuery};
     for fam in families() {
         // Arrange
         let root = common::Scratch::new(
@@ -1434,8 +1432,6 @@ fn every_rule_family_leaves_the_secret_out_of_graph_bytes_and_audit_with_a_keyed
                 hits.len()
             );
         }
-        let chain = store.audit_verify().unwrap();
-        assert!(chain.ok && chain.entries >= 1, "{name}: {chain:?}");
         drop(store);
         let _ = &root;
     }

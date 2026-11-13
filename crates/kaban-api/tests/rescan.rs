@@ -1,6 +1,6 @@
 //! The rescan job (core-spec S4 "rescan job after policy change"; core-plan C2.7; MD-18,
 //! MD-19): nodes stored under an older policy are re-judged by the loaded one, reject hits are
-//! tombstoned with a `policy-reject` event, redact hits are masked in place, and
+//! tombstoned, redact hits are masked in place, and
 //! `index_meta.policy_hash` records the policy the whole database has been checked against.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // test code: failures are the assertion
@@ -10,10 +10,7 @@ mod common;
 use common::{Scratch, fact};
 use kaban_api::{KabanApi, RESCAN_BATCH, RecallRequest, RememberRequest, RescanStatus};
 use kaban_core::ActorId;
-use kaban_core::{
-    GovernanceStore, GraphStore, IndexMeta, IngestStore, Lifecycle, MemoryStore, NodeId,
-    RecallQuery,
-};
+use kaban_core::{GraphStore, IndexMeta, IngestStore, Lifecycle, MemoryStore, NodeId, RecallQuery};
 use kaban_policy::Policy;
 use kaban_store_sqlite::SqliteStore;
 use std::sync::Arc;
@@ -60,21 +57,8 @@ fn encoded(s: &Scratch, id: &str) -> bool {
     kind == "blob"
 }
 
-/// `(op, tool, field, rules)` of every audit row, oldest first (the chain of record).
-fn audit_rows(s: &Scratch) -> Vec<(String, String, String, String)> {
-    // the store exposes no row reader; the table is the record (core-spec S3)
-    let conn = rusqlite::Connection::open(s.db()).unwrap();
-    let mut st = conn
-        .prepare("SELECT op, tool, field, rules FROM audit ORDER BY seq")
-        .unwrap();
-    st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
-        .unwrap()
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap()
-}
-
 #[test]
-fn a_node_a_newer_policy_rejects_is_hidden_after_startup_with_an_audit_row_and_an_event() {
+fn a_node_a_newer_policy_rejects_is_hidden_after_startup() {
     // Arrange: a node stored under v1 whose text v2 rejects, and a clean node
     let s = Scratch::new("kaban-api-rescan", "reject");
     let store = s.store();
@@ -83,7 +67,6 @@ fn a_node_a_newer_policy_rejects_is_hidden_after_startup_with_an_audit_row_and_a
         .remember(fact("the nightjar codename must not leak"))
         .unwrap();
     let clean = v1.remember(fact("a plain note about cargo")).unwrap();
-    let before = audit_rows(&s).len();
     assert!(store.get(&nid(&secret.id), false).unwrap().is_some());
 
     // Act: the server starts with v2 and runs the rescan job
@@ -93,7 +76,7 @@ fn a_node_a_newer_policy_rejects_is_hidden_after_startup_with_an_audit_row_and_a
         .rescan_if_policy_changed(&CancellationToken::new())
         .unwrap();
 
-    // Assert: hidden from every default read, the audit row exists, the event names the reason
+    // Assert: hidden from every default read
     assert_eq!(outcome.status, RescanStatus::Completed, "{outcome:?}");
     assert_eq!((outcome.rejected, outcome.kept), (1, 1), "{outcome:?}");
     assert!(
@@ -110,36 +93,10 @@ fn a_node_a_newer_policy_rejects_is_hidden_after_startup_with_an_audit_row_and_a
         })
         .unwrap();
     assert_eq!(found.count, 0, "{found:?}");
-    let rows = audit_rows(&s);
-    let new_rows = &rows[before..];
-    assert!(
-        new_rows.iter().any(|(op, tool, _, rules)| op == "reject"
-            && tool == "rescan"
-            && rules.contains("codename")),
-        "no rescan reject audit row: {new_rows:?}"
-    );
-    // the OWN-65 `unstamped` reason row of a record created outside any repository is not a
-    // lifecycle event (engine-plan E2.0)
-    let events: Vec<_> = store
-        .events(&nid(&secret.id))
-        .unwrap()
-        .into_iter()
-        .filter(|e| e.kind != "unstamped")
-        .collect();
-    assert_eq!(events.len(), 1, "{events:?}");
-    assert_eq!(events[0].reason, "policy-reject");
-    assert_eq!(events[0].kind, "tombstoned");
     // the clean node is untouched apart from its policy stamp
     let kept = store.get(&nid(&clean.id), false).unwrap().unwrap();
     assert_eq!(kept.policy_version, v2.policy_version());
     assert_eq!(kept.rev, 1);
-    assert!(
-        store
-            .events(&nid(&clean.id))
-            .unwrap()
-            .iter()
-            .all(|e| e.kind == "unstamped")
-    );
     // the database is now checked against v2: a second start does nothing
     assert_eq!(
         store.index_meta().unwrap().get(IndexMeta::POLICY_HASH),
@@ -149,7 +106,6 @@ fn a_node_a_newer_policy_rejects_is_hidden_after_startup_with_an_audit_row_and_a
         .rescan_if_policy_changed(&CancellationToken::new())
         .unwrap();
     assert_eq!(again.status, RescanStatus::UpToDate, "{again:?}");
-    assert_eq!(audit_rows(&s).len(), rows.len());
 }
 
 #[test]
@@ -159,7 +115,7 @@ fn a_redactable_term_is_masked_in_place_with_a_new_rev_and_the_policy_version_up
 
 /// Spec 05 SS-17 (T7 review t7-5): the rescan over an encoded body is the rescan over a plain
 /// one. The node is written encoded under v1, the rescan decodes it, masks it and stores the
-/// masked body encoded again: the same outcome, revision, stamp and audit row, and the body
+/// masked body encoded again: the same outcome, revision and stamp, and the body
 /// reads back masked.
 #[test]
 fn a_redactable_term_is_masked_in_place_over_an_encoded_body() {
@@ -198,7 +154,6 @@ fn redactable_term_is_masked_in_place(compressed: bool) {
         encoded(&s, &node.id),
         "every body is stored encoded (OWN-M)"
     );
-    let before = audit_rows(&s).len();
 
     // Act
     let v2 = api_with(&store, V2);
@@ -206,7 +161,7 @@ fn redactable_term_is_masked_in_place(compressed: bool) {
         .rescan_if_policy_changed(&CancellationToken::new())
         .unwrap();
 
-    // Assert: masked in place, still active, new rev, stamped; the verdict is in the chain
+    // Assert: masked in place, still active, new rev, stamped
     assert_eq!((outcome.redacted, outcome.rejected), (1, 0), "{outcome:?}");
     let masked = store.get(&nid(&node.id), false).unwrap().unwrap();
     assert_eq!(masked.lifecycle, Lifecycle::Active);
@@ -230,17 +185,6 @@ fn redactable_term_is_masked_in_place(compressed: bool) {
     assert!(
         !masked.text.contains("hunter2"),
         "the stored text still carries the term"
-    );
-    let rows = audit_rows(&s);
-    assert!(
-        rows[before..]
-            .iter()
-            .any(|(op, tool, field, rules)| op == "redact"
-                && tool == "rescan"
-                && field == "text"
-                && rules.contains("old-password")),
-        "no rescan redact audit row: {:?}",
-        &rows[before..]
     );
     // the text index follows the masked text: the raw term no longer matches (asked at the
     // store, since the API masks the query itself before FTS sees it), the rest still does;
@@ -318,7 +262,6 @@ fn cancellation_between_batches_leaves_earlier_batches_committed_and_the_rest_pe
         Some(version.as_str()),
         "policy_hash must not claim a complete rescan"
     );
-    let audit_after_first = audit_rows(&s).len();
 
     // Act again: the re-run resumes with what is pending and finishes
     let second = v2
@@ -338,14 +281,6 @@ fn cancellation_between_batches_leaves_earlier_batches_committed_and_the_rest_pe
         store.index_meta().unwrap().get(IndexMeta::POLICY_HASH),
         Some(version.as_str())
     );
-    // one reject audit row per rejected node, none for the kept ones
-    let rows = audit_rows(&s);
-    let rescan_rows: Vec<_> = rows
-        .iter()
-        .filter(|(_, tool, _, _)| tool == "rescan")
-        .collect();
-    assert_eq!(rescan_rows.len(), 2, "{rescan_rows:?}");
-    assert!(rows.len() > audit_after_first);
     // a third start has nothing to do
     let third = v2
         .rescan_if_policy_changed(&CancellationToken::new())
@@ -467,7 +402,7 @@ fn body_matches(s: &Scratch, term: &str) -> i64 {
 /// R2-2 (rescan): the inventory covers every persisted node string, not only the content
 /// fields. A redact hit confined to `session_id` or `repo` is rewritten in place; a reject hit
 /// confined to `path_scope` tombstones the node. Afterwards the raw terms are absent from every
-/// node column, from FTS and from the events, changes and audit tables.
+/// node column, from FTS and from the bookkeeping tables.
 #[test]
 fn hits_confined_to_session_id_repo_and_path_scope_are_rewritten_or_hidden_by_the_rescan() {
     // Arrange under v1: three nodes whose text is clean
@@ -495,34 +430,12 @@ fn hits_confined_to_session_id_repo_and_path_scope_are_rewritten_or_hidden_by_th
         .remember(RememberRequest {
             kind: "Decision".into(),
             props: Some(serde_json::json!({"rationale": "a Decision needs one (C3.1)"})),
+            path_scope: vec!["src/nightjar/**".into()],
             ..fact("the third clean note, a decision")
         })
         .unwrap();
-    store
-        .transition(
-            &nid(&by_scope.id),
-            kaban_core::Governance::Accepted,
-            kaban_core::NewEvent {
-                reason: "accepted in review".into(),
-                path_scope: vec!["src/nightjar/**".into()],
-                signer_kind: kaban_core::SignerKind::HumanCli,
-                commit_sha: Some("abc1234".into()),
-                ..Default::default()
-            },
-            &kaban_core::WriteCtx::new(
-                v1.policy_version(),
-                kaban_core::WorkspaceId::default(),
-                kaban_core::Actor::Agent,
-            ),
-        )
-        .unwrap();
     let scoped = store.get(&nid(&by_scope.id), false).unwrap().unwrap();
     assert_eq!(scoped.path_scope, vec!["src/nightjar/**".to_string()]);
-    assert_eq!(
-        scoped.policy_version,
-        v1.policy_version(),
-        "stamped with v1 by the transition"
-    );
     let bookkeeping_before = bookkeeping_text(&s);
 
     // Act: start with v2
@@ -571,44 +484,25 @@ fn hits_confined_to_session_id_repo_and_path_scope_are_rewritten_or_hidden_by_th
     }
     assert_eq!(body_matches(&s, "hunter2"), 0);
     assert_eq!(body_matches(&s, "nightjar"), 0);
-    // nothing the rescan wrote (events, changes, audit) carries a raw term; the one row that
-    // does predates it: the acceptance event's `path_scope`, written under v1 and append-only
-    // by design (F17), so a policy change cannot rewrite it (read-time gating of events is the
-    // `events` surface's job)
+    // nothing the rescan wrote (the change rows) carries a raw term, and no bookkeeping row
+    // carries one at all (the acceptance event that kept `path_scope` went with governance)
     let bookkeeping_after = bookkeeping_text(&s);
     let written: Vec<&String> = bookkeeping_after
         .iter()
         .filter(|v| !bookkeeping_before.contains(v))
         .collect();
-    assert!(
-        written.len() >= 3,
-        "the rescan wrote audit, event and change rows: {written:?}"
-    );
     for value in written {
         assert!(
             !value.contains("hunter2") && !value.contains("nightjar"),
             "the rescan wrote a raw term into the bookkeeping: {value}"
         );
     }
-    let carried: Vec<&String> = bookkeeping_after
-        .iter()
-        .filter(|v| v.contains("hunter2") || v.contains("nightjar"))
-        .collect();
-    assert_eq!(
-        carried,
-        vec![&"[\"src/nightjar/**\"]".to_string()],
-        "only the pre-existing acceptance event keeps the term"
+    assert!(
+        !bookkeeping_after
+            .iter()
+            .any(|v| v.contains("hunter2") || v.contains("nightjar")),
+        "no bookkeeping row keeps a term"
     );
-    // the verdicts name the fields they were found in
-    let rows = audit_rows(&s);
-    let fields: Vec<&str> = rows
-        .iter()
-        .filter(|(_, tool, ..)| tool == "rescan")
-        .map(|(_, _, field, _)| field.as_str())
-        .collect();
-    assert!(fields.contains(&"session_id"), "{fields:?}");
-    assert!(fields.contains(&"repo"), "{fields:?}");
-    assert!(fields.contains(&"path_scope"), "{fields:?}");
 }
 
 /// R2-2 (`content_hash` after an in-place redact): the stored hash is replaced by one derived

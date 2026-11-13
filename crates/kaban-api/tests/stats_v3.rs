@@ -1,5 +1,5 @@
 //! `stats` v3 (core-spec F6; core-plan C3.6 as amended by M3-26): a superset of the spike's
-//! counters with the engine, the schema version, the conflicts count, the stores list and the
+//! counters with the engine, the schema version, the stores list and the
 //! policy's effective hash beside its file hash.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // test code: failures are the assertion
@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 
 #[test]
-fn stats_is_a_superset_with_engine_schema_version_conflicts_stores_and_effective_hash() {
+fn stats_is_a_superset_with_engine_schema_version_stores_and_effective_hash() {
     let policy = Policy::from_file(Policy::parse(b"").unwrap(), "f".repeat(64)).unwrap();
     let effective = policy.effective_hash().to_owned();
     let store = Arc::new(SqliteStore::open_memory().unwrap());
@@ -31,10 +31,11 @@ fn stats_is_a_superset_with_engine_schema_version_conflicts_stores_and_effective
     assert_eq!(v["nodes"], json!(1), "{v}");
     assert_eq!(v["by_kind"]["Fact"], json!(1));
     assert!(v["db_bytes"].as_u64().is_some_and(|b| b > 0));
-    // EN-E10b: `changes_lag` with its deprecated alias `outbox_lag` (same value) until 3.2
-    assert_eq!(v["changes_lag"], json!(0));
-    assert_eq!(v["outbox_lag"], json!(0));
-    assert_eq!(v["scope"]["changes_lag"], json!("global"), "{v}");
+    // `changes_lag`/`outbox_lag` went with the projector lag fields (T3, REC-08)
+    assert!(
+        v.get("changes_lag").is_none() && v.get("outbox_lag").is_none(),
+        "{v}"
+    );
     assert_eq!(
         v["policy"]["version"],
         json!("f".repeat(64)),
@@ -47,7 +48,6 @@ fn stats_is_a_superset_with_engine_schema_version_conflicts_stores_and_effective
         json!(kaban_store_sqlite::LATEST_SCHEMA_VERSION),
         "{v}"
     );
-    assert_eq!(v["conflicts"], json!(0), "{v}");
     assert_eq!(v["stores"], json!(["project"]), "{v}");
     assert_eq!(v["layers"].as_array().unwrap().len(), 4);
     assert_eq!(v["layers"][0]["layer"], "fts");

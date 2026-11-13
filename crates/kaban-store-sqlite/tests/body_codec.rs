@@ -17,7 +17,7 @@ use kaban_core::ontology::{Ns, Qualified};
 use kaban_core::text_index::{Canonical, Rows};
 use kaban_core::{
     ChangeLogStore, ForgetMode, IngestStore, MemoryStore, NewNode, NodeId, Op, RedactedStrings,
-    RememberOutcome, RescanAction, SchemaStore, SyncStore, WorkspaceId, WriteBatch,
+    RememberOutcome, RescanAction, SchemaStore, WorkspaceId, WriteBatch,
 };
 use kaban_store_sqlite::index_rows::IndexRows;
 use kaban_store_sqlite::{LATEST_SCHEMA_VERSION, SqliteStore};
@@ -362,7 +362,6 @@ fn bodies_are_encoded_on_write_and_read_back_exactly_on_every_surface() {
             &store.get(&nid(&note.id), false).unwrap().unwrap().text,
             text
         );
-        store.mark_serialized(&nid(&note.id), note.rev).unwrap();
     }
     let (rows, at) = index_texts(&s);
     assert_eq!(
@@ -373,14 +372,6 @@ fn bodies_are_encoded_on_write_and_read_back_exactly_on_every_surface() {
             .collect::<Vec<_>>()
     );
     assert_eq!(at.seq, store.changes_head().unwrap());
-    let exported = store
-        .serialized_records("default", &["Decision"], 10)
-        .unwrap();
-    let mut exported: Vec<String> = exported.into_iter().map(|n| n.text).collect();
-    exported.sort();
-    let mut expected = texts.to_vec();
-    expected.sort();
-    assert_eq!(exported, expected);
     for text in &texts {
         let again = store
             .remember(

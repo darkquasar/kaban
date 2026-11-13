@@ -256,19 +256,6 @@ impl KabanApi {
         let mut entry = self.entry_for(&ctx, op, "forget", "node", &id, vec![]);
         entry.node_id = Some(id.clone());
         ctx.audit.push(entry);
-        // EN-F16: a retirement is evidence against the node's reconciled winner and candidate
-        // claims, read before the store rejects their statuses (an archive keeps them and
-        // counts nothing); an unknown id is the store's `NotFound` below, not a count
-        if mode != ForgetMode::Archive {
-            match self
-                .store
-                .priors_obs_bump(&node_id, kaban_core::PriorsOutcome::Rejected)
-            {
-                Ok(counted) => tracing::debug!(counted, "priors_obs: rejected"),
-                Err(kaban_core::StoreError::NotFound(_)) => {}
-                Err(e) => tracing::warn!(error = %e, "priors_obs: the rejected count failed"),
-            }
-        }
         let outcome = self.store.forget(&node_id, mode, &ctx)?;
         self.export_audit(&ctx.audit);
         // the store read the terminal `seq` inside the transaction (SS-10)

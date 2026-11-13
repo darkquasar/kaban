@@ -1,7 +1,7 @@
 //! The CG-JOIN v1 §5 anchor lifecycle slices (SO-2, SO-13; engine-plan E2.2; v4 CG5.3 reruns
 //! these names) through the public API: `remember`, `apply_batch` (the `IngestStore` role
-//! trait), `forget` and the M5 import (`SyncStore::import_record`). The rows are read back
-//! on a second read-only connection. Invented data.
+//! trait) and `forget`. The rows are read back on a second read-only connection. Invented
+//! data.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // test code: failures are the assertion
 
@@ -10,8 +10,8 @@ mod common;
 use common::Scratch;
 use kaban_api::{ApiConfig, ForgetRequest, KabanApi, RememberRequest};
 use kaban_core::{
-    Actor, ForgetMode, Governance, ImportedRecord, IngestStore, Lifecycle, MemoryStore, NewNode,
-    NodeId, Op, SyncStore, WorkspaceId, WriteBatch, WriteCtx,
+    Actor, ForgetMode, IngestStore, Lifecycle, MemoryStore, NewNode, NodeId, Op, WorkspaceId,
+    WriteBatch, WriteCtx,
 };
 use kaban_policy::Policy;
 use kaban_store_sqlite::SqliteStore;
@@ -181,55 +181,6 @@ fn anchor_removed_on_forget_and_purge() {
     assert_eq!(r.lifecycle, Lifecycle::Purged);
     assert_eq!(f.anchors(&b).len(), 0, "a purged node has no anchor rows");
     assert_eq!(f.foreign_key_violations(), 0);
-}
-
-/// A `CodeRef` arriving through the M5 import path gets the same rows as one from `remember`,
-/// byte for byte (apart from the node it hangs on).
-#[test]
-fn anchor_imported_coderef_rows() {
-    let f = Fixture::new("import");
-    let remembered = f.remember_coderef("repo src/api/recall.rs recall", "crate::api::recall");
-    let imported = NodeId::new();
-    let now = kaban_core::now_iso();
-    f.store
-        .import_record(
-            &ImportedRecord {
-                id: imported.clone(),
-                kind: "CodeRef".into(),
-                text: "repo src/api/recall.rs recall (imported)".into(),
-                summary: None,
-                tags: vec![],
-                confidence: None,
-                importance: None,
-                lifecycle: Lifecycle::Active,
-                governance: Governance::None,
-                path_scope: vec![],
-                props: coderef_props("crate::api::recall"),
-                rev: 1,
-                created_at: now.clone(),
-                updated_at: now,
-                valid_from: None,
-                valid_to: None,
-                accepted_commit: None,
-                agent_id: None,
-                session_id: None,
-                repo: Some("repo".into()),
-                commit_sha: None,
-                dup_key: None,
-                event: None,
-            },
-            &WriteCtx::new("v1", WorkspaceId::default(), Actor::Agent),
-        )
-        .unwrap();
-    let strip = |rows: Vec<AnchorRow>| {
-        rows.into_iter()
-            .map(|(_, k, key, repo, scope)| (k, key, repo, scope))
-            .collect::<Vec<_>>()
-    };
-    let a = strip(f.anchors(&remembered));
-    let b = strip(f.anchors(imported.as_str()));
-    assert_eq!(a.len(), 2);
-    assert_eq!(a, b, "import and remember derive identical rows");
 }
 
 /// SO-2: a `CodeRef` with `symbol` and `snapshot_commit` yields two rows with the same

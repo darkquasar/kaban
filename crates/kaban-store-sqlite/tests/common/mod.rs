@@ -5,9 +5,6 @@
 #![allow(dead_code)] // each test binary uses a subset
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // test code: failures are the assertion
 
-pub(crate) mod orange;
-pub(crate) mod replay;
-
 use kaban_core::{
     Actor, MemoryStore, NewNode, Node, NodeId, RememberOutcome, WorkspaceId, WriteCtx,
 };

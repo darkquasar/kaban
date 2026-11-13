@@ -1,38 +1,31 @@
-//! `SqliteStore`: the spike's `GraphStore` implementation plus the M1 audit chain
-//! (`audit_table`), key handling and `db_id` in `index_meta`.
+//! `SqliteStore`: the spike's `GraphStore` implementation, key handling and `db_id` in
+//! `index_meta`.
 //!
 //! Module map (OWN-79): this file keeps the store type, its fields and `lock`, construction
-//! and migration (`open*`, `assemble`, `init_schema`), the shared link and governance
-//! machinery (`LinkEffect`, `link_in`, `edge_rule`, `state_of`, `govern`, `mark_target`, the
-//! RID helpers, `NodeState`, `Tenant`), the query helpers (`fts_expr`, `WS_COL`,
-//! `in_workspace`), the code-graph attach (`cg_read`) and every role-trait impl, which
-//! forwards the moved bodies:
+//! and migration (`open*`, `assemble`, `init_schema`), the shared link machinery
+//! (`LinkEffect`, `link_in`, `edge_rule`, `state_of`, `mark_target`, the RID helpers,
+//! `NodeState`, `Tenant`), the query helpers (`fts_expr`, `WS_COL`, `in_workspace`), the
+//! code-graph attach (`cg_read`) and every role-trait impl, which forwards the moved bodies:
 //! - `nodes.rs`: the `remember` workflow, node placement and upsert, the content hashes;
-//! - `claims.rs`: rescans, deprecation, replay, forget, purge, reactivation;
-//! - `batch.rs`: the `apply_batch` transaction, the edge diff and `check_layer_edges`;
-//! - `governance.rs`: the governance transition, the `governing` lookup and the
-//!   `supersession_chain` walk (v4 CG5.3).
+//! - `claims.rs`: the policy rescan, forget, purge, reactivation;
+//! - `batch.rs`: the `apply_batch` transaction and the edge diff.
 
 #[path = "artifacts.rs"]
 pub(crate) mod artifacts;
 mod batch;
 mod claims;
-mod governance;
 mod nodes;
 
 use crate::anchors;
-use crate::audit_table;
 use crate::candidates;
 use crate::changelog;
-use crate::confirmations;
 use crate::connection::{CgRead, LiveGuard, NoFileBacking, prepare_database_files};
 use crate::connection::{database_file_modes, open_existing_as_is};
 use crate::doctor;
-use crate::events;
+use crate::edge_write::{self, EdgeWrite};
 use crate::leases;
 use crate::ontology::{self, valid_stored_label, valid_stored_rel};
 use crate::recall;
-use crate::reconcile::{self, persist, project};
 use crate::rows::{NODE_COLS, bad_enum, row_edge, row_node};
 use crate::schema::{MigrationReport, Migrator, configure_connection};
 use crate::session;
@@ -41,16 +34,14 @@ use crate::tantivy::{self, Attach, Attached, SharedConnection};
 use crate::traverse;
 use kaban_core::Result;
 use kaban_core::{
-    ActorId, AuditEntry, AuditStore, AuditVerification, BatchReport, Change, ChangeLogStore,
-    Confirmation, DiscoveredRules, Edge, Event, FailurePatch, ForgetMode, ForgetOutcome,
-    Governance, GovernanceStore, GovernedSet, GoverningQuery, Hit, IndexMeta, IngestStore, Lease,
-    LeaseStore, Lifecycle, LinkReq, MemoryStore, Method, NewConfirmation, NewEvent, NewNode, Node,
-    NodeId, Ontology, Owner, PendingFailuresQuery, RecallQuery, Reconciler, RememberOutcome,
-    RescanAction, RescanReport, SchemaStore, SessionEdit, SessionEditKind, StoreError,
-    TraverseQuery, TraverseResult, TypeDef, WorkspaceId, WriteBatch, WriteCtx, new_id, now_iso,
+    ActorId, BatchReport, Change, ChangeLogStore, DiscoveredRules, Edge, FailurePatch, ForgetMode,
+    ForgetOutcome, GovernedSet, Hit, IndexMeta, IngestStore, Lease, LeaseStore, Lifecycle, LinkReq,
+    MemoryStore, Method, NewNode, Node, NodeId, Ontology, Owner, PendingFailuresQuery, RecallQuery,
+    RememberOutcome, RescanAction, RescanReport, SchemaStore, SessionEdit, SessionEditKind,
+    SessionStore, StoreError, TraverseQuery, TraverseResult, TypeDef, WorkspaceId, WriteBatch,
+    WriteCtx, new_id, now_iso,
 };
 use kaban_core::{AnchorPredicates, SnapshotAttach, SnapshotSymbol, SymbolPage};
-use kaban_core::{Chain, ChainDirection, WorkspaceFilter};
 use kaban_core::{
     DatabaseFileModes, DocumentIndexSummary, FailedDocumentRow, MaintenanceOutcome,
     StoreCapabilities,
@@ -63,6 +54,17 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 pub(crate) use nodes::content_hash;
+
+/// The shipped ontology, resolved once per process (the store crate holds no loaded user
+/// ontology; the service passes one through `SqliteStore::with_ontology`).
+fn shipped_ontology() -> Arc<Ontology> {
+    static SHIPPED: std::sync::OnceLock<Arc<Ontology>> = std::sync::OnceLock::new();
+    Arc::clone(SHIPPED.get_or_init(|| {
+        // the shipped bytes always resolve (a `kaban-core` test asserts it)
+        #[allow(clippy::expect_used)]
+        Arc::new(kaban_core::shipped::resolved().expect("the shipped ontology resolves"))
+    }))
+}
 
 /// How long a hook's connection waits for a lock (M4-6): well inside the host's 2 s budget,
 /// unlike the server's 5 s.
@@ -93,13 +95,6 @@ impl LinkEffect {
             Some(Self::InvalidateTarget)
         } else {
             None
-        }
-    }
-    /// The governance a governed target takes.
-    fn governance(self) -> Governance {
-        match self {
-            Self::ArchiveTarget => Governance::Superseded,
-            Self::InvalidateTarget => Governance::Invalidated,
         }
     }
     /// The lifecycle a non-governed active target takes.
@@ -137,9 +132,11 @@ pub struct SqliteStore {
     db_id: String,
     signer: Arc<dyn AuditSigner>,
     migration: MigrationReport,
-    /// The reconciliation policy of this store (engine-spec EN-E9): the injected
-    /// `Reconciler`, the ontology and priors its thresholds come from.
-    reconcile: reconcile::Setup,
+    /// The ontology this store ranks and projects under (the shipped one until
+    /// [`Self::with_ontology`]).
+    ontology: Arc<Ontology>,
+    /// The recall configuration this store ranks under.
+    recall: kaban_core::config::Recall,
     /// The dedicated read connection the code-graph snapshot is attached on (CG-JOIN v1 §2
     /// SO-4; E2.6): opened lazily by the first `attach_snapshot`, closed by `detach_snapshot`
     /// and at drop (declared before `_live`, so it closes before the registration goes).
@@ -231,14 +228,14 @@ impl SqliteStore {
             .cloned()
     }
 
-    /// The ontology this store reconciles, ranks and projects under.
+    /// The ontology this store ranks and projects under.
     pub(crate) fn ontology(&self) -> &Ontology {
-        self.reconcile.ontology()
+        &self.ontology
     }
 
     /// The recall configuration this store ranks under.
     pub(crate) fn recall_config(&self) -> &kaban_core::config::Recall {
-        &self.reconcile.recall
+        &self.recall
     }
 
     /// Rank the store's own adapter with the ontology and recall configuration bound now.
@@ -356,29 +353,19 @@ impl SqliteStore {
         &self.migration
     }
 
-    /// The same store deciding its conflict groups with `reconciler` instead of
-    /// `WeightedVoteV1` (engine-spec EN-E9: the trait is the only entry; test injection).
-    #[must_use]
-    pub fn with_reconciler(mut self, reconciler: Box<dyn Reconciler>) -> Self {
-        self.reconcile.set_reconciler(reconciler);
-        self
-    }
-
-    /// The same store reconciling against `ontology` (the service's loaded ontology: its
-    /// thresholds, governed semantics and `priors` block) instead of the shipped one. The
-    /// injected reconciler and the `[er]` section are kept (RW5-1): order with
-    /// [`Self::with_reconciler`] and [`Self::with_er_priors`] does not matter.
+    /// The same store ranking and projecting under `ontology` (the service's loaded ontology)
+    /// instead of the shipped one.
     ///
     /// # Errors
-    /// A `priors` value outside `[0, 1]` or an unknown priors key.
+    /// Backend errors redeploying the identifier projection or rebuilding the index.
     pub fn with_ontology(mut self, ontology: Arc<Ontology>) -> Result<Self> {
-        self.reconcile.set_ontology(ontology)?;
+        self.ontology = ontology;
         {
             let mut conn = self.write();
             let tx = conn
                 .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
                 .sql()?;
-            crate::ident::deploy(&tx, self.reconcile.ontology(), false)?;
+            crate::ident::deploy(&tx, &self.ontology, false)?;
             tx.commit().sql()?;
         }
         // a redeployed projection is another binding (SS-09): the index is rebuilt under it
@@ -388,19 +375,6 @@ impl SqliteStore {
         Ok(self)
     }
 
-    /// The same store scoring entity resolution with `er` (E2.10 boundary review BR-7): the
-    /// startup seam for the loaded `EngineConfig.er`. The caller validates the section once with
-    /// `kaban_core::ErPriors::from_config`, so the error category (`er_unknown_field`,
-    /// `er_probability_out_of_range`, `er_threshold_invalid`) and the field path
-    /// (`m.<field>`, `possible_threshold`) are reported from the config loader, never from the
-    /// store; a store never sees an invalid section. Order with [`Self::with_ontology`] does not
-    /// matter: each keeps the other's setting.
-    #[must_use]
-    pub fn with_er_priors(mut self, er: kaban_core::ErPriors) -> Self {
-        self.reconcile.set_er(er);
-        self
-    }
-
     /// Bind validated recall settings.
     /// # Errors
     /// Invalid ranking configuration.
@@ -408,7 +382,7 @@ impl SqliteStore {
         recall.effective_rrf_k().map_err(|_| {
             StoreError::InvalidName("recall.fusion".into(), "invalid_configuration")
         })?;
-        self.reconcile.recall = recall;
+        self.recall = recall;
         self.configure_index();
         Ok(self)
     }
@@ -677,7 +651,8 @@ impl SqliteStore {
             db_id,
             signer,
             migration,
-            reconcile: reconcile::Setup::shipped(),
+            ontology: shipped_ontology(),
+            recall: kaban_core::config::Recall::default(),
             cg_read: Mutex::new(None),
             projector: None,
             text_index: None,
@@ -764,7 +739,6 @@ impl SqliteStore {
     #[allow(clippy::too_many_arguments)] // the one transactional edge write; every caller passes all of them
     fn link_in(
         conn: &Connection,
-        setup: &reconcile::Setup,
         tenant: &Tenant<'_>,
         src: &str,
         dst: &str,
@@ -789,40 +763,26 @@ impl SqliteStore {
                 |r| r.get(0),
             )
             .sql()?;
-        if reconcile::engine_tables(conn)? {
-            reconcile::human_edge(
-                conn,
-                setup,
-                tenant.ws,
-                reconcile::HumanEdge {
-                    src: srid,
-                    dst: drid,
-                    rel,
-                    confidence,
-                    props,
-                    method,
-                    actor: tenant.actor,
-                },
-                persist::now_unix(),
-            )?;
-        } else {
-            project::write_edge(
-                conn,
-                &project::EdgeWrite {
-                    src: srid,
-                    dst: drid,
-                    rel,
-                    confidence,
-                    props: &project::owned_props(Some(&props), Owner::Human),
-                    layer: None,
-                    method: None,
-                    score: None,
-                    source_id: None,
-                    offset: None,
-                    len: None,
-                },
-            )?;
-        }
+        let props = edge_write::owned_props(Some(&props), Owner::Human);
+        let scoring = edge_write::scoring_columns(conn)?;
+        edge_write::write_edge(
+            conn,
+            &EdgeWrite {
+                src: srid,
+                dst: drid,
+                rel,
+                confidence,
+                props: &props,
+                layer: scoring.then_some(kaban_core::Layer::Human),
+                method: scoring.then_some(method),
+                // a human link scores its confidence, 1.0 when it names none (the human
+                // claim's score before T3, EN-F46 `edge_filter.min_score`)
+                score: scoring.then(|| confidence.unwrap_or(1.0)),
+                source_id: None,
+                offset: None,
+                len: None,
+            },
+        )?;
         let edge = conn
             .query_row(
                 "SELECT e.id, s.id, d.id, e.rel, e.confidence, e.created_at, e.props FROM edge e JOIN node s ON s.rid=e.src JOIN node d ON d.rid=e.dst WHERE e.src=? AND e.dst=? AND e.rel=?",
@@ -831,10 +791,9 @@ impl SqliteStore {
             )
             .optional()
             .sql()?
-            // the claim's group has no winner (a zero-confidence claim): nothing materialised
-            .ok_or_else(|| StoreError::ClaimRejected(rel.to_owned()))?;
+            .ok_or_else(|| StoreError::NotFound(rel.to_owned()))?;
         if let Some(effect) = LinkEffect::of(tenant.governed, rel) {
-            Self::mark_target(conn, tenant, dst, effect, rel, src, &now)?;
+            Self::mark_target(conn, dst, effect, &now)?;
         }
         Ok((edge, !existed))
     }
@@ -878,7 +837,7 @@ impl SqliteStore {
     fn state_of(conn: &Connection, id: &str) -> Result<NodeState> {
         let st = conn
             .query_row(
-                "SELECT rid, kind, lifecycle, governance, workspace_id FROM node WHERE id=? AND lifecycle <> 'purged'",
+                "SELECT rid, kind, lifecycle, workspace_id FROM node WHERE id=? AND lifecycle <> 'purged'",
                 [id],
                 |r| {
                     Ok((
@@ -886,7 +845,6 @@ impl SqliteStore {
                         r.get::<_, String>(1)?,
                         r.get::<_, String>(2)?,
                         r.get::<_, String>(3)?,
-                        r.get::<_, String>(4)?,
                     ))
                 },
             )
@@ -894,91 +852,19 @@ impl SqliteStore {
             .ok_or_else(|| StoreError::NotFound(id.to_string()))?;
         Ok(NodeState {
             rid: st.0,
-            id: id.to_owned(),
             kind: st.1,
             lifecycle: Lifecycle::parse(&st.2)
                 .ok_or_else(|| bad_enum(2, &st.2))
                 .sql()?,
-            governance: Governance::parse(&st.3)
-                .ok_or_else(|| bad_enum(3, &st.3))
-                .sql()?,
-            workspace_id: st.4,
+            workspace_id: st.3,
         })
-    }
-    /// The strict governance transition of core-spec §4 on an active governed record, with its
-    /// event in the same transaction: `accepted` records `accepted_commit`, the event's path
-    /// scope and the process repo identity when `repo` is still unset (M3-23), `superseded`
-    /// also archives, `invalidated` also tombstones (`valid_to` set). Every path bumps `rev`
-    /// (D4). Returns the event's `seq`.
-    fn govern(
-        conn: &Connection,
-        governed: &GovernedSet,
-        st: &NodeState,
-        to: Governance,
-        ev: &NewEvent,
-        repo: Option<&str>,
-        now: &str,
-    ) -> Result<i64> {
-        governed.governance_transition(&st.kind, st.governance, to)?;
-        if st.lifecycle != Lifecycle::Active {
-            return Err(kaban_core::InvalidTransition::NotActive(st.lifecycle).into());
-        }
-        match to {
-            Governance::Accepted => {
-                let path_scope = if ev.path_scope.is_empty() {
-                    None
-                } else {
-                    Some(serde_json::to_string(&ev.path_scope)?)
-                };
-                conn.execute(
-                    "UPDATE node SET governance='accepted', accepted_commit=?1, path_scope=COALESCE(?2, path_scope), repo=COALESCE(repo, ?5), updated_at=?3, rev=rev+1 WHERE rid=?4",
-                    params![ev.commit_sha, path_scope, now, st.rid, repo],
-                ).sql()?;
-            }
-            Governance::Superseded | Governance::Invalidated => {
-                let lifecycle = if to == Governance::Superseded {
-                    Lifecycle::Archived
-                } else {
-                    Lifecycle::Tombstoned
-                };
-                conn.execute(
-                    "UPDATE node SET governance=?1, lifecycle=?2, valid_to=?3, updated_at=?3, rev=rev+1 WHERE rid=?4",
-                    params![to.as_str(), lifecycle.as_str(), now, st.rid],
-                ).sql()?;
-            }
-            // `none` and `proposed` are never targets; the table above has already refused them
-            _ => {
-                return Err(kaban_core::InvalidTransition::Governance {
-                    from: st.governance,
-                    to,
-                }
-                .into());
-            }
-        }
-        events::append(conn, &st.id, &st.workspace_id, to.as_str(), ev)
     }
     /// The `on_link` side effect of a `rel` edge on its target (MD-7 as decided in wave A Q1 =
     /// option B; EN-F4: `archive_target` rels such as `SUPERSEDES`, plus [`INVALIDATES_REL`]).
-    /// Governed targets (the tenant's set) take the strict §4 transition through
-    /// [`Self::govern`]: an archive effect on a proposed record fails the whole link.
-    /// Non-governed active targets are archived or tombstoned (OD-4), each with an event;
-    /// non-active targets stay untouched.
-    fn mark_target(
-        conn: &Connection,
-        tenant: &Tenant<'_>,
-        dst: &str,
-        effect: LinkEffect,
-        rel: &str,
-        src: &str,
-        now: &str,
-    ) -> Result<()> {
+    /// An active target is archived or tombstoned (OD-4); a non-active target stays
+    /// untouched.
+    fn mark_target(conn: &Connection, dst: &str, effect: LinkEffect, now: &str) -> Result<()> {
         let st = Self::state_of(conn, dst)?;
-        let to = effect.governance();
-        let ev = NewEvent {
-            reason: format!("{rel} edge from {src}"),
-            signer_kind: tenant.actor.clone().into(),
-            ..Default::default()
-        };
         if st.lifecycle != Lifecycle::Active {
             return Ok(());
         }
@@ -989,7 +875,6 @@ impl SqliteStore {
         )
         .sql()?;
         candidates::recount_stats(conn, &st.workspace_id, &st.kind)?;
-        events::append(conn, &st.id, &st.workspace_id, to.as_str(), &ev)?;
         Ok(())
     }
     /// Row id and kind of a non-purged node (a purged id names nothing any more, D3).
@@ -1026,10 +911,8 @@ impl SqliteStore {
 /// The state of a stored node that transitions read before writing.
 struct NodeState {
     rid: i64,
-    id: String,
     kind: String,
     lifecycle: Lifecycle,
-    governance: Governance,
     workspace_id: String,
 }
 
@@ -1042,14 +925,13 @@ pub(crate) fn in_workspace(node: &Node, ws: Option<&str>) -> bool {
     ws.is_none_or(|ws| node.workspace_id == ws)
 }
 
-/// Who writes, and in which workspace: every endpoint of an edge write is resolved inside
-/// `ws` (R3-3) and the `SUPERSEDES`/`INVALIDATES` event on the target is signed by `actor`.
 /// The rel whose source must govern paths (the shipped `adr:GOVERNS`, stored bare).
 const GOVERNS_REL: &str = "GOVERNS";
 
+/// In which workspace a write lands: every endpoint of an edge write is resolved inside `ws`
+/// (R3-3).
 struct Tenant<'a> {
     ws: &'a str,
-    actor: &'a kaban_core::Actor,
     /// The governed kinds and `on_link` rels this write decides by (`ctx.governed`, EN-F4).
     governed: &'a GovernedSet,
     /// The discovered-labels policy and cap this write places undeclared labels by
@@ -1062,7 +944,6 @@ impl<'a> Tenant<'a> {
     fn of(ctx: &'a WriteCtx, ws: &'a str) -> Self {
         Self {
             ws,
-            actor: &ctx.actor,
             governed: &ctx.governed,
             discovered: &ctx.discovered,
         }
@@ -1119,10 +1000,8 @@ impl MemoryStore for SqliteStore {
         let tx = conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .sql()?;
-        audit_table::append(&tx, self.signer.as_ref(), &ctx.audit)?;
         let (e, _) = Self::link_in(
             &tx,
-            &self.reconcile,
             &Tenant::of(ctx, ctx.workspace_id.as_str()),
             src.as_str(),
             dst.as_str(),
@@ -1154,8 +1033,8 @@ impl MemoryStore for SqliteStore {
         let index = self.seed_index().ok_or(StoreError::TextIndexUnavailable)?;
         recall::recall_with(
             &recall::Access(&self.conn),
-            self.reconcile.ontology(),
-            &self.reconcile.recall,
+            &self.ontology,
+            &self.recall,
             q,
             index,
             eligible,
@@ -1181,27 +1060,8 @@ impl MemoryStore for SqliteStore {
         let cg = self.cg_read();
         traverse::traverse(&conn, cg.as_ref(), q)
     }
-    fn explain_group(&self, group_key: &str) -> Result<kaban_core::Explanation> {
-        crate::explain::explain_group(&self.lock(), &self.reconcile, group_key)
-    }
-    fn claim_group(&self, key: &str) -> Result<String> {
-        crate::explain::claim_group(&self.lock(), key)
-    }
-    fn claim_group_in(&self, workspace: &str, key: &str) -> Result<String> {
-        crate::explain::claim_group_in(&self.lock(), workspace, key)
-    }
-    fn review_rows(
-        &self,
-        workspace: &str,
-        subject: Option<&NodeId>,
-    ) -> Result<Vec<kaban_core::ReviewRow>> {
-        candidates::review_rows(&self.lock(), workspace, subject)
-    }
-    fn proposed_nodes_in(&self, workspace: &str, offset: usize, limit: usize) -> Result<Vec<Node>> {
-        crate::explain::proposed_nodes_in(&self.lock(), workspace, offset, limit)
-    }
     fn chunk_covering(&self, workspace: &str, path: &str, offset: u64) -> Result<Option<Node>> {
-        crate::explain::chunk_covering(&self.lock(), workspace, path, offset)
+        crate::recall::chunk_covering(&self.lock(), workspace, path, offset)
     }
     fn forget(&self, id: &NodeId, mode: ForgetMode, ctx: &WriteCtx) -> Result<ForgetOutcome> {
         self.forget_impl(id, mode, ctx)
@@ -1288,50 +1148,6 @@ impl MemoryStore for SqliteStore {
             return Err(StoreError::SnapshotMismatch);
         };
         anchors::snapshot_symbols(cg, commit, page)
-    }
-    fn unmerge(
-        &self,
-        workspace: &str,
-        id: &NodeId,
-        reason: &str,
-        ctx: &WriteCtx,
-    ) -> Result<kaban_core::UnmergeOutcome> {
-        let mut conn = self.write();
-        let tx = conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .sql()?;
-        let outcome = crate::reconcile::er::unmerge(
-            &tx,
-            &self.reconcile,
-            workspace,
-            id.as_str(),
-            reason,
-            crate::reconcile::persist::now_unix(),
-        )?;
-        crate::audit_table::append(&tx, self.signer.as_ref(), &ctx.audit)?;
-        changelog::record_terminal(&tx, ctx)?;
-        tx.commit().sql()?;
-        Ok(outcome)
-    }
-    fn canonical_of(&self, workspace: &str, id: &NodeId) -> Result<Option<NodeId>> {
-        let conn = self.lock();
-        // a store without the engine tables has no redirects (the same guard as `recall`)
-        if !crate::reconcile::engine_tables(&conn)? {
-            return Ok(None);
-        }
-        // the join drops a `canonical_rid NULL` row (a purged canonical): no redirect
-        conn.query_row(
-            "SELECT c.id FROM node_identity ni \
-             JOIN node n ON n.rid = ni.rid \
-             JOIN node c ON c.rid = ni.canonical_rid \
-             WHERE n.id = ?1 AND n.workspace_id = ?2",
-            rusqlite::params![id.as_str(), workspace],
-            |r| r.get::<_, String>(0),
-        )
-        .optional()
-        .sql()?
-        .map(|c| NodeId::parse(&c).map_err(Into::into))
-        .transpose()
     }
     fn stats(&self, workspace_id: Option<&str>) -> Result<Value> {
         // the cursors (`changes_lag`) follow this process's own publication (spec 05 OWN-M)
@@ -1451,95 +1267,7 @@ impl SchemaStore for SqliteStore {
     }
 }
 
-impl GovernanceStore for SqliteStore {
-    fn pruning_protection_get(
-        &self,
-        target: &kaban_core::PruningTarget,
-        ctx: &WriteCtx,
-    ) -> Result<kaban_core::PruningProtection> {
-        self.protection(target, ctx, None)
-    }
-    fn pruning_protection_set(
-        &self,
-        target: &kaban_core::PruningTarget,
-        ctx: &WriteCtx,
-    ) -> Result<kaban_core::PruningProtection> {
-        self.protection(target, ctx, Some(true))
-    }
-    fn pruning_protection_clear(
-        &self,
-        target: &kaban_core::PruningTarget,
-        ctx: &WriteCtx,
-    ) -> Result<kaban_core::PruningProtection> {
-        self.protection(target, ctx, Some(false))
-    }
-    fn transition(
-        &self,
-        id: &NodeId,
-        to: Governance,
-        ev: NewEvent,
-        ctx: &WriteCtx,
-    ) -> Result<(Node, u64)> {
-        self.transition_impl(id, to, ev, ctx)
-    }
-    fn is_candidate(&self, id: &NodeId) -> Result<bool> {
-        let conn = self.lock();
-        match Self::rid_of(&conn, id.as_str()) {
-            Ok((rid, _)) => candidates::is_candidate(&conn, rid),
-            Err(StoreError::NotFound(_)) => Ok(false),
-            Err(e) => Err(e),
-        }
-    }
-    fn confirmation_create(&self, c: NewConfirmation) -> Result<()> {
-        let mut conn = self.write();
-        let tx = conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .sql()?;
-        confirmations::create(&tx, &c)?;
-        tx.commit().sql()?;
-        Ok(())
-    }
-    fn confirmation_consume(
-        &self,
-        token_hash: &str,
-        node_id: &NodeId,
-    ) -> Result<Option<Confirmation>> {
-        let mut conn = self.write();
-        let tx = conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .sql()?;
-        let row = confirmations::consume(&tx, token_hash, node_id.as_str())?;
-        tx.commit().sql()?;
-        Ok(row)
-    }
-    fn confirmation_prune(&self) -> Result<u64> {
-        let mut conn = self.write();
-        let tx = conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .sql()?;
-        let n = confirmations::prune(&tx)?;
-        tx.commit().sql()?;
-        Ok(n)
-    }
-    fn governing(&self, q: &GoverningQuery) -> Result<Vec<Node>> {
-        self.governing_impl(q)
-    }
-    fn events(&self, node: &NodeId) -> Result<Vec<Event>> {
-        let conn = self.lock();
-        events::list(&conn, node.as_str())
-    }
-    fn supersession_chain(
-        &self,
-        id: &NodeId,
-        direction: ChainDirection,
-        limit: usize,
-        ws: &WorkspaceFilter,
-    ) -> Result<Chain> {
-        self.supersession_chain_impl(id, direction, limit, ws)
-    }
-
-    // --- Hook session scratch, briefing and failure pairing (C4.3/C4.4; `session.rs`) ---
-
+impl SessionStore for SqliteStore {
     fn session_edit_record(&self, edit: &SessionEdit) -> Result<()> {
         let conn = self.lock();
         session::record(&conn, edit)
@@ -1558,10 +1286,6 @@ impl GovernanceStore for SqliteStore {
         let conn = self.lock();
         session::prune(&conn, older_than_ts, limit)
     }
-    fn briefing(&self, workspace_id: &str, kinds: &[&str], limit: usize) -> Result<Vec<Node>> {
-        let conn = self.lock();
-        session::briefing(&conn, kinds, workspace_id, limit)
-    }
     fn pending_failures(&self, q: &PendingFailuresQuery) -> Result<Vec<Node>> {
         let conn = self.lock();
         session::pending_failures(&conn, q)
@@ -1576,7 +1300,6 @@ impl GovernanceStore for SqliteStore {
         let tx = conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .sql()?;
-        audit_table::append(&tx, self.signer.as_ref(), &ctx.audit)?;
         let node = session::update_failure_props(
             &tx,
             id.as_str(),
@@ -1587,31 +1310,6 @@ impl GovernanceStore for SqliteStore {
         changelog::record_terminal(&tx, ctx)?;
         tx.commit().sql()?;
         Ok(node)
-    }
-}
-
-impl AuditStore for SqliteStore {
-    fn audit_append(&self, entries: &[AuditEntry]) -> Result<()> {
-        let mut conn = self.write();
-        let tx = conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .sql()?;
-        audit_table::append(&tx, self.signer.as_ref(), entries)?;
-        tx.commit().sql()?;
-        Ok(())
-    }
-    fn audit_append_read(&self, entries: &[AuditEntry]) -> Result<()> {
-        let mut conn = self.write();
-        let tx = conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .sql()?;
-        audit_table::append_read(&tx, self.signer.as_ref(), entries)?;
-        tx.commit().sql()?;
-        Ok(())
-    }
-    fn audit_verify(&self) -> Result<AuditVerification> {
-        let conn = self.lock();
-        audit_table::verify(&conn, self.signer.as_ref())
     }
 }
 
@@ -1801,11 +1499,7 @@ impl IngestStore for SqliteStore {
     ) -> Result<kaban_core::RetireReport> {
         artifacts::retire_producer(
             &mut self.write(),
-            &artifacts::MaintenanceContext {
-                setup: &self.reconcile,
-                signer: self.signer.as_ref(),
-                write: ctx,
-            },
+            &artifacts::MaintenanceContext { write: ctx },
             authority,
             old_producer,
             batch_rows,
@@ -1828,11 +1522,7 @@ impl IngestStore for SqliteStore {
     ) -> Result<kaban_core::RetireReport> {
         artifacts::maintain_layer(
             &mut self.write(),
-            &artifacts::MaintenanceContext {
-                setup: &self.reconcile,
-                signer: self.signer.as_ref(),
-                write: ctx,
-            },
+            &artifacts::MaintenanceContext { write: ctx },
             authority,
             operation,
             document_path,
@@ -1877,56 +1567,6 @@ impl IngestStore for SqliteStore {
         f: &mut dyn FnMut(&Node) -> RescanAction,
     ) -> Result<RescanReport> {
         self.rescan_impl(policy_version, batch, f)
-    }
-    fn rescan_assertions(
-        &self,
-        policy_version: &str,
-        f: &mut dyn FnMut(&kaban_core::Assertion, &mut Vec<AuditEntry>) -> Option<Value>,
-    ) -> Result<RescanReport> {
-        self.rescan_assertions_impl(policy_version, f)
-    }
-    fn deprecate_assertion(
-        &self,
-        key: &str,
-        reason: &str,
-        ctx: &WriteCtx,
-    ) -> Result<kaban_core::AssertionStatus> {
-        self.deprecate_assertion_impl(key, reason, ctx)
-    }
-    fn resolve_winner(
-        &self,
-        workspace: &str,
-        node: &NodeId,
-        value: &str,
-        group: Option<&str>,
-        ctx: &WriteCtx,
-    ) -> Result<String> {
-        candidates::resolve_winner(
-            &mut self.write(),
-            &self.reconcile,
-            self.signer.as_ref(),
-            workspace,
-            node,
-            value,
-            group,
-            ctx,
-        )
-    }
-    fn priors_obs_bump(&self, node: &NodeId, outcome: kaban_core::PriorsOutcome) -> Result<u32> {
-        let mut conn = self.write();
-        let tx = conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .sql()?;
-        let (rid, _) = Self::rid_of(&tx, node.as_str())?;
-        let counted = crate::explain::priors_obs_bump(&tx, rid, outcome)?;
-        tx.commit().sql()?;
-        Ok(counted)
-    }
-    fn priors_obs(&self) -> Result<Vec<kaban_core::PriorsObs>> {
-        crate::explain::priors_obs(&self.lock(), &self.reconcile)
-    }
-    fn unresolved_groups(&self, workspace: &str) -> Result<Vec<String>> {
-        crate::explain::unresolved_groups(&self.lock(), workspace)
     }
     fn index_meta(&self) -> Result<IndexMeta> {
         let conn = self.lock();
@@ -2095,21 +1735,11 @@ impl IngestStore for SqliteStore {
         if *actor != kaban_core::Actor::HumanCli {
             return Err(StoreError::HumanOnly("promote"));
         }
-        let to_stored = kaban_core::stored_name(to);
-        let ev = NewEvent {
-            reason: to_stored.clone(),
-            path_scope: Vec::new(),
-            signer: None,
-            signer_kind: actor.clone().into(),
-            host: None,
-            session_id: None,
-            commit_sha: None,
-        };
         let mut conn = self.write();
         let tx = conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .sql()?;
-        let report = candidates::promote(&tx, workspace.as_str(), from, to, &ev, &now_iso())?;
+        let report = candidates::promote(&tx, workspace.as_str(), from, to, &now_iso())?;
         tx.commit().sql()?;
         Ok(report)
     }
@@ -2135,50 +1765,9 @@ impl IngestStore for SqliteStore {
         tx.commit().sql()?;
         Ok(report)
     }
-    fn resolve_symbol(
-        &self,
-        workspace: &str,
-        node: &NodeId,
-        key: &str,
-        ctx: &WriteCtx,
-    ) -> Result<()> {
-        reconcile::resolve_symbol(
-            &mut self.write(),
-            &self.reconcile,
-            self.signer.as_ref(),
-            workspace,
-            node,
-            key,
-            ctx,
-        )
-    }
 }
 
 #[cfg(test)]
 // test code: failures are the assertion
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests;
-
-/// Entity resolution (E2.10): the one pass E2.11's tool and the ingest hook call.
-impl SqliteStore {
-    /// Resolve `workspace` once (engine-spec EN-F51 (1)-(5)): block, score and decide every pair
-    /// the blocks name, write the `identity` claims and the `node_identity` rows of the `Match`
-    /// pairs, leave the `Possible` pairs as `merge` candidates, in one write transaction.
-    ///
-    /// # Errors
-    /// Backend errors (the transaction is rolled back).
-    pub fn er_resolve(&self, workspace: &str) -> Result<kaban_core::ErReport> {
-        let mut conn = self.write();
-        let tx = conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .sql()?;
-        let report = crate::reconcile::er::resolve(
-            &tx,
-            &self.reconcile,
-            workspace,
-            crate::reconcile::persist::now_unix(),
-        )?;
-        tx.commit().sql()?;
-        Ok(report)
-    }
-}

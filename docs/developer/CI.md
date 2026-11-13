@@ -468,8 +468,7 @@ cargo nextest run --locked -p kaban-ingest --features pdf,md-splitter \
   --test ingest_path_security -j 1
 cargo nextest run --locked -p kaban-store-sqlite \
   --test tantivy_search --test tantivy_projector --test tantivy_capture \
-  --test recall --test sync_store --test ingest_acceptance --test protection \
-  --test forget_mentions -j 1
+  --test recall -j 1
 cargo test --locked --doc --workspace \
   --features kaban-ingest/pdf,kaban-ingest/md-splitter
 ```

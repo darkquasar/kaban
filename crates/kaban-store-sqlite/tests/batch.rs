@@ -8,9 +8,8 @@ mod common;
 
 use kaban_core::ActorId;
 use kaban_core::{
-    Actor, AuditStore, BatchAssertion, BatchSubject, ChangeLogStore, ClaimClass, EdgeDiff, Fixed,
-    GovernanceStore, IngestStore, Layer, MemoryStore, Method, NewNode, NodeId, Op, Rank,
-    StoreError, StoreScope, WorkspaceId, WriteBatch, WriteCtx,
+    Actor, ChangeLogStore, EdgeDiff, IngestStore, MemoryStore, NewNode, NodeId, Op, StoreError,
+    StoreScope, WorkspaceId, WriteBatch, WriteCtx,
 };
 use kaban_store_sqlite::SqliteStore;
 
@@ -51,25 +50,14 @@ fn changes_count(store: &SqliteStore) -> usize {
 }
 
 /// Plan slice 1: a batch with one failing op (an unknown rel) rolls back entirely: the valid
-/// node before it is not stored, no changes row and no audit row is left behind (D-17).
+/// node before it is not stored and no changes row is left behind (D-17).
 #[test]
 fn a_batch_with_one_failing_op_rolls_back_entirely() {
     let store = SqliteStore::open_memory().unwrap();
     let doc = NodeId::new();
     let other = NodeId::new();
     let changes_before = changes_count(&store);
-    let before_audit = store.audit_verify().unwrap().entries;
-    let mut ctx = ctx();
-    ctx.audit.push(kaban_core::AuditEntry {
-        op: kaban_core::AuditOp::Redact,
-        tool: "ingest".into(),
-        field: "text".into(),
-        workspace_id: WorkspaceId::default(),
-        policy_version: "v1".into(),
-        input_hmac: "stub".into(),
-        rules: vec!["old-password".into()],
-        node_id: None,
-    });
+    let ctx = ctx();
     let err = store
         .apply_batch(
             batch(vec![
@@ -94,12 +82,7 @@ fn a_batch_with_one_failing_op_rolls_back_entirely() {
         changes_before,
         "no changes row survives the rollback"
     );
-    assert_eq!(
-        store.audit_verify().unwrap().entries,
-        before_audit,
-        "the batch's audit rows are in the same transaction and rolled back with it"
-    );
-    // the same batch without the bad edge lands, with its audit row (D-17)
+    // the same batch without the bad edge lands (D-17)
     let report = store
         .apply_batch(
             batch(vec![
@@ -114,7 +97,6 @@ fn a_batch_with_one_failing_op_rolls_back_entirely() {
         (report.inserted, report.updated, report.unchanged),
         (2, 0, 0)
     );
-    assert_eq!(store.audit_verify().unwrap().entries, before_audit + 1);
     assert_eq!(store.get(&doc, false).unwrap().unwrap().id, doc.as_str());
     // 2 node inserts + 1 edge insert = 3 changes rows, reported as the batch's range
     assert_eq!(changes_count(&store), changes_before + 3);
@@ -515,7 +497,6 @@ fn tombstone_op_hides_the_node_is_idempotent_and_fails_on_an_unknown_id() {
     );
     let hidden = store.get(&doc, true).unwrap().unwrap();
     assert_eq!(hidden.lifecycle, kaban_core::Lifecycle::Tombstoned);
-    assert!(store.events(&doc).unwrap().is_empty(), "no event (D1)");
     // exactly one changes row (the node update): the edge was kept, no edge delete row
     let rows = store.changes_read(0, 10_000).unwrap();
     assert_eq!(rows.len(), changes_before + 1, "{rows:?}");
@@ -659,46 +640,29 @@ fn upsert_on_archived_purged_other_kind_and_other_workspace_rows() {
 
 // ---- M2 review R2-1 (C2.10): tenant checks on every op of a batch ----
 
-/// A context bound to `ws` carrying one audit entry, so a rollback can be asserted on the
-/// audit chain as well as on rows and `ChangeLog`.
-fn ctx_with_audit(ws: &str) -> WriteCtx {
-    let mut ctx = WriteCtx::new("v1", WorkspaceId::new(ws), Actor::Agent);
-    ctx.audit.push(kaban_core::AuditEntry {
-        op: kaban_core::AuditOp::Redact,
-        tool: "ingest".into(),
-        field: "text".into(),
-        workspace_id: WorkspaceId::new(ws),
-        policy_version: "v1".into(),
-        input_hmac: "stub".into(),
-        rules: vec!["old-password".into()],
-        node_id: None,
-    });
-    ctx
+/// A context bound to `ws`.
+fn ctx_in(ws: &str) -> WriteCtx {
+    WriteCtx::new("v1", WorkspaceId::new(ws), Actor::Agent)
 }
 
-/// Everything a rolled-back batch must leave untouched.
+/// Everything a rolled-back batch must leave untouched (the audit chain and the events went
+/// with governance, T3).
 struct Footprint {
     changes: usize,
-    audit: u64,
-    events: usize,
 }
 
-fn footprint(store: &SqliteStore, watched: &NodeId) -> Footprint {
+fn footprint(store: &SqliteStore) -> Footprint {
     Footprint {
         changes: changes_count(store),
-        audit: store.audit_verify().unwrap().entries,
-        events: store.events(watched).unwrap().len(),
     }
 }
 
-fn assert_rolled_back(store: &SqliteStore, watched: &NodeId, before: &Footprint, what: &str) {
-    let after = footprint(store, watched);
+fn assert_rolled_back(store: &SqliteStore, before: &Footprint, what: &str) {
+    let after = footprint(store);
     assert_eq!(
         after.changes, before.changes,
         "{what}: changes rows survived"
     );
-    assert_eq!(after.audit, before.audit, "{what}: audit rows survived");
-    assert_eq!(after.events, before.events, "{what}: events survived");
 }
 
 /// Two tenants: `theirs` is an active node of `other-tenant`; `mine` and `mine2` belong to the
@@ -733,7 +697,7 @@ fn two_tenants() -> (SqliteStore, NodeId, NodeId, NodeId) {
 #[test]
 fn a_foreign_tombstone_is_not_found_and_rolls_the_batch_back() {
     let (store, theirs, mine, _) = two_tenants();
-    let before = footprint(&store, &theirs);
+    let before = footprint(&store);
     let err = store
         .apply_batch(
             batch(vec![
@@ -743,7 +707,7 @@ fn a_foreign_tombstone_is_not_found_and_rolls_the_batch_back() {
                     reason: "cross-tenant".into(),
                 },
             ]),
-            &ctx_with_audit("default"),
+            &ctx_in("default"),
         )
         .expect_err("a foreign tombstone must fail the batch");
     assert!(
@@ -761,7 +725,7 @@ fn a_foreign_tombstone_is_not_found_and_rolls_the_batch_back() {
         "my own note",
         "the valid upsert before the foreign op rolled back"
     );
-    assert_rolled_back(&store, &theirs, &before, "foreign tombstone");
+    assert_rolled_back(&store, &before, "foreign tombstone");
 }
 
 /// R2-1: an edge whose source lives in another workspace is `NotFound` for that id; no edge
@@ -769,14 +733,14 @@ fn a_foreign_tombstone_is_not_found_and_rolls_the_batch_back() {
 #[test]
 fn a_foreign_edge_source_is_not_found_and_rolls_the_batch_back() {
     let (store, theirs, mine, _) = two_tenants();
-    let before = footprint(&store, &theirs);
+    let before = footprint(&store);
     let err = store
         .apply_batch(
             batch(vec![
                 upsert(&mine, "Fact", "changed before the foreign edge"),
                 edge(&theirs, &mine, "RELATES_TO"),
             ]),
-            &ctx_with_audit("default"),
+            &ctx_in("default"),
         )
         .expect_err("a foreign source must fail the batch");
     assert!(
@@ -791,7 +755,7 @@ fn a_foreign_edge_source_is_not_found_and_rolls_the_batch_back() {
         store.get(&mine, false).unwrap().unwrap().text,
         "my own note"
     );
-    assert_rolled_back(&store, &theirs, &before, "foreign src");
+    assert_rolled_back(&store, &before, "foreign src");
 }
 
 /// R2-1: an edge whose target lives in another workspace is `NotFound` for that id; no edge
@@ -799,14 +763,14 @@ fn a_foreign_edge_source_is_not_found_and_rolls_the_batch_back() {
 #[test]
 fn a_foreign_edge_target_is_not_found_and_rolls_the_batch_back() {
     let (store, theirs, mine, _) = two_tenants();
-    let before = footprint(&store, &theirs);
+    let before = footprint(&store);
     let err = store
         .apply_batch(
             batch(vec![
                 upsert(&mine, "Fact", "changed before the foreign edge"),
                 edge(&mine, &theirs, "RELATES_TO"),
             ]),
-            &ctx_with_audit("default"),
+            &ctx_in("default"),
         )
         .expect_err("a foreign target must fail the batch");
     assert!(
@@ -818,7 +782,7 @@ fn a_foreign_edge_target_is_not_found_and_rolls_the_batch_back() {
         store.get(&mine, false).unwrap().unwrap().text,
         "my own note"
     );
-    assert_rolled_back(&store, &theirs, &before, "foreign dst");
+    assert_rolled_back(&store, &before, "foreign dst");
 }
 
 /// R2-1: a `SUPERSEDES` edge to another tenant's node has no side effect on it: the target
@@ -826,14 +790,14 @@ fn a_foreign_edge_target_is_not_found_and_rolls_the_batch_back() {
 #[test]
 fn supersedes_to_a_foreign_node_has_no_side_effect_and_rolls_the_batch_back() {
     let (store, theirs, mine, mine2) = two_tenants();
-    let before = footprint(&store, &theirs);
+    let before = footprint(&store);
     let err = store
         .apply_batch(
             batch(vec![
                 upsert(&mine2, "Fact", "changed before the foreign supersede"),
                 edge(&mine, &theirs, "SUPERSEDES"),
             ]),
-            &ctx_with_audit("default"),
+            &ctx_in("default"),
         )
         .expect_err("a foreign SUPERSEDES target must fail the batch");
     assert!(
@@ -851,16 +815,15 @@ fn supersedes_to_a_foreign_node_has_no_side_effect_and_rolls_the_batch_back() {
         store.get(&mine2, false).unwrap().unwrap().text,
         "my second note"
     );
-    assert_rolled_back(&store, &theirs, &before, "foreign SUPERSEDES");
+    assert_rolled_back(&store, &before, "foreign SUPERSEDES");
 }
 
-/// R2-1: a batch whose workspace differs from the write context's is refused before any write
-/// (the audit rows would otherwise be attributed to a workspace other than the mutated rows):
-/// `WorkspaceMismatch`, nothing stored, no audit or changes row.
+/// R2-1: a batch whose workspace differs from the write context's is refused before any write:
+/// `WorkspaceMismatch`, nothing stored, no changes row.
 #[test]
 fn a_batch_whose_workspace_differs_from_the_context_is_refused_before_any_write() {
-    let (store, theirs, mine, _) = two_tenants();
-    let before = footprint(&store, &theirs);
+    let (store, _, mine, _) = two_tenants();
+    let before = footprint(&store);
     let fresh = NodeId::new();
     let err = store
         .apply_batch(
@@ -868,7 +831,7 @@ fn a_batch_whose_workspace_differs_from_the_context_is_refused_before_any_write(
                 upsert(&fresh, "Fact", "a new node"),
                 upsert(&mine, "Fact", "changed under the wrong context"),
             ]),
-            &ctx_with_audit("other-tenant"),
+            &ctx_in("other-tenant"),
         )
         .expect_err("ctx workspace must match the batch workspace");
     assert!(
@@ -881,7 +844,7 @@ fn a_batch_whose_workspace_differs_from_the_context_is_refused_before_any_write(
         store.get(&mine, false).unwrap().unwrap().text,
         "my own note"
     );
-    assert_rolled_back(&store, &theirs, &before, "ctx mismatch");
+    assert_rolled_back(&store, &before, "ctx mismatch");
 }
 
 // ---- DI1.8 (RD2-6): `WriteBatch.edge_diff` (engine-spec EN-E4, docs-ingest-spec D5 [A-3]) ----
@@ -1101,11 +1064,6 @@ fn reactivate_restores_an_ingest_owned_tombstoned_chunk() {
         changes_count(&store) > changes_before,
         "changes row for the reactivation"
     );
-    let events = store.events(&chunk).unwrap();
-    assert!(
-        events.iter().any(|e| e.kind == "reactivated"),
-        "audited as a `reactivated` event: {events:?}"
-    );
     // idempotent on an active node
     let again = store
         .apply_batch(batch(vec![reactivate(&chunk)]), &ctx())
@@ -1271,9 +1229,9 @@ fn an_embed_owned_batch_deletes_only_its_own_unnamed_edges() {
 }
 
 /// E2.5a (EN-E4 "a layer never deletes an edge it did not create"), moved by E2.5e (RW2-3): a
-/// chunk written by a producer under the default rule carries a human `link` (projected,
-/// `layer = human`) and the reconciler's projection of a layer's `MENTIONS` claim
-/// (`props.owner = kaban-reconcile`, `layer` set); the producer re-upserts the chunk naming
+/// chunk written by a producer under the default rule carries a human `link` (`layer =
+/// human`) and a layer's `MENTIONS` edge (`props.owner = kaban-parse`, `layer` set); the
+/// producer re-upserts the chunk naming
 /// no edge at all: both foreign rows survive, and so does the first batch's `PART_OF`,
 /// tagged `human` like the link and so no identified producer's to delete (E2.5a deleted it).
 #[test]
@@ -1298,19 +1256,22 @@ fn complete_diff_keeps_edges_of_other_layers() {
     store
         .link(&chunk, &human_target, "RELATES_TO", None, None, &ctx())
         .unwrap();
-    // a layer's `MENTIONS` claim, projected by the pass as the reconciler's own row
-    let mut claimed = owned_batch(vec![upsert(&chunk, "Chunk", "a chunk")], "kaban-parse");
-    claimed.assertions = vec![edge_claim(
-        &chunk,
-        "MENTIONS",
-        &entity,
-        Layer::Gliner,
-        Method::Gliner,
-        9000,
-        "l1",
-    )];
-    let report = store.apply_batch(claimed, &ctx()).unwrap();
-    assert_eq!(report.assertions_inserted, 1, "{report:?}");
+    // a layer's `MENTIONS` edge, written directly with its scoring in the props
+    let claimed = owned_batch(
+        vec![
+            upsert(&chunk, "Chunk", "a chunk"),
+            Op::UpsertEdge {
+                src: chunk.clone(),
+                dst: entity.clone(),
+                rel: "MENTIONS".into(),
+                props: Some(
+                    serde_json::json!({"layer": "gliner", "method": "gliner", "score": 9000}),
+                ),
+            },
+        ],
+        "kaban-parse",
+    );
+    store.apply_batch(claimed, &ctx()).unwrap();
     let owners: std::collections::BTreeMap<String, serde_json::Value> = out_edges(&store, &chunk)
         .into_iter()
         .map(|(dst, props)| (dst, props["owner"].clone()))
@@ -1323,7 +1284,7 @@ fn complete_diff_keeps_edges_of_other_layers() {
     );
     assert_eq!(
         owners[&entity.to_string()],
-        serde_json::json!("kaban-reconcile")
+        serde_json::json!("kaban-parse")
     );
     // the producer re-ingests the chunk and names none of its edges
     store
@@ -1341,7 +1302,7 @@ fn complete_diff_keeps_edges_of_other_layers() {
     assert_eq!(
         out_neighbours(&store, &chunk),
         expect,
-        "the human link and the reconciler's MENTIONS survive a default-rule re-upsert, and so does the first batch's PART_OF: tagged `human` like the link, it is no identified producer's (E2.5e, RW2-3)"
+        "the human link and the layer's MENTIONS survive a default-rule re-upsert, and so does the first batch's PART_OF: tagged `human` like the link, it is no identified producer's (E2.5e, RW2-3)"
     );
 }
 
@@ -1557,41 +1518,6 @@ fn a_node_without_a_scope_keeps_its_base_hash() {
 
 // ---- E2.6b (engine-spec EN-F20 verify pair): universal links at the batch seam ----
 
-/// An `edge` claim about `src -rel-> dst` from `layer`/`method` with raw score `raw`
-/// (1/10000) under lineage `lineage` (the shape of `tests/assertions.rs`).
-fn edge_claim(
-    src: &NodeId,
-    rel: &str,
-    dst: &NodeId,
-    layer: Layer,
-    method: Method,
-    raw: u32,
-    lineage: &str,
-) -> BatchAssertion {
-    BatchAssertion {
-        subject: BatchSubject::Edge {
-            src: src.clone(),
-            rel: rel.into(),
-            dst: dst.clone(),
-        },
-        claim_class: ClaimClass::Edge,
-        predicate: None,
-        object: None,
-        value: serde_json::json!({}),
-        layer,
-        method,
-        extractor_id: Some("fixture".into()),
-        extractor_version: Some("1".into()),
-        source_id: Some("doc-1".into()),
-        lineage_id: lineage.into(),
-        raw_score: Fixed::new(raw).unwrap(),
-        rank: Rank::Normal,
-        rank_reason: None,
-        calibration_version: 1,
-        supersedes: None,
-    }
-}
-
 /// The outgoing edges of `from` as `(dst, props)`.
 fn out_edges(store: &SqliteStore, from: &NodeId) -> Vec<(String, serde_json::Value)> {
     store
@@ -1613,118 +1539,10 @@ fn out_edges(store: &SqliteStore, from: &NodeId) -> Vec<(String, serde_json::Val
         .collect()
 }
 
-/// EN-F20 (OD-AI-5 default): `ABOUT` is a judgement and no deterministic layer writes it. A
-/// producer batch (`Owned` under a non-human owner) naming a bare `ABOUT` op is refused before
-/// the transaction opens with the EN-F9 class (`edge_requires_assertion`: the claim path is a
-/// producer's way to say it): no node, no edge, no audit row, no changes row. The human
-/// `ABOUT` of a default-rule (human) batch lands, and a producer's `ABOUT` claim is projected as the
-/// reconciler's edge, the op that names it for the diff admitted beside the claim.
-#[test]
-fn about_from_a_deterministic_owner_is_refused_before_any_row() {
-    let store = SqliteStore::open_memory().unwrap();
-    let (note, target, marker) = (NodeId::new(), NodeId::new(), NodeId::new());
-    store
-        .apply_batch(
-            batch(vec![
-                upsert(&note, "Fact", "a note about a pointer"),
-                upsert(&target, "CodeRef", "src/lib.rs lib"),
-            ]),
-            &ctx(),
-        )
-        .unwrap();
-    let before = footprint(&store, &note);
-    for owner in [
-        "kaban-ingest",
-        "kaban-parse",
-        "kaban-embed",
-        "kaban-reconcile",
-    ] {
-        let err = store
-            .apply_batch(
-                owned_batch(
-                    vec![
-                        upsert(&marker, "Fact", "a node before the refused edge"),
-                        owned_edge(&note, &target, "ABOUT", owner),
-                    ],
-                    owner,
-                ),
-                &ctx_with_audit("default"),
-            )
-            .expect_err("a deterministic owner's ABOUT must be refused");
-        assert!(
-            matches!(err, StoreError::EdgeRequiresAssertion),
-            "{owner}: {err:?}"
-        );
-        assert!(
-            store.get(&marker, true).unwrap().is_none(),
-            "{owner}: nothing of the batch was stored"
-        );
-        assert!(
-            out_edges(&store, &note).is_empty(),
-            "{owner}: no ABOUT edge landed"
-        );
-        assert_rolled_back(&store, &note, &before, owner);
-    }
-    // the human path (the default rule is a human batch): the judgement lands
-    store
-        .apply_batch(batch(vec![edge(&note, &target, "ABOUT")]), &ctx())
-        .unwrap();
-    let human = out_edges(&store, &note);
-    assert_eq!(human.len(), 1, "{human:?}");
-    assert_eq!(human[0].0, target.to_string());
-    assert_eq!(human[0].1["owner"], serde_json::json!("human"));
-    // the claim path (EN-F12, E2.2): the producer's ABOUT is a claim, projected by the pass
-    // as the reconciler's own edge; the op naming the same triple is the diff's name-keeper
-    let second = NodeId::new();
-    let mut claimed = owned_batch(
-        vec![
-            upsert(&second, "Fact", "a second note, its link a claim"),
-            owned_edge(&second, &target, "ABOUT", "kaban-parse"),
-        ],
-        "kaban-parse",
-    );
-    claimed.assertions = vec![edge_claim(
-        &second,
-        "ABOUT",
-        &target,
-        Layer::Gliner,
-        Method::Gliner,
-        9000,
-        "l1",
-    )];
-    let report = store.apply_batch(claimed, &ctx()).unwrap();
-    assert_eq!(report.assertions_inserted, 1, "{report:?}");
-    let projected = out_edges(&store, &second);
-    assert_eq!(projected.len(), 1, "{projected:?}");
-    assert_eq!(projected[0].0, target.to_string());
-    assert_eq!(
-        projected[0].1["owner"],
-        serde_json::json!("kaban-reconcile"),
-        "a layer claim's edge is the reconciler's write, never the producer's"
-    );
-    // the claim alone, without the op, lands too
-    let third = NodeId::new();
-    let mut claim_only = owned_batch(
-        vec![upsert(&third, "Fact", "a third note, claim only")],
-        "kaban-ingest",
-    );
-    claim_only.assertions = vec![edge_claim(
-        &third,
-        "ABOUT",
-        &target,
-        Layer::Gliner,
-        Method::Gliner,
-        9000,
-        "l2",
-    )];
-    store.apply_batch(claim_only, &ctx()).unwrap();
-    assert_eq!(out_edges(&store, &third).len(), 1);
-}
-
 /// EN-F20 `Verify:` `link` with a disallowed endpoint fails as today (`rel_def` check,
 /// `EndpointNotAllowed`): the declared `to:` list of `TAGGED` is `[Tag]`, so a `Fact` target
-/// is refused by `link`, by a batch's structural edge and by a batch's `edge` claim alike (the
-/// one `edge_rule` judgement); no edge is written on any path.
+/// is refused by `link` and by a batch's edge alike (the one `edge_rule` judgement); no edge is
+/// written on either path.
 #[test]
 fn a_disallowed_endpoint_is_endpoint_not_allowed_on_every_edge_path() {
     let store = SqliteStore::open_memory().unwrap();
@@ -1749,20 +1567,6 @@ fn a_disallowed_endpoint_is_endpoint_not_allowed_on_every_edge_path() {
     let err = store
         .apply_batch(batch(vec![edge(&a, &b, "TAGGED")]), &ctx())
         .expect_err("batch edge: a Fact is not a Tag");
-    assert!(is_tagged_refusal(&err), "{err:?}");
-    let mut claimed = batch(vec![]);
-    claimed.assertions = vec![edge_claim(
-        &a,
-        "TAGGED",
-        &b,
-        Layer::Gliner,
-        Method::Gliner,
-        9000,
-        "l1",
-    )];
-    let err = store
-        .apply_batch(claimed, &ctx())
-        .expect_err("edge claim: a Fact is not a Tag");
     assert!(is_tagged_refusal(&err), "{err:?}");
     assert!(out_edges(&store, &a).is_empty(), "no edge on any path");
     // the same rel to a Tag is allowed, so the refusal is the endpoint's, not the rel's

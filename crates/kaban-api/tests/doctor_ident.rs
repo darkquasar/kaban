@@ -84,12 +84,6 @@ fn current_and_noncurrent_markers_are_diagnosed_without_mutation_or_disclosure()
             assert!(row.detail.contains("kaban reindex text"));
         }
         assert!(!serde_json::to_string(&report).unwrap().contains(canary));
-        assert!(
-            report
-                .checks
-                .iter()
-                .any(|row| row.name == "audit" && row.ok)
-        );
         assert_eq!(store.index_meta().unwrap().entries, metadata);
         assert_eq!(
             serde_json::to_value(store.get(&id, false).unwrap()).unwrap(),
@@ -111,14 +105,7 @@ fn metadata_read_failure_is_named_and_does_not_hide_siblings() {
     let row = ident_check(&report);
     assert!(!row.ok);
     assert_eq!(row.detail, "not checked: backend read failed");
-    for name in [
-        "db_modes",
-        "integrity",
-        "fts_integrity",
-        "layers",
-        "audit",
-        "unresolved",
-    ] {
+    for name in ["db_modes", "integrity", "fts_integrity", "layers"] {
         assert!(
             report.checks.iter().any(|row| row.name == name),
             "{report:?}"

@@ -362,15 +362,6 @@ pub struct PairJudgement {
     pub same: bool,
 }
 
-impl From<PairJudgement> for kaban_core::PairJudgement {
-    fn from(value: PairJudgement) -> Self {
-        Self {
-            pair: kaban_core::PairRef::new(&value.pair.a, &value.pair.b),
-            same: value.same,
-        }
-    }
-}
-
 /// Canonical `ingest_submit` body, also the sole source of extractor JSON Schema.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]

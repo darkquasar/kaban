@@ -1,26 +1,16 @@
-//! Claim and node lifecycle: policy rescans (`rescan_impl`, `rescan_assertions_impl` and
-//! `ASSERTION_POLICY_HASH`), deprecation and replay (`deprecate_assertion_impl`,
-//! `redecide_assertions`), retirement and restoration (`forget_impl`, `hide_engine_rows`,
-//! `reactivate_node`) and the purge (`purge_in_place`, `purge_hygiene`). Includes the
-//! node-policy maintenance of `rescan`, not only assertion rows. Split out of `sqlite.rs`
-//! (OWN-79).
+//! Node lifecycle: the policy rescan (`rescan_impl`), forget (`forget_impl`), reactivation
+//! (`reactivate_node`) and the purge (`purge_in_place`, `purge_hygiene`, `purge_cleanup`).
+//! Split out of `sqlite.rs` (OWN-79).
 
 use crate::anchors;
-use crate::audit_table;
-use crate::candidates;
-use crate::events;
-use crate::reconcile::{self, persist};
 use crate::rows::{NODE_COLS, bad_enum, row_node_at};
 use crate::sql_error::SqlResultExt;
 use kaban_core::Result;
 use kaban_core::{
-    AuditEntry, BatchReport, ForgetMode, ForgetOutcome, Governance, IndexMeta, Lifecycle,
-    MaintenanceOutcome, NewEvent, Node, NodeId, OutcomeKind, RescanAction, RescanReport,
-    StoreCapabilities, StoreError, WriteCtx, now_iso,
+    BatchReport, ForgetMode, ForgetOutcome, IndexMeta, Lifecycle, MaintenanceOutcome, Node, NodeId,
+    OutcomeKind, RescanAction, RescanReport, StoreCapabilities, StoreError, WriteCtx, now_iso,
 };
 use rusqlite::{Connection, OptionalExtension, params};
-use serde_json::Value;
-use std::collections::BTreeSet;
 
 use super::nodes::redacted_content_hash;
 use super::{SqliteStore, Tenant};
@@ -41,45 +31,7 @@ pub(crate) struct PurgeCleanup {
     pub(crate) cleanup: Option<String>,
 }
 
-/// `index_meta` key of the policy version every stored `assertion.value` was last judged
-/// under (EN-S9; `IngestStore::rescan_assertions`), the claim-side twin of
-/// `IndexMeta::POLICY_HASH`.
-const ASSERTION_POLICY_HASH: &str = "assertion_policy_hash";
-
 impl SqliteStore {
-    /// Re-decide the conflict groups of these claim rows (`assertion.id`) in one transaction
-    /// (engine-spec EN-F8a, the replay seam; engine-plan E2.2 item 7): a claim whose
-    /// `assertion_status` row is missing gets it back as `pending` under its recomputed group
-    /// key first, every touched group is then decided over all of its stored supporters and
-    /// projected as `apply_batch` does (edges re-materialised or removed), and the verdicts
-    /// are counted. A row id that names no claim (a purged one) is skipped. Deterministic and
-    /// idempotent: a second call over the same ids changes no row and writes no `ChangeLog`
-    /// row. The `ReplaySink` of the test suite rebuilds the status table through this entry;
-    /// `SinkId::RECONCILE` stays reserved for the deferred asynchronous loop (OWN-68 SC-12).
-    ///
-    /// # Errors
-    /// Backend errors; the transaction is rolled back.
-    pub fn redecide_assertions(&self, ids: &[i64]) -> Result<BatchReport> {
-        let mut conn = self.write();
-        let tx = conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .sql()?;
-        let now = persist::now_unix();
-        let mut groups: BTreeSet<String> = BTreeSet::new();
-        for id in ids {
-            let Some(claim) = persist::load_claim(&tx, *id)? else {
-                continue;
-            };
-            let key = kaban_core::group_key(&claim);
-            reconcile::recover_group(&tx, &self.reconcile, &claim, now)?;
-            groups.insert(key);
-        }
-        let mut report = BatchReport::default();
-        reconcile::decide_groups(&tx, &self.reconcile, &groups, now, Some(&mut report))?;
-        tx.commit().sql()?;
-        Ok(report)
-    }
-
     /// The purge of one row inside the caller's transaction (core-spec F5, S5; MD-24): the id
     /// row stays as a `purged` ghost so the id never reappears, while text, index entry (the
     /// `node_au` trigger drops it), dedup identity and edges go. `rev` becomes `rev + 1`, or
@@ -97,7 +49,6 @@ impl SqliteStore {
         rev_floor: Option<i64>,
     ) -> Result<i64> {
         crate::jobs::revoke_document(tx, id, workspace_id)?;
-        crate::pruning_protection::purge(tx, workspace_id, rid, id)?;
         tx.execute(
             "UPDATE node SET lifecycle='purged', text='', summary=NULL, tags='[]', props='{}',
                  content_hash='', dup_key=NULL, valid_to=?1, updated_at=?1,
@@ -114,16 +65,11 @@ impl SqliteStore {
             params![id, workspace_id],
         )
         .sql()?;
-        // EN-F8a: the engine rows a cascade of the node row would take (claims naming the
-        // node, their statuses, review, identity and derived-artifact rows) and the node's
-        // anchors (EN-F10) go explicitly, then every group that lost a member is re-decided
-        // in this transaction
-        if reconcile::engine_tables(tx)? {
-            let groups: BTreeSet<String> = persist::purge_claims_of_node(tx, rid)?
-                .into_iter()
-                .collect();
+        // the node's anchors (EN-F10) and the derived artifacts of its source go explicitly
+        if crate::edge_write::scoring_columns(tx)? {
             anchors::remove(tx, rid)?;
-            reconcile::decide_groups(tx, &self.reconcile, &groups, persist::now_unix(), None)?;
+            tx.execute("DELETE FROM derived_artifact WHERE source_rid = ?1", [rid])
+                .sql()?;
         }
         tx.query_row("SELECT rev FROM node WHERE rid=?", [rid], |r| r.get(0))
             .sql()
@@ -190,7 +136,6 @@ impl SqliteStore {
         conn: &Connection,
         tenant: &Tenant<'_>,
         id: &NodeId,
-        ctx: &WriteCtx,
         report: &mut BatchReport,
     ) -> Result<Option<i64>> {
         let st: Option<(i64, String, String, String)> = conn
@@ -225,36 +170,15 @@ impl SqliteStore {
             params![now_iso(), rid],
         )
         .sql()?;
-        let ev = NewEvent {
-            reason: "source reconciliation".into(),
-            signer_kind: ctx.actor.clone().into(),
-            ..Default::default()
-        };
-        events::append(conn, id.as_str(), tenant.ws, "reactivated", &ev)?;
         report.record(id, &kind, OutcomeKind::Reactivated);
         Ok(Some(rid))
-    }
-    /// A tombstone deletes no claim (EN-F8a): every status of the node's claims becomes
-    /// `rejected` (one `status` `ChangeLog` row each), the claims are retired (`forgotten`,
-    /// RE4-1) and the node's anchor rows go (EN-F10: a hidden pointer never joins a
-    /// snapshot). Returns the groups that lost those claims and the claims' row ids: the
-    /// caller re-decides the groups without them in the same transaction.
-    pub(super) fn hide_engine_rows(
-        conn: &Connection,
-        rid: i64,
-    ) -> Result<(BTreeSet<String>, BTreeSet<i64>)> {
-        let groups = persist::groups_of_node(conn, rid)?.into_iter().collect();
-        let ids = persist::claim_ids_of_node(conn, rid)?.into_iter().collect();
-        persist::reject_claims_of_node(conn, rid, persist::now_unix())?;
-        anchors::remove(conn, rid)?;
-        Ok((groups, ids))
     }
     /// The body of [`kaban_core::MemoryStore::forget`].
     pub(super) fn forget_impl(
         &self,
         id: &NodeId,
         mode: ForgetMode,
-        ctx: &WriteCtx,
+        _ctx: &WriteCtx,
     ) -> Result<ForgetOutcome> {
         let id = id.as_str();
         let mut conn = self.write();
@@ -273,59 +197,17 @@ impl SqliteStore {
         if matches!(target, Lifecycle::Tombstoned | Lifecycle::Purged) {
             crate::jobs::revoke_document(&tx, id, &st.workspace_id)?;
         }
-        audit_table::append(&tx, self.signer.as_ref(), &ctx.audit)?;
         let now = now_iso();
-        let engine = reconcile::engine_tables(&tx)?;
-        // the groups a tombstone's retired claims leave are re-decided without them (RE4-1)
-        let hide = |tx: &Connection| -> Result<()> {
-            let (groups, ids) = Self::hide_engine_rows(tx, rid)?;
-            reconcile::decide_groups_without(
-                tx,
-                &self.reconcile,
-                &groups,
-                &ids,
-                persist::now_unix(),
-                None,
-            )
-        };
+        let scoring = crate::edge_write::scoring_columns(&tx)?;
         match mode {
-            // lifecycle only: governance untouched, no event (D1)
-            ForgetMode::Tombstone => {
+            // lifecycle only (D1); `invalidate` is the same tombstone since governance went
+            ForgetMode::Tombstone | ForgetMode::Invalidate => {
                 tx.execute(
                     "UPDATE node SET lifecycle='tombstoned', valid_to=?1, updated_at=?1, rev=rev+1 WHERE rid=?2",
                     params![now, rid],
                 ).sql()?;
-                if engine {
-                    hide(&tx)?;
-                }
-            }
-            // tombstone + governance invalidated (governed kinds, strict table) + `invalidated`
-            // event; non-governed kinds get the tombstone and the event too (OD-4)
-            ForgetMode::Invalidate => {
-                let ev = NewEvent {
-                    reason: "forget:invalidate".into(),
-                    signer_kind: ctx.actor.clone().into(),
-                    ..Default::default()
-                };
-                let governed = ctx.governed.contains(&st.kind);
-                if governed {
-                    ctx.governed.governance_transition(
-                        &st.kind,
-                        st.governance,
-                        Governance::Invalidated,
-                    )?;
-                }
-                tx.execute(
-                    "UPDATE node SET lifecycle='tombstoned',
-                         governance = CASE WHEN ?1 THEN 'invalidated' ELSE governance END,
-                         valid_to=?2, updated_at=?2, rev=rev+1
-                     WHERE rid=?3",
-                    params![governed, now, rid],
-                )
-                .sql()?;
-                events::append(&tx, id, &st.workspace_id, "invalidated", &ev)?;
-                if engine {
-                    hide(&tx)?;
+                if scoring {
+                    anchors::remove(&tx, rid)?;
                 }
             }
             ForgetMode::Archive => {
@@ -343,14 +225,10 @@ impl SqliteStore {
                 self.purge_in_place(&tx, rid, id, &st.workspace_id, &now, None)?;
             }
         }
-        // a retirement moves the kind's counters (EN-F6; E1.9a RE3-7)
-        candidates::recount_stats(&tx, &st.workspace_id, &st.kind)?;
-        let (lifecycle, governance): (String, String) = tx
-            .query_row(
-                "SELECT lifecycle, governance FROM node WHERE rid=?",
-                [rid],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
+        let lifecycle: String = tx
+            .query_row("SELECT lifecycle FROM node WHERE rid=?", [rid], |r| {
+                r.get(0)
+            })
             .sql()?;
         let last_seq: i64 = tx
             .query_row("SELECT COALESCE(max(seq), 0) FROM changes", [], |r| {
@@ -361,9 +239,6 @@ impl SqliteStore {
         let outcome = ForgetOutcome {
             lifecycle: Lifecycle::parse(&lifecycle)
                 .ok_or_else(|| bad_enum(0, &lifecycle))
-                .sql()?,
-            governance: Governance::parse(&governance)
-                .ok_or_else(|| bad_enum(1, &governance))
                 .sql()?,
             outbox_seq: u64::try_from(last_seq).unwrap_or(0),
             revoked: false,
@@ -494,7 +369,7 @@ impl SqliteStore {
                     .sql()?;
                     report.kept += 1;
                 }
-                RescanAction::Redact { strings, audit } => {
+                RescanAction::Redact { strings, .. } => {
                     // every rewritable string column is replaced (R2-2) and the content
                     // identity with it: the pre-redaction hash would keep a guess oracle on
                     // the masked secret, and a hash of the masked text alone would let two
@@ -526,13 +401,12 @@ impl SqliteStore {
                     // `props`) move the record's anchor keys in this transaction, as every
                     // other node write's do, or the `governing` prefilter keeps a stale key
                     crate::anchors::rekey(&tx, *rid)?;
-                    audit_table::append(&tx, self.signer.as_ref(), &audit)?;
                     report.redacted += 1;
                 }
-                RescanAction::Reject { audit } => {
+                RescanAction::Reject { .. } => {
                     crate::jobs::revoke_document(&tx, node.id.as_str(), &node.workspace_id)?;
                     // the `ForgetMode::Tombstone` path (lifecycle only, governance untouched,
-                    // edges kept) plus the event the plan asks for; a node that is already
+                    // edges kept) ; a node that is already
                     // tombstoned is stamped only
                     if node.lifecycle == Lifecycle::Tombstoned {
                         tx.execute(
@@ -546,15 +420,7 @@ impl SqliteStore {
                             "UPDATE node SET lifecycle='tombstoned', valid_to=?1, updated_at=?1, rev=rev+1, policy_version=?2 WHERE rid=?3",
                             params![now, policy_version, rid],
                         ).sql()?;
-                        let ev = NewEvent {
-                            reason: "policy-reject".into(),
-                            signer_kind: kaban_core::SignerKind::System,
-                            ..Default::default()
-                        };
-                        events::append(&tx, &node.id, &node.workspace_id, "tombstoned", &ev)?;
-                        candidates::recount_stats(&tx, &node.workspace_id, &node.kind)?;
                     }
-                    audit_table::append(&tx, self.signer.as_ref(), &audit)?;
                     report.rejected += 1;
                 }
             }
@@ -562,166 +428,5 @@ impl SqliteStore {
         }
         tx.commit().sql()?;
         Ok(report)
-    }
-    /// The body of [`kaban_core::IngestStore::rescan_assertions`].
-    pub(super) fn rescan_assertions_impl(
-        &self,
-        policy_version: &str,
-        f: &mut dyn FnMut(&kaban_core::Assertion, &mut Vec<AuditEntry>) -> Option<Value>,
-    ) -> Result<RescanReport> {
-        let mut conn = self.write();
-        let tx = conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .sql()?;
-        let mut report = RescanReport::default();
-        if !reconcile::engine_tables(&tx)? {
-            return Ok(report);
-        }
-        // claim rows carry no per-row stamp, so the pass is keyed by two DB-scoped rows read
-        // under the write lock (RE4-3): the policy version the last pass ran under and the
-        // high-water `assertion.id` it reached. An equal version judges the rows above the
-        // high-water mark only (a claim another process inserted since: under `BEGIN
-        // IMMEDIATE` an insert and a pass serialise, so its id is above the mark); none
-        // above it means nothing to judge and no write. Another version judges every row.
-        let meta = |key: &str| -> Result<Option<String>> {
-            tx.query_row("SELECT value FROM index_meta WHERE key = ?1", [key], |r| {
-                r.get(0)
-            })
-            .optional()
-            .sql()
-        };
-        let fresh = meta(ASSERTION_POLICY_HASH)?.as_deref() == Some(policy_version);
-        let high_water: i64 = meta(persist::ASSERTION_POLICY_HW)?
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0);
-        let max_id: i64 = tx
-            .query_row("SELECT COALESCE(max(id), 0) FROM assertion", [], |r| {
-                r.get(0)
-            })
-            .sql()?;
-        if fresh && max_id <= high_water {
-            return Ok(report);
-        }
-        let floor = if fresh { high_water } else { 0 };
-        let ids: Vec<i64> = {
-            let mut st = tx
-                .prepare_cached(
-                    "SELECT id FROM assertion WHERE value IS NOT NULL AND id > ?1 ORDER BY id",
-                )
-                .sql()?;
-            let rows = st.query_map([floor], |r| r.get(0)).sql()?;
-            rows.collect::<rusqlite::Result<_>>().sql()?
-        };
-        let now = persist::now_unix();
-        let mut audit: Vec<AuditEntry> = Vec::new();
-        let mut groups: BTreeSet<String> = BTreeSet::new();
-        let mut masked: BTreeSet<i64> = BTreeSet::new();
-        for id in ids {
-            let Some(claim) = persist::load_claim(&tx, id)? else {
-                continue;
-            };
-            if claim.value.as_value().is_null() {
-                continue;
-            }
-            report.scanned += 1;
-            let pushed = audit.len();
-            match f(&claim, &mut audit) {
-                None => report.kept += 1,
-                Some(value) => {
-                    // the value UPDATE the immutable claim table sees (EN-S9 over RE-9): the
-                    // denied string must leave storage; every other column is kept. The row
-                    // is retired with it (RE4-1): `deprecated` under `policy:<rule ids>` (the
-                    // rules of the entries the judge pushed for this claim, else the policy
-                    // version), so no later decide or replay lets it vote again
-                    let value = kaban_core::CanonicalJson::new(value);
-                    let rules: BTreeSet<&str> = audit[pushed..]
-                        .iter()
-                        .flat_map(|e| e.rules.iter().map(String::as_str))
-                        .collect();
-                    let reason = if rules.is_empty() {
-                        format!("{}{policy_version}", persist::POLICY_REASON_PREFIX)
-                    } else {
-                        format!(
-                            "{}{}",
-                            persist::POLICY_REASON_PREFIX,
-                            rules.into_iter().collect::<Vec<_>>().join(",")
-                        )
-                    };
-                    tx.execute(
-                        "UPDATE assertion SET value = ?1, rank = 'deprecated', rank_reason = ?3 WHERE id = ?2",
-                        params![value.as_str(), id, reason],
-                    )
-                    .sql()?;
-                    persist::set_status(&tx, id, kaban_core::AssertionStatus::Rejected, now)?;
-                    groups.insert(kaban_core::group_key(&claim));
-                    masked.insert(id);
-                    report.rejected += 1;
-                }
-            }
-        }
-        audit_table::append(&tx, self.signer.as_ref(), &audit)?;
-        reconcile::decide_groups_without(&tx, &self.reconcile, &groups, &masked, now, None)?;
-        for (key, value) in [
-            (ASSERTION_POLICY_HASH, policy_version.to_owned()),
-            (persist::ASSERTION_POLICY_HW, max_id.to_string()),
-        ] {
-            tx.execute(
-                "INSERT INTO index_meta(key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                params![key, value],
-            )
-            .sql()?;
-        }
-        tx.commit().sql()?;
-        Ok(report)
-    }
-    /// The body of [`kaban_core::IngestStore::deprecate_assertion`].
-    pub(super) fn deprecate_assertion_impl(
-        &self,
-        key: &str,
-        reason: &str,
-        ctx: &WriteCtx,
-    ) -> Result<kaban_core::AssertionStatus> {
-        let mut conn = self.write();
-        let tx = conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .sql()?;
-        let ws = ctx.workspace_id.as_str();
-        // the one rank write the claim table sees (EN-F12b): rank and reason are outside the
-        // identity, so the row keeps its key, its status row and its ChangeLog history. The
-        // claim is bound to the caller's workspace (S6, RE4-4): a foreign key and an unknown
-        // one are the same `NotFound`, nothing written
-        let changed = tx
-            .execute(
-                "UPDATE assertion SET rank = 'deprecated', rank_reason = ?2 WHERE key = ?1 AND workspace_id = ?3",
-                params![key, reason, ws],
-            )
-            .sql()?;
-        if changed == 0 {
-            return Err(StoreError::NotFound(key.to_owned()));
-        }
-        super::artifacts::clear_machine_retirement(&tx, key, ws)?;
-        audit_table::append(&tx, self.signer.as_ref(), &ctx.audit)?;
-        let (id, group): (i64, String) = tx
-            .query_row(
-                "SELECT a.id, s.group_key FROM assertion a JOIN assertion_status s ON s.assertion_id = a.id
-                 WHERE a.key = ?1 AND a.workspace_id = ?2",
-                params![key, ws],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .sql()?;
-        let now = persist::now_unix();
-        let groups: BTreeSet<String> = std::iter::once(group).collect();
-        reconcile::decide_groups(&tx, &self.reconcile, &groups, now, None)?;
-        let disposition: String = tx
-            .query_row(
-                "SELECT disposition FROM assertion_status WHERE assertion_id = ?1",
-                [id],
-                |r| r.get(0),
-            )
-            .sql()?;
-        tx.commit().sql()?;
-        kaban_core::AssertionStatus::parse(&disposition)
-            .ok_or_else(|| bad_enum(0, &disposition))
-            .sql()
     }
 }

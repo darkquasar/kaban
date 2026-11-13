@@ -1,6 +1,6 @@
 //! kaban memory core: the labelled-property-graph model, the [`GraphStore`] portability seam
-//! (an umbrella over the role traits [`MemoryStore`], [`SchemaStore`], [`GovernanceStore`],
-//! [`AuditStore`], [`ChangeLogStore`], [`LeaseStore`], [`IngestStore`] and [`SyncStore`]), the
+//! (an umbrella over the role traits [`MemoryStore`], [`SchemaStore`], [`SessionStore`],
+//! [`ChangeLogStore`], [`LeaseStore`] and [`IngestStore`]), the
 //! [`Sink`] seam over the `ChangeLog`, id/time helpers and the store error type.
 //!
 //! Everything above this crate (policy, service layer, adapters) speaks in nodes, typed edges,
@@ -15,7 +15,6 @@ mod canon;
 mod changelog;
 pub mod config;
 mod error;
-mod events;
 pub mod ident;
 mod ids;
 mod lease;
@@ -31,8 +30,6 @@ mod store;
 pub mod text_index;
 mod validator;
 
-mod reconcile;
-
 pub use artifact::{
     ArtifactDiagnostics, ArtifactKey, ArtifactSource, BuiltinProducer, CurrentProducerAuthority,
     DerivedArtifact, GazetteerClaimSet, LayerMaintenance, MaintenanceRefusal, RetireReport,
@@ -45,7 +42,6 @@ pub use audit::{
 // canonical JSON, `props_schema` validator subset (engine-plan E1.1)
 pub use canon::canonical_json;
 pub use error::{BackendSource, Result, StoreError, SupersedesClass};
-pub use events::{Confirmation, Event, ForgetOutcome, NewConfirmation, NewEvent, SignerKind};
 pub use ids::{InvalidNodeId, NodeId, new_id, now_iso};
 pub use lease::Lease;
 // `GovernedSet` (engine-plan E1.4): the EN-F4 governance membership read from the ontology
@@ -56,10 +52,11 @@ pub use lifecycle::{
 };
 pub use model::{
     AnchoredKind, AnchoredRow, BatchReport, BodyLocation, CodeRef, CodeRefFilter, ConventionProps,
-    DecisionProps, Edge, EdgeDiff, EdgeFilter, Evidence, FailureProps, ForgetMode, GoverningQuery,
-    Hit, IndexMeta, LinkReq, Location, NewNode, Node, Op, OpOutcome, OutcomeKind, RecallLayer,
-    RecallQuery, RedactedStrings, RememberOutcome, RescanAction, RescanReport, TraverseDirection,
-    TraverseQuery, TraverseResult, TypeDeclaration, TypeDef, WorkspaceFilter, WriteBatch,
+    DecisionProps, Edge, EdgeDiff, EdgeFilter, Evidence, FailureProps, ForgetMode, ForgetOutcome,
+    GoverningQuery, Hit, IndexMeta, LinkReq, Location, NewNode, Node, Op, OpOutcome, OutcomeKind,
+    RecallLayer, RecallQuery, RedactedStrings, RememberOutcome, RescanAction, RescanReport,
+    TraverseDirection, TraverseQuery, TraverseResult, TypeDeclaration, TypeDef, WorkspaceFilter,
+    WriteBatch,
 };
 // discovered labels, candidates and `kind_stats` (engine-plan E1.8)
 pub use model::{DiscoveredRules, KindStat, PromoteReport, PruneReport, ReadFilters};
@@ -70,10 +67,8 @@ pub use validator::{
 pub use model::{
     EvidenceRun, FailurePatch, PendingFailuresQuery, PendingScope, SessionEdit, SessionEditKind,
 };
-// `.kaban/*.md` serialization (core-plan C5.1; M5-18)
-pub use model::{ConflictRow, ImportedRecord};
-// batch assertions and typed edge owners (engine-plan E2.2; EN-E4, EN-F8)
-pub use model::{BatchAssertion, BatchSubject, Owner};
+// typed edge owners (EN-E4) and the producer vocabulary moved out of reconciliation
+pub use model::{Fixed, FixedError, Layer, Method, Owner};
 // ontologies as data (engine-plan E1.2)
 pub use ontology::{
     KindName, NamespaceSet, Ns, ONTOLOGY_ERROR_TEXTS, Ontology, OntologyError, OntologyFile,
@@ -125,14 +120,11 @@ pub mod shipped {
 #[allow(deprecated)] // the EN-E10b alias, re-exported for one minor version (removed in 3.2)
 pub use store::OutboxStore;
 pub use store::{
-    AuditStore, ChangeLogStore, GovernanceStore, GraphStore, IngestStore, LeaseStore, MemoryStore,
-    SchemaStore, SyncStore,
+    ChangeLogStore, GraphStore, IngestStore, LeaseStore, MemoryStore, SchemaStore, SessionStore,
 };
-// the `supersession_chain` types (v4 stage1-plan CG5.3; cg-join-v1 §7)
-pub use store::{Chain, ChainDirection, PruningProtection, PruningTarget};
 pub use store::{
-    DatabaseFileModes, DocumentIndexSummary, FailedDocumentRow, ImportedPurge, MaintenanceOutcome,
-    ReviewRow, StoreCapabilities, UnstampedCounts, UnstampedReason,
+    DatabaseFileModes, DocumentIndexSummary, FailedDocumentRow, MaintenanceOutcome,
+    StoreCapabilities,
 };
 pub use store::{
     IngestJob, InvalidJobId, JobClaimRequest, JobFinishOutcome, JobFinishRequest,
@@ -143,22 +135,4 @@ pub use store::{
 pub use store::{
     AnchorPredicates, AttachHandle, SNAPSHOT_SYMBOL_PAGE, SnapshotAttach, SnapshotSymbol,
     SymbolPage,
-};
-
-pub use reconcile::{
-    Assertion, AssertionKey, AssertionStatus, CandidateReason, CanonicalJson, ClaimClass, Fixed,
-    FixedError, Layer, LineageParts, LogWeight, Method, Priors, PriorsError, ProtectionSet, Rank,
-    ReconcileCtx, Reconciler, Subject, UnresolvedReason, Verdict, group_key, lineage_id,
-    same_group, votes,
-};
-// entity resolution (engine-plan E2.10; EN-F51): the pure scorer and its vocabulary
-pub use reconcile::er;
-pub use reconcile::er::{
-    Agreement, Block, BlockKey, ErConfigError, ErContribution, ErDecision, ErPriors, ErReport,
-    ErScore, Field, FuzzyIndex, JudgeFilter, NodeView, PairJudgement, PairRef, UnmergeOutcome,
-};
-// the `explain` document and the evaluation counters (engine-plan E2.4; EN-F14, EN-F16)
-pub use reconcile::{
-    CandidateView, Contribution, Explanation, LineageView, PriorsObs, PriorsOutcome, SupporterView,
-    WEIGHTED_VOTE_V1,
 };

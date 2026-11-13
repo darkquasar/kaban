@@ -9,9 +9,7 @@ use std::sync::Arc;
 mod common;
 
 fn maintenance_identity_case(field: &str, action: &str) {
-    use kaban_core::{
-        Actor, AuditStore, IngestStore, NewNode, NodeId, Op, WorkspaceId, WriteBatch, WriteCtx,
-    };
+    use kaban_core::{Actor, IngestStore, NewNode, NodeId, Op, WorkspaceId, WriteBatch, WriteCtx};
     let scratch = common::Scratch::new("maintenance-identity", &format!("{field}-{action}"));
     let store = Arc::new(SqliteStore::open(&scratch.db(), &scratch.keys()).unwrap());
     let conn = rusqlite::Connection::open(scratch.db()).unwrap();
@@ -83,22 +81,6 @@ fn maintenance_identity_case(field: &str, action: &str) {
         if action == "clean" { 1 } else { 2 },
         "neither raw nor masked alternate may be mutated on refusal"
     );
-    let op = if action == "clean" { "forget" } else { action };
-    let audits: i64 = conn
-        .query_row("SELECT count(*) FROM audit WHERE op=?1", [op], |r| r.get(0))
-        .unwrap();
-    assert!(audits > 0, "maintenance verdict must persist its audit");
-    if action == "redact" {
-        let verdicts: i64 = conn
-            .query_row(
-                "SELECT count(*) FROM audit WHERE op='redact' AND field=?1",
-                [field],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(verdicts, 1);
-    }
-    assert!(store.audit_verify().unwrap().ok);
 }
 
 #[test]

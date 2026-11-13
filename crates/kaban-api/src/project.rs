@@ -32,11 +32,7 @@ impl KabanApi {
         for e in &mut ctx.audit {
             e.node_id = Some(item_key.to_owned());
         }
-        if let Err(e) = self.store.audit_append_read(&ctx.audit) {
-            tracing::warn!(error = %e, item = %item_key, "read audit append failed; returning masked content");
-        } else {
-            self.export_audit(&ctx.audit);
-        }
+        self.export_audit(&ctx.audit);
         ctx.audit.clear();
     }
 

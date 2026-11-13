@@ -50,7 +50,7 @@ fn decision_without_rationale_is_rejected_as_invalid_props() {
 }
 
 use kaban_api::{CodeRefWire, coderefs_from_serena};
-use kaban_core::{AuditStore, BodyLocation, Location, MemoryStore, NodeId, TraverseQuery};
+use kaban_core::{BodyLocation, Location, MemoryStore, NodeId, TraverseQuery};
 
 const CANARY: &str = "AKIAQWERTYUIOPASDFGH";
 
@@ -305,9 +305,6 @@ fn canary_in_info_is_rejected_and_absent_from_db_audit_and_response() {
     );
     assert!(!text.contains(CANARY));
     assert_eq!(store.stats(None).unwrap()["nodes"], json!(0));
-    // the rejection is audited (rule id and keyed hash only)
-    let audit = store.audit_verify().unwrap();
-    assert!(audit.entries >= 1, "{audit:?}");
     drop(api);
     drop(store);
     for f in ["k.db", "k.db-wal", "k.db-shm"] {

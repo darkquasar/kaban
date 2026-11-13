@@ -12,7 +12,7 @@ mod common;
 
 use common::{Scratch, encoded, note, seed};
 use kaban_core::text_index::{MatchMode, Searched, TextIndex};
-use kaban_core::{ForgetMode, MemoryStore, NodeId, RecallQuery, SyncStore};
+use kaban_core::{ForgetMode, MemoryStore, NodeId, RecallQuery};
 use kaban_index_tantivy::projector::Projector;
 use std::path::Path;
 use std::sync::Arc;
@@ -134,64 +134,4 @@ fn a_purge_scrubs_the_index_files_and_reports_each_scope_without_an_unqualified_
         assert_eq!(row, None, "an old reader's hit is revalidated away");
     }
     assert_eq!(store.recall(&query("neighbour stays")).unwrap().len(), 1);
-}
-
-/// An imported purge (a tombstone synced in, `SyncStore::import_purged`) is the other
-/// canonical purge path (T2 review t2-7, SS-12): it runs the same post-commit index erase as
-/// `forget(Purge)` and reports the index scope beside the database's. With an old reader
-/// held, the canary leaves every term dictionary and the revoked content never returns.
-#[test]
-fn an_imported_purge_scrubs_the_index_like_forget_and_reports_the_index_scope() {
-    let s = Scratch::new("purge-imported");
-    let store = s.store();
-    let index = Arc::new(s.adapter());
-    let store = store.with_text_index(Box::new(Arc::clone(&index)));
-    let doomed = note(&store, "default", "Fact", &doomed_body(), &[]);
-    assert!(encoded(&s.db(), &doomed.id), "the body's shape");
-    let projector = Projector::new(index.as_ref(), &store, &store, "test:purge", 2);
-    assert_eq!(projector.catch_up().unwrap().halt, None);
-    let dir = s.index_dir();
-    assert!(index_names(&dir, CANARY), "the canary is indexed first");
-    let pinned = index.pin().unwrap();
-
-    let imported = store
-        .import_purged(
-            &NodeId::parse(&doomed.id).unwrap(),
-            "Fact",
-            5,
-            &common::ctx("default"),
-        )
-        .unwrap();
-
-    let cleanup = imported.cleanup.clone().unwrap_or_default();
-    for scope in ["database/WAL:", "index:", "temporary outputs:"] {
-        assert!(cleanup.contains(scope), "{imported:?}");
-    }
-    assert!(
-        cleanup.contains("other readers outstanding or unknown"),
-        "{cleanup}"
-    );
-    assert!(
-        !index_names(&dir, CANARY),
-        "the canary left every term dictionary"
-    );
-    assert!(store.recall(&query(CANARY)).unwrap().is_empty());
-    let hits = match pinned
-        .search(&seed(&query(CANARY), MatchMode::Lexical, 10, 0))
-        .unwrap()
-    {
-        Searched::Hits { hits, .. } => hits,
-        Searched::Unavailable => vec![],
-    };
-    for hit in hits {
-        let row: Option<String> = rusqlite::Connection::open(s.db())
-            .unwrap()
-            .query_row(
-                "SELECT lifecycle FROM node WHERE rid = ?1 AND lifecycle = 'active'",
-                [hit.rid],
-                |r| r.get(0),
-            )
-            .ok();
-        assert_eq!(row, None, "an old reader's hit is revalidated away");
-    }
 }

@@ -9,9 +9,7 @@
 mod common;
 
 use common::Scratch;
-use kaban_core::{
-    Actor, AuditStore, ChangeLogStore, IngestStore, MemoryStore, NodeId, WorkspaceId, WriteCtx,
-};
+use kaban_core::{Actor, ChangeLogStore, IngestStore, MemoryStore, NodeId, WorkspaceId, WriteCtx};
 use kaban_ingest::{
     Candidate, PIPELINE_VERSION, Skip, SkipKey, SourceId, WalkConfig, blocked_path_document,
     config_hash, should_skip_blocked, walk,
@@ -212,8 +210,6 @@ fn a_canary_in_a_file_name_is_rejected_before_hashing_and_reaches_no_byte_store(
         "{props}"
     );
 
-    let audit = tree.store.audit_verify().unwrap();
-    assert!(audit.ok && audit.entries >= 1, "{audit:?}");
     let disk = disk_bytes(&tree.db);
     assert!(!contains(&disk, CANARY), "canary in db/wal/shm bytes");
     assert!(
@@ -245,7 +241,6 @@ fn the_same_rejected_file_is_skipped_on_a_second_run_via_its_keyed_identity() {
     let first = ingest_blocked(&tree);
     assert_eq!(first.len(), 1);
     let outbox_after_first = outbox_rows(&tree.store);
-    let audit_after_first = tree.store.audit_verify().unwrap().entries;
     let rev_after_first = tree.store.get(&first[0], true).unwrap().unwrap().rev;
 
     let second = ingest_blocked(&tree);
@@ -257,11 +252,6 @@ fn the_same_rejected_file_is_skipped_on_a_second_run_via_its_keyed_identity() {
         outbox_rows(&tree.store),
         outbox_after_first,
         "no changes row on the re-run"
-    );
-    assert_eq!(
-        tree.store.audit_verify().unwrap().entries,
-        audit_after_first,
-        "no audit row on the re-run"
     );
     assert_eq!(
         tree.store.get(&first[0], true).unwrap().unwrap().rev,

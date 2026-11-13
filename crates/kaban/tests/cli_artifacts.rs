@@ -78,29 +78,19 @@ fn explicit_ingestion_restores_reset_links_and_preserves_other_authority() {
             &WriteCtx::new("v1", WorkspaceId::default(), Actor::HumanCli),
         )
         .unwrap();
-    let mut other_layer = kaban_core::WriteBatch::new(WorkspaceId::default(), vec![]);
-    other_layer.assertions.push(kaban_core::BatchAssertion {
-        subject: kaban_core::BatchSubject::Edge {
+    // another layer's edge on the human's triple: a producer never overwrites a human edge
+    let mut other_layer = kaban_core::WriteBatch::new(
+        WorkspaceId::default(),
+        vec![kaban_core::Op::UpsertEdge {
             src: chunk.clone(),
-            rel: "MENTIONS".into(),
             dst: human_target,
-        },
-        claim_class: kaban_core::ClaimClass::Edge,
-        predicate: None,
-        object: None,
-        value: serde_json::json!({"method":"measured","score":9000}),
-        layer: kaban_core::Layer::V4,
-        method: kaban_core::Method::Measured,
-        extractor_id: None,
-        extractor_version: None,
-        source_id: None,
-        lineage_id: "v4:fixture".into(),
-        raw_score: kaban_core::Fixed(9000),
-        rank: kaban_core::Rank::Normal,
-        rank_reason: None,
-        calibration_version: 0,
-        supersedes: None,
-    });
+            rel: "MENTIONS".into(),
+            props: Some(serde_json::json!({"layer": "v4", "method": "measured", "score": 9000})),
+        }],
+    );
+    other_layer.edge_diff = kaban_core::EdgeDiff::Owned {
+        owner: kaban_core::Owner::KabanParse,
+    };
     store.apply_batch(other_layer, &ctx).unwrap();
     let conn = rusqlite::Connection::open(scratch.db()).unwrap();
     assert_eq!(
@@ -130,16 +120,6 @@ fn explicit_ingestion_restores_reset_links_and_preserves_other_authority() {
     conn.execute("INSERT INTO derived_artifact SELECT 'foreign-sentinel',n.workspace_id,'gazetteer','foreign-fixture',n.rid,json_object('content_hash',n.content_hash,'rev',n.rev),'fixture',n.policy_version,0 FROM node n WHERE n.id=?1",[foreign.id.as_str()]).unwrap();
     conn.execute("INSERT INTO derived_artifact SELECT 'other-layer-sentinel',workspace_id,'script',producer_id,source_rid,source_rev,config_hash,policy_version,published_at FROM derived_artifact WHERE artifact_key<>'foreign-sentinel' LIMIT 1",[]).unwrap();
     let source_before = store.list_nodes("Document", "default", 0, 100).unwrap()[0].clone();
-    let human_before: String = conn
-        .query_row("SELECT value FROM assertion WHERE layer='human'", [], |r| {
-            r.get(0)
-        })
-        .unwrap();
-    let other_before: String = conn
-        .query_row("SELECT value FROM assertion WHERE layer='v4'", [], |r| {
-            r.get(0)
-        })
-        .unwrap();
     let reset = run(&["reindex", "layer", "gazetteer"]);
     assert!(String::from_utf8_lossy(&reset.stderr).contains("rebuilding has not run"));
     assert_eq!(conn.query_row("SELECT count(*) FROM derived_artifact WHERE artifact_key IN ('foreign-sentinel','other-layer-sentinel')",[],|r|r.get::<_,i64>(0)).unwrap(),2,"reset preserves other-layer and valid foreign artifacts");
@@ -168,21 +148,6 @@ fn explicit_ingestion_restores_reset_links_and_preserves_other_authority() {
         links().iter().any(
             |edge| serde_json::to_value(edge).unwrap() == serde_json::to_value(&human).unwrap()
         )
-    );
-    assert_eq!(
-        conn.query_row("SELECT value FROM assertion WHERE layer='human'", [], |r| r
-            .get::<_, String>(0))
-            .unwrap(),
-        human_before
-    );
-    assert_eq!(
-        conn.query_row(
-            "SELECT value FROM assertion WHERE layer='v4' AND rank='normal'",
-            [],
-            |r| r.get::<_, String>(0)
-        )
-        .unwrap(),
-        other_before
     );
     assert_eq!(
         serde_json::to_value(
