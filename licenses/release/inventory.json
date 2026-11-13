@@ -901,15 +901,6 @@
     },
     {
       "license": "MIT OR Apache-2.0",
-      "name": "form_urlencoded",
-      "notices": {
-        "LICENSE-APACHE": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-        "LICENSE-MIT": "20c7855c364d57ea4c97889a5e8d98470a9952dade37bd9248b9a54431670e5e"
-      },
-      "version": "1.2.2"
-    },
-    {
-      "license": "MIT OR Apache-2.0",
       "name": "fs4",
       "notices": {
         "LICENSE-APACHE": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
@@ -1166,38 +1157,6 @@
     },
     {
       "license": "Unicode-3.0",
-      "name": "icu_normalizer",
-      "notices": {
-        "LICENSE": "f367c1b8e1aa262435251e442901da4607b4650e0e63a026f5044473ecfb90f2"
-      },
-      "version": "2.3.0"
-    },
-    {
-      "license": "Unicode-3.0",
-      "name": "icu_normalizer_data",
-      "notices": {
-        "LICENSE": "f367c1b8e1aa262435251e442901da4607b4650e0e63a026f5044473ecfb90f2"
-      },
-      "version": "2.3.0"
-    },
-    {
-      "license": "Unicode-3.0",
-      "name": "icu_properties",
-      "notices": {
-        "LICENSE": "f367c1b8e1aa262435251e442901da4607b4650e0e63a026f5044473ecfb90f2"
-      },
-      "version": "2.3.0"
-    },
-    {
-      "license": "Unicode-3.0",
-      "name": "icu_properties_data",
-      "notices": {
-        "LICENSE": "f367c1b8e1aa262435251e442901da4607b4650e0e63a026f5044473ecfb90f2"
-      },
-      "version": "2.3.0"
-    },
-    {
-      "license": "Unicode-3.0",
       "name": "icu_provider",
       "notices": {
         "LICENSE": "f367c1b8e1aa262435251e442901da4607b4650e0e63a026f5044473ecfb90f2"
@@ -1227,24 +1186,6 @@
         "LICENSE": "508a77d2e7b51d98adeed32648ad124b7b30241a8e70b2e72c99f92d8e5874d1"
       },
       "version": "1.0.1"
-    },
-    {
-      "license": "MIT OR Apache-2.0",
-      "name": "idna",
-      "notices": {
-        "LICENSE-APACHE": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-        "LICENSE-MIT": "b38f11f6096706e6de553dabe2a7ed142d59b6fa8c97e290c67496154745cdd5"
-      },
-      "version": "1.1.0"
-    },
-    {
-      "license": "Apache-2.0 OR MIT",
-      "name": "idna_adapter",
-      "notices": {
-        "LICENSE-APACHE": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-        "LICENSE-MIT": "8b43ce8accd61e9d370b5ca9e9c4f953279b5c239926c62315b40e24df51b726"
-      },
-      "version": "1.2.2"
     },
     {
       "license": "Unlicense OR MIT",
@@ -1761,15 +1702,6 @@
         "src/fonts/assets/LICENSE-fallback-fonts": "5adcc08a77145a2569fd056e6cb7133420fa04b2a7ef35ccab6bdad9c097cc69"
       },
       "version": "0.3.78"
-    },
-    {
-      "license": "MIT OR Apache-2.0",
-      "name": "percent-encoding",
-      "notices": {
-        "LICENSE-APACHE": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-        "LICENSE-MIT": "b38f11f6096706e6de553dabe2a7ed142d59b6fa8c97e290c67496154745cdd5"
-      },
-      "version": "2.3.2"
     },
     {
       "license": "MIT",
@@ -2759,15 +2691,6 @@
       "version": "0.1.4"
     },
     {
-      "license": "MIT OR Apache-2.0",
-      "name": "url",
-      "notices": {
-        "LICENSE-APACHE": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-        "LICENSE-MIT": "b38f11f6096706e6de553dabe2a7ed142d59b6fa8c97e290c67496154745cdd5"
-      },
-      "version": "2.5.8"
-    },
-    {
       "license": "Unlicense/MIT",
       "name": "utf8-ranges",
       "notices": {
@@ -3061,8 +2984,8 @@
   ],
   "inputs": {
     ".cargo/config.toml": "f2e2fc8a56c1cf62697357291c53fe0321748664ac3abf68cce3f5c6970f06e5",
-    "Cargo.lock": "b9feb2cea3d1a991545e963c9cfeb761ee555f8e871e407d74212b50099a1a03",
-    "Cargo.toml": "e964dd8399a0a2662e8cbbd7fc9cb07448b73116231ecdd221f3f8853533de7a",
+    "Cargo.lock": "ce7c217810fe2168c5e4c3cc5d6780f5fc3df97f68d9f90dd4f70c8cccc7ea1d",
+    "Cargo.toml": "660c68f19efb269980f6e3a178baed0b46c3caeeff6e0ee31a9cc1e784cb7718",
     "crates/kaban-api/Cargo.toml": "57a7ffc5d9461b97dec77801c92bf75fca3b948615570742af224cc0cfbced64",
     "crates/kaban-codegraph/Cargo.toml": "6c8d67acaf1146426d68cee04ae060d3f9caa26700115797b47b90adad770a99",
     "crates/kaban-core/Cargo.toml": "3bfbd5ec57dbef5bf0ba19be7036ba7ff40f8e60414c2f31dca07f137015f1e5",
@@ -3110,20 +3033,20 @@
   "schema": 1,
   "targets": {
     "aarch64-apple-darwin": {
-      "bundle_sha256": "e01c21ee0e4b469363d246acd87ef85bf6b3d5c642d4f62cc607597ab14749e2",
-      "dependencies": 340
+      "bundle_sha256": "e3b9ecf4e84f553c8e922e9a4e2d92c4f9af1112373ef091f635daa9198b4f79",
+      "dependencies": 331
     },
     "aarch64-unknown-linux-gnu": {
-      "bundle_sha256": "dd8f1c6509b8dc539a5ff6c574b3459b7c14963b7e574f12e976fcbaed10365c",
-      "dependencies": 337
+      "bundle_sha256": "977f92487d30c0273373d7f73e2439533a52aac3ddb80d4197c2cb229a2eb1f5",
+      "dependencies": 328
     },
     "x86_64-unknown-linux-gnu": {
-      "bundle_sha256": "57d6c7c0cbe0939e06c581d2223a8ce0764931fb58b99d84485dc80191af5b34",
-      "dependencies": 338
+      "bundle_sha256": "c4b23008a9db88747fb1235252302159e1f397c2c11d660111a7ef3b97044674",
+      "dependencies": 329
     },
     "x86_64-unknown-linux-musl": {
-      "bundle_sha256": "cd1e0192dbdf8aa8438eba9c0d7cb6e7ee2eb3366e6d98daa5bbcf202d5a2047",
-      "dependencies": 338
+      "bundle_sha256": "231e1d0dfe78ddc40b498301b3789e7df3982b97c2197bc84016da0e3efc9749",
+      "dependencies": 329
     }
   }
 }

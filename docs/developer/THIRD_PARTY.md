@@ -13,10 +13,10 @@ features plus `kaban-ingest/pdf,kaban-ingest/md-splitter`:
 
 | Target | Registry packages in inventory |
 |---|---:|
-| `x86_64-unknown-linux-gnu` | 338 |
-| `x86_64-unknown-linux-musl` | 338 |
-| `aarch64-unknown-linux-gnu` | 337 |
-| `aarch64-apple-darwin` | 340 |
+| `x86_64-unknown-linux-gnu` | 329 |
+| `x86_64-unknown-linux-musl` | 329 |
+| `aarch64-unknown-linux-gnu` | 328 |
+| `aarch64-apple-darwin` | 331 |
 
 The closure comes from `cargo tree --locked --target TARGET -p kaban -p
 kaban-index --features kaban-ingest/pdf,kaban-ingest/md-splitter --edges normal,build`. Build dependencies and proc macros are
@@ -58,7 +58,7 @@ The collection includes these less obvious sources:
 - `qcms`: complete original MIT headers, including both Mozilla Foundation and
   Corporation copyright variants and Marti Maria attribution.
 - `text-splitter` and ICU: MIT splitter terms and Unicode-3.0 licences covering
-  embedded segmentation/normalization/property data and their IBM attribution.
+  embedded segmentation and locale-fallback data and their IBM attribution.
 - `alloc-stdlib` and `taffy`: omitted repository-root BSD/MIT texts recovered at
   their crate-recorded revisions. No dependency version was changed.
 - Brotli: both BSD and MIT texts; the decompressor's exact Google 2013 MIT
