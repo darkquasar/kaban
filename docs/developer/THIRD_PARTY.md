@@ -7,37 +7,40 @@ and runtime notices described here.
 
 ## Four-target full release profile
 
-The committed [release bundles](../../licenses/release/README.md) cover these
+The reviewed [licence inventory](../../licenses/release/README.md) covers these
 configurations, each building **both `kaban` and `kaban-index`** with default
 features plus `kaban-ingest/pdf,kaban-ingest/md-splitter`:
 
 | Target | Registry packages in inventory |
 |---|---:|
-| `x86_64-unknown-linux-gnu` | 332 |
-| `x86_64-unknown-linux-musl` | 332 |
-| `aarch64-unknown-linux-gnu` | 331 |
-| `aarch64-apple-darwin` | 334 |
+| `x86_64-unknown-linux-gnu` | 338 |
+| `x86_64-unknown-linux-musl` | 338 |
+| `aarch64-unknown-linux-gnu` | 337 |
+| `aarch64-apple-darwin` | 340 |
 
-The inventory comes from `cargo tree --locked --target TARGET -p kaban -p
+The closure comes from `cargo tree --locked --target TARGET -p kaban -p
 kaban-index --features kaban-ingest/pdf,kaban-ingest/md-splitter --edges normal,build`. Build dependencies and proc macros are
-included conservatively; dev-only dependencies are excluded. Each target's
-`manifest.json` records resolved versions, features, declared licence expressions,
-source repositories, individual notice hashes, and the complete bundle hash.
-The generator checks that both selected packages and a nonempty registry closure
-were resolved; malformed Cargo output is an error.
+included conservatively; dev-only dependencies are excluded. The generator checks
+that both selected packages and a nonempty registry closure were resolved;
+malformed Cargo output is an error.
 
-The manifest binds the notices to `Cargo.lock`, the workspace/member manifests,
-the toolchain, Cargo target configuration, the collector, and supplementary
-upstream texts. The release check refuses changed inputs or damaged bundles.
-Archive members under `third-party/` contain the target's manifest and full
+Generated notice bundles are not committed. `licenses/release/inventory.json`
+records, for all four targets, each package's version, declared licence expression
+and notice text hashes, each target's bundle hash, the Rust runtime notice hashes,
+and the hashes of `Cargo.lock`, the workspace/member manifests, the toolchain,
+Cargo target configuration, the collector and the supplements. Before building,
+the release check refuses changed inputs. After building, the release regenerates
+the notices from the locked Cargo sources and the pinned toolchain and refuses any
+drift from the inventory. Archive members under `third-party/` contain the
+target's `manifest.json` (versions, features, repositories, notice hashes) and full
 `THIRD_PARTY_LICENSES.txt`, plus the original runtime inventory in
 `RUST_STANDARD_LIBRARY_NOTICES.html`; Kaban's own `LICENSE` and `NOTICE` are separate members.
 
 ```text
-+--------------------+  resolve  +----------------------+  collect  +------------------+
-| Lock + release     | ========> | Target dependency    | ========> | Licence / notice |
-| package selection  |           | versions + features  |           | bundle + manifest|
-+--------------------+           +----------------------+           +------------------+
++--------------------+  resolve  +----------------------+  collect  +-----------------------+
+| Lock + release     | ========> | Target dependency    | ========> | Notices, compared     |
+| package selection  |           | versions + features  |           | with inventory.json   |
++--------------------+           +----------------------+           +-----------------------+
 ```
 
 ## Collection decisions
@@ -71,15 +74,21 @@ The collection includes these less obvious sources:
 - Apache DataSketches: upstream `LICENSE` and `NOTICE`, omitted from its crate
   archive, retrieved at the crate's recorded upstream revision.
 - Tantivy subcrates, `ownedbytes`, and `whatlang`: omitted licence texts
-  retrieved at their crate archives' `.cargo_vcs_info.json` revisions.
+  retrieved at their crate archives' `.cargo_vcs_info.json` revisions. The
+  `ownedbytes` revision's LICENSE is byte-identical to the Tantivy one, so one
+  committed copy serves both; `sources.json` records both revisions.
 - RMCP: from 3.9.0 the `rmcp` and `rmcp-macros` archives ship the upstream
   `LICENSE` (Apache-2.0 with the MIT-to-Apache transition preamble), so it is
   collected from the archives and no supplement is kept.
 - `htmlescape`: its manifest offers Apache-2.0, MIT, or MPL-2.0 but ships no
   licence text. Apache-2.0 is selected and its standard text is retained.
-- Rust 1.99.0: the standard-library copyright/dependency inventory and licence
-  texts from its official documentation component, plus the compiler-builtins
-  licence at the pinned Rust commit. This runtime inventory is conservative.
+- Rust 1.99.0: the standard-library copyright/dependency inventory
+  (`COPYRIGHT-library.html`) and licence texts, read at release time from the
+  pinned toolchain's `rustc` component and checked against the inventory hashes,
+  plus the committed compiler-builtins licence at the pinned Rust commit. The HTML
+  is shipped unmodified: it is the Rust project's own notice for code linked from
+  the standard library, carrying per-crate copyright lines that the plain licence
+  texts lack. This runtime inventory is conservative.
 - Static musl: musl 1.2.5's complete copyright terms from its official archive.
   Rust's pinned build recipe selects that version and applies upstream security
   patches. GNU host shared libraries are supplied by the operating system and
