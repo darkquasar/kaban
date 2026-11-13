@@ -25,6 +25,7 @@ pub mod ontology;
 /// The one-shot process runner (stage1-plan CG1.1): public as a module so the spawn lint can
 /// name `kaban_core::process` and so `Exec`, `EnvAllowlist`, `Monitor` keep their own namespace.
 pub mod process;
+pub mod query_budget;
 mod sink;
 mod store;
 pub mod text_index;

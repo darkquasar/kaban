@@ -14,9 +14,22 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// The v4 crates that must never contain `unsafe` (G1-E1; `unsafe_code = "forbid"` is inherited
-/// from the workspace lints, this lint catches a crate that stops inheriting them).
-const NEW_CRATES: [&str; 2] = ["crates/kaban-codegraph/", "crates/kaban-index/"];
+/// The crates that must never contain `unsafe`: every workspace member except `crates/kaban-vtab/`,
+/// the one listed exception (QRY-07, OD-7; G1-E1). `unsafe_code = "forbid"` is inherited from the
+/// workspace lints, this lint catches a crate that stops inheriting them. The name is historical
+/// (it began as the v4 crates).
+const NEW_CRATES: [&str; 10] = [
+    "crates/kaban-api/",
+    "crates/kaban-codegraph/",
+    "crates/kaban-core/",
+    "crates/kaban-index-graph/",
+    "crates/kaban-index-tantivy/",
+    "crates/kaban-index/",
+    "crates/kaban-ingest/",
+    "crates/kaban-policy/",
+    "crates/kaban-store-sqlite/",
+    "crates/kaban/",
+];
 
 /// The only production files that may construct a `Command` (G1-E3, G1-S3): the one-shot runner
 /// in `kaban-core::process` (`exec.rs` builds the `Command`, `run.rs` spawns it), the future
@@ -245,7 +258,10 @@ fn no_unsafe_in_new_crates() {
             .any(|p| p.ends_with("kaban-codegraph/src/lib.rs")),
         "the walker must reach crates/kaban-codegraph/src/lib.rs"
     );
-    let found = scan(&root, &files, &[], |l| has_word(l, "unsafe"));
+    // this file names the keyword in order to look for it
+    let found = scan(&root, &files, &["crates/kaban/tests/lints.rs"], |l| {
+        has_word(l, "unsafe")
+    });
     assert!(
         found.is_empty(),
         "`unsafe` in a v4 crate (G1-E1):\n{}",
@@ -260,6 +276,44 @@ fn no_unsafe_in_new_crates() {
             );
         }
     }
+}
+
+/// The crate directories listed in the workspace manifest's `members`, as `crates/<name>/`.
+fn workspace_member_dirs(root: &Path) -> Vec<String> {
+    let manifest = fs::read_to_string(root.join("Cargo.toml")).unwrap();
+    let members = manifest
+        .split("members = [")
+        .nth(1)
+        .and_then(|rest| rest.split(']').next())
+        .unwrap();
+    let mut dirs: Vec<String> = members
+        .split('"')
+        .skip(1)
+        .step_by(2)
+        .map(|member| format!("{member}/"))
+        .collect();
+    dirs.sort();
+    dirs
+}
+
+/// QRY-07, OD-7: the unsafe scan covers every workspace member except `crates/kaban-vtab/`.
+#[test]
+fn unsafe_scan_covers_every_member_except_vtab() {
+    let root = workspace_root();
+    let mut scanned: Vec<String> = NEW_CRATES.iter().map(|c| (*c).to_owned()).collect();
+    scanned.sort();
+    let expected: Vec<String> = workspace_member_dirs(&root)
+        .into_iter()
+        .filter(|dir| dir != "crates/kaban-vtab/")
+        .collect();
+    assert_eq!(
+        scanned, expected,
+        "the unsafe scan set must be every workspace member except crates/kaban-vtab/"
+    );
+    assert!(
+        workspace_member_dirs(&root).contains(&"crates/kaban-vtab/".to_owned()),
+        "kaban-vtab must be a workspace member"
+    );
 }
 
 #[test]

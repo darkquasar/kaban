@@ -227,3 +227,10 @@ SECURITY/20261104 pulldown-cmark 0.13.6
 # MACOS/M1-M21: accepted native descriptor admission/tests and bounded snapshot persistence.
 MACOS/M1-M21 nix 0.29.0
 MACOS/M1-M21 sqlite-vfs 0.2.0
+
+# QUERY/T1: openCypher parser for the GRAPH_TABLE pattern language (spec 11 T1; open-cypher 0.5.0 and its Logos/LALRPOP stack).
+QUERY/T1 lalrpop-util 0.23.2
+QUERY/T1 logos 0.16.1
+QUERY/T1 logos-codegen 0.16.1
+QUERY/T1 logos-derive 0.16.1
+QUERY/T1 open-cypher 0.5.0

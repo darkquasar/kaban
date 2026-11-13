@@ -428,7 +428,8 @@ quality() {
   # store-boundary dependency check (engine-spec EN-E10a hygiene, engine-plan E1.0, SO-5):
   #   kaban-api and kaban-ingest declare no direct normal `rusqlite` dependency (dev-only is fine),
   #   and the inverse normal tree of rusqlite under kaban-api is empty (today) or names
-  #   kaban-codegraph as the only direct parent (after v4 CG5.2). Any other parent fails.
+  #   kaban-codegraph as the only direct parent (after v4 CG5.2). Any other parent fails. Across the
+  #   workspace the direct parents of rusqlite are kaban-store-sqlite, kaban-codegraph, kaban-vtab.
   store_boundary_deps() {
     local meta direct parents
     meta=$("${CARGO:-cargo}" metadata --format-version 1 --no-deps) || return 1
@@ -458,7 +459,22 @@ quality() {
       echo "$parents" >&2
       return 1
     fi
-    echo "store boundary: no direct rusqlite in kaban-api/kaban-ingest; kaban-api inverse tree parents: ${parents:-none}"
+    # workspace-wide: the direct normal parents of rusqlite are the store, the code graph and the
+    # virtual-table crate (spec 11 QRY-07); any other parent fails
+    local all_parents unexpected
+    tree=$("${CARGO:-cargo}" tree -e normal -i rusqlite --prefix depth 2>&1) || {
+      echo "FAILED: cargo tree -i rusqlite exited non-zero:" >&2
+      echo "$tree" >&2
+      return 1
+    }
+    all_parents=$(printf '%s\n' "$tree" | awk '/^1[^0-9]/ { sub(/^1/, ""); print $1 }' | sort -u)
+    unexpected=$(printf '%s\n' "$all_parents" | grep -vxE 'kaban-store-sqlite|kaban-codegraph|kaban-vtab' || true)
+    if [ -n "$unexpected" ]; then
+      echo "FAILED: rusqlite has a direct parent outside kaban-store-sqlite, kaban-codegraph, kaban-vtab:" >&2
+      echo "$unexpected" >&2
+      return 1
+    fi
+    echo "store boundary: no direct rusqlite in kaban-api/kaban-ingest; kaban-api inverse tree parents: ${parents:-none}; workspace rusqlite parents: $(printf '%s' "$all_parents" | tr '\n' ' ')"
   }
   if command -v jq >/dev/null 2>&1; then
     step store_boundary_deps

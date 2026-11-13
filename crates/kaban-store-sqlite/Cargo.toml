@@ -11,13 +11,19 @@ authors.workspace = true
 # `SqliteStore::with_text_index`: ordinary recall seeds through an injected `TextIndex` instead of
 # the FTS5 adapter (spec 05 SS-07; lane B's external adapter and `tests/text_index_override.rs`)
 text-index-override = []
+# Failure injection points for the unified-query tests (spec 11); inert until a task wires them.
+failpoints = []
 
 [dependencies]
 kaban-core.workspace = true
 kaban-policy.workspace = true
 kaban-index-tantivy.workspace = true # the store owns its text index (spec 05 OWN-M, lane T8a): opened, admitted or rebuilt at open, projected after every commit
 tracing.workspace = true             # a post-commit projection failure is logged, never a rejection (OWN-M constraint 2)
-rusqlite = { workspace = true, features = ["functions"] } # `kaban_writer()`, the connection-local writer the stamp triggers read (spec 05 SS-26)
+rusqlite = { workspace = true, features = ["functions", "vtab", "hooks", "limits"] } # `kaban_writer()`, the connection-local writer the stamp triggers read (spec 05 SS-26)
+kaban-index-graph.workspace = true  # pre-wired for the unified query tasks (spec 11 T1)
+kaban-vtab.workspace = true          # pre-wired: the virtual-table glue (spec 11 T1)
+tantivy.workspace = true             # `MmapDirectory`/`OwnedBytes` for the graph index files (OD-7)
+open-cypher.workspace = true         # GRAPH_TABLE pattern parser (spec 11 T15)
 serde_json.workspace = true
 subtle.workspace = true
 rustix.workspace = true

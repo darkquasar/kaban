@@ -89,6 +89,47 @@ requires a runtime-notice review when the pinned Rust version changes. Collected
 source and licence texts are unmodified; deduplication only shares identical
 complete text blocks while preserving every package/path association.
 
+## openCypher parser selection (spec 11 T1)
+
+The `GRAPH_TABLE` pattern language (T15) borrows a parser instead of writing one. Candidates
+were taken in the order `open-cypher`, `cyrs`, `decypher` and judged against four conditions:
+it builds on the pinned 1.99.0 toolchain, its licence is on the `deny.toml` allow list, it adds at
+most 15 packages to `Cargo.lock`, and it parses a full read-only query (`MATCH ... [WHERE] ...
+RETURN ...`) for one sample of each T15 construct class (a) to (e).
+
+| Candidate | Version | Licence | MSRV | Result |
+|---|---|---|---|---|
+| `open-cypher` | 0.5.0 | Apache-2.0 | 1.88 | Selected. Builds on 1.99.0; 5 new packages; every class parses (see below). |
+| `cyrs` | 0.3.3 | MIT | unknown | Rejected without a build: it is a command-line tool ("C-c C-v"), not a Cypher parser. |
+| `decypher` | 0.2.0-alpha.10 | EUPL-1.2 OR MIT OR Apache-2.0 | 1.94 | Not evaluated: an earlier candidate passed, and it is an alpha release. |
+
+`open-cypher` is pinned exactly (`=0.5.0`) in the workspace manifest. It is a lexer and parser for
+the openCypher 2024.3 grammar (Logos tokens, LALRPOP parser, spanned AST) and parses syntax only.
+Its normal dependencies add these lock entries, all licensed `MIT OR Apache-2.0` except the
+parser itself:
+
+- `open-cypher` 0.5.0 (Apache-2.0)
+- `lalrpop-util` 0.23.2 (Apache-2.0 OR MIT)
+- `logos` 0.16.1, `logos-derive` 0.16.1, `logos-codegen` 0.16.1 (MIT OR Apache-2.0)
+
+`logos-codegen` pulls `fnv`, `proc-macro2`, `quote`, `regex-automata`, `regex-syntax` and `syn`,
+which were already in the lock. The optional `serde` feature is off.
+
+Probe results, one sample per class, each parsed to a syntax tree without error:
+
+- (a) paths: `MATCH (a:Function)-[:CALLS]->(b:Function) WHERE a.name = 'x' RETURN b.name AS n`
+- (b) traversal: `MATCH (m:Commit {id: 'main'})-[*1..3]->(x) RETURN x.id AS id` and
+  `MATCH p = shortestPath((a:N)-[:R*..5]->(b:N)) WHERE a.id = 1 RETURN b.id AS id`
+- (c) shaping: `OPTIONAL MATCH`, `WITH ... count(b) AS c WHERE c > 1`, `DISTINCT`, `ORDER BY`,
+  `SKIP`, `LIMIT`
+- (d) composition: `UNION`, `CASE WHEN ... END` and `EXISTS { MATCH ... [WHERE ...] }`
+- (e) functions: `RETURN pagerank(a) AS pr, toLower(a.name) AS n, count(*) AS c`
+
+Known gap for T15: the bare-pattern subquery form `EXISTS { (a)-[:R]->(m:M) }` is a syntax error
+in this parser, while `EXISTS { MATCH (a)-[:R]->(m:M) }` and `exists((a)-[:R]->(:M))` parse. The
+parser also accepts write clauses (`MATCH (a) DELETE a`), so the refusal inventory stays the
+pattern layer's job.
+
 ## Other configurations
 
 These bundles cover the four full-profile downloads, including PDF and
