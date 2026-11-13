@@ -234,3 +234,13 @@ QUERY/T1 logos 0.16.1
 QUERY/T1 logos-codegen 0.16.1
 QUERY/T1 logos-derive 0.16.1
 QUERY/T1 open-cypher 0.5.0
+
+# QUERY/T1 (kab-8mhm): owner-approved advisory bumps for `cargo deny`. rusqlite 0.41.1 moves libsqlite3-sys
+# to 0.39.1 (RUSTSEC-2026-0459); rmcp 3.9.0 fixes 0457, 0461 and 0462, and its `transport-io` feature
+# turns on `tokio/net`, which adds socket2; rustix 1.1.6 fixes 0486; 6 packages
+QUERY/T1 libsqlite3-sys 0.39.1
+QUERY/T1 rmcp 3.9.0
+QUERY/T1 rmcp-macros 3.9.0
+QUERY/T1 rusqlite 0.41.1
+QUERY/T1 rustix 1.1.6
+QUERY/T1 socket2 0.6.5

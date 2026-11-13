@@ -81,7 +81,7 @@ fn raw(s: &Scratch) -> Connection {
 /// Every `assertion` row as `(column name, text)` pairs, ordered by id.
 fn claim_rows(conn: &Connection) -> Vec<Vec<(String, Option<String>)>> {
     let mut st = conn.prepare("SELECT * FROM assertion ORDER BY id").unwrap();
-    let names: Vec<String> = st.column_names().iter().map(|n| (*n).to_owned()).collect();
+    let names: Vec<String> = st.column_names().map(str::to_owned).collect();
     st.query_map([], |r| {
         names
             .iter()

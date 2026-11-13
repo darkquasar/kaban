@@ -36,10 +36,10 @@ kaban-index-graph = { path = "crates/kaban-index-graph", version = "3.0.0" }
 kaban-vtab = { path = "crates/kaban-vtab", version = "3.0.0" }
 
 # exact pins per core-plan.md §3 (licences recorded there)
-rmcp = { version = "=3.5.1", features = ["server", "transport-io", "elicitation"] }  # elicitation (+ url): C3.2 accept handshake probe (M3-20, OWN-4)
+rmcp = { version = "=3.9.0", features = ["server", "transport-io", "elicitation"] }  # elicitation (+ url): C3.2 accept handshake probe (M3-20, OWN-4); 3.9.0 clears RUSTSEC-2026-0457/0461/0462
 tokio = { version = "=1.53.3", features = ["rt-multi-thread", "macros", "io-std", "signal", "sync", "time"] }  # sync/time: LeaseKeeper (C2.5, D-18)
 tokio-util = "=0.7.19"                  # MIT: CancellationToken for the LeaseKeeper and the rescan job (C2.5, MD-18)
-rusqlite = { version = "=0.40.2", features = ["bundled", "backup", "vtab", "hooks", "limits"] }  # vtab/hooks/limits: unified query (spec 11, T1); `functions` stays per-crate
+rusqlite = { version = "=0.41.1", features = ["bundled", "backup", "vtab", "hooks", "limits"] }  # vtab/hooks/limits: unified query (spec 11, T1); `functions` stays per-crate; 0.41 pulls libsqlite3-sys 0.39 (RUSTSEC-2026-0459)
 thiserror = "=2.0.21"
 anyhow = "=1.0.104"
 clap = { version = "=4.6.7", features = ["derive", "env"] }
@@ -48,7 +48,7 @@ yaml_serde = "=0.10.7"                 # MIT OR Apache-2.0: maintained YAML Orga
 unicode-normalization = "=0.1.25"
 zeroize = "=1.9.1"                      # Apache-2.0 OR MIT: audit key / token in zeroizing memory
 subtle = "=2.6.1"                       # BSD-3-Clause: constant-time compare of chain HMACs and tokens
-rustix = { version = "=1.1.5", features = ["fs", "process", "mount", "thread"] }  # Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT: fchmod without unsafe (S5); process: process-group kill without unsafe (C3.3, R-C3.2-4; v4 CG1.1 runner); mount, thread: the v4 namespaces tier's mount view and unshare/setns helper (stage1-plan CG1.2, consumed from CG4.4; additive, no new package, no member uses them yet)
+rustix = { version = "=1.1.6", features = ["fs", "process", "mount", "thread"] }  # 1.1.6 clears RUSTSEC-2026-0486; Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT: fchmod without unsafe (S5); process: process-group kill without unsafe (C3.3, R-C3.2-4; v4 CG1.1 runner); mount, thread: the v4 namespaces tier's mount view and unshare/setns helper (stage1-plan CG1.2, consumed from CG4.4; additive, no new package, no member uses them yet)
 
 # exact pin per spec 05 SS-13b (EN-N1 amended narrowly; s31-tantivy-integration-design.md §6): the latest stable on
 # crates.io at T1 (2026-10-26; 0.26.2 is also Turso's tested pin). MIT. `mmap` is the directory and the writer lock,

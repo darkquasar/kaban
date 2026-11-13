@@ -172,7 +172,8 @@ expression: today
             "lifecycle",
             "governance",
             "created_at",
-            "workspace_id"
+            "workspace_id",
+            "provenance"
           ],
           "type": "object"
         },
@@ -370,7 +371,8 @@ expression: today
           "required": [
             "outcome",
             "instance_id",
-            "pack_lineage_id"
+            "pack_lineage_id",
+            "seq"
           ],
           "type": "object"
         }
@@ -637,7 +639,8 @@ expression: today
           "required": [
             "outcome",
             "instance_id",
-            "pack_lineage_id"
+            "pack_lineage_id",
+            "seq"
           ],
           "type": "object"
         }
@@ -793,7 +796,8 @@ expression: today
           "required": [
             "outcome",
             "instance_id",
-            "pack_lineage_id"
+            "pack_lineage_id",
+            "seq"
           ],
           "type": "object"
         }
@@ -841,6 +845,7 @@ expression: today
         "from",
         "rel",
         "to",
+        "confidence",
         "redactions",
         "receipt"
       ],
@@ -1137,7 +1142,8 @@ expression: today
             "lifecycle",
             "governance",
             "created_at",
-            "workspace_id"
+            "workspace_id",
+            "provenance"
           ],
           "type": "object"
         },
@@ -1472,7 +1478,8 @@ expression: today
       },
       "required": [
         "count",
-        "results"
+        "results",
+        "follow_ups"
       ],
       "type": "object"
     }
@@ -1895,7 +1902,8 @@ expression: today
             "lifecycle",
             "governance",
             "created_at",
-            "workspace_id"
+            "workspace_id",
+            "provenance"
           ],
           "type": "object"
         },
@@ -2073,7 +2081,8 @@ expression: today
           "required": [
             "outcome",
             "instance_id",
-            "pack_lineage_id"
+            "pack_lineage_id",
+            "seq"
           ],
           "type": "object"
         }
@@ -2144,6 +2153,8 @@ expression: today
         "id",
         "kind",
         "redactions",
+        "links_created",
+        "links_ignored",
         "receipt"
       ],
       "type": "object"
@@ -2312,7 +2323,13 @@ expression: today
           "required": [
             "kind",
             "name",
-            "description"
+            "ns",
+            "description",
+            "from_kinds",
+            "to_kinds",
+            "directed",
+            "props_schema",
+            "builtin"
           ],
           "type": "object"
         }
@@ -2484,7 +2501,13 @@ expression: today
       "required": [
         "kind",
         "name",
-        "description"
+        "ns",
+        "description",
+        "from_kinds",
+        "to_kinds",
+        "directed",
+        "props_schema",
+        "builtin"
       ],
       "type": "object"
     }
@@ -2644,7 +2667,11 @@ expression: today
           "required": [
             "layer",
             "producer_layers",
-            "on"
+            "on",
+            "owner",
+            "last_run",
+            "last_outcome",
+            "reason_off"
           ],
           "type": "object"
         },
@@ -2758,7 +2785,8 @@ expression: today
       },
       "required": [
         "stores",
-        "policy"
+        "policy",
+        "layers"
       ],
       "type": "object"
     }
@@ -3117,7 +3145,8 @@ expression: today
             "lifecycle",
             "governance",
             "created_at",
-            "workspace_id"
+            "workspace_id",
+            "provenance"
           ],
           "type": "object"
         },
@@ -3153,7 +3182,8 @@ expression: today
             "id",
             "from",
             "rel",
-            "to"
+            "to",
+            "confidence"
           ],
           "type": "object"
         },
@@ -3296,7 +3326,8 @@ expression: today
       },
       "required": [
         "nodes",
-        "edges"
+        "edges",
+        "anchored"
       ],
       "type": "object"
     }
@@ -3494,7 +3525,8 @@ expression: today
             "lifecycle",
             "governance",
             "created_at",
-            "workspace_id"
+            "workspace_id",
+            "provenance"
           ],
           "type": "object"
         },
@@ -3930,7 +3962,8 @@ expression: today
             "governance",
             "currency",
             "matched_target",
-            "matched_by"
+            "matched_by",
+            "superseded_by"
           ],
           "type": "object"
         }
@@ -3959,7 +3992,8 @@ expression: today
       },
       "required": [
         "results",
-        "partial"
+        "partial",
+        "follow_ups"
       ],
       "type": "object"
     }

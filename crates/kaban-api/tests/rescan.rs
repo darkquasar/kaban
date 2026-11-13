@@ -376,7 +376,7 @@ fn policy_handle_shares_the_apis_policy_instance_with_ingestion() {
 fn node_columns(s: &Scratch, id: &str) -> Vec<(String, String)> {
     let conn = rusqlite::Connection::open(s.db()).unwrap();
     let mut st = conn.prepare("SELECT * FROM node WHERE id = ?1").unwrap();
-    let names: Vec<String> = st.column_names().iter().map(ToString::to_string).collect();
+    let names: Vec<String> = st.column_names().map(ToString::to_string).collect();
     st.query_row([id], |r| {
         let mut out = Vec::new();
         for (i, name) in names.iter().enumerate() {
