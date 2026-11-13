@@ -61,16 +61,6 @@ impl IndexRows {
         Self { conn }
     }
 
-    /// Open the read-only connection on an immutable snapshot (a pack's `kaban.db`, spec 05
-    /// SS-19): `mode=ro&immutable=1`, so no lock is taken and no sidecar is ever created
-    /// beside it.
-    ///
-    /// # Errors
-    /// As [`Self::open`].
-    pub fn open_immutable(db: &Path) -> Result<Self> {
-        Self::open(Path::new(&crate::pack::immutable_uri(db)))
-    }
-
     fn lock(&self) -> MutexGuard<'_, Connection> {
         self.conn
             .lock()

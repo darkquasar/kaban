@@ -13,7 +13,6 @@ small allowlisted envelope on stdin, and delivers kaban's answer through pi's ow
     bash
   agent_before_settle  =>  stop          --host pi            ->  one continuation
                                                                  (custom_message, continue: true)
-  session_shutdown     =>  nothing in M4 (`kaban sync` is M5)
 ```
 
 ## Files
@@ -61,9 +60,10 @@ envelope (R4-4). The kaban pi selector reads exactly these fields (`toolName`, `
   with `pi.sendMessage({customType: "kaban-brief", content, display: true}, {deliverAs: "nextTurn"})`.
   Reached the model in every live session (round 1 sentinel 3/3; round 2 the seeded Decision
   text was echoed in the first reply).
-- **Pre-edit context.** `tool_call` for `edit`/`write` -> `kaban hook pre-tool-use` -> the
-  governing records for `input.path` as a `deliverAs: "steer"` message (reached the model 3/3 in
-  round 1); the handler returns nothing, so the edit is never blocked or changed. `edit` was not
+- **Pre-edit record.** `tool_call` for `edit`/`write` -> `kaban hook pre-tool-use` records the
+  attempted edit of `input.path` for the session and injects nothing (a non-empty
+  `additionalContext` would be sent as a `deliverAs: "steer"` message); the handler returns
+  nothing, so the edit is never blocked or changed. `edit` was not
   used by the model live (**unverified**; `write` 5/5).
 - **Failures and evidence.** `tool_execution_end` for `bash` -> `kaban hook post-tool-use`, which
   records a Failure (`pending_fix: true`, command, error text) when `isError` is true and
@@ -85,17 +85,20 @@ envelope (R4-4). The kaban pi selector reads exactly these fields (`toolName`, `
 - **Silence.** The extension writes nothing to stdout (pi's `--print --mode json` streams stayed
   intact in every live session) and never throws into pi: any failure (binary missing, timeout,
   non-JSON output) is ignored.
-- `session_shutdown` does nothing in M4; `kaban sync` (M5) will be called there with
-  argument-only `pi.exec`, which needs no stdin.
 
 ## Verification
 
 Offline: `scripts/hooks-live/test-pi-extension.sh --kaban <bin>` runs, inside the harness image,
 `node --experimental-strip-types --check` (syntax) and an invented-data run with a fake `pi`
-object against the static binary with a recording shim: exact envelope keys per event (the
-allowlist above), no `content` secret and no image item forwarded, briefing nextTurn,
-pre-context steer, Failure recorded, one continuation, second settle silent, evidence appended
-(`../specs/kaban/00-project/archive/evidence/m4-logs/m4corr2-pi-ext-fake-pi-green.log`). Live: the Docker lane
+object against the static binary with a recording shim. It dispatches only the handlers the
+extension registers and asserts: exactly the four events above plus `tool_execution_start` are
+registered (no `session_shutdown`, so nothing runs at shutdown); exact envelope keys per event
+(the allowlist above); no `content` secret and no image item forwarded; no briefing and no
+pre-edit message for a seeded Decision; Failure recorded; one continuation naming it, second
+settle silent; the pending Failure briefed (nextTurn) in a second session; evidence appended.
+It ends with one summary line whose `exit` is 0 when every check passed (the earlier fake-pi
+capture, `../specs/kaban/00-project/archive/evidence/m4-logs/m4corr2-pi-ext-fake-pi-green.log`,
+predates the governance removal). Live: the Docker lane
 (`scripts/hooks-live/run.sh pi <s> --recipes …`, OWN-7), two round-2 sessions and one
 re-verification session after R4-4 (`m4corr2-sessions/pi-c1`), all green.
 

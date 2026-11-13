@@ -128,16 +128,6 @@ async fn accepted_and_terminal_predecessors_are_immutable_and_revisions_repeat()
                 })
                 .unwrap();
             assert_eq!(keys.len(), 1);
-            let explanation = api
-                .explain(kaban_api::ExplainRequest {
-                    key: keys[0].0.clone(),
-                })
-                .unwrap();
-            assert_eq!(
-                explanation.explanation.verdict,
-                kaban_core::AssertionStatus::Winner,
-                "terminal revision link remains a winning projection, not an automatic supersede"
-            );
         }
         let last = rig.last_seq();
         let repeat = submit(&api, &rig.root, changed).await.unwrap();

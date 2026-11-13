@@ -169,59 +169,6 @@ fn two_processes_duplicate_submit_create_once_and_equal_single_submit_graph() {
 }
 
 #[test]
-fn acceptance_before_pending_submit_preserves_authority_and_makes_revision_candidate() {
-    let s = Scratch::new("kaban-e310-race", "accept");
-    let root = repo(&s);
-    let mut server = Server::start_at(&s, &root);
-    let prepared = call(
-        &mut server,
-        "ingest_brief",
-        &json!({"path":"a.md","type":"adr"}),
-    );
-    let job = prepared["job"].as_str().unwrap();
-    let original = json!({"job":job,"records":[{"local_id":"d","kind":"Decision","text":"Original decision","props":{"rationale":"Original rationale"},"confidence":1.0}]});
-    let placed = call(&mut server, "ingest_submit", &original);
-    let id = placed["records"][0]["id"].as_str().unwrap();
-    // Stdin is the deterministic publication barrier. The pending independent submit
-    // process exists before acceptance and cannot read/overwrite the accepted bytes.
-    let pending = launch(&s, &root, &["ingest", "job", "submit", job, "--stdin-json"]);
-    let accepted = launch(
-        &s,
-        &root,
-        &["accept", id, "--reason", "reviewed", "--path-scope", "a.md"],
-    )
-    .wait_with_output()
-    .unwrap();
-    parse(&accepted);
-    let conn = rusqlite::Connection::open(s.db()).unwrap();
-    kaban_store_sqlite::register_body_reader(&conn).unwrap();
-    let before: (String, String, i64) = conn
-        .query_row(
-            "SELECT kaban_body(text),props,rev FROM node WHERE id=?",
-            [id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )
-        .unwrap();
-    let changed = json!({"job":job,"records":[{"local_id":"d","kind":"Decision","text":"New decision","props":{"rationale":"New rationale"},"confidence":1.0}]});
-    let result = parse(&send(pending, &changed));
-    assert_eq!(result["records"][0]["outcome"], "revision_candidate");
-    assert_eq!(result["revision_candidates"][0]["of"], id);
-    let after: (String, String, i64) = conn
-        .query_row(
-            "SELECT kaban_body(text),props,rev FROM node WHERE id=?",
-            [id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )
-        .unwrap();
-    assert_eq!(after, before);
-    let governance: String = conn
-        .query_row("SELECT governance FROM node WHERE id=?", [id], |r| r.get(0))
-        .unwrap();
-    assert_eq!(governance, "accepted");
-    server.finish();
-}
-
-#[test]
 fn forget_and_purge_before_pending_submit_revoke_without_late_rows() {
     for mode in ["tombstone", "purge"] {
         let s = Scratch::new("kaban-e310-race", mode);

@@ -7,30 +7,22 @@
 
 mod hook_common;
 
-use hook_common::{HookScratch, accepted_decision, fixture, hook, session_rows, set};
+use hook_common::{HookScratch, fixture, hook, pending_failure, session_rows, set};
 use serde_json::{Value, json};
 
 /// Hits the builtin credential rule `aws-access-key-id` (always reject).
 const CANARY: &str = "AKIAQWERTYUIOPASDFGH";
 
-/// Plan slice: `pre-tool-use` output is valid `hookSpecificOutput` JSON carrying the `why`
-/// context for the edited file (path normalized against the repository root, M4-18); the
-/// attempted edit is recorded as a `session_edits` row; the `old_string`/`new_string` file
-/// content in the envelope (carrying a credential canary) is neither scanned nor stored
-/// (M4-7: allowlisted intake), so the hook still answers and the canary reaches nothing.
+/// Plan slice: `pre-tool-use` records the attempted edit as a `session_edits` row (path
+/// normalized against the repository root, M4-18) and injects nothing (`{}`, governance is
+/// removed); the `old_string`/`new_string` file content in the envelope (carrying a credential
+/// canary) is neither scanned nor stored (M4-7: allowlisted intake), so the canary reaches
+/// nothing.
 #[test]
-fn pre_tool_use_injects_the_governing_decisions_for_the_edited_path_as_hook_specific_output() {
+fn pre_tool_use_records_the_edited_path_and_injects_nothing() {
     // Arrange
     let s = HookScratch::new("pre");
-    let api = s.api();
-    let governing = accepted_decision(
-        &api,
-        "Use WAL mode for every SQLite store",
-        &["src/store/**"],
-        None,
-    );
-    let _elsewhere = accepted_decision(&api, "The CLI prints JSON only", &["src/cli/**"], None);
-    drop(api);
+    drop(s.api());
     let mut env = fixture("claude-code", "pre-tool-use-edit");
     set(&mut env, "/cwd", json!(s.repo().to_str().unwrap()));
     set(
@@ -51,23 +43,11 @@ fn pre_tool_use_injects_the_governing_decisions_for_the_edited_path_as_hook_spec
 
     // Assert
     assert_eq!(run.code(), Some(0), "stderr: {}", run.stderr());
-    let out = run.json();
-    let hso = &out["hookSpecificOutput"];
-    assert_eq!(hso["hookEventName"], json!("PreToolUse"), "{out}");
-    let context = hso["additionalContext"]
-        .as_str()
-        .expect("additionalContext");
-    assert!(
-        context.contains("Use WAL mode for every SQLite store") && context.contains(&governing),
-        "{context}"
-    );
-    assert!(
-        !context.contains("The CLI prints JSON only"),
-        "a record scoped elsewhere must not be injected: {context}"
-    );
-    assert!(
-        context.contains("src/store/sqlite.rs"),
-        "the repository-relative path names the target: {context}"
+    assert_eq!(
+        run.json(),
+        Value::Object(serde_json::Map::new()),
+        "{}",
+        run.stdout()
     );
     assert!(
         !run.stdout().contains(CANARY) && !run.stderr().contains(CANARY),
@@ -93,9 +73,7 @@ fn pre_tool_use_injects_the_governing_decisions_for_the_edited_path_as_hook_spec
 #[test]
 fn pre_tool_use_outside_the_repository_prints_an_empty_document() {
     let s = HookScratch::new("pre-outside");
-    let api = s.api();
-    accepted_decision(&api, "Use WAL mode", &["**"], None);
-    drop(api);
+    drop(s.api());
     let mut env = fixture("claude-code", "pre-tool-use-edit");
     set(&mut env, "/cwd", json!(s.repo().to_str().unwrap()));
     set(&mut env, "/tool_input/file_path", json!("/etc/passwd"));
@@ -113,38 +91,22 @@ fn pre_tool_use_outside_the_repository_prints_an_empty_document() {
     );
 }
 
-/// Plan slice: the briefing is capped at 5 items (core-spec F8; M4-17): accepted Decisions by
-/// importance, newest first, plus the workspace's pending Failures; a seventh record is left
-/// out, a proposed Decision is never briefed, and the output is `hookSpecificOutput` for
-/// `SessionStart`.
+/// Plan slice: the briefing lists the workspace's pending Failures, at most two (core-spec F8;
+/// M4-17), as `hookSpecificOutput` for `SessionStart`; a Decision is never briefed (governance
+/// is removed).
 #[test]
-fn session_start_briefing_is_capped_at_five_items_by_importance_with_pending_failures() {
+fn session_start_briefs_at_most_two_pending_failures_and_no_decision() {
     let s = HookScratch::new("brief");
     let api = s.api();
-    let mut ids = Vec::new();
-    for (i, importance) in [0.9, 0.1, 0.8, 0.5, 0.7, 0.6].iter().enumerate() {
-        ids.push(accepted_decision(
-            &api,
-            &format!("decision number {i} importance {importance}"),
-            &["src/**"],
-            Some(*importance),
-        ));
-    }
-    let proposed = api
+    let failures: Vec<String> = (0..3)
+        .map(|i| pending_failure(&api, &format!("\"cargo test\" failed: {i} errors")))
+        .collect();
+    let decision = api
         .remember(kaban_api::RememberRequest {
             kind: "Decision".into(),
-            text: "a proposed decision stays out of the briefing".into(),
-            props: Some(json!({"rationale": "not yet"})),
+            text: "a decision stays out of the briefing".into(),
+            props: Some(json!({"rationale": "not briefed"})),
             importance: Some(1.0),
-            ..Default::default()
-        })
-        .unwrap()
-        .id;
-    let failure = api
-        .remember(kaban_api::RememberRequest {
-            kind: "Failure".into(),
-            text: "\"cargo test\" failed: 1 error".into(),
-            props: Some(json!({"pending_fix": true, "command": "cargo test"})),
             ..Default::default()
         })
         .unwrap()
@@ -166,25 +128,14 @@ fn session_start_briefing_is_capped_at_five_items_by_importance_with_pending_fai
         .as_str()
         .expect("additionalContext");
     let items: Vec<&str> = context.lines().filter(|l| l.starts_with("- ")).collect();
-    assert_eq!(items.len(), 5, "{context}");
-    // the pending Failure is one item, the four most important accepted Decisions the rest
+    assert_eq!(items.len(), 2, "{context}");
     assert!(
-        items
-            .iter()
-            .any(|l| l.contains(&failure) && l.contains("pending fix")),
+        items.iter().all(|l| l.contains("pending fix")
+            && failures.iter().any(|id| l.contains(id.as_str()))),
         "{context}"
     );
-    for (i, id) in ids.iter().enumerate() {
-        let expected = matches!(i, 0 | 2 | 4 | 5); // 0.9, 0.8, 0.7, 0.6
-        assert_eq!(
-            context.contains(id),
-            expected,
-            "decision {i}: expected {expected}: {context}"
-        );
-    }
-    assert!(!context.contains(&proposed), "{context}");
-    let first = items[0];
-    assert!(first.contains(&ids[0]), "most important first: {context}");
+    assert!(!context.contains(&decision), "{context}");
+    assert!(!context.contains("kaban review"), "{context}");
 }
 
 /// Plan slice: a `PostToolUseFailure` payload records a `Failure { pending_fix: true, command,
@@ -417,7 +368,7 @@ fn sidecar(db: &std::path::Path, suffix: &str) -> std::path::PathBuf {
 /// R4-2: the hook open is existing-only and best-effort: it never tightens the database or
 /// its `-wal`/`-shm` sidecars (that is the server's job at its own open, C1.6), so loose modes
 /// an operator left behind read the same after a hook call, which still answers normally: the
-/// briefing names the seeded Decision and stderr is empty (RL-3: `{}` after a refusal would
+/// briefing names the seeded Failure and stderr is empty (RL-3: `{}` after a refusal would
 /// not pass).
 #[test]
 fn a_hook_leaves_loose_database_and_sidecar_modes_exactly_as_it_found_them() {
@@ -426,7 +377,7 @@ fn a_hook_leaves_loose_database_and_sidecar_modes_exactly_as_it_found_them() {
     // Arrange: a live holder (the server) keeps the WAL sidecars on disk during the hook
     let s = HookScratch::new("loose-modes");
     let holder = s.api();
-    let seeded = accepted_decision(&holder, SEEDED, &["**"], None);
+    let seeded = pending_failure(&holder, SEEDED);
     let (wal, shm) = (sidecar(&s.db(), "-wal"), sidecar(&s.db(), "-shm"));
     assert!(wal.exists() && shm.exists(), "WAL sidecars expected");
     for p in [&s.db(), &wal, &shm] {
@@ -438,7 +389,7 @@ fn a_hook_leaves_loose_database_and_sidecar_modes_exactly_as_it_found_them() {
     // Act
     let run = hook(&s, "session-start", None, &env);
 
-    // Assert: the hook answered with the briefing (exit 0, the seeded Decision in
+    // Assert: the hook answered with the briefing (exit 0, the seeded Failure in
     // `additionalContext`, nothing on stderr) and touched no mode
     assert_eq!(run.code(), Some(0), "{}", run.stderr());
     let out = run.json();
@@ -447,7 +398,7 @@ fn a_hook_leaves_loose_database_and_sidecar_modes_exactly_as_it_found_them() {
         .unwrap_or_else(|| panic!("a usable hook briefs; got {out}"));
     assert!(
         context.contains(&seeded) && context.contains(SEEDED),
-        "the briefing names the seeded Decision: {context}"
+        "the briefing names the seeded Failure: {context}"
     );
     assert!(run.stderr().trim().is_empty(), "{}", run.stderr());
     assert_eq!(
@@ -468,7 +419,7 @@ fn a_hook_beside_a_symlinked_wal_sidecar_prints_an_empty_document_and_leaves_the
     let s = HookScratch::new("wal-symlink");
     {
         let api = s.api();
-        accepted_decision(&api, "A symlinked WAL is refused", &["**"], None);
+        pending_failure(&api, "A symlinked WAL is refused");
     }
     let wal = sidecar(&s.db(), "-wal");
     assert!(!wal.exists(), "fixture: no -wal after a clean close");

@@ -29,6 +29,8 @@ bench = ["kaban-codegraph/test-support"]
 # the tests that need it. `tantivy` pulls `nom 7.1.3`, a never-list package, under
 # `tantivy-query-grammar` only: granted by OWN-J (`tests/never_list.rs`, grant row `TANTIVY/OWN-J`).
 text-index-tantivy = ["kaban-store-sqlite/text-index-override"]
+# Inert scaffold until T12 implements the virtual-table startup (spec 11); never default.
+process-bootstrap = ["dep:kaban-vtab", "kaban-vtab/process-bootstrap"]
 
 [dependencies]
 kaban-core.workspace = true
@@ -38,6 +40,7 @@ kaban-index-tantivy.workspace = true  # the pack admission of a captured index (
 kaban-api.workspace = true
 kaban-codegraph.workspace = true  # `identity::{resolve_common_dir, repo_id}` and `DiscoverProvider` for `serve` (CG5.2)
 kaban-ingest = { workspace = true, optional = true }
+kaban-vtab = { workspace = true, optional = true }  # `process-bootstrap` only (T12)
 rmcp.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true

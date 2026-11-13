@@ -79,20 +79,8 @@ kaban remember Decision "Use SQLite for integration storage" \
   --path-scope 'src/storage/**'
 ```
 
-This creates a proposal, not an accepted rule. Read its text, rationale and scope.
-Replace `DECISION_ID` below with the returned Decision ID. **The person who has
-reviewed the proposal runs the acceptance command**, not an agent acting alone:
-
-```sh
-kaban accept DECISION_ID --reason "Reviewed the local integration-storage choice" \
-  --path-scope 'src/storage/**'
-kaban why --path src/storage/db.rs
-```
-
-Quoted globs are passed to Kaban rather than expanded by your shell. Acceptance
-requires a reason and scope for this direct CLI route. The MCP route uses its own
-human-confirmation flow; it must not silently imitate a person's CLI acceptance.
-See [governance](guides/governance.mdx) for the review and supersession lifecycle.
+Quoted globs are passed to Kaban rather than expanded by your shell. Recall the
+Decision by its text with `kaban recall`.
 
 ## 5. Register the stdio server
 

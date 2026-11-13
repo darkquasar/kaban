@@ -113,13 +113,6 @@ impl Corpus {
             cdf,
         }
     }
-    /// A path under the `i`-th vocabulary directory (the shape of the Decision globs
-    /// `src/<vocab>/**`): `src/<vocab[i]>/<vocab[j]>.rs`.
-    pub(super) fn vocab_path(&mut self) -> String {
-        let dir = self.rng.below(VOCAB_SIZE);
-        let file = self.rng.below(VOCAB_SIZE);
-        format!("src/{}/{}.rs", self.vocab[dir], self.vocab[file])
-    }
     /// The vocabulary word at `i` (wrapping).
     pub(super) fn vocab_word(&self, i: usize) -> &str {
         &self.vocab[i % VOCAB_SIZE]

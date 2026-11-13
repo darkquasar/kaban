@@ -1,25 +1,23 @@
 #!/usr/bin/env python3
-"""MCP stdio black-box test: protocol flow, tool behaviour, denylist canary, audit chain,
-and the M3 flows (`why` over `path_scope` with currency, the `accept` confirmation handshake,
-`supersede` via `link SUPERSEDES`), then the M4 CLI and hook sections over the same database
-(`recall`, `accept`, `doctor`, `why`, a clap error, `kaban hook` briefing, failure capture and
-refusal; core-plan C4.6), then the M5 section over a temporary git repository next to the db
-(`sync` twice, the digest, `import` into a fresh database, the purge round trip through a
-tombstone, `export --write`, `resolve`, `hook post-commit`, the `ingest-decisions` stub; core-plan
-C5.5 as amended by M5-27: the checkout's own `.kaban/` is never written). Deterministic and
-offline: the subprocesses besides the server are `git` inside the server's currency check, which
-is `active` in a repository (no commit since acceptance) and `uncheckable` outside one (both are
-accepted), and the smoke's own `git` calls in the temporary repository.
+"""MCP stdio black-box test: protocol flow, tool behaviour, the code-graph surface without a
+snapshot, the denylist canary and redaction, purge (S5), a path-scoped Decision, the docs-ingest
+tools and file modes, then the CLI and hook sections over the same database (`recall`, `doctor`,
+a clap error, `kaban hook` failure capture, briefing and refusal; core-plan C4.6), the docs-ingest CLI
+section, the engine E1 ontology verbs and `schema_describe`, the E2 human edge and the E3 strace
+envelope, each in a temporary git repository next to the db, so the checkout's own `.kaban/` is
+never written. Deterministic and offline: the subprocesses besides the server are `git` (the
+server's currency checks, the smoke's own calls in the temporary repositories) and `strace`.
 Exit code 0 only if every assertion holds. Usage: mcp_smoke.py <binary> <db> <policy.yaml>
 The smoke binds one explicit workspace across its MCP servers and temporary-repository CLI
 processes. KABAN_WORKSPACE overrides the default `kaban-smoke` workspace.
-The server's KABAN_HOME is set to <db>.home so the audit key never touches ~/.kaban.
+The server's KABAN_HOME is set to <db>.home so the key file never touches ~/.kaban.
+When a server closes stdout without a reply, the smoke stops with the tail of its stderr.
 Docker mode: set MCP_SMOKE_DOCKER_IMAGE=<image>; <binary> is then ignored and the image runs
 via `docker run -i` with the db directory and the policy file bind-mounted at the same absolute
 paths, so every MCP assertion (including the on-disk canary and mode checks) runs unchanged; the
-CLI, hook and M5 sections are skipped with a printed note (like `verify-audit`), because the hooks,
-`why` and the M5 commands bind the workspace from the process's own directory, which inside the
-container is not this repository."""
+key-file, CLI, hook and later sections are skipped with a printed note, because the CLI and the
+hooks bind the workspace from the process's own directory, which inside the container is not this
+repository."""
 import json, subprocess, sys, time, os, glob
 from mcp_catalog import load_tool_names, tool_names_match
 
@@ -54,19 +52,36 @@ def check(cond, msg):
         print("ok:", msg)
 
 t0 = time.time()
-p = subprocess.Popen(cmd + ["--db", db, "--policy", policy, "--audit-export", db + ".audit.jsonl"],
+p = subprocess.Popen(cmd + ["--db", db, "--policy", policy],
                      stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
 raw_out = []
 i = 0
+def exchange(proc, msg, notify=False):
+    """Write one JSON-RPC message and read its reply line (none for a notification). A broken
+    pipe or an empty line means the server is gone: print the tail of its stderr and stop."""
+    try:
+        proc.stdin.write(json.dumps(msg) + "\n"); proc.stdin.flush()
+        line = None if notify else proc.stdout.readline()
+    except BrokenPipeError:
+        line = ""
+    if line is None or line.strip():
+        return line
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill(); proc.wait()
+    tail = "\n".join(proc.stderr.read().splitlines()[-20:])
+    print(f"FAIL: the server closed stdout without a reply (exit {proc.returncode}); stderr tail:\n{tail}")
+    sys.exit(1)
 def rpc(method, params=None, notify=False):
     global i
     msg = {"jsonrpc": "2.0", "method": method}
     if params is not None: msg["params"] = params
     if not notify:
         i += 1; msg["id"] = i
-    p.stdin.write(json.dumps(msg) + "\n"); p.stdin.flush()
+    line = exchange(p, msg, notify)
     if notify: return None
-    line = p.stdout.readline(); raw_out.append(line)
+    raw_out.append(line)
     return json.loads(line)
 def call(name, args):
     r = rpc("tools/call", {"name": name, "arguments": args})
@@ -101,10 +116,10 @@ check("Failure" in [l["name"] for l in schema["labels"]], "schema resource reada
 # is prefixed `cg:`. The one edit outside this section is the `children_ok()` line in `call()`.
 NO_SNAPSHOT = "no_snapshot: no code-graph snapshot for this repository and commit; run `kaban-index index`"
 CODE_TOOLS = ["code_context", "code_definition", "code_implementers", "code_members", "code_neighbours", "code_references", "code_tests_for"]
-# (a) a subset check beside the exact list above: the seven `code_*` tools and `governance_history`
-# are listed, `code_impact` is not in 3.0.0 (OWN-68 SC-09)
-cg_missing = [n for n in CODE_TOOLS + ["governance_history"] if n not in names]
-check(cg_missing == [] and "code_impact" not in names, f"cg: tools/list has the seven code_* tools and governance_history, no code_impact (missing: {cg_missing})")
+# (a) a subset check beside the exact list above: the seven `code_*` tools are listed,
+# `code_impact` is not in 3.0.0 (OWN-68 SC-09)
+cg_missing = [n for n in CODE_TOOLS if n not in names]
+check(cg_missing == [] and "code_impact" not in names, f"cg: tools/list has the seven code_* tools, no code_impact (missing: {cg_missing})")
 # (d) serve_children_are_git_only (G1-S3): while the smoke drives the server, a daemon thread
 # reads /proc/<pid>/task/*/children every 100 ms and `call()` reads them after every tool call;
 # each child's /proc/<child>/comm must be `git`; the first other comm fails the smoke by name.
@@ -201,7 +216,7 @@ check(e, "schema_extend with redactable value refused (C1)")
 e, t = call("remember", {"kind": "Fact", "text": f"staging db host is {REDACT_CANARY} and old pw hunter2"})
 check(not e and sorted(json.loads(t)["redactions"]) == ["text:internal-hostname", "text:old-password"], "redact rules applied on remember"); redid = json.loads(t)["id"]
 # engine E1.8 (EN-F5, EN-F49): an undeclared label is placed as an `x:` candidate under the shipped `review`
-# policy and stays hidden from recall until promoted or accepted; an unknown rel keeps today's rejection
+# policy and stays hidden from recall until promoted; an unknown rel keeps today's rejection
 e, t = call("remember", {"kind": "Rumour", "text": "an undeclared label about the zebrafish ledger"})
 check(not e and json.loads(t)["kind"] == "x:Rumour", "undeclared label placed as the x:Rumour candidate (E1.8)")
 e, t = call("recall", {"query": "zebrafish ledger"})
@@ -238,55 +253,12 @@ r = json.loads(t)
 check(not e and r["status"] == "existing" and r["id"] == fixid and r["links_created"] == 1 and r["links_ignored"] is False and "summary" in r["fields_ignored"], f"dedup retry attaches links and reports ignored fields: {t}")
 e, t = call("link", {"from": fid, "to": fid, "rel": "SUPERSEDES"})
 check(e and "itself" in t, "self-link refused")
-# M3 (C3.8): a Decision with a path_scope governs a matching path (F2), with currency (F14)
-SCOPE = ["src/store/**"]; GOVERNED = "src/store/sqlite.rs"; UNGOVERNED = "docs/readme.md"
+# M3 (C3.8): a Decision with a path_scope is stored. Supersede via `link SUPERSEDES` is not
+# exercised: the store moves only an accepted Decision to superseded, and no public surface
+# accepts one since the governance removal
+SCOPE = ["src/store/**"]
 e, t = call("remember", {"kind": "Decision", "text": "store writes go through one connection per process", "summary": "one writer connection", "props": {"rationale": "SQLite allows a single writer"}, "path_scope": SCOPE})
 check(not e and json.loads(t)["status"] == "created", "remember Decision with path_scope"); did = json.loads(t)["id"] if not e else ""
-def why_cards(node_id, *targets):
-    e, t = call("why", {"targets": [{"path": p} for p in targets]})
-    r = json.loads(t) if not e else {"results": []}
-    return e, r, [x for x in r["results"] if x["node"]["id"] == node_id]
-e, r, mine = why_cards(did, GOVERNED, UNGOVERNED)
-check(not e and len(mine) == 1 and mine[0]["matched_target"] == GOVERNED and mine[0]["matched_by"] == "path_scope" and mine[0]["governance"] == "proposed" and "follow_ups" in r, f"why: the proposed Decision governs {GOVERNED} by path_scope, not {UNGOVERNED}")
-cur = mine[0]["currency"] if mine else {}
-check(cur.get("state") == "uncheckable" and cur.get("reason") == "not accepted" and "checked_at" in cur, f"why: currency present on a proposed Decision: {cur}")
-# the accept handshake over MCP (F4 iii): the agent gets confirmation_required with a one-time token
-e, t = call("accept", {"id": did, "reason": "reviewed in standup", "path_scope": SCOPE})
-issue_line = len(raw_out) - 1
-r = json.loads(t) if not e else {}
-token = r.get("confirmation_token", "") if isinstance(r.get("confirmation_token"), str) else ""
-check(not e and r.get("status") == "confirmation_required" and len(token) == 64 and all(c in "0123456789abcdef" for c in token) and r.get("expires_in_s") == 600, "accept by the agent on a Decision: confirmation_required with a 64-hex one-time token")
-check(token != "" and r.get("prompt") and token not in r["prompt"] and did not in r["prompt"], "the prompt names neither the token nor the id")
-e, t = call("accept", {"id": did, "confirmation_token": token, "confirmed_by_user": True})
-r = json.loads(t) if not e else {}
-check(not e and r.get("status") == "accepted" and r.get("signer_kind") == "human-via-chat" and r.get("node", {}).get("governance") == "accepted" and token not in t, "redeeming the token with confirmed_by_user accepts as human-via-chat")
-e, t = call("accept", {"id": did, "confirmation_token": token, "confirmed_by_user": True})
-check(e and "confirmation_token" in t and token not in t, "replaying the token fails without echoing it")
-e, r, mine = why_cards(did, GOVERNED)
-cur = mine[0]["currency"] if mine else {}
-check(not e and len(mine) == 1 and mine[0]["governance"] == "accepted" and cur.get("state") in ("active", "uncheckable") and cur.get("staleness") == 0 and "checked_at" in cur, f"why after acceptance: accepted, currency {cur.get('state')} (active in a repository, uncheckable outside)")
-# supersede via link SUPERSEDES (F4, M3-24): the old record leaves traverse (M3-11), stays reachable by id
-e, t = call("remember", {"kind": "Decision", "text": "store writes go through a bounded writer pool", "summary": "bounded writer pool", "props": {"rationale": "one connection starved the hooks"}, "path_scope": SCOPE})
-check(not e and json.loads(t)["status"] == "created", "remember the superseding Decision"); d2 = json.loads(t)["id"] if not e else ""
-e, t = call("link", {"from": d2, "to": did, "rel": "SUPERSEDES"})
-check(not e and json.loads(t)["rel"] == "SUPERSEDES" and json.loads(t)["to"] == did, "supersede via link SUPERSEDES")
-e, t = call("traverse", {"start_ids": [d2], "max_depth": 2})
-r = json.loads(t) if not e else {"nodes": [], "edges": None}
-check(not e and [n["id"] for n in r["nodes"]] == [d2] and r["edges"] == [], "the superseded Decision leaves traverse (M3-11)")
-e, t = call("traverse", {"start_ids": [did]})
-check(e, "traverse cannot start from the superseded Decision")
-e, t = call("recall", {"query": "writer pool", "hops": 1})
-r = json.loads(t) if not e else {"results": []}
-check(not e and any(x["id"] == d2 for x in r["results"]) and not any(x["id"] == did for x in r["results"]), "recall hides the superseded Decision by default")
-e, t = call("recall", {"query": "writer pool", "hops": 1, "include_superseded": True})
-old = [x for x in json.loads(t)["results"] if x["id"] == did] if not e else []
-check(len(old) == 1 and old[0]["governance"] == "superseded" and old[0]["lifecycle"] == "archived", "the superseded Decision stays reachable by id (recall include_superseded)")
-e, r, mine = why_cards(did, GOVERNED)
-check(not e and mine == [] and any(x["node"]["id"] == d2 for x in r["results"]), "why: the superseding Decision governs the path, the superseded one no longer")
-# v4 CG6.2 (G1-F13): the history of the superseded Decision lists both records of the chain, events newest first
-e, t = call("governance_history", {"id": did})
-hist = {x["card"]["id"]: x for x in json.loads(t)["records"]} if not e else {}
-check(not e and sorted(hist) == sorted([did, d2]) and hist[did]["superseded_by"] == [d2] and hist[d2]["supersedes"] == [did] and hist[did]["events"][0]["kind"] == "superseded" and hist[did]["governance"] == "superseded", f"governance_history: {did} superseded_by {d2}, {d2} supersedes {did}, the superseded event first")
 # a clean note is stored, purged, and must leave no bytes in db/-wal/-shm (S5)
 e, t = call("remember", {"kind": "Fact", "text": f"rotate {PURGE_CANARY} before the release"})
 check(not e and json.loads(t)["status"] == "created", "purge canary stored"); pcid = json.loads(t)["id"]
@@ -304,9 +276,9 @@ e, t = call("stats", {"workspace_id": "*"})
 check(not e and json.loads(t)["scope"]["workspace"] == "*" and json.loads(t)["nodes"] >= r["nodes"], "stats with workspace_id \"*\" counts every workspace (R1-5)")
 
 # docs-ingest DI1.6 over MCP: `index_docs` dry run on the committed Markdown fixtures of this
-# repository (the server's workspace root; nothing is written, so the M5 post-commit stamp count
-# below stays exact), `index_status` and the `kaban://documents` resource on the empty index; the
-# writing half of the section runs through the CLI in the temporary repository
+# repository (the server's workspace root; nothing is written), `index_status` and the
+# `kaban://documents` resource on the empty index; the writing half of the section runs through
+# the CLI in the temporary repository
 FIXTURES = "crates/kaban-ingest/tests/fixtures/md"
 e, t = call("index_docs", {"paths": [FIXTURES], "dry_run": True})
 v = json.loads(t) if not e else {}
@@ -330,7 +302,7 @@ body = json.loads(rr["result"]["contents"][0]["text"]) if "result" in rr else {}
 check(body.get("documents", []) == [] and body.get("more") is False and body.get("limit") == 2 and body.get("status", {}).get("pipeline_version") == 1, f"mcp kaban://documents serves the status and an empty page with the requested limit ({body.get('limit')}, more={body.get('more')})")
 
 # file modes while the server still holds the database (SQLite removes -wal/-shm on close)
-live_modes = {os.path.basename(f): oct(os.stat(f).st_mode & 0o777) for f in glob.glob(db + "*") if os.path.isfile(f) and not f.endswith(".audit.jsonl")}
+live_modes = {os.path.basename(f): oct(os.stat(f).st_mode & 0o777) for f in glob.glob(db + "*") if os.path.isfile(f)}
 p.stdin.close(); p.wait(timeout=5)
 if cg_children["enabled"]:
     cg_sampler.join(timeout=3)
@@ -340,33 +312,24 @@ err = p.stderr.read()
 check(all(json.loads(l).get("jsonrpc") == "2.0" for l in raw_out if l.strip()), "stdout purity: every line is JSON-RPC")
 files = [f for f in glob.glob(db + "*") if os.path.isfile(f)]
 blob = b"".join(open(f, "rb").read() for f in files)
-check(CANARY.encode() not in blob, "canary absent from db/wal/shm/audit bytes")
+check(CANARY.encode() not in blob, "canary absent from db/wal/shm bytes")
 check(REDACT_CANARY.encode() not in blob, "redact canary absent from db bytes")
 check(PURGE_CANARY.lower().encode() not in blob.lower(), "purged note absent from db/-wal/-shm bytes (S5)")
 check(live_modes and all(m == "0o600" for m in live_modes.values()) and any(k.endswith("-wal") for k in live_modes) and any(k.endswith("-shm") for k in live_modes), f"db/-wal/-shm created 0600 (checked while the server was running): {live_modes}")
 check(CANARY not in "".join(raw_out) and CANARY not in err, "canary absent from stdout/stderr (RUST_LOG=trace)")
 check("harmless" not in err and REDACT_CANARY not in err, "no argument values in trace output")
 check("hunter2" not in err.lower() and "hunter2" not in "".join(raw_out).lower(), "redact-class argument values absent from stdout/stderr (R1-3)")
-check(token != "" and token in raw_out[issue_line] and sum(1 for l in raw_out if token in l) == 1, "confirmation token present in the issuing response only (stdout)")
-check(token != "" and token not in err and token.encode() not in blob, "confirmation token absent from stderr and from db/wal/shm/audit bytes (hash only)")
 check("call_tool{tool=remember}" in err, "call_tool span carries the tool name only")
-audit = [json.loads(l) for l in open(db + ".audit.jsonl")]
-check(len(audit) >= 5 and all("input_hmac" in a and "rules" in a for a in audit) and audit[1]["prev"] != "genesis", f"audit export has {len(audit)} chained HMAC entries")
-check(oct(os.stat(db + ".audit.jsonl").st_mode & 0o777) == "0o600", "audit file mode 0600")
-check(any(a["op"] == "purge" for a in audit) and any(a["op"] == "reject" for a in audit) and any(a["op"] == "redact" for a in audit), "audit export records reject, redact and purge ops")
-# the chain of record is the audit table inside the database: verify it with the same key
+# the key file lives under KABAN_HOME/keys (core-spec S3), never in ~/.kaban
 if not docker_image:
-    v = subprocess.run([bin_, "--db", db, "verify-audit"], capture_output=True, text=True, env=env)
-    vr = json.loads(v.stdout) if v.stdout.strip() else {}
-    check(v.returncode == 0 and vr.get("ok") is True and vr.get("entries", 0) >= len(audit), f"verify-audit ok: {vr}")
     keys = glob.glob(os.path.join(kaban_home, "keys", "*.key"))
-    check(len(keys) == 1 and os.stat(keys[0]).st_size == 32 and oct(os.stat(keys[0]).st_mode & 0o777) == "0o600", "one 32-byte audit key, mode 0600, under KABAN_HOME/keys")
+    check(len(keys) == 1 and os.stat(keys[0]).st_size == 32 and oct(os.stat(keys[0]).st_mode & 0o777) == "0o600", "one 32-byte key file, mode 0600, under KABAN_HOME/keys")
 
 # CLI section (M4 C4.6): the same binary, db, policy and KABAN_HOME, after the server exited; the
 # CLI goes through the same seam as the MCP adapter (M4-3) and binds the same workspace from this
 # directory, so it reads what the MCP flow stored
 if docker_image:
-    print("note: CLI, hook and M5 sections skipped in Docker mode (workspace binding differs inside the container)")
+    print("note: key-file, CLI, hook and later sections skipped in Docker mode (workspace binding differs inside the container)")
 else:
     FAILURE_CANARY = "SmokeFailureZq8vK3"  # a clean token in the captured error text, found by recall
     def cli(*args, stdin=None):
@@ -380,9 +343,6 @@ else:
     r = cli("recall", "libssl linker", "--hops", "0")
     v = one_json(r)
     check(r.returncode == 0 and v is not None and any(x["id"] == fid for x in v["results"]), f"cli recall parses as one JSON object and finds the Failure the MCP flow stored (exit {r.returncode})")
-    r = cli("accept", d2, "--reason", "reviewed on the cli", "--path-scope", SCOPE[0])
-    v = one_json(r) or {}
-    check(r.returncode == 0 and v.get("status") == "accepted" and v.get("signer_kind") == "human-cli", f"cli accept of the superseding Decision as human-cli: {v.get('status')}, {v.get('signer_kind')}")
     r = cli("doctor")
     v = one_json(r) or {}
     names = [c["name"] for c in v.get("checks", [])]
@@ -397,24 +357,12 @@ else:
         "unresolved", "stale_anchors",
     ]
     check(r.returncode == 0 and v.get("ok") is True and names == expected_checks and all(c["ok"] for c in v["checks"]), f"cli doctor ok with the twenty-six checks: {names}")
-    r = cli("governance-history", "--id", did)
-    v = one_json(r) or {"records": []}
-    hist = {x["card"]["id"]: x for x in v["records"]}
-    check(r.returncode == 0 and sorted(hist) == sorted([did, d2]) and hist[did]["superseded_by"] == [d2] and hist[d2]["supersedes"] == [did], f"cli governance-history --id returns the two records of the chain (exit {r.returncode})")
-    r = cli("why", "--path", GOVERNED)
-    v = one_json(r) or {"results": []}
-    mine = [x for x in v["results"] if x["node"]["id"] == d2]
-    check(r.returncode == 0 and len(mine) == 1 and mine[0]["governance"] == "accepted" and mine[0]["matched_by"] == "path_scope" and not any(x["node"]["id"] == did for x in v["results"]), f"cli why --path {GOVERNED} returns the accepted Decision, not the superseded one")
     r = cli("bogus-subcommand", CANARY)
     check(r.returncode == 4 and r.stdout == "" and CANARY not in r.stderr and "Sup3r" not in r.stderr and r.stderr.startswith("error: "), f"clap error exits 4 with a fixed text, the argument never echoed (exit {r.returncode})")
     # hook section: the Claude Code variant over minimal envelopes (hooks/README.md contract)
     cwd = os.getcwd()
     def hook(event, envelope):
         return cli("hook", event, "--host", "claude-code", "--stdin-json", stdin=json.dumps(envelope))
-    r = hook("session-start", {"session_id": "sess-smoke-0001", "hook_event_name": "SessionStart", "cwd": cwd, "source": "startup"})
-    v = one_json(r) or {}
-    ctx = v.get("hookSpecificOutput", {}).get("additionalContext", "")
-    check(r.returncode == 0 and v.get("hookSpecificOutput", {}).get("hookEventName") == "SessionStart" and "bounded writer pool" in ctx and d2 in ctx, f"hook session-start briefs the accepted Decision as hookSpecificOutput.additionalContext (exit {r.returncode})")
     failure_env = {"session_id": "sess-smoke-0001", "hook_event_name": "PostToolUseFailure", "cwd": cwd, "tool_name": "Bash", "tool_input": {"command": "false"}, "error": f"smoke: the command returned exit status 1 ({FAILURE_CANARY})", "is_interrupt": False}
     r = hook("post-tool-use-failure", failure_env)
     # A committed hook may report pending search visibility on stderr (SS-10);
@@ -424,6 +372,11 @@ else:
     v = one_json(r) or {"results": []}
     found = [x for x in v["results"] if x["kind"] == "Failure" and x.get("props", {}).get("pending_fix") is True and x.get("props", {}).get("command") == "false"]
     check(r.returncode == 0 and len(found) == 1 and found[0]["provenance"].get("session_id") == "sess-smoke-0001", f"recall finds the captured Failure with pending_fix and the session id ({len(found)} hit)")
+    # the session briefing lists the pending Failures, never a Decision (governance is removed)
+    r = hook("session-start", {"session_id": "sess-smoke-0003", "hook_event_name": "SessionStart", "cwd": cwd, "source": "startup"})
+    v = one_json(r) or {}
+    ctx = v.get("hookSpecificOutput", {}).get("additionalContext", "")
+    check(r.returncode == 0 and v.get("hookSpecificOutput", {}).get("hookEventName") == "SessionStart" and found and found[0]["id"] in ctx and "pending fix" in ctx and did not in ctx, f"hook session-start briefs the captured pending Failure, no Decision, as hookSpecificOutput.additionalContext (exit {r.returncode})")
     secret_env = dict(failure_env, session_id="sess-smoke-0002", tool_input={"command": "deploy"}, error=f"auth failed: deploy password = {CANARY}")
     r = hook("post-tool-use-failure", secret_env)
     check(r.returncode == 0 and one_json(r) == {} and "refused by the denylist policy" in r.stderr and CANARY not in r.stdout + r.stderr and "Sup3r" not in r.stdout + r.stderr, f"a credential in the hook's error text is refused: {{}}, exit 0, stderr fixed text, no echo (exit {r.returncode})")
@@ -435,12 +388,9 @@ else:
     files = [f for f in glob.glob(db + "*") if os.path.isfile(f)]
     blob = b"".join(open(f, "rb").read() for f in files)
     check(CANARY.encode() not in blob and FAILURE_CANARY.encode() in blob, "after the hook section: the refused canary is absent from the db bytes, the captured failure present")
-    # M5 section (C5.5; M5-27): the serialization commands over a temporary git repository, so the
-    # checkout's own `.kaban/` is never written. Same binary, db, policy and KABAN_HOME; the
-    # workspace is still bound from this directory and `--repo` names the repository written into.
-    import hashlib
-    SYNC_CANARY = "SyncPurgeCanaryQx9vK3"  # clean value in a serialized record: purged, then absent from every file kaban writes (S5)
-    OWN26_TEXT = "error: ingest-decisions is not available in this build (assisted ingestion spec pending)"
+    # the temporary git repository next to the db (M5-27): the docs-ingest and engine sections
+    # below write into it, so the checkout's own `.kaban/` is never written. Same binary, db,
+    # policy and KABAN_HOME; `in_tmp` runs the CLI with the repository as its directory.
     ws = env["KABAN_WORKSPACE"]
     tmp = db + ".m5repo"
     shutil.rmtree(tmp, ignore_errors=True); os.makedirs(tmp)
@@ -460,94 +410,8 @@ else:
             if skip_git and ".git" in dirs: dirs.remove(".git")
             out += [os.path.join(d, f) for f in fs]
         return sorted(out)
-    def tree(root):  # relative path -> sha256 of every file under root
-        return {os.path.relpath(p, root): hashlib.sha256(open(p, "rb").read()).hexdigest() for p in files_under(root)}
-    def kaban_bytes():
-        return b"".join(open(p, "rb").read() for p in files_under(kdir))
-    # a second accepted Decision carrying the canary, for the purge round trip (the digest lists it too)
-    r = cli("remember", "Decision", f"Rotate the smoke key. {SYNC_CANARY} is the current value.", "--props", '{"rationale": "the smoke needs a record to purge"}')
-    sid = (one_json(r) or {}).get("id", "")
-    r = cli("accept", sid, "--reason", "smoke", "--path-scope", "ops/**") if sid else r
-    accepted_sid = r.returncode == 0 and (one_json(r) or {}).get("status") == "accepted"
-    r = cli("sync", "--repo", tmp)
-    v = one_json(r) or {}
-    first = tree(kdir)
-    check(r.returncode == 0 and accepted_sid and v.get("written", 0) >= 2 and v.get("digest_updated") is True and v.get("lease") == "acquired" and {f"adr/decisions/{d2}.md", f"adr/decisions/{sid}.md", "adr/INDEX.md", ".gitignore"} <= set(first), f"m5: sync --repo <tmp> writes the record files, the digest and .gitignore (written {v.get('written')}, exit {r.returncode})")
-    r = cli("sync", "--repo", tmp)
-    v = one_json(r) or {}
-    check(r.returncode == 0 and (v.get("written"), v.get("rewritten"), v.get("tombstones"), v.get("deleted")) == (0, 0, 0, 0) and v.get("digest_updated") is False and first and tree(kdir) == first, f"m5: a second sync writes nothing and every file under .kaban is byte-identical ({len(first)} files)")
-    digest = open(os.path.join(kdir, "adr", "INDEX.md")).read()
-    check(d2 in digest and "bounded writer pool" in digest and sid in digest and did not in digest and fid not in digest, "m5: adr/INDEX.md lists the accepted Decisions (the MCP-stored one accepted on the CLI, the canary one), not the superseded Decision nor the Failure")
-    git("add", "-A"); git("commit", "-q", "-m", "serialized")
-    db2 = db + ".rebuilt.db"
-    def cli2(*args):
-        return subprocess.run([bin_, "--db", db2, "--policy", policy, "--json", *args], capture_output=True, text=True, env=env)
-    r = cli2("import", "--repo", tmp)
-    v = one_json(r) or {}
-    rr = cli2("recall", "writer pool", "--hops", "0")
-    mine = [x for x in (one_json(rr) or {"results": []})["results"] if x["id"] == d2]
-    check(r.returncode == 0 and v.get("files", 0) >= 2 and v.get("imported") == v.get("files") and v.get("conflicts") == [] and v.get("import_warnings") == 0 and len(mine) == 1 and mine[0]["governance"] == "accepted", f"m5: import --repo <tmp> into a fresh database imports the committed files ({v.get('imported')} of {v.get('files')}) and recall finds the Decision by the same id as accepted")
-    # the purge round trip: forget --mode purge, then sync writes the four-key tombstone (S5 on disk)
-    r = cli("forget", sid, "--mode", "purge")
-    fv = one_json(r) or {}
-    r2 = cli("sync", "--repo", tmp)
-    v = one_json(r2) or {}
-    check(r.returncode == 0 and fv.get("lifecycle") == "purged" and r2.returncode == 0 and v.get("tombstones") == 1 and (v.get("written"), v.get("rewritten")) == (0, 0) and v.get("digest_updated") is True, f"m5: forget --mode purge then sync writes one tombstone and refreshes the digest, nothing else (tombstones {v.get('tombstones')}, exit {r2.returncode})")
-    tomb = open(os.path.join(kdir, "adr", "decisions", sid + ".md")).read()
-    parts = tomb.split("---\n")
-    keys = [l.split(":")[0] for l in parts[1].splitlines()] if len(parts) == 3 else []
-    check(keys == ["id", "lifecycle", "rev", "version"] and parts[0] == "" and parts[2] == "" and f"id: {sid}\n" in tomb and "lifecycle: purged\n" in tomb, f"m5: the tombstone file has exactly the four keys and no body: {keys}")
-    digest = open(os.path.join(kdir, "adr", "INDEX.md")).read()
-    check(SYNC_CANARY.encode() not in kaban_bytes() and sid not in digest and d2 in digest, "m5: the purged text left every byte under <tmp>/.kaban and the digest no longer lists the record")
-    git("add", "-A"); git("commit", "-q", "-m", "purged")
-    r = cli2("import", "--repo", tmp)
-    v = one_json(r) or {}
-    blob2 = b"".join(open(f, "rb").read() for f in glob.glob(db2 + "*") if os.path.isfile(f))
-    check(r.returncode == 0 and v.get("tombstones") == 1 and v.get("purged") == 1 and SYNC_CANARY.lower().encode() not in blob2.lower(), f"m5: the committed tombstone purges the second database on its next import and the canary leaves its bytes (S5; tombstones {v.get('tombstones')}, purged {v.get('purged')})")
-    # export --write: created, unchanged, and a pre-existing file keeps every byte outside the block
-    agents = os.path.join(tmp, "AGENTS.md")
-    r1 = cli("export", "--format", "agents-md", "--write", agents)
-    v1 = one_json(r1) or {}
-    b1 = open(agents, "rb").read()
-    r2 = cli("export", "--format", "agents-md", "--write", agents)
-    v2 = one_json(r2) or {}
-    b2 = open(agents, "rb").read()
-    check(r1.returncode == 0 and v1.get("outcome") == "created" and r2.returncode == 0 and v2.get("outcome") == "unchanged" and b1 == b2 and b1.startswith(b"<!-- kaban:start -->\n") and b1.endswith(b"<!-- kaban:end -->\n") and d2.encode() in b1 and b"bounded writer pool" in b1 and did.encode() not in b1 and sid.encode() not in b1, f"m5: export --write twice: created then unchanged, bytes identical, the accepted Decision inside the block ({v1.get('outcome')}, {v2.get('outcome')})")
-    claude = os.path.join(tmp, "CLAUDE.md")
-    pre = b"# Smoke notes\nkeep this line  \n\nand this one without a newline"
-    with open(claude, "wb") as fh: fh.write(pre)
-    r = cli("export", "--format", "claude-md", "--write", claude)
-    v = one_json(r) or {}
-    after = open(claude, "rb").read()
-    check(r.returncode == 0 and v.get("outcome") == "updated" and after.startswith(pre + b"\n<!-- kaban:start -->\n") and after.endswith(b"<!-- kaban:end -->\n") and after.count(b"<!-- kaban:start -->") == 1, f"m5: export into a pre-existing file appends the block and preserves every byte before it ({v.get('outcome')})")
-    # a manufactured equal-rev conflict (a hand edit keeping `rev`), then resolve --take db
-    path2 = os.path.join(kdir, "adr", "decisions", d2 + ".md")
-    orig = open(path2).read()
-    with open(path2, "w") as fh: fh.write(orig.replace("a bounded writer pool", "a bounded writer pool, always"))
-    r = cli("import", "--repo", tmp)
-    v = one_json(r) or {}
-    check(r.returncode == 0 and v.get("conflicts") == [d2] and v.get("imported") == 0 and "always" in open(path2).read(), f"m5: an equal-rev hand edit of a record file is a conflict for import, not an import ({v.get('conflicts')})")
-    r = cli("resolve", d2, "--take", "db", "--repo", tmp)
-    v = one_json(r) or {}
-    now = open(path2).read()
-    check(r.returncode == 0 and v.get("take") == "db" and v.get("id") == d2 and "always" not in now and now != orig and f"\nrev: {v.get('rev')}\n" in now and "a bounded writer pool" in now, f"m5: resolve --take db rewrites the file from the database at rev {v.get('rev')} and clears the conflict")
-    # the post-commit hook inside the temporary repository: HEAD stamped once on the unstamped
-    # records made in that repository; the checkout's records are left alone (M5-15 repo filter)
-    git("add", "-A"); git("commit", "-q", "-m", "resolved")
-    head = git("rev-parse", "HEAD")
     def in_tmp(*args):
         return subprocess.run([os.path.abspath(bin_), "--db", os.path.abspath(db), "--policy", os.path.abspath(policy), "--json", *args], cwd=tmp, stdin=subprocess.DEVNULL, capture_output=True, text=True, env=dict(env, KABAN_WORKSPACE=ws))
-    r = in_tmp("remember", "Fact", "A note taken inside the temporary repository")
-    tid = (one_json(r) or {}).get("id", "")
-    r = in_tmp("hook", "post-commit", "--stdin-json")
-    v = one_json(r) or {}
-    r2 = in_tmp("hook", "post-commit", "--stdin-json")
-    rr = cli("recall", "temporary repository note writer pool", "--hops", "0")
-    by_id = {x["id"]: x for x in (one_json(rr) or {"results": []})["results"]}
-    # A committed stamp may report pending search visibility on stderr (SS-10).
-    check(tid != "" and r.returncode == 0 and v == {"stamped": 1} and r2.returncode == 0 and one_json(r2) == {"stamped": 0} and by_id.get(tid, {}).get("provenance", {}).get("commit_sha") == head and "commit_sha" not in by_id.get(d2, {}).get("provenance", {}), f"m5: hook post-commit in the temporary repository stamps HEAD on its own unstamped record once ({v.get('stamped')} then 0) and leaves the checkout's Decision unstamped (exit {r.returncode})")
-    r = cli("ingest-decisions", "--repo", tmp)
-    check(r.returncode == 4 and r.stdout == "" and r.stderr.strip() == OWN26_TEXT, f"m5: ingest-decisions is the OWN-26 typed stub: exit 4 with the fixed text (exit {r.returncode})")
     # docs-ingest DI1.6: the plain pipeline (`kaban ingest`, the MCP tools, the resource, the chunk
     # card, `forget --document`) in the temporary repository; the reject canary in a paragraph is
     # stubbed or blocks its file and never reaches a stream (D6, D7, D10)
@@ -602,11 +466,10 @@ else:
     files = [f for f in glob.glob(db + "*") if os.path.isfile(f)]
     blob = b"".join(open(f, "rb").read() for f in files)
     tmp_blob = b"".join(open(p, "rb").read() for p in files_under(tmp, skip_git=True))
-    check(SYNC_CANARY.lower().encode() not in blob.lower() and SYNC_CANARY.encode() not in tmp_blob and CANARY.encode() not in blob + tmp_blob, "m5: after the section the purged canary is absent from db/-wal/-shm/audit bytes (S5) and from every file in the temporary repository outside .git (history keeps old bytes by design, docs/developer/SYNC.md)")
-    # engine E1 section (engine-plan E1.9, §12; EN-F2, EN-F5, EN-F7, EN-S8, EN-F4 layout move): the
+    check(CANARY.encode() not in blob + tmp_blob, "docs: after the section the reject canary is absent from db/-wal/-shm bytes and from every file in the temporary repository outside .git")
+    # engine E1 section (engine-plan E1.9, §12; EN-F2, EN-F5, EN-F7, EN-S8): the
     # ontology verbs through the CLI in the temporary repository (the S7 containment root), the
-    # `schema_describe` body through a second server on the same database, the one-time layout
-    # move on a fixture `.kaban/` in a second temporary repository
+    # `schema_describe` body through a second server on the same database
     ONT_YAML = """ontology: ops
 version: 1
 kinds:
@@ -675,8 +538,8 @@ discovered: {policy: review, cap: 500, prune_after_days: 90, promote_when: {min_
             if params is not None: msg["params"] = params
             if not notify:
                 n += 1; msg["id"] = n
-            q.stdin.write(json.dumps(msg) + "\n"); q.stdin.flush()
-            return None if notify else json.loads(q.stdout.readline())
+            line = exchange(q, msg, notify)
+            return None if notify else json.loads(line)
         send("initialize", {"protocolVersion": "2025-11-25", "capabilities": {}, "clientInfo": {"name": "smoke-e1", "version": "0"}})
         send("notifications/initialized", notify=True)
         res = send("tools/call", {"name": name, "arguments": args}).get("result", {})
@@ -702,51 +565,17 @@ discovered: {policy: review, cap: 500, prune_after_days: 90, promote_when: {min_
         check(not e and failed_pdf == [] and by_status.get("partial") == 1 and by_status.get("failed") is None, f"pdf[{PDF_BRANCH}]: index_status lists no failed PDF and one partial document (scanned.pdf): {by_status}")
     else:
         check(not e and len(failed_pdf) == 1 and failed_pdf[0].get("error") == NO_EXTRACTOR and by_status.get("failed") == 1, f"pdf[{PDF_BRANCH}]: index_status.failed names docs/born1.pdf with the fixed reason `{NO_EXTRACTOR}` ({failed_pdf}, {by_status})")
-    # the one-time layout move (EN-F4, OWN-46): a second temporary repository holding the record files
-    # `sync` wrote above in the pre-engine flat layout (`.kaban/<dir>/<id>.md` without the `ontology:` key,
-    # `.kaban/DECISIONS.md` with the digest bytes) becomes `.kaban/adr/...` on the first `kaban sync` with
-    # every byte kept and nothing written; the second run finds nothing to move
-    flat = db + ".e1repo"
-    shutil.rmtree(flat, ignore_errors=True); os.makedirs(os.path.join(flat, ".kaban"))
-    def git_flat(*args):
-        r = subprocess.run(["git", "-C", flat, *args], capture_output=True, text=True, env=git_env)
-        if r.returncode != 0:
-            raise RuntimeError(f"git {args}: {r.stderr}")
-        return r.stdout.strip()
-    git_flat("init", "-q", "-b", "main"); git_flat("config", "user.name", "smoke"); git_flat("config", "user.email", "smoke@example.invalid")
-    records = sorted(rel[len("adr/"):] for rel in tree(kdir) if rel.startswith("adr/") and rel.endswith(".md") and rel != "adr/INDEX.md")
-    for rel in records:
-        os.makedirs(os.path.dirname(os.path.join(flat, ".kaban", rel)), exist_ok=True)
-        with open(os.path.join(kdir, "adr", rel)) as src, open(os.path.join(flat, ".kaban", rel), "w") as dst:
-            dst.write("".join(l for l in src.read().splitlines(keepends=True) if not l.startswith("ontology: ")))
-    shutil.copyfile(os.path.join(kdir, "adr", "INDEX.md"), os.path.join(flat, ".kaban", "DECISIONS.md"))
-    git_flat("add", "-A"); git_flat("commit", "-q", "-m", "pre-engine layout")
-    before_move = tree(os.path.join(flat, ".kaban"))
-    r = cli("sync", "--repo", flat)
-    v = one_json(r) or {}
-    lay = v.get("layout", {})
-    after_move = tree(os.path.join(flat, ".kaban"))
-    porcelain = git_flat("status", "--porcelain")
-    expected = {("adr/INDEX.md" if rel == "DECISIONS.md" else "adr/" + rel): h for rel, h in before_move.items()}
-    check(r.returncode == 0 and (lay.get("moved"), lay.get("deleted_digest"), lay.get("already"), lay.get("conflicts", [])) == (len(records), True, False, []) and v.get("import", {}).get("imported") == 0 and v.get("import", {}).get("conflicts") == [] and (v.get("written"), v.get("rewritten"), v.get("deleted")) == (0, 0, 0), f"e1: the first sync over a pre-engine .kaban/ moves the {len(records)} record files and the digest, imports nothing new and writes no record ({lay}, written {v.get('written')}, exit {r.returncode})")
-    check(len(records) >= 2 and {k: h for k, h in after_move.items() if k != ".gitignore"} == expected and not os.path.exists(os.path.join(flat, ".kaban", "DECISIONS.md")) and ".kaban/DECISIONS.md -> .kaban/adr/INDEX.md" in porcelain and sum(1 for l in porcelain.splitlines() if l.startswith("R ")) == len(records) + 1 and [l for l in porcelain.splitlines() if l.startswith("??")] == ["?? .kaban/.gitignore"], f"e1: every file is at .kaban/adr/<dir>/ with identical bytes and git records the renames: {porcelain.splitlines()}")
-    git_flat("add", "-A"); git_flat("commit", "-q", "-m", "engine layout")
-    r = cli("sync", "--repo", flat)
-    v = one_json(r) or {}
-    check(r.returncode == 0 and "layout" not in v and (v.get("written"), v.get("rewritten"), v.get("tombstones"), v.get("deleted")) == (0, 0, 0, 0) and v.get("digest_updated") is False and tree(os.path.join(flat, ".kaban")) == after_move and git_flat("status", "--porcelain") == "", f"e1: a second sync finds nothing to move and writes nothing (idempotent): {v}")
     files = [f for f in glob.glob(db + "*") if os.path.isfile(f)]
     blob = b"".join(open(f, "rb").read() for f in files)
-    e1_blob = b"".join(open(p, "rb").read() for p in files_under(tmp, skip_git=True) + files_under(flat, skip_git=True))
-    check(CANARY.encode() not in blob + e1_blob, "e1: after the section the ontology canary is absent from db/-wal/-shm/audit bytes and from both temporary repositories outside .git")
+    e1_blob = b"".join(open(p, "rb").read() for p in files_under(tmp, skip_git=True))
+    check(CANARY.encode() not in blob + e1_blob, "e1: after the section the ontology canary is absent from db/-wal/-shm bytes and from the temporary repository outside .git")
     # ---- E2 ----
-    # engine E2 section (engine-plan E2.12 item 1; EN-F12c, EN-F14a, EN-F49, EN-F50, SC-02): the
-    # overlay through the public surfaces, after the E1 lines, on one fresh server over the same
-    # database (the main server exited before the CLI sections) and the same CLI binding. Every
-    # message starts `e2:`. Not reachable black-box in 3.0.0 and therefore not asserted here: a
-    # layer assertion on a human-linked edge (no CLI or MCP surface submits a producer claim;
-    # `kaban-store-sqlite/tests/protection.rs` holds the property) and the agent refusal of
-    # `resolve --winner` (the CLI is the one human surface and runs as `human-cli`; the fixed
-    # text is asserted in `kaban-api/tests/explain_status.rs`): this section states the surface.
+    # engine E2 section (engine-plan E2.12 item 1; EN-F12c, EN-F14a, SC-02): the overlay through
+    # the public surfaces that survive the governance removal, after the E1 lines, on one fresh
+    # server over the same database (the main server exited before the CLI sections) and the same
+    # CLI binding. Every message starts `e2:`. Not reachable black-box in 3.0.0 and therefore not
+    # asserted here: a layer assertion on a human-linked edge (no CLI or MCP surface submits a
+    # producer claim; `kaban-store-sqlite/tests/protection.rs` holds the property).
     class E2Server:
         """One stdio server for the section: `tools/list` and `tools/call` over the smoke's db."""
         def __init__(self):
@@ -759,8 +588,8 @@ discovered: {policy: review, cap: 500, prune_after_days: 90, promote_when: {min_
             if params is not None: msg["params"] = params
             if not notify:
                 self.n += 1; msg["id"] = self.n
-            self.q.stdin.write(json.dumps(msg) + "\n"); self.q.stdin.flush()
-            return None if notify else json.loads(self.q.stdout.readline())
+            line = exchange(self.q, msg, notify)
+            return None if notify else json.loads(line)
         def call(self, name, args):
             res = self.send("tools/call", {"name": name, "arguments": args}).get("result", {})
             return bool(res.get("isError")), res["content"][0]["text"] if res.get("content") else json.dumps(res)
@@ -768,12 +597,6 @@ discovered: {policy: review, cap: 500, prune_after_days: 90, promote_when: {min_
             return sorted(t["name"] for t in self.send("tools/list")["result"]["tools"])
         def close(self):
             self.q.stdin.close(); self.q.wait(timeout=5)
-    def review_subjects():
-        r = cli("review")
-        v = one_json(r) or {"items": []}
-        return r.returncode, [json.dumps(i.get("subject"), sort_keys=True) for i in v.get("items", [])], v
-    e2_rc, e2_before, _ = review_subjects()
-    check(e2_rc == 0, f"e2: kaban review over the smoke's store lists its pending items before the section ({len(e2_before)} items, exit {e2_rc})")
     e2 = E2Server()
     # (1) `link` between two plain records is the human edge; a second `link` on the same triple
     # is the same claim (no second edge, the first confidence kept); `traverse` shows one edge
@@ -789,33 +612,11 @@ discovered: {policy: review, cap: 500, prune_after_days: 90, promote_when: {min_
     tv = json.loads(t) if not e else {"edges": [], "nodes": []}
     e2_edges = [x for x in tv.get("edges", []) if x.get("from") == e2_a and x.get("to") == e2_b]
     check(not e and len(e2_edges) == 1 and e2_edges[0].get("rel") == "RELATES_TO" and e2_edges[0].get("confidence") == 0.9 and len(tv.get("edges", [])) == 1, f"e2: a second link on the same edge leaves the one human edge in place at its confidence ({tv.get('edges')})")
-    # (2) `explain` of a settled record: `settled: active`, no next action
-    r = cli("explain", e2_a)
-    x = one_json(r) or {}
-    check(r.returncode == 0 and x.get("status") == {"settled": "active"} and x.get("next_actions") == [], f"e2: explain of a settled record is settled: active with next_actions [] (exit {r.returncode}; {x.get('status')}, {x.get('next_actions')})")
-    # (3) an undeclared kind through `remember` is the one pending item the section creates:
-    # `kaban review` lists the candidate record and its discovered kind, and nothing else new
-    e, t = e2.call("remember", {"kind": "Gadget", "text": "the e2 overlay smoke: a gadget nobody declared"})
-    e2_g = json.loads(t).get("id", "") if not e else ""
-    e2_rc, e2_after, e2_doc = review_subjects()
-    e2_new = sorted(s for s in e2_after if s not in e2_before)
-    check(e2_rc == 0 and e2_g and e2_new == sorted([json.dumps({"node": e2_g}, sort_keys=True), json.dumps({"discovered_kind": "x:Gadget"}, sort_keys=True)]) and all(s in e2_after for s in e2_before), f"e2: kaban review lists exactly what the section created (the x:Gadget candidate record and its kind) beside the earlier items ({e2_new})")
-    e2_items = {json.dumps(i.get("subject"), sort_keys=True): i for i in e2_doc.get("items", [])}
-    e2_item = e2_items.get(json.dumps({"node": e2_g}, sort_keys=True), {})
-    check(e2_item.get("status") == {"candidate": "discovered_kind"} and str(e2_item.get("first_action", {}).get("command", "")).startswith("kaban "), f"e2: the candidate record's review item carries its status and a runnable first action ({e2_item.get('status')}, {e2_item.get('first_action', {}).get('command')})")
-    # (4) `resolve --winner` is CLI-only: no MCP tool, the flag documented as a human claim; on a
-    # record with no candidate group it is exit 3 and writes nothing (the agent refusal is the
-    # API's: `RESOLVE_WINNER_HUMAN_ONLY`, a fixed text, asserted in the Rust tests)
+    # (2) `ask` is absent from the catalog and from the CLI (OWN-68 SC-02)
     e2_tools = e2.tools()
-    r = cli("resolve", "--help")
-    check("resolve" not in e2_tools and r.returncode == 0 and "--winner" in r.stdout and "agents are refused" in r.stdout, f"e2: resolve --winner is CLI-only: absent from tools/list, documented as a human claim in kaban resolve --help (exit {r.returncode})")
-    r = cli("resolve", e2_a, "--winner", "quokka")
-    e2_rc2, e2_after2, _ = review_subjects()
-    check(r.returncode == 3 and r.stdout == "" and "quokka" not in r.stderr and e2_rc2 == 0 and e2_after2 == e2_after, f"e2: resolve --winner on a settled record is exit 3 with no echo and leaves review unchanged (exit {r.returncode}; stderr {r.stderr.strip()!r})")
-    # (5) `ask` is absent from the catalog and from the CLI (OWN-68 SC-02)
     r = cli("--help")
     e2_verbs = [l.split()[0] for l in r.stdout.splitlines() if l.startswith("  ") and not l.startswith("   ") and l.split()]
-    check("ask" not in e2_tools and "ask" not in e2_verbs and "review" in e2_verbs and "explain" in e2_verbs, f"e2: ask is absent from tools/list and from kaban --help, review and explain are present ({len(e2_tools)} tools, {len(e2_verbs)} verbs)")
+    check("ask" not in e2_tools and "ask" not in e2_verbs and "recall" in e2_tools and "recall" in e2_verbs and "ontology" in e2_verbs, f"e2: ask is absent from tools/list and from kaban --help, recall and ontology are present ({len(e2_tools)} tools, {len(e2_verbs)} verbs)")
     e2.close()
     files = [f for f in glob.glob(db + "*") if os.path.isfile(f)]
     blob = b"".join(open(f, "rb").read() for f in files)

@@ -177,18 +177,6 @@ pub(crate) struct ForkBinding {
 }
 
 impl ForkBinding {
-    fn to_json(&self) -> String {
-        serde_json::json!({
-            "parent_pack_id": self.parent_pack_id,
-            "parent_pack_sha256": self.parent_pack_sha256,
-            "parent_instance_id": self.parent_instance_id,
-            "parent_audit_head": self.parent_audit_head,
-            "parent_audit_entries": self.parent_audit_entries,
-            "base_commit": self.base_commit,
-        })
-        .to_string()
-    }
-
     fn from_json(rules: &str) -> Option<Self> {
         let v: serde_json::Value = serde_json::from_str(rules).ok()?;
         let s = |key: &str| v.get(key)?.as_str().map(str::to_owned);
@@ -216,48 +204,6 @@ pub(crate) struct ForkGenesis {
     pub(crate) binding: Option<ForkBinding>,
     /// The `policy_version` column of the genesis row.
     pub(crate) policy_version: String,
-}
-
-/// Append the fork genesis inside the caller's transaction: `op = fork`, chained onto the
-/// current tail (the parent's historical head), signed by the child's key. Returns its `seq`.
-pub(crate) fn append_fork_genesis(
-    conn: &Connection,
-    signer: &dyn AuditSigner,
-    binding: &ForkBinding,
-) -> Result<u64> {
-    let prev = tail_hmac(conn)?;
-    let ts = now_ms();
-    let rules = binding.to_json();
-    let row = ChainRow {
-        prev_hmac: &prev,
-        ts,
-        op: FORK_OP,
-        tool: "pack",
-        field: "genesis",
-        // the fork spans the whole database, every workspace
-        workspace_id: kaban_core::WorkspaceId::ALL,
-        policy_version: &binding.policy_version,
-        input_hmac: &binding.parent_pack_sha256,
-        rules_json: &rules,
-    };
-    let entry_hmac = signer.hmac_hex(row.input().as_slice());
-    conn.execute(
-        "INSERT INTO audit(ts, op, tool, field, workspace_id, policy_version, input_hmac, rules, prev_hmac, entry_hmac) VALUES (?,?,?,?,?,?,?,?,?,?)",
-        params![
-            ts,
-            FORK_OP,
-            "pack",
-            "genesis",
-            kaban_core::WorkspaceId::ALL,
-            binding.policy_version,
-            binding.parent_pack_sha256,
-            rules,
-            prev,
-            entry_hmac
-        ],
-    )
-    .sql()?;
-    Ok(u64::try_from(conn.last_insert_rowid()).unwrap_or(0))
 }
 
 /// The latest fork genesis, when the chain has one.
@@ -323,35 +269,6 @@ pub(crate) fn verify(conn: &Connection, signer: &dyn AuditSigner) -> Result<Audi
         }
         None => verify_range(conn, signer, 1, None, GENESIS),
     }
-}
-
-/// Recompute the parent's history under `parent`: the rows before the latest fork genesis,
-/// from the parent's own genesis (the previous fork row) or the literal `genesis`. `None`
-/// when this database has no fork genesis (nothing is parent history).
-pub(crate) fn verify_parent_history(
-    conn: &Connection,
-    parent: &dyn AuditSigner,
-) -> Result<Option<AuditVerification>> {
-    let Some(genesis) = fork_genesis(conn)? else {
-        return Ok(None);
-    };
-    let previous: Option<i64> = conn
-        .query_row(
-            "SELECT seq FROM audit WHERE op = ?1 AND seq < ?2 ORDER BY seq DESC LIMIT 1",
-            params![FORK_OP, i64::try_from(genesis.seq).unwrap_or(i64::MAX)],
-            |r| r.get(0),
-        )
-        .optional()
-        .sql()?;
-    let first = previous.and_then(|s| u64::try_from(s).ok()).unwrap_or(1);
-    let expected_prev = head_before(conn, first)?;
-    Ok(Some(verify_range(
-        conn,
-        parent,
-        first,
-        Some(genesis.seq - 1),
-        &expected_prev,
-    )?))
 }
 
 /// Recompute the rows `first..=last` (to the end when `last` is `None`), the first of which

@@ -125,23 +125,6 @@ const fn entry(
     }
 }
 
-const fn secret(
-    tool: &'static str,
-    direction: Direction,
-    path: &'static str,
-    shape: Shape,
-    issuing: bool,
-) -> ControlEntry {
-    ControlEntry {
-        tool,
-        direction,
-        path,
-        shape,
-        secret: true,
-        issuing,
-    }
-}
-
 /// `snapshot_commit`, `snapshot.commit`, `last_change.commit`, `range.from`, `range.to`
 /// (stage1-spec §6.1, G1-S2): a commit a caller names or a response reports, 7 to 64 lowercase
 /// hex. Admission of user input before resolution only (SO-2): a stored or compared value is
@@ -305,36 +288,6 @@ fn schemas<I: JsonSchema, O: JsonSchema>(tool: &'static str) -> ToolSchemas {
     }
 }
 
-/// A verb whose seam scope serves several response types (`explain` prints a status or, with
-/// `--deprecate`, a deprecation; `resolve` a winner or a symbol report): the output schema is
-/// their `anyOf` with the definitions hoisted to the root, so a registered row can point at a
-/// path of any of them and the walkers resolve every `$ref`.
-fn schemas_any_of<I: JsonSchema>(tool: &'static str, outputs: &[Schema]) -> ToolSchemas {
-    let mut defs = serde_json::Map::new();
-    let branches: Vec<serde_json::Value> = outputs
-        .iter()
-        .map(|schema| {
-            let mut branch = schema.as_value().clone();
-            if let Some(object) = branch.as_object_mut()
-                && let Some(serde_json::Value::Object(own)) = object.remove("$defs")
-            {
-                defs.extend(own);
-            }
-            branch
-        })
-        .collect();
-    let mut output = serde_json::Map::new();
-    output.insert("anyOf".into(), serde_json::Value::Array(branches));
-    if !defs.is_empty() {
-        output.insert("$defs".into(), serde_json::Value::Object(defs));
-    }
-    ToolSchemas {
-        tool,
-        input: schema_for!(I),
-        output: Schema::from(output),
-    }
-}
-
 /// Entries of [`tool_schemas`] that are resource bodies gated through the registry and not
 /// tools: `crates/kaban/tests/mcp_control.rs` subtracts them before comparing with the live
 /// `tools/list` (review RC-4; CG7.3).
@@ -348,17 +301,9 @@ pub const RESOURCE_ONLY: &[&str] = &["code_index"];
 pub const RESERVED: &[&str] = &["embed_submit"];
 
 /// Entries of [`tool_schemas`] that are CLI verbs going through the seam (`run_tool`) and are
-/// not MCP tools (E2.10 boundary review BR-8): `kaban unmerge <id>` is a human action, so the
-/// adapter never lists it. Machine layer maintenance is also CLI-only. Subtracted by `crates/kaban/tests/mcp_control.rs` like
-/// [`RESOURCE_ONLY`].
-pub const CLI_ONLY: &[&str] = &[
-    "unmerge",
-    "forget_layer",
-    "reindex_layer",
-    "resolve",
-    "import",
-    "sync",
-];
+/// not MCP tools (E2.10 boundary review BR-8): machine layer maintenance is CLI-only.
+/// Subtracted by `crates/kaban/tests/mcp_control.rs` like [`RESOURCE_ONLY`].
+pub const CLI_ONLY: &[&str] = &["forget_layer", "reindex_layer"];
 
 /// The schemas of every tool the adapters expose (the same request and response types the MCP
 /// adapter dispatches on), plus the [`RESOURCE_ONLY`] bodies, the [`RESERVED`] shapes and the

@@ -18,15 +18,18 @@
     "rust_build_source": "https://github.com/rust-lang/rust/blob/b940084d7eb6a299eb4bfeb8e34901bc051e7ac4/src/ci/docker/scripts/musl.sh",
     "url": "https://www.musl-libc.org/releases/musl-1.2.5.tar.gz"
   },
-  "ownedbytes-0.9.0-LICENSE": "https://github.com/quickwit-oss/tantivy/blob/c6e77d27c605cb3cea1a933fa7d68632aeb7865e/LICENSE",
-  "rmcp-3.5.1-LICENSE": "https://github.com/modelcontextprotocol/rust-sdk/blob/79437f291b2c44053d00dcd5db969fd0cca7c887/LICENSE",
   "rust-1.99.0-*": {
-    "note": "Includes standard-library and compiler-builtins notices and a conservative upstream dependency inventory.",
+    "note": "Standard-library notices (COPYRIGHT-library.html, a conservative upstream dependency inventory) and licence texts are not committed. The release reads them from the pinned toolchain's rustc component, share/doc/rust/COPYRIGHT-library.html and share/doc/rust/licenses/*.txt, and refuses bytes that differ from the hashes in inventory.json.",
     "rust_commit": "b940084d7eb6a299eb4bfeb8e34901bc051e7ac4",
-    "source": "Rust 1.99.0 official rust-docs component, share/doc/rust/COPYRIGHT-library.html and licenses/*.txt"
+    "source": "Rust 1.99.0 official rustc component (also present in rust-docs)"
   },
   "rust-1.99.0-COMPILER-BUILTINS-LICENSE.txt": "https://github.com/rust-lang/rust/blob/b940084d7eb6a299eb4bfeb8e34901bc051e7ac4/library/compiler-builtins/LICENSE.txt",
   "taffy-0.14.0-LICENSE": "https://github.com/DioxusLabs/taffy/blob/77f385683c1d698c91a23a259f87fdddf26925fb/LICENSE",
-  "tantivy-9e63fc5-LICENSE": "https://github.com/quickwit-oss/tantivy/blob/9e63fc508153ef770f9ff980c8fa2f11e8e2e6db/LICENSE",
+  "tantivy-9e63fc5-LICENSE": {
+    "identical_text_sources": {
+      "ownedbytes 0.9.0": "https://github.com/quickwit-oss/tantivy/blob/c6e77d27c605cb3cea1a933fa7d68632aeb7865e/LICENSE"
+    },
+    "text_source": "https://github.com/quickwit-oss/tantivy/blob/9e63fc508153ef770f9ff980c8fa2f11e8e2e6db/LICENSE"
+  },
   "whatlang-0.18.0-LICENSE": "https://github.com/greyblake/whatlang-rs/blob/584009bbdbd715681fc1c144ac986814104bedbc/LICENSE"
 }

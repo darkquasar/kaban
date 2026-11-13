@@ -5,449 +5,6 @@ expression: today
 [
   {
     "annotations": {
-      "destructiveHint": false,
-      "idempotentHint": false,
-      "openWorldHint": false,
-      "readOnlyHint": false,
-      "title": "Accept"
-    },
-    "description": "Accept a governed record (sets governance=accepted and appends an event). Needs a reason and a non-empty path_scope (paths or globs the record governs). Conventions and Failures are accepted directly (signer_kind agent). A Decision needs human confirmation: the response is status=confirmation_required with a prompt to show the user and a one-time confirmation_token (10 min); once the user agrees, call accept again with the same id, the confirmation_token and confirmed_by_user=true (signer_kind human-via-chat). Where the host supports elicitation the user is asked directly first. Supersede an old Decision with link rel=SUPERSEDES.",
-    "inputSchema": {
-      "$defs": {
-        "ConfirmationToken": {
-          "description": "kaban-issued one-time confirmation token (64 lowercase hex digits)",
-          "pattern": "^[0-9a-f]{64}$",
-          "type": "string"
-        }
-      },
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "properties": {
-        "confirmation_token": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/ConfirmationToken"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "The one-time token of an earlier `confirmation_required` response. A kaban-issued\nsecret: validated by shape, never scanned, logged, echoed or stored (only its keyed\nhash is compared).",
-          "writeOnly": true
-        },
-        "confirmed_by_user": {
-          "default": false,
-          "description": "The user confirmed the acceptance in chat; together with `confirmation_token` this\nredeems the token (event `signer_kind: human-via-chat`).",
-          "type": "boolean"
-        },
-        "id": {
-          "description": "Id of the Decision, Convention or Failure to accept.",
-          "type": "string"
-        },
-        "path_scope": {
-          "default": [],
-          "description": "Paths or globs the record governs, relative to the repository root. Required, except\nwhen a confirmation token is redeemed (same rule as `reason`).",
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "reason": {
-          "description": "Why it is accepted. Required, except when a confirmation token is redeemed (the\nconfirmed request's reason applies and this one must be absent or equal).",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "signer": {
-          "description": "Declared signer identity (free text, recorded on the event; not proof).",
-          "type": [
-            "string",
-            "null"
-          ]
-        }
-      },
-      "required": [
-        "id"
-      ],
-      "type": "object"
-    },
-    "name": "accept",
-    "outputSchema": {
-      "$defs": {
-        "Card": {
-          "description": "Outgoing projection of a node (re-scanned on read when the policy says so).",
-          "properties": {
-            "confidence": {
-              "description": "0..1 confidence.",
-              "format": "double",
-              "type": [
-                "number",
-                "null"
-              ]
-            },
-            "created_at": {
-              "description": "Creation time (RFC 3339).",
-              "type": "string"
-            },
-            "governance": {
-              "$ref": "#/$defs/Governance",
-              "description": "Governance state (`none` for kinds other than Decision, Convention and Failure)."
-            },
-            "id": {
-              "description": "Node id.",
-              "type": "string"
-            },
-            "kind": {
-              "description": "Node kind.",
-              "type": "string"
-            },
-            "lifecycle": {
-              "$ref": "#/$defs/Lifecycle",
-              "description": "Storage visibility (`active` unless the read opted into archived records)."
-            },
-            "props": {
-              "description": "Props (full text only, omitted when empty)."
-            },
-            "provenance": {
-              "$ref": "#/$defs/Provenance",
-              "default": {
-                "store": "project"
-              },
-              "description": "Who produced the record and where it lives."
-            },
-            "redactions": {
-              "description": "`field:rule` entries for redactions applied on read (omitted when none).",
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            "score": {
-              "description": "Fused score (recall only), rounded to 3 decimals.",
-              "format": "double",
-              "type": [
-                "number",
-                "null"
-              ]
-            },
-            "summary": {
-              "description": "Summary, if any.",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "tags": {
-              "description": "Tags (omitted when empty).",
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            "text": {
-              "description": "Text (present when full text was requested or the node has no summary).",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "why": {
-              "description": "Why the card was returned (recall only).",
-              "items": {
-                "type": "string"
-              },
-              "type": [
-                "array",
-                "null"
-              ]
-            },
-            "workspace_id": {
-              "description": "Workspace id (every row carries one, F17).",
-              "type": "string"
-            }
-          },
-          "required": [
-            "id",
-            "kind",
-            "lifecycle",
-            "governance",
-            "created_at",
-            "workspace_id"
-          ],
-          "type": "object"
-        },
-        "ConfirmationToken": {
-          "description": "kaban-issued one-time confirmation token (64 lowercase hex digits)",
-          "pattern": "^[0-9a-f]{64}$",
-          "type": "string"
-        },
-        "Governance": {
-          "description": "Governance state of a `Decision`, `Convention` or `Failure`; [`Governance::None`] for every\nother kind.",
-          "oneOf": [
-            {
-              "const": "none",
-              "description": "The kind is not governed.",
-              "type": "string"
-            },
-            {
-              "const": "proposed",
-              "description": "Recorded, not yet accepted (ranked below accepted in `why`).",
-              "type": "string"
-            },
-            {
-              "const": "accepted",
-              "description": "Accepted with reason and path scope (event recorded).",
-              "type": "string"
-            },
-            {
-              "const": "superseded",
-              "description": "Replaced by a newer record (`SUPERSEDES` edge plus event).",
-              "type": "string"
-            },
-            {
-              "const": "invalidated",
-              "description": "Declared no longer valid (event recorded).",
-              "type": "string"
-            }
-          ]
-        },
-        "Lifecycle": {
-          "description": "Storage visibility of a node. Reads default to [`Lifecycle::Active`].",
-          "oneOf": [
-            {
-              "const": "active",
-              "description": "Visible to recall, traverse and get.",
-              "type": "string"
-            },
-            {
-              "const": "archived",
-              "description": "Kept and reachable through graph expansion or `include_archived`; not in the text index.",
-              "type": "string"
-            },
-            {
-              "const": "tombstoned",
-              "description": "Hidden everywhere; never re-proposed as a duplicate. Terminal except for purge.",
-              "type": "string"
-            },
-            {
-              "const": "purged",
-              "description": "Text, index entries and edges removed; only the id row remains so it never reappears.",
-              "type": "string"
-            }
-          ]
-        },
-        "Provenance": {
-          "description": "Where a card came from (core-spec F3 \"cards with provenance\"; core-plan C3.5). Every string\nis a persisted node string, masked by the read projection like the rest of the card.",
-          "properties": {
-            "agent_id": {
-              "description": "Agent that produced the record.",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "commit_sha": {
-              "description": "Commit the record was taken at, when stamped.",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "repo": {
-              "description": "Repository identity (the root directory name, M3-23).",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "session_id": {
-              "description": "Session that produced the record.",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "store": {
-              "$ref": "#/$defs/StoreScope",
-              "description": "Which store the record lives in (`project`; `personal` arrives in M6)."
-            }
-          },
-          "required": [
-            "store"
-          ],
-          "type": "object"
-        },
-        "SignerKind": {
-          "description": "Who signed a governance event; matches the `events.signer_kind` CHECK vocabulary.",
-          "oneOf": [
-            {
-              "const": "human-cli",
-              "description": "A human on the CLI.",
-              "type": "string"
-            },
-            {
-              "const": "human-pr",
-              "description": "A human through a reviewed pull request (committed bytes, OD-15).",
-              "type": "string"
-            },
-            {
-              "const": "human-via-chat",
-              "description": "A human confirming through the chat handshake (F4).",
-              "type": "string"
-            },
-            {
-              "const": "agent",
-              "description": "An agent acting on its own authority (default).",
-              "type": "string"
-            },
-            {
-              "const": "system",
-              "description": "kaban itself (migrations, `link` side effects, rescans).",
-              "type": "string"
-            }
-          ]
-        },
-        "StoreScope": {
-          "description": "Which database a record lives in (core-spec §4 `store_scope`, F18).",
-          "oneOf": [
-            {
-              "const": "project",
-              "description": "The per-project database (default).",
-              "type": "string"
-            },
-            {
-              "const": "personal",
-              "description": "The personal global database.",
-              "type": "string"
-            }
-          ]
-        },
-        "WriteOutcome": {
-          "description": "What became of the requested mutation (SS-10). On FTS5 the index is written in the\nmutation's own transaction, so a commit is searchable at once. An index with its own\nstorage (Tantivy, SS-09) publishes behind the commit: the service waits one bounded\nbarrier for the serving reader to cover the receipt's position and otherwise reports the\nthird outcome, which is never a rejection and is never replayed. The enum is\n`non_exhaustive` so a further outcome lands without touching a caller.",
-          "oneOf": [
-            {
-              "const": "rejected",
-              "description": "The requested mutation did not commit (nothing stored; the existing rejection auditing\nand the reason-specific nonzero CLI status stand). The error that refused it says why.",
-              "type": "string"
-            },
-            {
-              "const": "committed",
-              "description": "Committed: the state is incorporated through the receipt's `seq`. CLI status 0.",
-              "type": "string"
-            },
-            {
-              "const": "committed_not_yet_searchable",
-              "description": "Committed, and the search index had not incorporated the receipt's position when the\nvisibility barrier expired or failed: the write stands, a later search will show it,\ndo not replay the mutation. CLI status 6.",
-              "type": "string"
-            }
-          ]
-        },
-        "WriteReceipt": {
-          "description": "The receipt of one public write (SS-10), independent of transport.\n\nSS-27 rule: every identifier that leaves a database is a UUID. `instance_id` and\n`pack_lineage_id` are the store's UUIDs; the record references of the enclosing response\n(node and edge ids, claim keys) are UUIDs or content hashes already; `seq` is a local\n`ChangeLog` position scoped by `instance_id`, never a record identity. No SQLite row id\n(`rid`, `rowid`) may appear in a receipt or beside it.",
-          "properties": {
-            "instance_id": {
-              "description": "The database copy that answered: its `db_id` (SS-26 `instance_id`).",
-              "type": "string"
-            },
-            "outcome": {
-              "$ref": "#/$defs/WriteOutcome",
-              "description": "`rejected`, `committed` or `committed_not_yet_searchable` (see [`WriteOutcome`])."
-            },
-            "pack_lineage_id": {
-              "description": "The pack lineage the database belongs to (SS-26; kept across forks and copies).",
-              "type": "string"
-            },
-            "seq": {
-              "description": "The `ChangeLog` position the outcome holds at. For `committed`, the call's terminal\nsequence: its last change row, read inside its transaction (the head at that moment\nwhen the call wrote no change row, so a no-op still names the state it saw); `None`\nonly when the position could not be read after the commit (the write stands; the\nservice logs the read failure). For `rejected`, `None`: nothing of the call is in the\nlog.",
-              "format": "uint64",
-              "minimum": 0,
-              "type": [
-                "integer",
-                "null"
-              ]
-            }
-          },
-          "required": [
-            "outcome",
-            "instance_id",
-            "pack_lineage_id"
-          ],
-          "type": "object"
-        }
-      },
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "oneOf": [
-        {
-          "description": "The record is accepted; the event was appended.",
-          "properties": {
-            "event_seq": {
-              "description": "Sequence number of the `accepted` event.",
-              "format": "uint64",
-              "minimum": 0,
-              "type": "integer"
-            },
-            "node": {
-              "$ref": "#/$defs/Card",
-              "description": "The accepted record."
-            },
-            "receipt": {
-              "$ref": "#/$defs/WriteReceipt",
-              "description": "The write's receipt (spec 05 SS-10): outcome, store identities and `ChangeLog`\nposition."
-            },
-            "signer_kind": {
-              "$ref": "#/$defs/SignerKind",
-              "description": "Who signed the acceptance (`agent`, `human-cli`, `human-via-chat`)."
-            },
-            "status": {
-              "const": "accepted",
-              "type": "string"
-            }
-          },
-          "required": [
-            "status",
-            "node",
-            "event_seq",
-            "signer_kind",
-            "receipt"
-          ],
-          "type": "object"
-        },
-        {
-          "description": "A Decision needs human confirmation: ask the user with `prompt`, then call `accept`\nagain with `confirmation_token` and `confirmed_by_user: true` (or redeem it on the CLI).",
-          "properties": {
-            "confirmation_token": {
-              "$ref": "#/$defs/ConfirmationToken",
-              "description": "The one-time token, shown here once (the issuing response) and never again."
-            },
-            "expires_in_s": {
-              "description": "Seconds until the token expires.",
-              "format": "uint32",
-              "minimum": 0,
-              "type": "integer"
-            },
-            "prompt": {
-              "description": "Human-readable question (never contains the token).",
-              "type": "string"
-            },
-            "status": {
-              "const": "confirmation_required",
-              "type": "string"
-            }
-          },
-          "required": [
-            "status",
-            "prompt",
-            "confirmation_token",
-            "expires_in_s"
-          ],
-          "type": "object"
-        }
-      ],
-      "type": "object"
-    }
-  },
-  {
-    "annotations": {
       "destructiveHint": true,
       "idempotentHint": true,
       "openWorldHint": false,
@@ -637,7 +194,8 @@ expression: today
           "required": [
             "outcome",
             "instance_id",
-            "pack_lineage_id"
+            "pack_lineage_id",
+            "seq"
           ],
           "type": "object"
         }
@@ -793,7 +351,8 @@ expression: today
           "required": [
             "outcome",
             "instance_id",
-            "pack_lineage_id"
+            "pack_lineage_id",
+            "seq"
           ],
           "type": "object"
         }
@@ -841,6 +400,7 @@ expression: today
         "from",
         "rel",
         "to",
+        "confidence",
         "redactions",
         "receipt"
       ],
@@ -1137,7 +697,8 @@ expression: today
             "lifecycle",
             "governance",
             "created_at",
-            "workspace_id"
+            "workspace_id",
+            "provenance"
           ],
           "type": "object"
         },
@@ -1472,7 +1033,8 @@ expression: today
       },
       "required": [
         "count",
-        "results"
+        "results",
+        "follow_ups"
       ],
       "type": "object"
     }
@@ -1895,7 +1457,8 @@ expression: today
             "lifecycle",
             "governance",
             "created_at",
-            "workspace_id"
+            "workspace_id",
+            "provenance"
           ],
           "type": "object"
         },
@@ -2073,7 +1636,8 @@ expression: today
           "required": [
             "outcome",
             "instance_id",
-            "pack_lineage_id"
+            "pack_lineage_id",
+            "seq"
           ],
           "type": "object"
         }
@@ -2144,6 +1708,8 @@ expression: today
         "id",
         "kind",
         "redactions",
+        "links_created",
+        "links_ignored",
         "receipt"
       ],
       "type": "object"
@@ -2312,7 +1878,13 @@ expression: today
           "required": [
             "kind",
             "name",
-            "description"
+            "ns",
+            "description",
+            "from_kinds",
+            "to_kinds",
+            "directed",
+            "props_schema",
+            "builtin"
           ],
           "type": "object"
         }
@@ -2484,7 +2056,13 @@ expression: today
       "required": [
         "kind",
         "name",
-        "description"
+        "ns",
+        "description",
+        "from_kinds",
+        "to_kinds",
+        "directed",
+        "props_schema",
+        "builtin"
       ],
       "type": "object"
     }
@@ -2644,7 +2222,11 @@ expression: today
           "required": [
             "layer",
             "producer_layers",
-            "on"
+            "on",
+            "owner",
+            "last_run",
+            "last_outcome",
+            "reason_off"
           ],
           "type": "object"
         },
@@ -2758,7 +2340,8 @@ expression: today
       },
       "required": [
         "stores",
-        "policy"
+        "policy",
+        "layers"
       ],
       "type": "object"
     }
@@ -3117,7 +2700,8 @@ expression: today
             "lifecycle",
             "governance",
             "created_at",
-            "workspace_id"
+            "workspace_id",
+            "provenance"
           ],
           "type": "object"
         },
@@ -3153,7 +2737,8 @@ expression: today
             "id",
             "from",
             "rel",
-            "to"
+            "to",
+            "confidence"
           ],
           "type": "object"
         },
@@ -3296,670 +2881,8 @@ expression: today
       },
       "required": [
         "nodes",
-        "edges"
-      ],
-      "type": "object"
-    }
-  },
-  {
-    "annotations": {
-      "destructiveHint": false,
-      "idempotentHint": true,
-      "openWorldHint": false,
-      "readOnlyHint": true,
-      "title": "Why"
-    },
-    "description": "Why: the accepted (then proposed) Decisions and Conventions that govern a path (their path_scope covers it) or match a query, each with its currency since acceptance: active, needs_review (half or more of the scope changed in committed history), stale (every scope entry is gone) or uncheckable (no repository, git absent or slow, another repository, not accepted). Targets are {\"path\": \"src/store/sqlite.rs\"} or {\"query\": \"wal mode\"}, up to 16 per call; results are per target, accepted first.",
-    "inputSchema": {
-      "$defs": {
-        "WhyTarget": {
-          "description": "One `why` target (core-spec F2): a repository-relative path, or a free-text query.",
-          "oneOf": [
-            {
-              "additionalProperties": false,
-              "description": "A path whose governing records are wanted (`path_scope` entries that cover it).",
-              "properties": {
-                "path": {
-                  "type": "string"
-                }
-              },
-              "required": [
-                "path"
-              ],
-              "type": "object"
-            },
-            {
-              "additionalProperties": false,
-              "description": "A query matched against the records' text.",
-              "properties": {
-                "query": {
-                  "type": "string"
-                }
-              },
-              "required": [
-                "query"
-              ],
-              "type": "object"
-            },
-            {
-              "additionalProperties": false,
-              "description": "A normalised SCIP symbol key (stage1-spec §4.2): the records anchored on a `CodeRef`\nwith that `symbol`, plus those governing the symbol's defining file in the resolved\nsnapshot. Scanned as content first, then grammar-checked (`symbol_invalid`).",
-              "properties": {
-                "symbol": {
-                  "type": "string"
-                }
-              },
-              "required": [
-                "symbol"
-              ],
-              "type": "object"
-            }
-          ]
-        }
-      },
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "properties": {
-        "include_superseded": {
-          "default": false,
-          "description": "Also return the superseded records behind each current one (stage1-spec G1-F13,\nread-gated like the rest of the call): each is listed after its successor with\n`superseded_by` filled. Default `false`: superseded records are left out, as always.",
-          "type": "boolean"
-        },
-        "limit": {
-          "description": "Max records per target (default 10, max 100).",
-          "format": "uint",
-          "minimum": 0,
-          "type": [
-            "integer",
-            "null"
-          ]
-        },
-        "targets": {
-          "description": "Paths and queries, 1..=16 per call (`{\"path\": \"src/store/sqlite.rs\"}` or\n`{\"query\": \"sqlite wal\"}`).",
-          "items": {
-            "$ref": "#/$defs/WhyTarget"
-          },
-          "type": "array"
-        },
-        "workspace_id": {
-          "description": "Workspace to read (default: the bound workspace; `\"*\"` for all; core-spec S6).",
-          "type": [
-            "string",
-            "null"
-          ]
-        }
-      },
-      "required": [
-        "targets"
-      ],
-      "type": "object"
-    },
-    "name": "why",
-    "outputSchema": {
-      "$defs": {
-        "Card": {
-          "description": "Outgoing projection of a node (re-scanned on read when the policy says so).",
-          "properties": {
-            "confidence": {
-              "description": "0..1 confidence.",
-              "format": "double",
-              "type": [
-                "number",
-                "null"
-              ]
-            },
-            "created_at": {
-              "description": "Creation time (RFC 3339).",
-              "type": "string"
-            },
-            "governance": {
-              "$ref": "#/$defs/Governance",
-              "description": "Governance state (`none` for kinds other than Decision, Convention and Failure)."
-            },
-            "id": {
-              "description": "Node id.",
-              "type": "string"
-            },
-            "kind": {
-              "description": "Node kind.",
-              "type": "string"
-            },
-            "lifecycle": {
-              "$ref": "#/$defs/Lifecycle",
-              "description": "Storage visibility (`active` unless the read opted into archived records)."
-            },
-            "props": {
-              "description": "Props (full text only, omitted when empty)."
-            },
-            "provenance": {
-              "$ref": "#/$defs/Provenance",
-              "default": {
-                "store": "project"
-              },
-              "description": "Who produced the record and where it lives."
-            },
-            "redactions": {
-              "description": "`field:rule` entries for redactions applied on read (omitted when none).",
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            "score": {
-              "description": "Fused score (recall only), rounded to 3 decimals.",
-              "format": "double",
-              "type": [
-                "number",
-                "null"
-              ]
-            },
-            "summary": {
-              "description": "Summary, if any.",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "tags": {
-              "description": "Tags (omitted when empty).",
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            "text": {
-              "description": "Text (present when full text was requested or the node has no summary).",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "why": {
-              "description": "Why the card was returned (recall only).",
-              "items": {
-                "type": "string"
-              },
-              "type": [
-                "array",
-                "null"
-              ]
-            },
-            "workspace_id": {
-              "description": "Workspace id (every row carries one, F17).",
-              "type": "string"
-            }
-          },
-          "required": [
-            "id",
-            "kind",
-            "lifecycle",
-            "governance",
-            "created_at",
-            "workspace_id"
-          ],
-          "type": "object"
-        },
-        "CodeField": {
-          "description": "The `code` field of a symbol card (CG-JOIN v1 §6): exactly one of a resolved snapshot, no\nsnapshot (`snapshot_absent`), every candidate too new (`snapshot_too_new`), a key present in\nthe anchors but absent from the resolved snapshot (`snapshot_mismatch`), or several\nnon-external rows sharing the key (`ambiguous_symbol`); the last two carry the `snapshot`\nobject beside them.",
-          "oneOf": [
-            {
-              "additionalProperties": false,
-              "description": "A snapshot resolved and holds the key once.",
-              "properties": {
-                "snapshot": {
-                  "description": "The `snapshot` object of a symbol card (CG-JOIN v1 §4 projection): the resolved commit,\nwhether it is `HEAD`'s own, and `off | current | stale` against the live policy version\n(`off`: the content scan was disabled at index time). `isolation_tier` and\n`schema_version` are not on the wire.",
-                  "properties": {
-                    "commit": {
-                      "description": "The snapshot's commit, 40 lowercase hex.",
-                      "type": "string"
-                    },
-                    "exact": {
-                      "description": "Whether it is the snapshot of the current `HEAD` (else the nearest ancestor's).",
-                      "type": "boolean"
-                    },
-                    "policy": {
-                      "description": "`current` when the snapshot was built under the live denylist policy, `off` when the\ncontent scan was disabled at index time (nothing was gated), else `stale`.",
-                      "type": "string"
-                    }
-                  },
-                  "required": [
-                    "commit",
-                    "exact",
-                    "policy"
-                  ],
-                  "type": "object"
-                }
-              },
-              "required": [
-                "snapshot"
-              ],
-              "type": "object"
-            },
-            {
-              "const": "snapshot_absent",
-              "description": "No snapshot resolves (`NoSnapshot::{NoDirectory, NoFile, CorruptOnly}`): the exact\nanchor leg only, nothing attached.",
-              "type": "string"
-            },
-            {
-              "const": "snapshot_too_new",
-              "description": "Every candidate snapshot was written by a newer `kaban-index`: the exact anchor leg\nonly, nothing attached.",
-              "type": "string"
-            },
-            {
-              "additionalProperties": false,
-              "description": "The key is absent from the resolved snapshot.",
-              "properties": {
-                "snapshot_mismatch": {
-                  "properties": {
-                    "snapshot": {
-                      "description": "The snapshot that was consulted.",
-                      "properties": {
-                        "commit": {
-                          "description": "The snapshot's commit, 40 lowercase hex.",
-                          "type": "string"
-                        },
-                        "exact": {
-                          "description": "Whether it is the snapshot of the current `HEAD` (else the nearest ancestor's).",
-                          "type": "boolean"
-                        },
-                        "policy": {
-                          "description": "`current` when the snapshot was built under the live denylist policy, `off` when the\ncontent scan was disabled at index time (nothing was gated), else `stale`.",
-                          "type": "string"
-                        }
-                      },
-                      "required": [
-                        "commit",
-                        "exact",
-                        "policy"
-                      ],
-                      "type": "object"
-                    }
-                  },
-                  "required": [
-                    "snapshot"
-                  ],
-                  "type": "object"
-                }
-              },
-              "required": [
-                "snapshot_mismatch"
-              ],
-              "type": "object"
-            },
-            {
-              "additionalProperties": false,
-              "description": "More than one `kind = 'symbol' AND external = 0` row shares the key.",
-              "properties": {
-                "ambiguous_symbol": {
-                  "properties": {
-                    "snapshot": {
-                      "description": "The snapshot that was consulted.",
-                      "properties": {
-                        "commit": {
-                          "description": "The snapshot's commit, 40 lowercase hex.",
-                          "type": "string"
-                        },
-                        "exact": {
-                          "description": "Whether it is the snapshot of the current `HEAD` (else the nearest ancestor's).",
-                          "type": "boolean"
-                        },
-                        "policy": {
-                          "description": "`current` when the snapshot was built under the live denylist policy, `off` when the\ncontent scan was disabled at index time (nothing was gated), else `stale`.",
-                          "type": "string"
-                        }
-                      },
-                      "required": [
-                        "commit",
-                        "exact",
-                        "policy"
-                      ],
-                      "type": "object"
-                    }
-                  },
-                  "required": [
-                    "snapshot"
-                  ],
-                  "type": "object"
-                }
-              },
-              "required": [
-                "ambiguous_symbol"
-              ],
-              "type": "object"
-            }
-          ]
-        },
-        "Currency": {
-          "description": "The result of a currency check.",
-          "properties": {
-            "changed": {
-              "description": "Changed paths inside the scope, each once, sorted.",
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            "checked_at": {
-              "description": "When the check ran (RFC 3339).",
-              "type": "string"
-            },
-            "gone": {
-              "description": "Scope entries with no tracked file left at HEAD, sorted.",
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            "reason": {
-              "description": "Why the record is `Uncheckable` (a failure class, never caller data).",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "staleness": {
-              "description": "`changed_scope_entries / scope_entries` (0 when uncheckable).",
-              "format": "float",
-              "type": "number"
-            },
-            "state": {
-              "$ref": "#/$defs/CurrencyState",
-              "description": "The state."
-            }
-          },
-          "required": [
-            "state",
-            "staleness",
-            "checked_at"
-          ],
-          "type": "object"
-        },
-        "CurrencyState": {
-          "description": "Currency state (core-spec F2 vocabulary).",
-          "oneOf": [
-            {
-              "const": "active",
-              "description": "Less than half of the scope entries changed.",
-              "type": "string"
-            },
-            {
-              "const": "needs_review",
-              "description": "At least half of the scope entries changed.",
-              "type": "string"
-            },
-            {
-              "const": "stale",
-              "description": "Every scope entry is gone at HEAD.",
-              "type": "string"
-            },
-            {
-              "const": "uncheckable",
-              "description": "Git absent, not a repository, another repository, timeout or an unusable scope.",
-              "type": "string"
-            }
-          ]
-        },
-        "FollowUp": {
-          "description": "A suggestion the agent may execute with another tool (core-spec F19). kaban never runs it.",
-          "properties": {
-            "args": {
-              "description": "Arguments for that tool, built from the masked `CodeRef` props."
-            },
-            "reason": {
-              "description": "Why the suggestion is made (names the pointer, never a node id).",
-              "type": "string"
-            },
-            "tool": {
-              "$ref": "#/$defs/FollowUpTool",
-              "description": "The tool to call."
-            }
-          },
-          "required": [
-            "tool",
-            "args",
-            "reason"
-          ],
-          "type": "object"
-        },
-        "FollowUpTool": {
-          "description": "Tools a follow-up may name (closed set; the wire form is the dotted tool name).",
-          "oneOf": [
-            {
-              "const": "serena.find_symbol",
-              "description": "Serena `find_symbol` (`name_path` + `relative_path`).",
-              "type": "string"
-            },
-            {
-              "const": "serena.find_referencing_symbols",
-              "description": "Serena `find_referencing_symbols` (`name_path` + `relative_path`).",
-              "type": "string"
-            }
-          ]
-        },
-        "Governance": {
-          "description": "Governance state of a `Decision`, `Convention` or `Failure`; [`Governance::None`] for every\nother kind.",
-          "oneOf": [
-            {
-              "const": "none",
-              "description": "The kind is not governed.",
-              "type": "string"
-            },
-            {
-              "const": "proposed",
-              "description": "Recorded, not yet accepted (ranked below accepted in `why`).",
-              "type": "string"
-            },
-            {
-              "const": "accepted",
-              "description": "Accepted with reason and path scope (event recorded).",
-              "type": "string"
-            },
-            {
-              "const": "superseded",
-              "description": "Replaced by a newer record (`SUPERSEDES` edge plus event).",
-              "type": "string"
-            },
-            {
-              "const": "invalidated",
-              "description": "Declared no longer valid (event recorded).",
-              "type": "string"
-            }
-          ]
-        },
-        "Lifecycle": {
-          "description": "Storage visibility of a node. Reads default to [`Lifecycle::Active`].",
-          "oneOf": [
-            {
-              "const": "active",
-              "description": "Visible to recall, traverse and get.",
-              "type": "string"
-            },
-            {
-              "const": "archived",
-              "description": "Kept and reachable through graph expansion or `include_archived`; not in the text index.",
-              "type": "string"
-            },
-            {
-              "const": "tombstoned",
-              "description": "Hidden everywhere; never re-proposed as a duplicate. Terminal except for purge.",
-              "type": "string"
-            },
-            {
-              "const": "purged",
-              "description": "Text, index entries and edges removed; only the id row remains so it never reappears.",
-              "type": "string"
-            }
-          ]
-        },
-        "MatchedBy": {
-          "description": "How a `why` result matched its target.",
-          "oneOf": [
-            {
-              "const": "path_scope",
-              "description": "A `path_scope` entry covers the target path.",
-              "type": "string"
-            },
-            {
-              "const": "query",
-              "description": "The record's text matches the query.",
-              "type": "string"
-            },
-            {
-              "const": "symbol",
-              "description": "The record is linked `ABOUT` or `GOVERNS` to a `CodeRef` whose `symbol` anchor equals\nthe target key (CG-JOIN v1 §3 predicates).",
-              "type": "string"
-            },
-            {
-              "const": "evidence",
-              "description": "The record is reached only through an `EVIDENCE_FOR` edge from such a `CodeRef`.",
-              "type": "string"
-            }
-          ]
-        },
-        "Provenance": {
-          "description": "Where a card came from (core-spec F3 \"cards with provenance\"; core-plan C3.5). Every string\nis a persisted node string, masked by the read projection like the rest of the card.",
-          "properties": {
-            "agent_id": {
-              "description": "Agent that produced the record.",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "commit_sha": {
-              "description": "Commit the record was taken at, when stamped.",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "repo": {
-              "description": "Repository identity (the root directory name, M3-23).",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "session_id": {
-              "description": "Session that produced the record.",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "store": {
-              "$ref": "#/$defs/StoreScope",
-              "description": "Which store the record lives in (`project`; `personal` arrives in M6)."
-            }
-          },
-          "required": [
-            "store"
-          ],
-          "type": "object"
-        },
-        "StoreScope": {
-          "description": "Which database a record lives in (core-spec §4 `store_scope`, F18).",
-          "oneOf": [
-            {
-              "const": "project",
-              "description": "The per-project database (default).",
-              "type": "string"
-            },
-            {
-              "const": "personal",
-              "description": "The personal global database.",
-              "type": "string"
-            }
-          ]
-        },
-        "WhyCard": {
-          "description": "One governing record returned by `why`.",
-          "properties": {
-            "anchor_commit": {
-              "description": "The commit the anchor row that reached this card was scoped to (40 hex), present only\nwhen no snapshot resolved (`code: snapshot_absent`, OWN-83 (1); CG-JOIN v1 §3): the\nanswer is the latest decision, not verified against a current index. Absent on a\nresolved lookup and on `path` and `query` targets.",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "code": {
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/CodeField"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "The code-graph side of a `symbol` target (CG-JOIN v1 §6); absent on `path` and\n`query` targets."
-            },
-            "conflict": {
-              "description": "`true` when the record's `.kaban/*.md` file and the database disagree at the same rev\n(core-spec F13; a human resolves it with `kaban resolve <id> --take file|db`). Omitted\nwhen false.",
-              "type": "boolean"
-            },
-            "currency": {
-              "$ref": "#/$defs/Currency",
-              "description": "Currency of the record's `path_scope` since acceptance (core-spec F14)."
-            },
-            "governance": {
-              "$ref": "#/$defs/Governance",
-              "description": "Governance state (`accepted` records come first)."
-            },
-            "matched_by": {
-              "$ref": "#/$defs/MatchedBy",
-              "description": "How it matched."
-            },
-            "matched_target": {
-              "description": "The target this card answers (the path or the query as sent).",
-              "type": "string"
-            },
-            "node": {
-              "$ref": "#/$defs/Card",
-              "description": "The record (compact card; `props` are not included)."
-            },
-            "superseded_by": {
-              "default": [],
-              "description": "The ids of the records that supersede this one, nearest first (stage1-spec §6; a\ncontrol-registry `NodeId` path). Always present: `[]` for a current record.",
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            }
-          },
-          "required": [
-            "node",
-            "governance",
-            "currency",
-            "matched_target",
-            "matched_by"
-          ],
-          "type": "object"
-        }
-      },
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "properties": {
-        "follow_ups": {
-          "default": [],
-          "description": "Suggestions the agent may run with other tools, derived from the `CodeRef` pointers\nlinked to the cards of this result (core-spec F19); kaban never executes them.",
-          "items": {
-            "$ref": "#/$defs/FollowUp"
-          },
-          "type": "array"
-        },
-        "partial": {
-          "description": "`true` when a target had more governing records than `limit`.",
-          "type": "boolean"
-        },
-        "results": {
-          "description": "Governing records, per target in request order; within a target accepted before\nproposed, then importance, then newest first.",
-          "items": {
-            "$ref": "#/$defs/WhyCard"
-          },
-          "type": "array"
-        }
-      },
-      "required": [
-        "results",
-        "partial"
+        "edges",
+        "anchored"
       ],
       "type": "object"
     }

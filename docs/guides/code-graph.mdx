@@ -14,8 +14,7 @@ flowchart LR
   R[Checked-out commit] --> I[Explicit kaban-index run]
   I --> S[Per-commit snapshot]
   S --> T[MCP code tools]
-  M[Memory and governing records] --> C[code_context and why bridge]
-  T --> C
+  T --> C[code_context]
 ```
 
 ## What it indexes
@@ -189,8 +188,7 @@ implementers, a file path is a node whose members are its top-level items, and
 document-local symbols (parameters, variables) are hidden from `code_neighbours`
 and counted in `locals_hidden` unless `include_locals` is set. `code_context` adds
 bounded callers and callees over `REFERENCES` edges (`approximate: true`: no call
-graph is derived), linked tests, the governing records of the symbol and the file's
-last change. The first call after `serve` starts is answered after a warm-up that
+graph is derived), linked tests and the file's last change. The first call after `serve` starts is answered after a warm-up that
 opens and checks the snapshot; the server starts it, you do not.
 
 ## Check which snapshot answered
@@ -215,9 +213,5 @@ is older than the writer: upgrade `kaban` or re-index with a matching version.
 fields. Copy real repository/commit/symbol values from your tools; a flat `line`
 field is not the CodeRef wire shape. Positions in CodeRefs are zero-based.
 
-Those anchors connect notes to snapshot symbols and files. `code_context` includes
-governing records through the symbol-aware `why` bridge, and MCP `traverse` with
-`follow_anchors: true` can return anchored code cards alongside memory nodes. For a
-path-only question, use `kaban why --path storage/store.go` even without a snapshot.
-[Currency](governance.mdx) says what changed since acceptance, not whether a past
-rationale is still the right choice.
+Those anchors connect notes to snapshot symbols and files: MCP `traverse` with
+`follow_anchors: true` can return anchored code cards alongside memory nodes.

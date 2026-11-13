@@ -322,11 +322,11 @@ macos() {
   selection='binary_id(=kaban-core::process) | binary_id(=kaban-codegraph::open) | binary_id(=kaban-codegraph::discover) | binary_id(=kaban-index::writer) | binary_id(=kaban-index::runner) | binary_id(=kaban-index::trust)'
   selection="$selection | (binary_id(=kaban-index::cli) & (test(=cli_index_required_without_isolating_tier_is_exit_8) | test(=rust_required_unavailable_never_runs_native_producer_probes) | test(=trust_revalidated_before_each_spawn) | test(=indexer_replaced_after_admission_is_refused) | test(=checkout_replaced_between_revalidation_and_spawn_is_refused)))"
   selection="$selection | (package(kaban-ingest) & (binary(golden_markdown) | binary(chunk) | binary(golden_pdf)))"
-  selection="$selection | (package(kaban) & (binary(walkthrough) | binary(cli_sync) | binary(recall_determinism) | binary(code_smoke) | binary(mcp_control) | binary(mcp_scrub) | binary(mcp_docs) | binary(hook_hosts) | binary(hooks_roundtrip)))"
+  selection="$selection | (package(kaban) & (binary(walkthrough) | binary(recall_determinism) | binary(code_smoke) | binary(mcp_control) | binary(mcp_scrub) | binary(mcp_docs) | binary(hook_hosts) | binary(hooks_roundtrip)))"
   step rust_runner "${CARGO:-cargo}" nextest run --locked \
     -p kaban-core -p kaban-codegraph -p kaban-index -p kaban-ingest -p kaban \
     --test process --test open --test discover --test writer --test runner --test trust --test cli \
-    --test golden_markdown --test chunk --test golden_pdf --test walkthrough --test cli_sync \
+    --test golden_markdown --test chunk --test golden_pdf --test walkthrough \
     --test recall_determinism --test code_smoke --test mcp_control --test mcp_scrub --test mcp_docs \
     --test hook_hosts --test hooks_roundtrip \
     --features kaban-ingest/pdf,kaban-ingest/md-splitter \
@@ -426,19 +426,23 @@ quality() {
   step "${CARGO:-cargo}" deny check
 
   # store-boundary dependency check (engine-spec EN-E10a hygiene, engine-plan E1.0, SO-5):
-  #   kaban-api and kaban-ingest declare no direct normal `rusqlite` dependency (dev-only is fine),
-  #   and the inverse normal tree of rusqlite under kaban-api is empty (today) or names
-  #   kaban-codegraph as the only direct parent (after v4 CG5.2). Any other parent fails.
+  #   no workspace member other than kaban-store-sqlite, kaban-codegraph and kaban-vtab (spec 11
+  #   QRY-07) declares a normal `rusqlite` dependency, counting optional entries behind any feature
+  #   and `[target.'cfg(...)'.dependencies]` entries for any platform (dev-only is fine). The inverse
+  #   normal tree of rusqlite under kaban-api is empty (today) or names kaban-codegraph as the only
+  #   direct parent (after v4 CG5.2), and the resolved workspace tree has no other direct parent.
   store_boundary_deps() {
     local meta direct parents
     meta=$("${CARGO:-cargo}" metadata --format-version 1 --no-deps) || return 1
+    # --no-deps lists only workspace members, each with every declared dependency regardless of
+    # features or target; `.name` is the package name, so a renamed rusqlite is still caught
     direct=$(printf '%s' "$meta" | jq -r '.packages[]
-      | select(.name == "kaban-api" or .name == "kaban-ingest")
+      | select(.name as $n | ["kaban-store-sqlite", "kaban-codegraph", "kaban-vtab"] | index($n) | not)
       | .name as $pkg | .dependencies[]
       | select(.name == "rusqlite" and .kind == null)
-      | "\($pkg) -> rusqlite (normal)"') || return 1
+      | "\($pkg) -> rusqlite (normal\(if .optional then ", optional" else "" end)\(if .target then ", target \(.target)" else "" end))"') || return 1
     if [ -n "$direct" ]; then
-      echo "FAILED: direct rusqlite dependency outside the store crate:" >&2
+      echo "FAILED: normal rusqlite dependency outside kaban-store-sqlite, kaban-codegraph, kaban-vtab:" >&2
       echo "$direct" >&2
       return 1
     fi
@@ -458,7 +462,22 @@ quality() {
       echo "$parents" >&2
       return 1
     fi
-    echo "store boundary: no direct rusqlite in kaban-api/kaban-ingest; kaban-api inverse tree parents: ${parents:-none}"
+    # workspace-wide: the direct normal parents of rusqlite are the store, the code graph and the
+    # virtual-table crate (spec 11 QRY-07); any other parent fails
+    local all_parents unexpected
+    tree=$("${CARGO:-cargo}" tree -e normal -i rusqlite --prefix depth 2>&1) || {
+      echo "FAILED: cargo tree -i rusqlite exited non-zero:" >&2
+      echo "$tree" >&2
+      return 1
+    }
+    all_parents=$(printf '%s\n' "$tree" | awk '/^1[^0-9]/ { sub(/^1/, ""); print $1 }' | sort -u)
+    unexpected=$(printf '%s\n' "$all_parents" | grep -vxE 'kaban-store-sqlite|kaban-codegraph|kaban-vtab' || true)
+    if [ -n "$unexpected" ]; then
+      echo "FAILED: rusqlite has a direct parent outside kaban-store-sqlite, kaban-codegraph, kaban-vtab:" >&2
+      echo "$unexpected" >&2
+      return 1
+    fi
+    echo "store boundary: no normal rusqlite outside kaban-store-sqlite, kaban-codegraph, kaban-vtab; kaban-api inverse tree parents: ${parents:-none}; workspace rusqlite parents: $(printf '%s' "$all_parents" | tr '\n' ' ')"
   }
   if command -v jq >/dev/null 2>&1; then
     step store_boundary_deps

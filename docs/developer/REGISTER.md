@@ -1,7 +1,7 @@
 # Registering kaban with your agent
 
-Two things to register per host: the **MCP server** (the `remember`/`recall`/`why`/… tools) and
-the **hooks** (briefing, pre-edit context, failure capture, the "how was it fixed" prompt). All
+Two things to register per host: the **MCP server** (the `remember`/`recall`/… tools) and
+the **hooks** (briefing, edit recording, failure capture, the "how was it fixed" prompt). All
 transports are stdio. Replace `/path/to/kaban` with the native binary. The
 server never opens network connections. Hooks are covered in the second half of this page.
 There is no working HTTP/REST transport: `serve --http` explicitly refuses the request.
@@ -68,8 +68,7 @@ and `keys/codegraph.key` are mounted at the container's `KABAN_HOME` and the con
 the repository as its working directory.
 
 ## Environment variables
-`KABAN_DB`, `KABAN_POLICY`, `KABAN_AUDIT_EXPORT` mirror `--db`, `--policy`, `--audit-export` (alias
-`--audit`). The spike's
+`KABAN_DB` and `KABAN_POLICY` mirror `--db` and `--policy`. The spike's
 `SB_DB`/`SB_POLICY`/`SB_AUDIT` are not read any more (clap binds one environment variable per
 flag; see CHANGELOG 3.0.0-alpha.1). Logs go to stderr only; set `RUST_LOG=info` to see startup
 timing. Avoid verbose logging when processing sensitive data; the application policy
@@ -77,9 +76,7 @@ is not a substitute for protecting client and host logs.
 
 ## Explicit CLI maintenance
 
-`kaban import [--repo <root>]` runs the full record import without writing repository files.
-Its absence pass tombstones records whose files git deleted, guarded by their serialized
-revision. The old `rebuild` spelling is retired. `kaban reindex text` rebuilds the Tantivy text index
+`kaban reindex text` rebuilds the Tantivy text index
 from the database; `kaban doctor --optimize` explicitly merges its segments once. Ordinary writes and ordinary doctor checks never request optimization.
 CLI request/result content gates still apply; repository/document paths are not exempt.
 `kaban reindex layer <name>` is a DB-only reset, not a completed rebuild: generated links
@@ -151,7 +148,7 @@ Files: `hooks/claude-code/` (`settings.hooks.json`, `_run.sh`, one script per ev
 3. Export `KABAN_DB`, `KABAN_HOME`, `KABAN_POLICY` in Claude Code's environment.
 
 Events: `SessionStart` (`startup|resume|compact`) briefing; `PreToolUse` (`Edit|Write|MultiEdit`)
-governing records for the file; `PostToolUseFailure` (`Bash`) Failure; `PostToolUse` (`Bash`)
+the edit recorded for the file; `PostToolUseFailure` (`Bash`) Failure; `PostToolUse` (`Bash`)
 success evidence; `SubagentStop` Episode; `Stop` the one-time prompt as `decision: block`.
 `SessionEnd` is not used. Verified live (round 2, two sessions): all of the above except
 `SubagentStop` and `Edit`/`MultiEdit` (the model chose `Write`).
@@ -169,7 +166,7 @@ Files: `hooks/codex/` (`hooks.json`, `config.hooks.toml`, `_run.sh`, one script 
    pinned to a hash of the configuration. `--dangerously-bypass-hook-trust` is a test flag for
    throwaway containers, never for a working checkout.
 
-Events: `SessionStart` briefing; `PreToolUse` (`^apply_patch$|^Edit$|^Write$`) governing records
+Events: `SessionStart` briefing; `PreToolUse` (`^apply_patch$|^Edit$|^Write$`) the edits recorded
 for the files in the patch headers; `PostToolUse` (`^Bash$`) success evidence; `SubagentStop`
 Episode (unverified); `Stop` prompt as `decision: block`. See `hooks/codex/README.md` for the
 Codex-specific details (the empty `Bash` response, trust, `config.toml`).
@@ -183,37 +180,10 @@ File: `hooks/pi/kaban-hooks.ts`.
 2. Export `KABAN_DB`, `KABAN_HOME`, `KABAN_POLICY` (and `KABAN_BIN` if `kaban` is not on `PATH`).
 
 Events: `session_start` briefing (`sendMessage` next turn); `tool_call` for `edit`/`write`
-governing records (steer message); `tool_execution_end` for `bash` Failure (`isError`) or success
+the edit recorded; `tool_execution_end` for `bash` Failure (`isError`) or success
 evidence; `agent_before_settle` the one-time prompt as a single continuation. Verified live
 (round 2, two sessions). In `pi --print` the continuation was honoured although pi reported
 `canContinue: false`; see `hooks/pi/README.md`.
-
-### git (`hooks/git/pre-commit`, `hooks/git/post-commit`; core-spec F9b, F13)
-
-The two git hooks keep the committed serialization in step with the database: `pre-commit`
-runs `kaban sync --stage` so `.kaban/<ontology>/<dir>/<id>.md` and `.kaban/<ontology>/INDEX.md`
-(the shipped ontology: `.kaban/adr/decisions/<id>.md`, `.kaban/adr/INDEX.md`) land in the commit
-being made; `post-commit` runs `kaban hook post-commit`, which stamps the commit's sha on the
-records no commit stamped yet (re-serialized by the next sync, one commit later).
-
-1. Inside the repository: `git config core.hooksPath hooks/git`, or copy both files into
-   `.git/hooks/` (executable).
-2. Make sure git's environment carries the same `KABAN_DB`, `KABAN_HOME`, `KABAN_POLICY` and (if
-   set) `KABAN_WORKSPACE` as the MCP server entry, and `kaban` on `PATH` or `KABAN_BIN`. git
-   runs hooks from the repository root with the caller's environment; it reads no `.env`.
-3. Keep the database out of the commit (`kaban.db*` in `.gitignore`).
-
-Contract: both hooks exit 0 on every path (a missing binary or database, a lock, a timeout or
-any error never aborts a commit), print nothing, and stay inside `.kaban/`. `kaban hook
-post-commit` has no envelope and never reads stdin. Partial commits (`git commit <paths>`)
-get their serialization in the next commit (`hooks/README.md`, "git hooks", M5-29). Offline
-proof: `crates/kaban/tests/hook_post_commit.rs` (a fixture repository with `core.hooksPath`).
-The Stop hooks of the three agent hosts also flush the files with a detached `kaban sync`
-(`hooks/README.md`); the git hooks are what commits them.
-
-The instruction block an agent should see (`docs/developer/AGENTS-snippet.md`) tells it to read
-`.kaban/adr/INDEX.md` at session start and call `why` before editing governed paths; the managed
-block in `AGENTS.md`/`CLAUDE.md` is written by `kaban export --write` only.
 
 ### Manual fallbacks (core-spec §11: missing host events are documented manual flows)
 

@@ -160,21 +160,6 @@ impl std::fmt::Display for NoFileBacking {
 
 impl std::error::Error for NoFileBacking {}
 
-/// Create `path` as an empty owner-only (0600) file; fails with `AlreadyExists` when it exists
-/// (the migrator's backup target, core-spec S5). The mode is set exactly with `fchmod` before
-/// the descriptor is dropped, so a restrictive `umask` cannot leave `0400` or `0000` behind
-/// (C2.5b, P-6).
-pub(crate) fn create_owner_only(path: &Path) -> std::io::Result<()> {
-    use std::fs::OpenOptions;
-    use std::os::unix::fs::OpenOptionsExt;
-    let created = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(path)?;
-    fchmod_owner_only(&created)
-}
-
 fn fchmod_owner_only(file: &std::fs::File) -> std::io::Result<()> {
     use rustix::fs::Mode;
     rustix::fs::fchmod(file, Mode::RUSR | Mode::WUSR)?;

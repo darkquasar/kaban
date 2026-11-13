@@ -249,7 +249,6 @@ fn start(s: &Scratch, repo: &Path) -> McpClient {
         cwd: repo,
         policy: None,
         workspace: "default",
-        audit_export: None,
     })
 }
 

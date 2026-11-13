@@ -270,6 +270,17 @@ fn run_contender(s: &Scratch, index: usize, stop: &AtomicBool, log: &Mutex<Vec<H
     }
 }
 
+/// Recompute the scratch database's audit chain with the key the writers used.
+fn audit_verify(s: &Scratch) -> kaban_core::AuditVerification {
+    let store = SqliteStore::open_existing_key(
+        &s.db(),
+        &s.home().join("keys"),
+        &kaban_core::ActorId::default(),
+    )
+    .unwrap();
+    kaban_core::AuditStore::audit_verify(&store).unwrap()
+}
+
 fn db_now(db: &std::path::Path) -> i64 {
     rusqlite::Connection::open(db)
         .unwrap()
@@ -369,19 +380,13 @@ fn multi_process_eight_writers_and_three_lease_contenders_share_one_database() {
         .unwrap();
     assert_eq!(usize::try_from(nodes).unwrap(), WRITERS * NOTES_PER_WRITER);
 
-    // the audit chain written by eight processes verifies (run the binary, like an operator)
-    let verify = Command::new(env!("CARGO_BIN_EXE_kaban"))
-        .env("KABAN_HOME", s.home())
-        .args(["--db", s.db().to_str().unwrap(), "verify-audit"])
-        .output()
-        .unwrap();
-    let report: Value = serde_json::from_slice(&verify.stdout).unwrap();
-    assert!(verify.status.success(), "{report}");
-    assert_eq!(report["ok"], json!(true), "{report}");
+    // the audit chain written by eight processes verifies
+    let report = audit_verify(s);
+    assert!(report.ok, "{report:?}");
     assert_eq!(
-        report["entries"],
-        json!(WRITERS),
-        "one redaction row per writer: {report}"
+        report.entries,
+        u64::try_from(WRITERS).unwrap(),
+        "one redaction row per writer: {report:?}"
     );
     let conn = rusqlite::Connection::open(s.db()).unwrap();
     kaban_store_sqlite::register_body_reader(&conn).unwrap();
@@ -572,14 +577,8 @@ fn multi_process_two_processes_share_one_database_and_a_lone_cli_writer_progress
         .query_row("SELECT count(*) FROM node", [], |r| r.get(0))
         .unwrap();
     assert_eq!(usize::try_from(nodes).unwrap(), 2 * SHARED_NOTES + 1);
-    let verify = Command::new(env!("CARGO_BIN_EXE_kaban"))
-        .env("KABAN_HOME", s.home())
-        .args(["--db", s.db().to_str().unwrap(), "verify-audit"])
-        .output()
-        .unwrap();
-    let report: Value = serde_json::from_slice(&verify.stdout).unwrap();
-    assert!(verify.status.success(), "{report}");
-    assert_eq!(report["ok"], json!(true), "{report}");
+    let report = audit_verify(s);
+    assert!(report.ok, "{report:?}");
 }
 
 // ---- spec 05 SS-21 (Tantivy part, lane T4): shared mode B through the poll loop ----

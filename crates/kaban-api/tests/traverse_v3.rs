@@ -5,11 +5,10 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // test code: failures are the assertion
 
-use kaban_api::{AcceptRequest, ApiError, Caller, KabanApi, RememberRequest, TraverseRequest};
+use kaban_api::{ApiError, KabanApi, RememberRequest};
 use kaban_core::{
-    Actor, BatchAssertion, BatchSubject, ClaimClass, EdgeDiff, Fixed, Governance, GraphStore,
-    IngestStore, Layer, Method, NewNode, NodeId, Op, Owner, Rank, StoreError, WorkspaceId,
-    WriteBatch, WriteCtx,
+    Actor, BatchAssertion, BatchSubject, ClaimClass, EdgeDiff, Fixed, GraphStore, IngestStore,
+    Layer, Method, NewNode, NodeId, Op, Owner, Rank, StoreError, WorkspaceId, WriteBatch, WriteCtx,
 };
 use kaban_policy::Policy;
 use kaban_store_sqlite::SqliteStore;
@@ -21,109 +20,6 @@ fn api() -> KabanApi {
     let store = Arc::new(SqliteStore::open_memory().unwrap());
     let signer = store.signer();
     KabanApi::new(store, policy, signer, None)
-}
-
-fn convention(api: &KabanApi, text: &str, links_to: Option<&str>) -> String {
-    api.remember(RememberRequest {
-        kind: "Convention".into(),
-        text: text.into(),
-        props: Some(json!({"rule": text})),
-        links: links_to
-            .map(|to| {
-                vec![kaban_api::LinkSpec {
-                    rel: "RELATES_TO".into(),
-                    to: Some(to.to_owned()),
-                    ..Default::default()
-                }]
-            })
-            .unwrap_or_default(),
-        ..Default::default()
-    })
-    .unwrap()
-    .id
-}
-
-fn traverse_ids(api: &KabanApi, start: &str, governance: Vec<Governance>) -> Vec<String> {
-    api.traverse(TraverseRequest {
-        start_ids: vec![start.to_owned()],
-        governance,
-        max_depth: Some(2),
-        ..Default::default()
-    })
-    .unwrap()
-    .nodes
-    .into_iter()
-    .map(|c| c.id)
-    .collect()
-}
-
-/// F6: traversal returns active nodes of any governance unless a `governance` filter is given;
-/// then only nodes in the listed states are kept (start nodes included), and the edges follow.
-#[test]
-fn governance_filter_keeps_only_the_requested_states() {
-    let api = api();
-    let proposed = convention(&api, "quokka names are lowercase", None);
-    let accepted = convention(&api, "quokka tests live beside the code", Some(&proposed));
-    let plain = api
-        .remember(RememberRequest {
-            kind: "Fact".into(),
-            text: "quokka facts have no governance".into(),
-            links: vec![kaban_api::LinkSpec {
-                rel: "RELATES_TO".into(),
-                to: Some(accepted.clone()),
-                ..Default::default()
-            }],
-            ..Default::default()
-        })
-        .unwrap()
-        .id;
-    // a Convention may be accepted by an agent (F4 tiered gate)
-    api.accept(
-        AcceptRequest {
-            id: accepted.clone(),
-            reason: Some("team agreed".into()),
-            path_scope: vec!["tests/**".into()],
-            ..Default::default()
-        },
-        &Caller {
-            kind: Actor::Agent,
-            ..Default::default()
-        },
-    )
-    .unwrap();
-
-    let all = traverse_ids(&api, &accepted, vec![]);
-    assert_eq!(all.len(), 3, "any governance by default: {all:?}");
-
-    let only_accepted = traverse_ids(&api, &accepted, vec![Governance::Accepted]);
-    assert_eq!(only_accepted, vec![accepted.clone()], "{only_accepted:?}");
-
-    let mut governed = traverse_ids(
-        &api,
-        &accepted,
-        vec![Governance::Accepted, Governance::Proposed],
-    );
-    governed.sort();
-    let mut expected = vec![accepted.clone(), proposed.clone()];
-    expected.sort();
-    assert_eq!(governed, expected);
-
-    // the filter applies to the start node too: a Fact is `none`, not `accepted`
-    let none_from_plain = traverse_ids(&api, &plain, vec![Governance::Accepted]);
-    assert_eq!(
-        none_from_plain,
-        vec![accepted.clone()],
-        "{none_from_plain:?}"
-    );
-    let r = api
-        .traverse(TraverseRequest {
-            start_ids: vec![plain.clone()],
-            governance: vec![Governance::Accepted],
-            max_depth: Some(2),
-            ..Default::default()
-        })
-        .unwrap();
-    assert!(r.edges.is_empty(), "no edge without both endpoints: {r:?}");
 }
 
 // ---- EN-F46 (engine-plan E2.8): ontology filters, validated; the edge filter; `kind_set` ----

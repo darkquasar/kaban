@@ -11,7 +11,7 @@ use anyhow::{Context, Result, bail, ensure};
 use clap::Args;
 use kaban_api::{
     ApiConfig, EdgeFilter, ForgetRequest, KabanApi, LinkRequest, RecallRequest, RememberRequest,
-    RememberStatus, TraverseRequest, WhyRequest, WhyTarget,
+    RememberStatus, TraverseRequest,
 };
 use kaban_core::{
     Actor, ActorId, ForgetMode, Governance, GraphStore, NewEvent, NodeId, TraverseDirection,
@@ -547,21 +547,14 @@ fn paired(
         rels: vec!["RELATES_TO".into()],
         ..Default::default()
     };
-    let why = WhyRequest {
-        targets: vec![WhyTarget::Path("src/checkout/cart.rs".into())],
-        limit: Some(10),
-        ..Default::default()
-    };
     for _ in 0..warmup {
         api.recall(fts.clone())?;
         api.recall(fused.clone())?;
         api.traverse(traverse.clone())?;
-        api.why(why.clone())?;
     }
     let mut fts_us = Vec::new();
     let mut fused_us = Vec::new();
     let mut traverse_us = Vec::new();
-    let mut why_us = Vec::new();
     let mut rounds = Vec::new();
     for round in 0..samples {
         if round % 2 == 0 {
@@ -574,7 +567,6 @@ fn paired(
             rounds.push("fused_first");
         }
         traverse_us.push(timed(|| Ok(api.traverse(traverse.clone())?))?);
-        why_us.push(timed(|| Ok(api.why(why.clone())?))?);
     }
     let requests = json!([fts, fused]);
     let fts = super::report::raw_series(&fts_us);
@@ -589,8 +581,7 @@ fn paired(
     Ok(
         json!({ "samples": samples, "warmup": warmup, "round_order": rounds,
         "recall_fts": fts, "recall_fused": fused, "traverse": traversal,
-        "traverse_request": traverse, "why": super::report::raw_series(&why_us),
-        "why_informational": true, "n2": gates, "recall_requests": requests }),
+        "traverse_request": traverse, "n2": gates, "recall_requests": requests }),
     )
 }
 
@@ -1146,7 +1137,7 @@ mod tests {
         let result = paired(&api, &fixtures, &map, 30, 1, 5, false).unwrap();
         assert_eq!(result["round_order"][0], "fts_first");
         assert_eq!(result["round_order"][1], "fused_first");
-        for key in ["recall_fts", "recall_fused", "traverse", "why"] {
+        for key in ["recall_fts", "recall_fused", "traverse"] {
             assert_eq!(result[key]["n"], 30);
             assert_eq!(result[key]["us_runs"].as_array().unwrap().len(), 30);
         }

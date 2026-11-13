@@ -1,14 +1,14 @@
 //! Public-behaviour tests of the enrichment seam and `follow_ups` (core-spec F19; core-plan
 //! C3.9, M3-27; M3 review R3-10) through `KabanApi`: an `enrich[]` id nobody configured is
 //! refused with the documented error; follow-ups are built from the masked `CodeRef` pointers
-//! linked to the visible cards (`recall` and `why`) and a hidden pointer yields none; a
+//! linked to the visible cards (`recall`) and a hidden pointer yields none; a
 //! configured enricher runs after card assembly and its output passes the read gate.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // test code: failures are the assertion
 
 use kaban_api::{
     ApiConfig, ApiError, CodeRefWire, EnrichBudget, Enricher, Enrichment, FollowUpTool, KabanApi,
-    RecallRequest, RememberRequest, WhyRequest, WhyTarget,
+    RecallRequest, RememberRequest,
 };
 use kaban_core::{CodeRef, WorkspaceId};
 use kaban_policy::Policy;
@@ -255,95 +255,4 @@ fn a_configured_enricher_runs_on_the_pointers_and_its_output_is_gated() {
     assert_eq!(fake.calls.load(Ordering::SeqCst), 2);
     assert_eq!(r.enrichments, Vec::new());
     assert_eq!(r.follow_ups, Vec::new());
-}
-
-fn why_path(api: &KabanApi, path: &str) -> kaban_api::WhyResponse {
-    api.why(WhyRequest {
-        targets: vec![WhyTarget::Path(path.into())],
-        ..Default::default()
-    })
-    .unwrap()
-}
-
-/// F19 names `why` too (M3 review R3-10): the follow-ups of a governing record come from the
-/// `CodeRef` nodes linked to it (`refs` are stored as `ABOUT` edges), projected through the
-/// read gate like a card: a masked path stays masked in `args`, a `CodeRef` hidden by a reject
-/// rule yields nothing, and a record without pointers yields an empty list.
-#[test]
-fn why_suggests_follow_ups_from_the_coderefs_linked_to_a_governing_record() {
-    let store = Arc::new(SqliteStore::open_memory().unwrap());
-    let lax = api_over(&store, "");
-    lax.remember(RememberRequest {
-        kind: "Decision".into(),
-        text: "quokka stays on sqlite".into(),
-        path_scope: vec!["src/store/**".into()],
-        props: Some(json!({"rationale": "no server to run"})),
-        refs: vec![
-            coderef(&format!("src/{REDACT}/open.rs"), Some("Store/open")),
-            coderef(&format!("src/{REJECT}/pool.rs"), None),
-        ],
-        ..Default::default()
-    })
-    .unwrap();
-    lax.remember(RememberRequest {
-        kind: "Convention".into(),
-        text: "quokka names tests after behaviour".into(),
-        path_scope: vec!["tests/**".into()],
-        ..Default::default()
-    })
-    .unwrap();
-
-    // the Decision governs the path; its two pointers are suggested in link order
-    let r = why_path(&lax, "src/store/sqlite.rs");
-    assert_eq!(r.results.len(), 1, "{r:?}");
-    assert_eq!(r.results[0].node.kind, "Decision");
-    let tools: Vec<FollowUpTool> = r.follow_ups.iter().map(|f| f.tool).collect();
-    assert_eq!(
-        tools,
-        vec![
-            FollowUpTool::SerenaFindSymbol,
-            FollowUpTool::SerenaFindReferencingSymbols,
-            FollowUpTool::SerenaFindSymbol
-        ],
-        "{:?}",
-        r.follow_ups
-    );
-    assert_eq!(
-        r.follow_ups[0].args,
-        json!({"name_path": "Store/open", "relative_path": format!("src/{REDACT}/open.rs")})
-    );
-    assert_eq!(
-        r.follow_ups[2].args,
-        json!({"relative_path": format!("src/{REJECT}/pool.rs")})
-    );
-
-    // a governing record without pointers: present on the wire, empty
-    let r = why_path(&lax, "tests/why.rs");
-    assert_eq!(r.results.len(), 1, "{r:?}");
-    assert_eq!(r.follow_ups, Vec::new());
-    let v = serde_json::to_value(&r).unwrap();
-    assert_eq!(v["follow_ups"], json!([]), "{v}");
-
-    // under the strict policy the same store answers with a masked and a hidden pointer
-    let strict = api_over(&store, STRICT);
-    let r = why_path(&strict, "src/store/sqlite.rs");
-    assert_eq!(r.results.len(), 1, "the Decision itself is clean: {r:?}");
-    let tools: Vec<FollowUpTool> = r.follow_ups.iter().map(|f| f.tool).collect();
-    assert_eq!(
-        tools,
-        vec![
-            FollowUpTool::SerenaFindSymbol,
-            FollowUpTool::SerenaFindReferencingSymbols
-        ],
-        "the nightjar CodeRef is hidden: {:?}",
-        r.follow_ups
-    );
-    let masked = format!("src/{MASK}/open.rs");
-    for f in &r.follow_ups {
-        assert_eq!(f.args["relative_path"], json!(masked), "{f:?}");
-        assert!(f.reason.contains(&masked), "{}", f.reason);
-    }
-    let bytes = serde_json::to_string(&r).unwrap().to_lowercase();
-    assert!(!bytes.contains(REDACT), "{bytes}");
-    assert!(!bytes.contains(REJECT), "{bytes}");
 }

@@ -7,8 +7,8 @@
 #![allow(dead_code)] // each test binary uses a subset
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // test code: failures are the assertion
 
-use kaban_api::{AcceptRequest, ApiConfig, Caller, KabanApi, RememberRequest};
-use kaban_core::{Actor, WorkspaceId};
+use kaban_api::{ApiConfig, KabanApi, RememberRequest};
+use kaban_core::WorkspaceId;
 use kaban_policy::Policy;
 use kaban_store_sqlite::SqliteStore;
 use serde_json::{Value, json};
@@ -94,42 +94,17 @@ impl Drop for HookScratch {
     }
 }
 
-fn human() -> Caller {
-    Caller {
-        kind: Actor::HumanCli,
-        host: None,
-        session: None,
-    }
-}
-
-/// An accepted Decision governing `scope`, with `importance`; returns its id.
-pub(crate) fn accepted_decision(
-    api: &KabanApi,
-    text: &str,
-    scope: &[&str],
-    importance: Option<f64>,
-) -> String {
-    let id = api
-        .remember(RememberRequest {
-            kind: "Decision".into(),
-            text: text.into(),
-            props: Some(json!({"rationale": "because the team agreed"})),
-            importance,
-            ..Default::default()
-        })
-        .unwrap()
-        .id;
-    api.accept(
-        AcceptRequest {
-            id: id.clone(),
-            reason: Some("reviewed".into()),
-            path_scope: scope.iter().map(|s| (*s).to_owned()).collect(),
-            ..Default::default()
-        },
-        &human(),
-    )
-    .unwrap();
-    id
+/// A pending Failure in the bound workspace (what the session-start briefing lists); returns
+/// its id.
+pub(crate) fn pending_failure(api: &KabanApi, text: &str) -> String {
+    api.remember(RememberRequest {
+        kind: "Failure".into(),
+        text: text.into(),
+        props: Some(json!({"pending_fix": true, "command": "cargo test"})),
+        ..Default::default()
+    })
+    .unwrap()
+    .id
 }
 
 /// Load `tests/fixtures/hooks/<host>/<name>.json`.

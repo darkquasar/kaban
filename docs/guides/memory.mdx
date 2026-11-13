@@ -13,9 +13,8 @@ current `3.0.0` version; see the
 Use `Fact` for an observed statement, `Idea` for an untested proposal, `Insight` for
 a lesson, `Improvement` for a fix, and `Episode` for a sanitized source interaction.
 `Failure` records what went wrong. `Decision` records a choice and requires a
-`rationale` property; `Convention` records a project rule. Governed kinds have a
-separate [acceptance lifecycle](governance.mdx)—storing a choice does not mean
-someone approved it. The kind is a label, not proof that the text is correct.
+`rationale` property; `Convention` records a project rule. Storing a choice does
+not mean someone approved it. The kind is a label, not proof that the text is correct.
 
 Inspect the MCP `schema_describe` tool for the loaded kinds and relationship endpoint
 rules. This is more reliable than assuming every installation has the same ontology.
@@ -76,8 +75,7 @@ personal/global store. Choose names deliberately when repositories share a datab
 Ordinary recall hides tombstones, invalidated records and candidates under review.
 Archived/superseded records do not seed normal search; explicit inclusion flags allow
 them through graph expansion. MCP `include_candidates: true` can include candidates
-in recall/traverse; use `review`/`explain` to understand them rather than mistaking
-their presence for acceptance. Traversal follows active records by default.
+in recall/traverse; their presence is not acceptance. Traversal follows active records by default.
 
 Treat IDs as opaque values: copy the exact ID from a response and keep it in the
 matching field. An ID or workspace name is not an authorization token. Content,

@@ -15,7 +15,7 @@ BASH = shutil.which("bash")
 
 
 class CiToolSelection(unittest.TestCase):
-    def run_gate(self, *, tools=("nextest", "deny"), fail="nextest", color="always", inherited_fd=False, versions=None, cargo_override=None, args=(), missing_tool=None, target_present=True, marker="", runner_fail="", helper_fail=False, smoke_skip=False, size_table=False, artifact_scenario="", artifact_sizes=None, repeats=1, artifact_root=False, summary=False, isolation_split=False, hosted=True, isolation_probe="normal", platform="Linux", machine="x86_64", qualify="0", producer_resources=True, errexit=False, producer_build="normal"):
+    def run_gate(self, *, tools=("nextest", "deny"), fail="nextest", color="always", inherited_fd=False, versions=None, cargo_override=None, args=(), missing_tool=None, target_present=True, marker="", runner_fail="", helper_fail=False, smoke_skip=False, size_table=False, artifact_scenario="", artifact_sizes=None, repeats=1, artifact_root=False, summary=False, isolation_split=False, hosted=True, isolation_probe="normal", platform="Linux", machine="x86_64", qualify="0", producer_resources=True, errexit=False, producer_build="normal", boundary_metadata=None):
         with tempfile.TemporaryDirectory(prefix="kaban-ci-tools-") as scratch:
             root = Path(scratch)
             (root / "tmp").mkdir(mode=0o700)
@@ -107,9 +107,12 @@ class CiToolSelection(unittest.TestCase):
             if missing_tool:
                 for name in ((missing_tool,) if isinstance(missing_tool, str) else missing_tool):
                     (bin_dir / name).unlink()
-            # Dependency inspection is exercised elsewhere; keep this external jq boundary deterministic.
-            (bin_dir / "jq").write_text('#!/bin/sh\ncat >/dev/null\n')
-            (bin_dir / "jq").chmod(0o700)
+            if boundary_metadata is None:
+                # Store-boundary fixtures use real jq; elsewhere keep this external jq boundary deterministic.
+                (bin_dir / "jq").write_text('#!/bin/sh\ncat >/dev/null\n')
+                (bin_dir / "jq").chmod(0o700)
+            else:
+                (bin_dir / "jq").symlink_to(shutil.which("jq"))
             # Unrelated dependency checks can pass before the sentinel release build.
             (script.parent / "deps_allowlist.sh").write_text("exit 0\n")
             cargo = root / "effective cargo"
@@ -159,6 +162,8 @@ class CiToolSelection(unittest.TestCase):
                 "    if os.environ['RUNNER_FAIL'] == suite or args[0] == os.environ['FAIL']: sys.exit(37)\n"
                 "elif args[0] == os.environ['FAIL']:\n"
                 "    sys.exit(37)\n"
+                "elif args[0] == 'metadata' and os.environ['BOUNDARY_METADATA']:\n"
+                "    print(os.environ['BOUNDARY_METADATA'])\n"
                 "elif args[0] == 'metadata':\n"
                 "    libraries = [{'id': 'fixture-lib', 'name': 'kaban-rust-scip' if Path.cwd().name == 'kaban-rust-scip' else 'kaban-ingest', 'targets': [{'kind': ['lib'], 'doctest': True}]}]\n"
                 "    if Path.cwd().name != 'kaban-rust-scip': libraries.append({'id': 'second-lib', 'name': 'fixture-core', 'targets': [{'kind': ['lib'], 'doctest': True}]})\n"
@@ -248,6 +253,7 @@ class CiToolSelection(unittest.TestCase):
                         "GITHUB_STEP_SUMMARY": str(root / "summary") if summary else os.devnull,
                         "CHECK_FD": "1" if inherited_fd else "0",
                         "PRESERVED_VALUE": "retained environment",
+                        "BOUNDARY_METADATA": "" if boundary_metadata is None else json.dumps(boundary_metadata),
                     },
                     input="retained standard input\n" if inherited_fd else None,
                     capture_output=True,
@@ -592,8 +598,60 @@ class CiToolSelection(unittest.TestCase):
         result, calls = self.run_gate(args=("quality",), tools=("deny",), fail="", missing_tool="musl-gcc")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         checks = [c for c in calls if "--version" not in c and c != ["--list"]]
-        self.assertEqual([c[0] for c in checks], ["fmt", "clippy", "clippy", "clippy", "deny", "metadata", "tree"])
+        self.assertEqual([c[0] for c in checks], ["fmt", "clippy", "clippy", "clippy", "deny", "metadata", "tree", "tree"])
         self.assertIn(["clippy", "-p", "kaban-ingest", "--all-targets", "--no-default-features", "--", "-D", "warnings"], calls)
+        # store boundary: the kaban-api inverse tree, then the workspace-wide direct-parent check
+        self.assertEqual(
+            [c for c in checks if c[0] == "tree"],
+            [
+                ["tree", "-e", "normal", "-p", "kaban-api", "-i", "rusqlite", "--prefix", "depth"],
+                ["tree", "-e", "normal", "-i", "rusqlite", "--prefix", "depth"],
+            ],
+        )
+
+    @staticmethod
+    def boundary_package(name, *dependencies):
+        return {"name": name, "dependencies": [
+            {"name": "rusqlite", "kind": kind, "optional": optional, "target": target}
+            for kind, optional, target in dependencies]}
+
+    @unittest.skipUnless(shutil.which("jq"), "jq absent")
+    def test_store_boundary_rejects_any_other_member_with_normal_rusqlite(self):
+        # every declared normal edge counts, whatever the features or the host target
+        for label, dependency in (
+            ("default", (None, False, None)),
+            ("optional", (None, True, None)),
+            ("target-specific", (None, False, "cfg(windows)")),
+            ("optional target-specific", (None, True, 'cfg(target_os = "macos")')),
+        ):
+            for member in ("kaban-policy", "kaban-api", "kaban-ingest"):
+                with self.subTest(label, member=member):
+                    metadata = {"packages": [
+                        self.boundary_package("kaban-store-sqlite", (None, False, None)),
+                        self.boundary_package(member, dependency),
+                    ]}
+                    result, calls = self.run_gate(args=("quality",), tools=("deny",), fail="",
+                                                  missing_tool="musl-gcc", boundary_metadata=metadata)
+                    self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertIn(member + " -> rusqlite", result.stderr)
+                    self.assertIn("FAILED (exit 1): store_boundary_deps", result.stderr)
+                    self.assertFalse(any(c[0] == "tree" for c in calls), calls)
+
+    @unittest.skipUnless(shutil.which("jq"), "jq absent")
+    def test_store_boundary_accepts_permitted_parents_and_dev_dependencies(self):
+        metadata = {"packages": [
+            self.boundary_package("kaban-store-sqlite", (None, False, None)),
+            self.boundary_package("kaban-codegraph", (None, True, None)),
+            self.boundary_package("kaban-vtab", (None, False, "cfg(unix)"), ("dev", False, None)),
+            self.boundary_package("kaban-api", ("dev", False, None)),
+            self.boundary_package("kaban-policy", ("dev", False, "cfg(windows)")),
+            self.boundary_package("kaban-core"),
+        ]}
+        result, calls = self.run_gate(args=("quality",), tools=("deny",), fail="",
+                                      missing_tool="musl-gcc", boundary_metadata=metadata)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("store boundary: no normal rusqlite outside kaban-store-sqlite, kaban-codegraph, kaban-vtab", result.stdout)
+        self.assertEqual([c[0] for c in calls if c[0] == "tree"], ["tree", "tree"])
 
     def test_installed_nextest_runs_and_preserves_failure_with_forced_color(self):
         result, calls = self.run_gate()

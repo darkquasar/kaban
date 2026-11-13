@@ -1,20 +1,14 @@
 //! The memory tools' control rows and schemas (`remember`, `link`, `recall`, `traverse`,
-//! `schema_*`, `forget`, `stats`, `accept`, `why`, `explain`, `governance_history`) and the
-//! CLI-only `unmerge` verb.
+//! `schema_*`, `forget`, `stats`) and the CLI-only layer maintenance verbs.
 
-use super::{ControlEntry, Direction, Empty, SNAPSHOT_COMMIT, Shape, ToolSchemas, entry, secret};
-use crate::api::{ResolveSymbolResponse, ResolveWinnerResponse};
-use crate::explain::{ExplainStatusRequest, StatusExplanation};
-use crate::governance_history::{GovernanceHistoryRequest, GovernanceHistoryResponse};
-use crate::sync::{ImportReport, SyncReport};
+use super::{ControlEntry, Direction, Empty, SNAPSHOT_COMMIT, Shape, ToolSchemas, entry};
 use crate::types::{
-    AcceptRequest, AcceptResponse, DeprecateResponse, ForgetRequest, ForgetResponse, LinkRequest,
-    LinkResponse, RecallRequest, RecallResponse, RememberRequest, RememberResponse,
-    SchemaExtendRequest, SchemaResponse, StatsRequest, StatsResponse, TraverseRequest,
-    TraverseResponse, WhyRequest, WhyResponse,
+    ForgetRequest, ForgetResponse, LinkRequest, LinkResponse, RecallRequest, RecallResponse,
+    RememberRequest, RememberResponse, SchemaExtendRequest, SchemaResponse, StatsRequest,
+    StatsResponse, TraverseRequest, TraverseResponse,
 };
 use kaban_core::TypeDef;
-use schemars::{JsonSchema, schema_for};
+use schemars::JsonSchema;
 
 /// `forget.mode` wire values (`kaban_core::ForgetMode`, `rename_all = "lowercase"`).
 const FORGET_MODES: &[&str] = &["tombstone", "invalidate", "archive", "purge"];
@@ -32,8 +26,6 @@ const STORE_SCOPES: &[&str] = &["project", "personal"];
 /// The write outcomes of a receipt (spec 05 SS-10 `WriteOutcome`, `rename_all = "snake_case"`).
 pub(super) const WRITE_OUTCOMES: &[&str] =
     &["rejected", "committed", "committed_not_yet_searchable"];
-/// `sync.lease` wire values (`crate::sync::LeaseState`, `rename_all = "lowercase"`).
-const LEASE_STATES: &[&str] = &["acquired", "held"];
 
 /// `traverse.edge_filter.layers[]` wire values: the stored spellings of `kaban_core::Layer`,
 /// `Layer::ALL` in order (EN-E6, EN-E7). Spelled out on purpose: `tests/control.rs` asserts
@@ -77,66 +69,7 @@ pub const METHOD_VALUES: &[&str] = &[
     "ingest_submit",
 ];
 
-/// A claim key: 64 lowercase hex digits (EN-F12a), as `unmerge.deprecated[]` reports them.
-const CLAIM_KEY: Shape = Shape::Hex { min: 64, max: 64 };
 const RECALL_LAYERS: &[&str] = &["fts", "fuzzy", "sim"];
-
-/// `kaban unmerge <id> [--reason <text>]` as the CLI seam parses it (`crates/kaban/src/cli/
-/// unmerge.rs`; E2.10, boundary review BR-8): the registry's view of the request. CLI-only
-/// (`super::CLI_ONLY`): never an MCP tool.
-#[derive(Debug, serde::Deserialize, JsonSchema)]
-#[allow(dead_code)] // schema only: the CLI parses its own copy and the handler takes primitives
-struct UnmergeRequest {
-    /// The merged node or its canonical (a node id: control by shape).
-    id: String,
-    /// Why the merge is reversed; stored as the identity claim's `rank_reason` (content).
-    #[serde(default)]
-    reason: Option<String>,
-}
-
-/// `kaban resolve <id> --winner <value> [--group <key>]` or `--symbol <key>` as the CLI seam
-/// parses it (`crates/kaban/src/cli/resolve.rs`; D3 review d3-4): the registry's view of the
-/// request; every leaf is content (the id is parsed after the scan). CLI-only.
-#[derive(Debug, serde::Deserialize, JsonSchema)]
-#[allow(dead_code)] // schema only: the CLI parses its own copy
-struct ResolveRequest {
-    /// The node (or `CodeRef`) named.
-    id: String,
-    /// The winning value (`--winner`).
-    #[serde(default)]
-    winner: Option<String>,
-    /// The group the winner decides (`--group`), when the node has several.
-    #[serde(default)]
-    group: Option<String>,
-    /// The symbol key a stale `CodeRef` is re-targeted to (`--symbol`).
-    #[serde(default)]
-    symbol: Option<String>,
-}
-
-/// `kaban import` as the CLI seam parses it (`crates/kaban/src/cli/import.rs`). CLI-only.
-#[derive(Debug, serde::Deserialize, JsonSchema)]
-#[allow(dead_code)] // schema only: the CLI parses its own copy
-struct ImportRequest {
-    /// The repository root.
-    repo: String,
-}
-
-/// `kaban sync` as the CLI seam parses it (`crates/kaban/src/cli/sync.rs`). CLI-only.
-#[derive(Debug, serde::Deserialize, JsonSchema)]
-#[allow(dead_code)] // schema only: the CLI parses its own copy
-struct SyncRequest {
-    /// The repository root.
-    repo: String,
-    /// `--stage`: stage the written files.
-    #[serde(default)]
-    stage: bool,
-    /// `--digest-only`: rewrite the digest, import nothing.
-    #[serde(default)]
-    digest_only: bool,
-    /// `--ontology <name>`: the ontologies whose records are synced.
-    #[serde(default)]
-    ontologies: Option<Vec<String>>,
-}
 
 /// CLI-only machine reset; document paths remain CONTENT, never control identifiers.
 #[derive(Debug, serde::Deserialize, JsonSchema)]
@@ -174,49 +107,6 @@ struct MaintenanceResponse {
 
 /// The memory tools' rows of [`super::REGISTRY`].
 pub(super) const ROWS: &[ControlEntry] = &[
-    entry(
-        "pruning_protection",
-        Direction::Request,
-        "operation",
-        Shape::Enum(&["get", "set", "clear"]),
-    ),
-    entry(
-        "pruning_protection",
-        Direction::Response,
-        "operation",
-        Shape::Enum(&["get", "set", "clear"]),
-    ),
-    entry(
-        "pruning_protection",
-        Direction::Request,
-        "target_kind",
-        Shape::Enum(&["node", "claim", "relationship"]),
-    ),
-    entry(
-        "pruning_protection",
-        Direction::Response,
-        "target_kind",
-        Shape::Enum(&["node", "claim", "relationship"]),
-    ),
-    entry(
-        "pruning_protection",
-        Direction::Request,
-        "id",
-        Shape::NodeId,
-    ),
-    entry(
-        "pruning_protection",
-        Direction::Request,
-        "src",
-        Shape::NodeId,
-    ),
-    entry(
-        "pruning_protection",
-        Direction::Request,
-        "dst",
-        Shape::NodeId,
-    ),
-    entry("pruning_protection", Direction::Request, "key", CLAIM_KEY),
     entry(
         "forget_layer",
         Direction::Request,
@@ -300,33 +190,12 @@ pub(super) const ROWS: &[ControlEntry] = &[
         "scope",
         Shape::Enum(STORE_SCOPES),
     ),
-    // `kaban unmerge <id>` (E2.10; BR-8): the id the human names, the ids and claim keys the
-    // outcome reports; `reason` and `redactions[]` are content
-    entry("unmerge", Direction::Request, "id", Shape::NodeId),
-    entry("unmerge", Direction::Response, "id", Shape::NodeId),
-    entry(
-        "unmerge",
-        Direction::Response,
-        "canonical_id",
-        Shape::NodeId,
-    ),
-    entry("unmerge", Direction::Response, "restored[]", Shape::NodeId),
-    entry("unmerge", Direction::Response, "deprecated[]", CLAIM_KEY),
     entry("forget", Direction::Request, "id", Shape::NodeId),
     entry(
         "forget",
         Direction::Request,
         "mode",
         Shape::Enum(FORGET_MODES),
-    ),
-    entry("accept", Direction::Request, "id", Shape::NodeId),
-    // the handshake token on its way back in: validated, never scanned, never issued here
-    secret(
-        "accept",
-        Direction::Request,
-        "confirmation_token",
-        Shape::Token64,
-        false,
     ),
     // response side: ids kaban minted, the forget mode, the policy version hash
     entry("remember", Direction::Response, "id", Shape::NodeId),
@@ -381,83 +250,6 @@ pub(super) const ROWS: &[ControlEntry] = &[
         "policy.effective_hash",
         Shape::Hex { min: 64, max: 64 },
     ),
-    entry("accept", Direction::Response, "node.id", Shape::NodeId),
-    entry(
-        "why",
-        Direction::Response,
-        "results[].node.id",
-        Shape::NodeId,
-    ),
-    // `why(include_superseded)` (v4 CG6.1, stage1-spec §6): the successor ids of a card
-    entry(
-        "why",
-        Direction::Response,
-        "results[].superseded_by[]",
-        Shape::NodeId,
-    ),
-    // `governance_history` (v4 CG6.2, stage1-spec §6.1, G1-F13): the `id` selector, each
-    // record's id and its chain ids; `symbol`, `path` and `workspace_id` stay content
-    entry(
-        "governance_history",
-        Direction::Request,
-        "id",
-        Shape::NodeId,
-    ),
-    entry(
-        "governance_history",
-        Direction::Response,
-        "records[].card.id",
-        Shape::NodeId,
-    ),
-    entry(
-        "governance_history",
-        Direction::Response,
-        "records[].superseded_by[]",
-        Shape::NodeId,
-    ),
-    entry(
-        "governance_history",
-        Direction::Response,
-        "records[].supersedes[]",
-        Shape::NodeId,
-    ),
-    // `explain` (E2.5, EN-F14a): a node-id address is control by shape; any other address
-    // (a key, `x:Kind`, `path:offset`) is content and is gated before the grammar sees it
-    entry("explain", Direction::Request, "address", Shape::NodeId),
-    entry(
-        "explain",
-        Direction::Response,
-        "subject.node",
-        Shape::NodeId,
-    ),
-    // the one issuing response: the token is handed to the caller here and nowhere else
-    secret(
-        "accept",
-        Direction::Response,
-        "confirmation_token",
-        Shape::Token64,
-        true,
-    ),
-    // spec 05 SS-10: the receipt every write returns; its identities are kaban-minted UUIDs
-    // (SS-27), its outcome a closed vocabulary
-    entry(
-        "accept",
-        Direction::Response,
-        "receipt.outcome",
-        Shape::Enum(WRITE_OUTCOMES),
-    ),
-    entry(
-        "accept",
-        Direction::Response,
-        "receipt.instance_id",
-        Shape::NodeId,
-    ),
-    entry(
-        "accept",
-        Direction::Response,
-        "receipt.pack_lineage_id",
-        Shape::NodeId,
-    ),
     entry(
         "remember",
         Direction::Response,
@@ -511,132 +303,12 @@ pub(super) const ROWS: &[ControlEntry] = &[
         Direction::Response,
         "receipt.pack_lineage_id",
         Shape::NodeId,
-    ),
-    entry(
-        "unmerge",
-        Direction::Response,
-        "receipt.outcome",
-        Shape::Enum(WRITE_OUTCOMES),
-    ),
-    entry(
-        "unmerge",
-        Direction::Response,
-        "receipt.instance_id",
-        Shape::NodeId,
-    ),
-    entry(
-        "unmerge",
-        Direction::Response,
-        "receipt.pack_lineage_id",
-        Shape::NodeId,
-    ),
-    entry(
-        "pruning_protection",
-        Direction::Response,
-        "receipt.outcome",
-        Shape::Enum(WRITE_OUTCOMES),
-    ),
-    entry(
-        "pruning_protection",
-        Direction::Response,
-        "receipt.instance_id",
-        Shape::NodeId,
-    ),
-    entry(
-        "pruning_protection",
-        Direction::Response,
-        "receipt.pack_lineage_id",
-        Shape::NodeId,
-    ),
-    // the CLI-only writes under their seam scopes (D3 review d3-4): `explain --deprecate`,
-    // `resolve --winner` / `--symbol`, `import` and `sync` (whose import report nests it); a
-    // policy term can never withhold or alter a committed mutation's own outcome
-    entry(
-        "explain",
-        Direction::Response,
-        "receipt.outcome",
-        Shape::Enum(WRITE_OUTCOMES),
-    ),
-    entry(
-        "explain",
-        Direction::Response,
-        "receipt.instance_id",
-        Shape::NodeId,
-    ),
-    entry(
-        "explain",
-        Direction::Response,
-        "receipt.pack_lineage_id",
-        Shape::NodeId,
-    ),
-    entry(
-        "resolve",
-        Direction::Response,
-        "receipt.outcome",
-        Shape::Enum(WRITE_OUTCOMES),
-    ),
-    entry(
-        "resolve",
-        Direction::Response,
-        "receipt.instance_id",
-        Shape::NodeId,
-    ),
-    entry(
-        "resolve",
-        Direction::Response,
-        "receipt.pack_lineage_id",
-        Shape::NodeId,
-    ),
-    entry(
-        "import",
-        Direction::Response,
-        "receipt.outcome",
-        Shape::Enum(WRITE_OUTCOMES),
-    ),
-    entry(
-        "import",
-        Direction::Response,
-        "receipt.instance_id",
-        Shape::NodeId,
-    ),
-    entry(
-        "import",
-        Direction::Response,
-        "receipt.pack_lineage_id",
-        Shape::NodeId,
-    ),
-    entry(
-        "sync",
-        Direction::Response,
-        "import.receipt.outcome",
-        Shape::Enum(WRITE_OUTCOMES),
-    ),
-    entry(
-        "sync",
-        Direction::Response,
-        "import.receipt.instance_id",
-        Shape::NodeId,
-    ),
-    entry(
-        "sync",
-        Direction::Response,
-        "import.receipt.pack_lineage_id",
-        Shape::NodeId,
-    ),
-    entry(
-        "sync",
-        Direction::Response,
-        "lease",
-        Shape::Enum(LEASE_STATES),
     ),
 ];
 
 /// The memory tools' entries of [`super::tool_schemas`].
 pub(super) fn schemas() -> Vec<ToolSchemas> {
     vec![
-        super::schemas::<crate::PruningProtectionRequest, crate::PruningProtectionResponse>(
-            "pruning_protection",
-        ),
         super::schemas::<RememberRequest, RememberResponse>("remember"),
         super::schemas::<LinkRequest, LinkResponse>("link"),
         super::schemas::<RecallRequest, RecallResponse>("recall"),
@@ -645,33 +317,6 @@ pub(super) fn schemas() -> Vec<ToolSchemas> {
         super::schemas::<SchemaExtendRequest, TypeDef>("schema_extend"),
         super::schemas::<ForgetRequest, ForgetResponse>("forget"),
         super::schemas::<StatsRequest, StatsResponse>("stats"),
-        super::schemas::<AcceptRequest, AcceptResponse>("accept"),
-        super::schemas::<WhyRequest, WhyResponse>("why"),
-        // the one-stop status explanation (engine-plan E2.5; EN-F14a), or with `--deprecate`
-        // the deprecation's receipt-bearing report under the same seam scope
-        super::schemas_any_of::<ExplainStatusRequest>(
-            "explain",
-            &[
-                schema_for!(StatusExplanation),
-                schema_for!(DeprecateResponse),
-            ],
-        ),
-        // the governance history of the records one selector reaches (v4 CG6.2; G1-F13)
-        super::schemas::<GovernanceHistoryRequest, GovernanceHistoryResponse>("governance_history"),
-        // the CLI-only merge reversal (E2.10; BR-8): `super::CLI_ONLY`, never advertised
-        super::schemas::<UnmergeRequest, crate::UnmergeResponse>("unmerge"),
-        // the other CLI-only writes under their seam scopes (`super::CLI_ONLY`; D3 review
-        // d3-4): the receipt-bearing reports of `resolve --winner` / `--symbol` (the conflict
-        // `--take` report carries no control leaf and stays content), `import` and `sync`
-        super::schemas_any_of::<ResolveRequest>(
-            "resolve",
-            &[
-                schema_for!(ResolveWinnerResponse),
-                schema_for!(ResolveSymbolResponse),
-            ],
-        ),
-        super::schemas::<ImportRequest, ImportReport>("import"),
-        super::schemas::<SyncRequest, SyncReport>("sync"),
         super::schemas::<LayerMaintenanceRequest, MaintenanceResponse>("forget_layer"),
         super::schemas::<LayerMaintenanceRequest, MaintenanceResponse>("reindex_layer"),
     ]

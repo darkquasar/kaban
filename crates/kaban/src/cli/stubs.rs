@@ -1,10 +1,7 @@
-//! Subcommands and flags whose milestone has not landed (M4-1, M4-4): `promote`, `serve --http`
-//! and `--global-db` are accepted by the parser and exit 4 with "not available in this build",
-//! so a hook or script that calls them fails loudly instead of succeeding silently (core-plan
-//! C4.1). The M5 subcommands `export`, `sync`, `rebuild` and `resolve` have their typed shapes
-//! (M5-16) and call [`not_available`] from their own placeholder modules until the C5.1b and
-//! C5.2 lanes fill them; `ingest-decisions` stays a stub until the assisted ingestion spec
-//! lands (OWN-26).
+//! Flags and modes whose milestone has not landed (M4-1, M4-4): `serve --http`, `--global-db`
+//! and `bench cg` without the `bench` feature are accepted by the parser and exit 4 with "not
+//! available in this build", so a hook or script that calls them fails loudly instead of
+//! succeeding silently (core-plan C4.1).
 
 use crate::cli::output::{EXIT_INVALID, print_error};
 use std::process::ExitCode;

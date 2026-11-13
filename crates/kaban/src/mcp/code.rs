@@ -178,7 +178,7 @@ impl KabanServer {
     }
 
     #[tool(
-        description = "Everything about one node of the code-graph snapshot in one call: the target is exactly one of symbol, ref, {label, name}, {path, line} or path (several matches are ambiguous_symbol with the candidates, select by ref; {label, name} takes an optional path); the answer carries the definition card (signature, doc, snippet), up to 3 callers and 3 callees over REFERENCES edges (approximate: true until a call graph is derived), up to 3 TESTED_BY test links, the governing records of why(symbol) with their currency and superseded_by, and last_change (the commit, author date and subject of the last commit touching the defining file; null when git is slow or the file is unknown, never an error).",
+        description = "Everything about one node of the code-graph snapshot in one call: the target is exactly one of symbol, ref, {label, name}, {path, line} or path (several matches are ambiguous_symbol with the candidates, select by ref; {label, name} takes an optional path); the answer carries the definition card (signature, doc, snippet), up to 3 callers and 3 callees over REFERENCES edges (approximate: true until a call graph is derived), up to 3 TESTED_BY test links and last_change (the commit, author date and subject of the last commit touching the defining file; null when git is slow or the file is unknown, never an error).",
         output_schema = output_schema::<CodeContextResponse>(),
         annotations(
             title = "Code context",

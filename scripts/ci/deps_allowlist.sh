@@ -14,6 +14,8 @@
 #   kaban-store-sqlite must not list kaban-codegraph                                    (normal, build;
 #                                                                                        the dev edge is allowed, SO-3)
 #   kaban-core         must not list kaban-codegraph                                    (any kind)
+#   kaban-index-graph  must not list kaban-store-sqlite, kaban-api, kaban-vtab, rusqlite (any kind; spec 11 T1)
+#   kaban-core         must not list kaban-vtab, kaban-index-graph                      (any kind; spec 11 T1)
 #
 # Every rule applies only to workspace members present at run time; a member not yet present
 # prints "skipped: <member> not a workspace member yet" (informational, not a failure), but only
@@ -108,6 +110,9 @@ forbid normal,build,dev kaban-codegraph kaban-policy kaban-store-sqlite kaban-ap
 forbid normal,build kaban-index kaban-store-sqlite kaban-api || exit 1
 forbid normal,build kaban-store-sqlite kaban-codegraph || exit 1
 forbid normal,build,dev kaban-core kaban-codegraph || exit 1
+# spec 11 T1: the graph index and the core never reach SQL or the virtual-table crate
+forbid normal,build,dev kaban-index-graph kaban-store-sqlite kaban-api kaban-vtab rusqlite || exit 1
+forbid normal,build,dev kaban-core kaban-vtab kaban-index-graph || exit 1
 
 # informational: the one admitted edge of the store to the code graph is dev-only (SO-3)
 if has_member kaban-store-sqlite && closure_names dev kaban-store-sqlite | grep -qx kaban-codegraph; then

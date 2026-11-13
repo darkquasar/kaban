@@ -5,10 +5,10 @@
 //! ```text
 //!   stdin envelope (Value)        allowlist (M4-7)          seam             store
 //!   +------------------+   =>   +--------------+   =>   +-------------+   =>   +--------+
-//!   | host JSON object | -----> | Selected     | -----> | prepare_args| -----> | why /  |
-//!   | (never stored,   |        | session_id,  |        | typed parse |        | remem- |
-//!   |  never scanned   |        | paths, cmd,  |        | call        |        | ber /  |
-//!   |  as a whole)     |        | error, ...   |        | gate_resp.  |        | session|
+//!   | host JSON object | -----> | Selected     | -----> | prepare_args| -----> | remem- |
+//!   | (never stored,   |        | session_id,  |        | typed parse |        | ber /  |
+//!   |  never scanned   |        | paths, cmd,  |        | call        |        | session|
+//!   |  as a whole)     |        | error, ...   |        | gate_resp.  |        |        |
 //!   +------------------+        +--------------+        +-------------+        +--------+
 //!                                                              |
 //!                                                              v
@@ -26,24 +26,16 @@
 //!   fixed stderr line ([`HookOutcome::note`]); the CLI always exits 0 (M4-8, PR-9).
 //! - The workspace is the process's bound workspace (M4-32); the envelope `cwd` only resolves
 //!   relative paths.
-//! - One event has no host and no envelope: [`HookEvent::PostCommit`] (C5.3, M5-14) is the git
-//!   `post-commit` hook; the CLI never reads stdin for it and the handler reads only the
-//!   repository root, `HEAD` and the bound workspace (M5-15, OWN-23).
 
 use crate::api::KabanApi;
 use crate::error::ApiError;
-use crate::explain::{Addressable, PendingStatus};
-use crate::review::ReviewQuery;
-use crate::types::{
-    RememberRequest, RememberResponse, WhyRequest, WhyResponse, WriteOutcome, WriteReceipt,
-};
+use crate::types::{RememberRequest, RememberResponse, WriteOutcome, WriteReceipt};
 use kaban_core::{
     EvidenceRun, FailurePatch, PendingFailuresQuery, PendingScope, SessionEdit, SessionEditKind,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
-use std::fmt::Write as _;
 use std::path::{Component, Path, PathBuf};
 
 /// Which host sent the envelope (core-plan C4.3 `--host`; `serde-enum-representation`: the
@@ -63,9 +55,9 @@ pub enum HookHost {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum HookEvent {
-    /// Session briefing (<= 5 items) as `additionalContext`.
+    /// Session briefing (the pending Failures) as `additionalContext`.
     SessionStart,
-    /// Governing records for the file about to be edited as `additionalContext`.
+    /// A file is about to be edited: the attempted edit is recorded for the session.
     PreToolUse,
     /// A command finished: success evidence for a pending Failure (C4.4); on Codex and pi also
     /// the failure signal (non-zero exit, `isError`).
@@ -78,13 +70,10 @@ pub enum HookEvent {
     Stop,
     /// The agent's reply: `{"failure_id", "fix"}` (C4.4).
     Fix,
-    /// The git `post-commit` hook (C5.3, M5-14, M5-15/OWN-23): stamp `HEAD` on the unstamped
-    /// nodes of the bound workspace. No host, no envelope.
-    PostCommit,
 }
 
 impl HookEvent {
-    /// Whether the event's handler writes (a Failure, an episode, a fix, commit stamps): the
+    /// Whether the event's handler writes (a Failure, an episode, a fix): the
     /// events whose refusal is an SS-10 `rejected` outcome.
     fn writes(self) -> bool {
         matches!(
@@ -94,7 +83,6 @@ impl HookEvent {
                 | Self::SubagentStop
                 | Self::Stop
                 | Self::Fix
-                | Self::PostCommit
         )
     }
 
@@ -108,9 +96,8 @@ impl HookEvent {
                 Some("tool_execution_end")
             }
             (HookHost::Pi, Self::Stop) => Some("agent_before_settle"),
-            // pi has no subagent event of its own; `fix` is the agent's reply, not a host event;
-            // `post-commit` comes from git, which has no envelope at all
-            (HookHost::Pi, Self::SubagentStop) | (_, Self::Fix | Self::PostCommit) => None,
+            // pi has no subagent event of its own; `fix` is the agent's reply, not a host event
+            (HookHost::Pi, Self::SubagentStop) | (_, Self::Fix) => None,
             (_, Self::SessionStart) => Some("SessionStart"),
             (_, Self::PreToolUse) => Some("PreToolUse"),
             // Codex has no PostToolUseFailure: its PostToolUse carries the failure signal
@@ -173,10 +160,8 @@ impl HookOutcome {
     }
 }
 
-/// Most `why` targets one pre-tool-use may name (the `WhyRequest` limit, M4-18).
+/// Most edited paths one pre-tool-use records (M4-18).
 const MAX_TARGETS: usize = 16;
-/// Governing records injected per edited path.
-const WHY_LIMIT: usize = 3;
 /// The coding-agent adapter kinds the hooks write, declared in the shipped `adr.yaml`
 /// (engine-spec EN-F4 "retained as the adapter kinds of `adr.yaml`"): the stored names of a
 /// failed command, a subagent episode and a fix. One place instead of a literal per site; a
@@ -198,9 +183,7 @@ pub const ADAPTER_KINDS: AdapterKinds = AdapterKinds {
     improvement: "Improvement",
 };
 
-/// Items in a session briefing (core-spec F8).
-pub const BRIEFING_ITEMS: usize = 5;
-/// Pending Failures a briefing shows at most (the rest are accepted records).
+/// Pending Failures a briefing shows at most.
 const BRIEFING_FAILURES: usize = 2;
 /// Most characters of injected context (Codex `additionalContextLimit` 1500 in the recipe).
 const MAX_CONTEXT_CHARS: usize = 1500;
@@ -234,8 +217,6 @@ const NOTE_FIX_FIELDS: &str = "fix needs {\"failure_id\", \"fix\"}";
 const NOTE_WITHHELD: &str = "output withheld by the denylist policy";
 /// SS-10: the write committed and is not searchable yet; the host must not replay it.
 const NOTE_PENDING_SEARCH: &str = "stored; not yet searchable, do not replay";
-const NOTE_NO_REPO: &str = "not inside a git repository; nothing stamped";
-const NOTE_NO_HEAD: &str = "git gave no HEAD; nothing stamped";
 /// The session pairing failed after the Failure committed (SS-10: the record stands, the
 /// receipt says `committed`; the pairing is best effort, M4-14).
 const NOTE_PAIRING_FAILED: &str = "failure stored; its session pairing failed";
@@ -495,18 +476,6 @@ fn tail_lines(s: &str, lines: usize, bytes: usize) -> String {
     kept.join("\n")
 }
 
-/// The spelling `kaban explain <address>` accepts for `a` (`explain::parse_address`: a node
-/// id, `e:<id>`, a claim key, `x:Kind`, `<path>:<offset>`).
-fn address_text(a: &Addressable) -> String {
-    match a {
-        Addressable::Node(id) => id.to_string(),
-        Addressable::Edge(id) => format!("e:{id}"),
-        Addressable::Assertion(key) => key.0.clone(),
-        Addressable::DiscoveredKind(label) => label.clone(),
-        Addressable::SpanRef { path, offset } => format!("{path}:{offset}"),
-    }
-}
-
 /// `{"hookSpecificOutput":{"hookEventName":…,"additionalContext":…}}` (core-plan C4.3).
 fn hook_specific(host_event: &str, context: &str) -> Value {
     json!({
@@ -554,7 +523,6 @@ impl KabanApi {
             HookEvent::SubagentStop => self.hook_subagent_stop(host, &selected),
             HookEvent::Stop => self.hook_stop(host, &selected),
             HookEvent::Fix => self.hook_fix(&selected),
-            HookEvent::PostCommit => self.hook_post_commit(),
         };
         match outcome {
             Ok(outcome) => self.gate_outcome(&prefix, self.settle_hook(&prefix, outcome)),
@@ -650,15 +618,15 @@ impl KabanApi {
             .map_err(ApiError::from)
     }
 
-    /// `pre-tool-use`: the governing records for the paths about to be edited, injected as
-    /// `additionalContext`; the attempted edits recorded as `edit` rows (M4-18).
+    /// `pre-tool-use`: the attempted edits recorded as `edit` rows of the session (M4-18);
+    /// nothing is injected.
     fn hook_pre_tool_use(
         &self,
         host: HookHost,
         s: &Selected,
         host_event: Option<&str>,
     ) -> Result<HookOutcome, ApiError> {
-        let (Some(host_event), Some(tool)) = (host_event, s.tool_name.as_deref()) else {
+        let (Some(_), Some(tool)) = (host_event, s.tool_name.as_deref()) else {
             return Ok(HookOutcome::empty());
         };
         if !is_edit_tool(host, tool) {
@@ -677,13 +645,8 @@ impl KabanApi {
         if paths.is_empty() {
             return Ok(HookOutcome::empty());
         }
-        let raw = json!({
-            "targets": paths.iter().map(|p| json!({"path": p})).collect::<Vec<_>>(),
-            "limit": WHY_LIMIT,
-        });
-        let why: WhyResponse = self.hook_tool("why", raw, |api, req: WhyRequest| api.why(req))?;
-        // the attempted edits, gated (the `why` targets were scanned above; a redact-class
-        // path is stored in its masked form, a reject-class one skipped)
+        // the attempted edits, gated (a redact-class path is stored in its masked form, a
+        // reject-class one skipped)
         if let Some(session) = s
             .session_id
             .as_deref()
@@ -695,40 +658,11 @@ impl KabanApi {
                 }
             }
         }
-        if why.results.is_empty() {
-            return Ok(HookOutcome::empty());
-        }
-        let mut text = String::from("kaban: records governing this edit (why):\n");
-        for card in &why.results {
-            let body = card
-                .node
-                .summary
-                .as_deref()
-                .or(card.node.text.as_deref())
-                .unwrap_or("");
-            let _ = writeln!(
-                text,
-                "- {} [{}, {}, currency {}] {} (id {})",
-                card.matched_target,
-                card.node.kind,
-                card.governance.as_str(),
-                currency_name(card.currency.state),
-                head_chars(body.lines().next().unwrap_or(""), TEXT_COMMAND_CHARS),
-                card.node.id
-            );
-        }
-        Ok(HookOutcome {
-            output: hook_specific(host_event, &bounded_context(text.trim_end())),
-            note: None,
-            receipt: None,
-        })
+        Ok(HookOutcome::empty())
     }
 
-    /// `session-start`: the briefing (<= [`BRIEFING_ITEMS`]: accepted Decisions and
-    /// Conventions by importance, pending Failures; M4-17), the `kaban review:` section (OD-E-6,
-    /// EN-F49: up to `[briefing] max_candidates` pending candidates and unresolved groups, each
-    /// with its `kaban explain` address; `0` removes it) and the bounded prune of old
-    /// `session_edits` rows (M4-13).
+    /// `session-start`: the briefing (<= [`BRIEFING_FAILURES`] pending Failures; M4-17) and the
+    /// bounded prune of old `session_edits` rows (M4-13).
     fn hook_session_start(
         &self,
         s: &Selected,
@@ -746,25 +680,14 @@ impl KabanApi {
         let failures = self
             .store
             .pending_failures(&kaban_core::PendingFailuresQuery {
-                workspace_id: workspace.clone(),
+                workspace_id: workspace,
                 session_id: session,
                 scope: kaban_core::PendingScope::Workspace,
                 limit: BRIEFING_FAILURES,
             })?;
-        // the kinds whose records govern paths, from the loaded ontologies (EN-F4, E1.6)
-        let governing = self.registry().governing_kinds();
-        let governing: Vec<&str> = governing.iter().map(String::as_str).collect();
-        let records = self.store.briefing(
-            &workspace,
-            &governing,
-            BRIEFING_ITEMS.saturating_sub(failures.len()),
-        )?;
         let governed = self.governed();
-        let mut lines: Vec<String> = Vec::with_capacity(BRIEFING_ITEMS);
-        for node in records.iter().chain(failures.iter()) {
-            if lines.len() == BRIEFING_ITEMS {
-                break;
-            }
+        let mut lines: Vec<String> = Vec::with_capacity(BRIEFING_FAILURES);
+        for node in &failures {
             // S4: the projected (masked) card, a hidden record skipped
             let Some(card) = self.project(node, false, None) else {
                 continue;
@@ -774,61 +697,21 @@ impl KabanApi {
                 .as_deref()
                 .or(card.text.as_deref())
                 .unwrap_or("");
-            let state = if node.kind == ADAPTER_KINDS.failure {
-                "pending fix".to_owned()
-            } else {
-                card.governance.as_str().to_owned()
-            };
             // the kind's display label (`governed.display.label`, EN-F4), the stored name for
             // a kind without one
             let label = governed
                 .display(&node.kind)
                 .map_or(card.kind.as_str(), |d| d.label.as_str());
             lines.push(format!(
-                "- [{label}, {state}] {} (id {})",
+                "- [{label}, pending fix] {} (id {})",
                 head_chars(body.lines().next().unwrap_or(""), TEXT_COMMAND_CHARS),
                 card.id
             ));
         }
-        // OD-E-6 (EN-F49; engine-plan E2.8): one bounded page of pending review items in
-        // review order (review rows, conflicts, proposed records, stale anchors, discovered
-        // kinds), the candidate statuses kept, each with the address `kaban explain` takes;
-        // the lines count against `MAX_CONTEXT_CHARS` after the records
-        let max_candidates =
-            usize::try_from(self.config.engine.briefing.max_candidates).unwrap_or(usize::MAX);
-        let mut review: Vec<String> = Vec::new();
-        if max_candidates > 0 {
-            let page = self.review(&ReviewQuery {
-                limit: max_candidates,
-                ..ReviewQuery::default()
-            })?;
-            for item in page.items {
-                if !matches!(
-                    item.status,
-                    PendingStatus::Candidate(_)
-                        | PendingStatus::Unresolved(_)
-                        | PendingStatus::Discovered { .. }
-                ) {
-                    continue;
-                }
-                review.push(format!(
-                    "- [review] {} (kaban explain {})",
-                    item.sentence,
-                    address_text(&item.subject)
-                ));
-            }
-        }
-        if lines.is_empty() && review.is_empty() {
+        if lines.is_empty() {
             return Ok(HookOutcome::empty());
         }
-        let mut sections: Vec<String> = Vec::with_capacity(2);
-        if !lines.is_empty() {
-            sections.push(format!("kaban briefing:\n{}", lines.join("\n")));
-        }
-        if !review.is_empty() {
-            sections.push(format!("kaban review:\n{}", review.join("\n")));
-        }
-        let text = sections.join("\n");
+        let text = format!("kaban briefing:\n{}", lines.join("\n"));
         Ok(HookOutcome {
             output: hook_specific(host_event, &bounded_context(&text)),
             note: None,
@@ -1119,41 +1002,6 @@ impl KabanApi {
         })
     }
 
-    /// `post-commit` (M5-14, M5-15/OWN-23; OWN-65): `commit_sha = HEAD` on every unstamped node
-    /// of the bound workspace whose kind is in the registry's stamping set (effective
-    /// `index.stamp: commit`, engine-spec §3.1; the shipped document kinds are `none`) and
-    /// whose `repo` is unset or this repository's, bumping `rev` so the next `sync`
-    /// re-serializes the record with its provenance (once per node, so it converges). Outside
-    /// a repository, or when git gives no HEAD within its bound, `{}` with a fixed note. No
-    /// `changes(paths)` rows and no currency cache (OWN-23).
-    fn hook_post_commit(&self) -> Result<HookOutcome, ApiError> {
-        let Some(root) = self.config.repo_root.as_deref() else {
-            return Ok(HookOutcome::silent(format!(
-                "kaban hook post-commit: {NOTE_NO_REPO}"
-            )));
-        };
-        let Some(sha) = self.git.head(root) else {
-            return Ok(HookOutcome::silent(format!(
-                "kaban hook post-commit: {NOTE_NO_HEAD}"
-            )));
-        };
-        let kinds = self.registry.stamp_kinds();
-        let kinds: Vec<&str> = kinds.iter().map(String::as_str).collect();
-        let stamped = self.store.stamp_commit(
-            self.config.workspace.as_str(),
-            &sha,
-            self.config.repo.as_deref(),
-            &kinds,
-        )?;
-        Ok(HookOutcome {
-            output: json!({"stamped": stamped}),
-            note: None,
-            // the stamping committed: its receipt holds at the head (no store outcome
-            // carries the stamping's own sequence)
-            receipt: Some(self.committed_receipt(None)),
-        })
-    }
-
     /// `fix`: the agent's reply `{"failure_id", "fix"}` (M4-15): an `Improvement` with the fix
     /// text linked `FIXED_BY` from the Failure through the atomic, workspace-checked
     /// `remember`, then the Failure's props patched (`fix`, `pending_fix: false`) in one
@@ -1219,17 +1067,6 @@ impl KabanApi {
     }
 }
 
-/// The wire name of a currency state (core-spec F2 vocabulary).
-fn currency_name(state: crate::currency::CurrencyState) -> &'static str {
-    use crate::currency::CurrencyState;
-    match state {
-        CurrencyState::Active => "active",
-        CurrencyState::NeedsReview => "needs_review",
-        CurrencyState::Stale => "stale",
-        CurrencyState::Uncheckable => "uncheckable",
-    }
-}
-
 /// The kebab-case name of an event, for notes.
 fn event_name(event: HookEvent) -> &'static str {
     match event {
@@ -1240,7 +1077,6 @@ fn event_name(event: HookEvent) -> &'static str {
         HookEvent::SubagentStop => "subagent-stop",
         HookEvent::Stop => "stop",
         HookEvent::Fix => "fix",
-        HookEvent::PostCommit => "post-commit",
     }
 }
 

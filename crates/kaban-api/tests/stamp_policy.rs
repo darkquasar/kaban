@@ -1,7 +1,6 @@
 //! OWN-65 stamping policy (engine-spec §3.1 "Indexing meta-config `index`", AMD-14; engine-plan
 //! E2.0 item 5): the registry derives the stamping set from the loaded ontologies
-//! (`stamp_kinds`, `index_policy`), `post-commit` stamps only that set, and a record of a
-//! stamping kind written without a repository gets `commit_sha` NULL plus a known
+//! (`stamp_kinds`, `index_policy`), and a record of a stamping kind written without a repository gets `commit_sha` NULL plus a known
 //! `no_repository` event. Doctor separates historical reasons from current stamp eligibility.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // test code: failures are the assertion
@@ -9,10 +8,7 @@
 mod common;
 
 use common::Scratch;
-use kaban_api::{
-    ApiConfig, DoctorContext, GitRunner, HookEvent, HookHost, KabanApi, OntologyRegistry,
-    RememberRequest,
-};
+use kaban_api::{ApiConfig, DoctorContext, GitRunner, KabanApi, OntologyRegistry, RememberRequest};
 use kaban_core::ontology::Stamp;
 use kaban_core::{
     Actor, DatabaseFileModes, ForgetMode, GovernanceStore, MemoryStore, NodeId, SyncStore,
@@ -146,60 +142,6 @@ fn stamp_kinds_follows_the_loaded_ontologies() {
     );
 }
 
-/// 5b: `post-commit` passes the registry's stamping set: a `Document` beside a committed
-/// `Decision` stays unstamped, and a user kind with `index: {stamp: none}` is left alone while
-/// its default-indexed neighbour is stamped. Inside a repository with history no reason row is
-/// written.
-#[test]
-fn post_commit_stamps_only_the_stamping_kinds() {
-    // Arrange
-    let s = Scratch::new("kaban-stamp", "post-commit");
-    std::fs::create_dir_all(s.0.join(".kaban/ontology")).unwrap();
-    git_init_with_history(&s.0);
-    let registry = Arc::new(OntologyRegistry::new(Some(s.0.clone())).unwrap());
-    let (api, store) = api_on(
-        &s,
-        ApiConfig {
-            repo_root: Some(s.0.clone()),
-            repo: Some("kaban-stamp".into()),
-            ..Default::default()
-        },
-    );
-    let api = api.with_registry(Arc::clone(&registry));
-    let path = s.0.join(".kaban/ontology/ops.yaml");
-    std::fs::write(&path, OPS_YAML).unwrap();
-    registry.load_file(&api, &path).unwrap();
-    let decision = remember(&api, "Decision", "stamped per commit");
-    let document = remember(&api, "Document", "ingested document, never stamped");
-    let runbook = remember(&api, "ops:Runbook", "outside the repository by policy");
-    let service = remember(&api, "ops:Service", "default indexing");
-
-    // Act
-    let outcome = api.hook(HookHost::ClaudeCode, HookEvent::PostCommit, &json!({}));
-
-    // Assert
-    assert_eq!(outcome.output, json!({"stamped": 2}), "{outcome:?}");
-    let sha_of = |id: &NodeId| store.get(id, false).unwrap().unwrap().commit_sha;
-    assert!(sha_of(&decision).is_some());
-    assert!(sha_of(&service).is_some());
-    assert_eq!(
-        sha_of(&document),
-        None,
-        "Document is `stamp: none` in the shipped file"
-    );
-    assert_eq!(
-        sha_of(&runbook),
-        None,
-        "the user ontology turned stamping off"
-    );
-    for id in [&decision, &document, &runbook, &service] {
-        assert!(
-            store.events(id).unwrap().is_empty(),
-            "inside a repository with history no reason is recorded"
-        );
-    }
-}
-
 /// 5c: outside any repository (`repo_root = None`) a `remember` of a `Decision` succeeds with
 /// `commit_sha` NULL and one `unstamped`/`no_repository` events row; a `Document` in the same
 /// situation gets no reason row; `doctor` lists the counts per reason.
@@ -311,15 +253,6 @@ fn ordinary_remember_never_probes_git_and_doctor_reports_current_history() {
     assert_eq!(
         current(api.doctor(&doctor_context(&s))),
         "historical no_repository: 0, no_history: 0; current eligible: 1; status: pending"
-    );
-    assert_eq!(
-        api.hook(HookHost::ClaudeCode, HookEvent::PostCommit, &json!({}))
-            .output,
-        json!({"stamped": 1})
-    );
-    assert_eq!(
-        current(api.doctor(&doctor_context(&s))),
-        "historical no_repository: 0, no_history: 0; current eligible: 0; status: pending"
     );
     assert!(
         store.events(&decision).unwrap().is_empty(),

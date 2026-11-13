@@ -16,9 +16,8 @@ over stdio. There is no HTTP daemon or hosted model behind it.
 
 Suppose a team chooses SQLite for its integration database. A Fact can record
 where it is used. A Decision can retain the rationale and govern `src/storage/**`.
-A person reviews and accepts that Decision; an agent asks `why` before changing
-`src/storage/db.rs` and receives the governing record instead of guessing from
-old chat history. A later Failure can record a migration problem, with a linked
+An agent recalls it before changing `src/storage/db.rs` and receives the
+recorded rationale instead of guessing from old chat history. A later Failure can record a migration problem, with a linked
 Improvement preserving how it was fixed.
 
 Human-governed memory is more than a collection of notes: proposals, acceptance,

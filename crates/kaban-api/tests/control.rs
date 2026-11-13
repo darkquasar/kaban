@@ -11,7 +11,7 @@ use kaban_api::control::{
 use kaban_api::{
     ApiError, ForgetRequest, KabanApi, LinkRequest, LinkSpec, RememberRequest, TraverseRequest,
 };
-use kaban_core::{Actor, AssertionStatus, ClaimClass, Layer, Method, NodeId, Rank};
+use kaban_core::{AssertionStatus, ClaimClass, Layer, Method, NodeId, Rank};
 use kaban_policy::Policy;
 use kaban_store_sqlite::SqliteStore;
 use schemars::{JsonSchema, schema_for};
@@ -604,9 +604,8 @@ const CODE_CONTROL_ALLOWANCE: &[(&str, Direction, &str)] = &[
 /// moves or the path is named here. Free strings stay content by default (OWN-10).
 ///
 /// The response-side closed vocabularies kaban itself emits (card `lifecycle`, `governance`
-/// and `provenance.store`, `signer_kind`, the `follow_ups[].tool` names, the `why` currency
-/// and match words, `explain`'s status words, `remember`/`accept` `status`, `stats.stores[]`,
-/// `anchored[].kind`, the `why` `code`) are content on purpose: the response gate scans them
+/// and `provenance.store`, the `follow_ups[].tool` names, `remember` `status`, `stats.stores[]`,
+/// `anchored[].kind`) are content on purpose: the response gate scans them
 /// as text and the adapter withholds a result whose enum value a redaction reshaped
 /// (`crates/kaban/src/mcp/mod.rs`, review R3-9), so a policy word rule is honoured on every
 /// string that leaves. Rowing them would make them unmaskable: an owner decision, not a lane's
@@ -642,51 +641,6 @@ const CONTENT_ENUM_ALLOWANCE: &[(&str, Direction, &str)] = &[
     ("stats", Direction::Response, "layers[].layer"),
     ("stats", Direction::Response, "layers[].producer_layers[]"),
     ("stats", Direction::Response, "layers[].last_outcome"),
-    ("accept", Direction::Response, "node.governance"),
-    ("accept", Direction::Response, "node.lifecycle"),
-    ("accept", Direction::Response, "node.provenance.store"),
-    ("accept", Direction::Response, "signer_kind"),
-    ("accept", Direction::Response, "status"),
-    ("why", Direction::Response, "follow_ups[].tool"),
-    ("why", Direction::Response, "results[].code"),
-    ("why", Direction::Response, "results[].currency.state"),
-    ("why", Direction::Response, "results[].governance"),
-    ("why", Direction::Response, "results[].matched_by"),
-    ("why", Direction::Response, "results[].node.governance"),
-    ("why", Direction::Response, "results[].node.lifecycle"),
-    (
-        "why",
-        Direction::Response,
-        "results[].node.provenance.store",
-    ),
-    ("explain", Direction::Response, "history[].signer_kind"),
-    ("explain", Direction::Response, "status.pending"),
-    ("explain", Direction::Response, "status.settled"),
-    (
-        "governance_history",
-        Direction::Response,
-        "records[].card.governance",
-    ),
-    (
-        "governance_history",
-        Direction::Response,
-        "records[].card.lifecycle",
-    ),
-    (
-        "governance_history",
-        Direction::Response,
-        "records[].card.provenance.store",
-    ),
-    (
-        "governance_history",
-        Direction::Response,
-        "records[].events[].signer_kind",
-    ),
-    (
-        "governance_history",
-        Direction::Response,
-        "records[].governance",
-    ),
     (
         "code_implementers",
         Direction::Response,
@@ -697,37 +651,6 @@ const CONTENT_ENUM_ALLOWANCE: &[(&str, Direction, &str)] = &[
     ("code_references", Direction::Response, "follow_ups[].tool"),
     ("code_tests_for", Direction::Response, "follow_ups[].tool"),
     ("code_context", Direction::Response, "follow_ups[].tool"),
-    ("code_context", Direction::Response, "governing[].code"),
-    (
-        "code_context",
-        Direction::Response,
-        "governing[].currency.state",
-    ),
-    (
-        "code_context",
-        Direction::Response,
-        "governing[].governance",
-    ),
-    (
-        "code_context",
-        Direction::Response,
-        "governing[].matched_by",
-    ),
-    (
-        "code_context",
-        Direction::Response,
-        "governing[].node.governance",
-    ),
-    (
-        "code_context",
-        Direction::Response,
-        "governing[].node.lifecycle",
-    ),
-    (
-        "code_context",
-        Direction::Response,
-        "governing[].node.provenance.store",
-    ),
 ];
 
 /// Whether `(tool, direction, path)` is named in [`CONTENT_ENUM_ALLOWANCE`].
@@ -998,16 +921,9 @@ fn every_control_entry_points_at_a_string_path_of_its_tool_and_names_no_content_
             e.path
         );
     }
+    // the one kaban-issued secret (the `accept` confirmation token) left with governance
     let issuing: Vec<_> = REGISTRY.iter().filter(|e| e.issuing).collect();
-    assert_eq!(
-        issuing.len(),
-        1,
-        "exactly one issuing response entry: {issuing:?}"
-    );
-    assert_eq!(
-        (issuing[0].tool, issuing[0].direction, issuing[0].path),
-        ("accept", Direction::Response, "confirmation_token")
-    );
+    assert!(issuing.is_empty(), "no issuing response entry: {issuing:?}");
     // every string path of every tool is either listed above or content by default; the walk
     // itself must see every tool on both sides
     for t in &tools {
@@ -1218,71 +1134,6 @@ fn embed_submit_is_reserved_with_its_rows_and_nothing_names_ask_rank_reason_or_o
     // `ask` is absent, not stubbed (OWN-68 SC-02)
     assert!(!tool_schemas().iter().any(|t| t.tool == "ask"));
     assert!(!REGISTRY.iter().any(|e| e.tool == "ask"));
-}
-
-/// BR-8: `unmerge` is a CLI-only verb with registry rows. Its `id` is control: under a
-/// UUID-rejecting policy a valid node id is not a policy rejection (at base the row was
-/// missing and `gate_control` scanned the id as content, so every `kaban unmerge` was refused
-/// under such a policy); the response mirror in the registry spells the real response's wire
-/// keys; the verb is never an MCP tool.
-#[test]
-fn unmerge_id_is_control_and_the_schema_mirror_matches_the_real_response() {
-    let (api, store) = api_and_store_with(UUID_REJECT);
-    let fresh = NodeId::new();
-    let err = api
-        .unmerge(fresh.as_str(), None, Actor::HumanCli)
-        .unwrap_err();
-    assert!(
-        !matches!(err, ApiError::Rejected { .. }),
-        "a valid node id must not be a policy rejection: {err}"
-    );
-    assert!(matches!(err, ApiError::NotFound(_)), "{err}");
-    // an applied merge (two twins the ER layer matches), then the real response's keys
-    let mut ids = Vec::new();
-    for body in ["first body line", "second body line"] {
-        ids.push(
-            api.remember(RememberRequest {
-                kind: "Fact".into(),
-                text: format!("Saffron ledger reconciliation\n{body}"),
-                ..Default::default()
-            })
-            .unwrap()
-            .id,
-        );
-    }
-    let report = store.er_resolve("default").unwrap();
-    assert_eq!((report.compared, report.matched), (1, 1), "{report:?}");
-    let resp = api.unmerge(&ids[1], None, Actor::HumanCli).unwrap();
-    let wire = serde_json::to_value(&resp).unwrap();
-    let schema = tool_schemas()
-        .into_iter()
-        .find(|t| t.tool == "unmerge")
-        .unwrap();
-    let out = serde_json::to_value(&schema.output).unwrap();
-    let declared: BTreeSet<&str> = out["properties"]
-        .as_object()
-        .unwrap()
-        .keys()
-        .map(String::as_str)
-        .collect();
-    let actual: BTreeSet<&str> = wire
-        .as_object()
-        .unwrap()
-        .keys()
-        .map(String::as_str)
-        .collect();
-    assert!(actual.is_subset(&declared), "{actual:?} vs {declared:?}");
-    for key in ["id", "restored", "deprecated", "reason", "redactions"] {
-        assert!(actual.contains(key), "{wire}");
-    }
-    assert!(
-        !resp.restored.is_empty() && !resp.deprecated.is_empty(),
-        "{wire}"
-    );
-    // the gated response: ids and claim keys are control, the reason is content
-    api.gate_response("unmerge", &wire)
-        .expect("the outcome's ids are control");
-    assert!(kaban_api::control::CLI_ONLY.contains(&"unmerge"));
 }
 
 /// EN-E5: the four gate entries are callable from outside the crate. The per-field gate

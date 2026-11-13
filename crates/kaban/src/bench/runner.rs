@@ -1,11 +1,11 @@
 //! The benchmark itself: build the corpus through the full service path and time the §16
-//! operation set (C3.4 adds `why_one_path` here).
+//! operation set (`why_one_path` is reported not applicable since the `why` tool was removed).
 
 use super::corpus::{Corpus, Kind, Life, RELS, SEED, WORKSPACES, fixture_repo};
 use super::report::{machine_profile, not_applicable, self_status_kb, summarize};
 use kaban_api::{
     ApiConfig, CodeRefWire, ForgetRequest, KabanApi, LinkRequest, RecallRequest, RememberRequest,
-    RememberStatus, TraverseRequest, WhyRequest, WhyTarget,
+    RememberStatus, TraverseRequest,
 };
 use kaban_core::{
     Actor, ActorId, ForgetMode, Governance, GraphStore, Location, NewEvent, NodeId, RecallQuery,
@@ -88,7 +88,6 @@ struct ReadPlan {
     recall_or_fallback: Vec<RecallRequest>,
     recall_filtered: Vec<RecallRequest>,
     recall_chunks: Option<Vec<RecallRequest>>,
-    why_paths: Vec<String>,
     denylist_short: Vec<String>,
     denylist_long: String,
 }
@@ -97,7 +96,6 @@ impl ReadPlan {
     const GETS: usize = 5000;
     const TRAVERSES: usize = 1000;
     const RECALLS: usize = 1000;
-    const WHYS: usize = 1000;
     const DENYLIST_SHORT: usize = 1000;
     const DENYLIST_LONG: usize = 200;
 
@@ -140,7 +138,6 @@ impl ReadPlan {
                 ..Default::default()
             })
         });
-        let why_paths = (0..Self::WHYS).map(|_| corpus.vocab_path()).collect();
         let denylist_short = (0..Self::DENYLIST_SHORT)
             .map(|_| {
                 format!(
@@ -167,7 +164,6 @@ impl ReadPlan {
             recall_or_fallback,
             recall_filtered,
             recall_chunks,
-            why_paths,
             denylist_short,
             denylist_long,
         })
@@ -264,32 +260,6 @@ impl ReadPlan {
         if let Some(reqs) = &self.recall_chunks {
             recall("recall_chunks", false, reqs)?;
         }
-        // N2 `why`: one path per call, currency included (one `git log` per anchor group over
-        // the fixture repository; every accepted Decision shares the anchor, so one git call
-        // per why)
-        let mut lat = Vec::new();
-        let mut returned = 0usize;
-        let mut by_state: std::collections::BTreeMap<String, usize> =
-            std::collections::BTreeMap::new();
-        for target in &self.why_paths {
-            let s = Instant::now();
-            let r = api.why(WhyRequest {
-                targets: vec![WhyTarget::Path(target.clone())],
-                limit: Some(10),
-                ..Default::default()
-            })?;
-            lat.push(s.elapsed().as_secs_f64() * 1e6);
-            returned += r.results.len();
-            for c in &r.results {
-                *by_state
-                    .entry(format!("{:?}", c.currency.state).to_lowercase())
-                    .or_insert(0) += 1;
-            }
-        }
-        let mut v = summarize("why_one_path", "api", lat);
-        v["avg_results"] = json!(returned as f64 / self.why_paths.len() as f64);
-        v["currency_states"] = json!(by_state);
-        ops.push(v);
         // N3: the high-water mark right after the recall phase
         let vm_hwm_kb = self_status_kb("VmHWM");
 
@@ -356,12 +326,10 @@ pub(crate) fn run(
     let store: Arc<dyn GraphStore> = Arc::new(sqlite);
     let open_ms = t_open.elapsed().as_secs_f64() * 1e3;
     let mut corpus = Corpus::new(SEED);
-    // the N2 `why` fixture: a 50-commit repository beside the database; every accepted
+    // the fixture repository: a 50-commit repository beside the database; every accepted
     // Decision is stamped with its commit 25 and the fixture's root name (M3-22, M3-23)
     let fixture = db.with_file_name("bench-fixture-repo");
-    let t_fixture = Instant::now();
     let fixture_commit = fixture_repo(&fixture, &corpus)?;
-    let fixture_s = t_fixture.elapsed().as_secs_f64();
     let api = Arc::new(KabanApi::with_config(
         store.clone(),
         policy,
@@ -563,12 +531,11 @@ pub(crate) fn run(
     let pre_migration_ops: Option<Vec<Value>> = None;
     let (read_ops, vm_hwm_kb) = plan.run(&api, store.as_ref())?;
     ops.extend(read_ops);
-    if let Some(why) = ops
-        .iter_mut()
-        .find(|o| o["op"] == "why_one_path" && o["path"] == "api")
-    {
-        why["fixture"] = json!({ "commits": super::corpus::FIXTURE_COMMITS, "accepted_commit": fixture_commit, "build_s": fixture_s });
-    }
+    ops.push(not_applicable(
+        "why_one_path",
+        "spec 11 DEL-01",
+        "the why tool is removed with governance",
+    ));
     ops.push(not_applicable(
         "recall_ref",
         "C3.5",
