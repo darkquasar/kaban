@@ -979,18 +979,6 @@ impl SqliteStore {
             signer_kind: tenant.actor.clone().into(),
             ..Default::default()
         };
-        if tenant.governed.contains(&st.kind) {
-            // the table refuses superseded, invalidated and (for an archive effect) proposed
-            // targets whatever their lifecycle; a non-active proposed/accepted target is left
-            // untouched
-            tenant
-                .governed
-                .governance_transition(&st.kind, st.governance, to)?;
-            if st.lifecycle == Lifecycle::Active {
-                Self::govern(conn, tenant.governed, &st, to, &ev, None, now)?;
-            }
-            return Ok(());
-        }
         if st.lifecycle != Lifecycle::Active {
             return Ok(());
         }
@@ -1401,14 +1389,10 @@ impl MemoryStore for SqliteStore {
             .sql()?
             .and_then(|v| v.parse().ok())
             .unwrap_or(0);
-        let conflicts: i64 = conn
-            .query_row("SELECT count(*) FROM conflicts", [], |r| r.get(0))
-            .sql()?;
         Ok(json!({
             "nodes": nodes, "edges": edges, "by_kind": by_kind, "by_rel": by_rel, "db_bytes": page,
-            "changes_lag": changes_lag, "outbox_lag": changes_lag,
-            "engine": "sqlite", "schema_version": schema_version, "conflicts": conflicts,
-            "scope": { "workspace": workspace_id.unwrap_or(WorkspaceId::ALL), "db_bytes": "global", "changes_lag": "global", "outbox_lag": "global" },
+            "engine": "sqlite", "schema_version": schema_version,
+            "scope": { "workspace": workspace_id.unwrap_or(WorkspaceId::ALL), "db_bytes": "global" },
         }))
     }
 }

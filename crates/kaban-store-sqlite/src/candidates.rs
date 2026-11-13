@@ -83,7 +83,7 @@ use crate::sql_error::SqlResultExt;
 use kaban_core::config::PromoteWhen;
 use kaban_core::ontology::meta::{Acceptance, DiscoveredPolicyName};
 use kaban_core::{
-    DiscoveredRules, Governance, GovernedSet, KindStat, OntologyError, PromoteReport, PruneReport,
+    DiscoveredRules, GovernedSet, KindStat, OntologyError, PromoteReport, PruneReport,
     ReadFilters, Result, StoreError, split_stored,
 };
 use rusqlite::{Connection, OptionalExtension, params};
@@ -121,19 +121,6 @@ impl Placement {
         match self {
             Self::Declared(kind) => kind,
             Self::Discovered { label, .. } => label,
-        }
-    }
-
-    /// The governance a fresh record starts in: `proposed` for a governed declared kind (the
-    /// tenant's set) and for an `allow`-placed label, none otherwise (core-spec §4, EN-F5).
-    pub(crate) fn initial_governance(&self, governed: &GovernedSet) -> Governance {
-        match self {
-            Self::Declared(kind) if governed.contains(kind) => Governance::Proposed,
-            Self::Discovered {
-                policy: DiscoveredPolicyName::Allow,
-                ..
-            } => Governance::Proposed,
-            Self::Declared(_) | Self::Discovered { .. } => Governance::None,
         }
     }
 

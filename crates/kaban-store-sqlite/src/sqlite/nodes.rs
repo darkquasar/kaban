@@ -157,7 +157,7 @@ impl SqliteStore {
         let tags = serde_json::to_string(&n.tags)?;
         let props = serde_json::to_string(n.props.as_ref().unwrap_or(&json!({})))?;
         let path_scope = serde_json::to_string(&n.path_scope)?;
-        let governance = placement.initial_governance(tenant.governed);
+        let governance = Governance::None;
         let bodies = crate::body_codec::Writer::for_connection(conn)?;
         conn.execute(
             "INSERT INTO node(id,kind,text,summary,tags,confidence,importance,lifecycle,governance,store_scope,path_scope,dup_key,repo,created_at,updated_at,valid_from,session_id,agent_id,workspace_id,props,content_hash,policy_version)
@@ -323,7 +323,7 @@ impl SqliteStore {
                 rid
             }
             None => {
-                let governance = placement.initial_governance(tenant.governed);
+                let governance = Governance::None;
                 let bodies = crate::body_codec::Writer::for_connection(conn)?;
                 // EN-E3: `store_scope`, `path_scope`, `dup_key` and `repo` are persisted on
                 // insert and update (before E2.2 the batch path dropped them)
