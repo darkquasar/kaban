@@ -26,6 +26,7 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 const ADR: &str = "docs/adr/0007-discounts.md";
 const ARCH: &str = "docs/ARCHITECTURE.md";
@@ -52,6 +53,30 @@ fn git(root: &Path, date: &str, args: &[&str]) -> String {
         .unwrap();
     assert!(out.status.success(), "git {args:?}: {out:?}");
     String::from_utf8(out.stdout).unwrap().trim().to_owned()
+}
+
+/// `kaban doctor` once the serving process's text index has caught up with the head: a
+/// doctor run straight after a write can see the consumer still draining (a slower runner
+/// loses that race), so the report is read only when `text_index_lag` is 0 (10 s bound).
+fn settled_doctor(s: &Scratch, root: &Path) -> Value {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let doctor = cli(s, root, &["doctor"]);
+        let lag = doctor["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == "text_index_lag")
+            .map(|c| c["detail"].clone());
+        if lag.is_none_or(|d| d == "0") {
+            return doctor;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the text index did not catch up: {doctor}"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 fn cli(s: &Scratch, root: &Path, args: &[&str]) -> Value {
@@ -180,9 +205,9 @@ fn step3(s: &Scratch, _root: &Path, mcp: &mut McpClient, arch: &str, adr: &str) 
     let submitted = mcp.call("ingest_submit", &body);
     assert_eq!(submitted["created"], 1, "{submitted}");
     let decision = nodes(s, "Decision").into_iter().next().unwrap();
-    // no surface accepts it, so the Decision stays proposed and the reads below include
-    // candidates
-    assert_eq!(decision.governance, kaban_core::Governance::Proposed);
+    // REC-08: an extracted record is active at commit, with no proposed state
+    assert_eq!(decision.lifecycle, kaban_core::Lifecycle::Active);
+    assert_eq!(decision.governance, kaban_core::Governance::None);
     let before = changes(s);
     let repeat = mcp.call("ingest_submit", &body);
     assert_eq!(repeat["unchanged"], 1, "{repeat}");
@@ -397,7 +422,7 @@ fn step6(s: &Scratch, root: &Path, mcp: &mut McpClient, dir: &Path, decision: &s
         .into_iter()
         .find(|n| n.props["symbol"] == shop_rows::DISCOUNT)
         .unwrap();
-    let doctor = cli(s, root, &["doctor"]);
+    let doctor = settled_doctor(s, root);
     // Doctor names the renamed anchor in its stale_anchors check (not stale_artifacts).
     let stale = doctor["checks"]
         .as_array()
