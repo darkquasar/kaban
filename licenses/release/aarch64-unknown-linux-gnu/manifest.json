@@ -1,5 +1,5 @@
 {
-  "bundle_sha256": "80b7c146ba06cdd566d7e8da5bb7cbf6f500688c1ea92f52925ece9a51867df0",
+  "bundle_sha256": "6515906e1a2343572c19904af331773798a72643f60f2b9804deb1487775b5d9",
   "dependencies": [
     {
       "features": [],
@@ -3008,6 +3008,26 @@
       "version": "0.13.1"
     },
     {
+      "features": [
+        "std"
+      ],
+      "license": "Apache-2.0 OR MIT",
+      "name": "lalrpop-util",
+      "notices": [
+        {
+          "path": "LICENSE-APACHE",
+          "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+        },
+        {
+          "path": "LICENSE-MIT",
+          "sha256": "73cb5f952615bc21d11487cd7e0cf091967cc71d2e7d6cb93f96b36d47b250ed"
+        }
+      ],
+      "repository": "https://github.com/lalrpop/lalrpop",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "version": "0.23.2"
+    },
+    {
       "features": [],
       "license": "MIT OR Apache-2.0",
       "name": "lazy_static",
@@ -3083,7 +3103,7 @@
         "bundled_bindings",
         "cc",
         "default",
-        "min_sqlite_version_3_34_1",
+        "min_sqlite_version_3_45_3",
         "pkg-config",
         "vcpkg"
       ],
@@ -3101,7 +3121,7 @@
       ],
       "repository": "https://github.com/rusqlite/rusqlite",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "version": "0.38.2"
+      "version": "0.39.1"
     },
     {
       "features": [],
@@ -3187,6 +3207,65 @@
       "repository": "https://github.com/rust-lang/log",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
       "version": "0.4.34"
+    },
+    {
+      "features": [
+        "default",
+        "export_derive",
+        "logos-derive",
+        "std"
+      ],
+      "license": "MIT OR Apache-2.0",
+      "name": "logos",
+      "notices": [
+        {
+          "path": "LICENSE-APACHE",
+          "sha256": "f30735c11407534952947e1c7b7457ddf28847000bb038402495ad66f3d020a4"
+        },
+        {
+          "path": "LICENSE-MIT",
+          "sha256": "112fcdb9f4935988cc2313e4cc38faaeccfff53eb1296499e618932d472908e0"
+        }
+      ],
+      "repository": "https://github.com/maciejhirsz/logos",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "version": "0.16.1"
+    },
+    {
+      "features": [],
+      "license": "MIT OR Apache-2.0",
+      "name": "logos-codegen",
+      "notices": [
+        {
+          "path": "LICENSE-APACHE",
+          "sha256": "f30735c11407534952947e1c7b7457ddf28847000bb038402495ad66f3d020a4"
+        },
+        {
+          "path": "LICENSE-MIT",
+          "sha256": "112fcdb9f4935988cc2313e4cc38faaeccfff53eb1296499e618932d472908e0"
+        }
+      ],
+      "repository": "https://github.com/maciejhirsz/logos",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "version": "0.16.1"
+    },
+    {
+      "features": [],
+      "license": "MIT OR Apache-2.0",
+      "name": "logos-derive",
+      "notices": [
+        {
+          "path": "LICENSE-APACHE",
+          "sha256": "f30735c11407534952947e1c7b7457ddf28847000bb038402495ad66f3d020a4"
+        },
+        {
+          "path": "LICENSE-MIT",
+          "sha256": "112fcdb9f4935988cc2313e4cc38faaeccfff53eb1296499e618932d472908e0"
+        }
+      ],
+      "repository": "https://github.com/maciejhirsz/logos",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "version": "0.16.1"
     },
     {
       "features": [
@@ -3644,6 +3723,34 @@
       "repository": "https://github.com/faern/oneshot",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
       "version": "0.1.13"
+    },
+    {
+      "features": [
+        "default"
+      ],
+      "license": "Apache-2.0",
+      "name": "open-cypher",
+      "notices": [
+        {
+          "path": "LICENSE-APACHE",
+          "sha256": "c95bae1d1ce0235ecccd3560b772ec1efb97f348a79f0fbe0a634f0c2ccefe2c"
+        },
+        {
+          "path": "LICENSE-MIT",
+          "sha256": "8eac281fe660b689cb8c331a713e5f208ec17f5a2245ad9daca4813931520db7"
+        },
+        {
+          "path": "spec/vendor/openCypher-2024.3/LICENSE",
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+        },
+        {
+          "path": "spec/vendor/openCypher-2024.3/NOTICE",
+          "sha256": "31e925892196a078ed5bf9ec2b243f3dce1c71ee4489af0cfc4ecd88e62d518b"
+        }
+      ],
+      "repository": "https://github.com/a-poor/open-cypher",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "version": "0.5.0"
     },
     {
       "features": [
@@ -4247,6 +4354,8 @@
     {
       "features": [
         "alloc",
+        "default",
+        "dfa",
         "dfa-build",
         "dfa-onepass",
         "dfa-search",
@@ -4338,13 +4447,13 @@
       "name": "rmcp",
       "notices": [
         {
-          "path": "upstream/rmcp-3.5.1-LICENSE",
+          "path": "LICENSE",
           "sha256": "0382b0057770ca05e9c350a50aa3b1c1fea84da0bc81d723bf00b9aa841be58a"
         }
       ],
       "repository": "https://github.com/modelcontextprotocol/rust-sdk/",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "version": "3.5.1"
+      "version": "3.9.0"
     },
     {
       "features": [],
@@ -4352,13 +4461,13 @@
       "name": "rmcp-macros",
       "notices": [
         {
-          "path": "upstream/rmcp-3.5.1-LICENSE",
+          "path": "LICENSE",
           "sha256": "0382b0057770ca05e9c350a50aa3b1c1fea84da0bc81d723bf00b9aa841be58a"
         }
       ],
       "repository": "https://github.com/modelcontextprotocol/rust-sdk/",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "version": "3.5.1"
+      "version": "3.9.0"
     },
     {
       "features": [
@@ -4369,7 +4478,11 @@
         "ffi-sqlite-wasm-rs",
         "functions",
         "hashlink",
-        "modern_sqlite"
+        "hooks",
+        "limits",
+        "modern_sqlite",
+        "vtab",
+        "wal"
       ],
       "license": "MIT",
       "name": "rusqlite",
@@ -4381,7 +4494,7 @@
       ],
       "repository": "https://github.com/rusqlite/rusqlite",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "version": "0.40.2"
+      "version": "0.41.1"
     },
     {
       "features": [],
@@ -4454,7 +4567,7 @@
       ],
       "repository": "https://github.com/bytecodealliance/rustix",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "version": "1.1.5"
+      "version": "1.1.6"
     },
     {
       "features": [],
@@ -4939,6 +5052,26 @@
       "repository": "https://github.com/servo/rust-smallvec",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
       "version": "1.16.2"
+    },
+    {
+      "features": [
+        "all"
+      ],
+      "license": "MIT OR Apache-2.0",
+      "name": "socket2",
+      "notices": [
+        {
+          "path": "LICENSE-APACHE",
+          "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+        },
+        {
+          "path": "LICENSE-MIT",
+          "sha256": "378f5840b258e2779c39418f3f2d7b2ba96f1c7917dd6be0713f88305dbda397"
+        }
+      ],
+      "repository": "https://github.com/rust-lang/socket2",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "version": "0.6.5"
     },
     {
       "features": [
@@ -5574,10 +5707,12 @@
         "libc",
         "macros",
         "mio",
+        "net",
         "rt",
         "rt-multi-thread",
         "signal",
         "signal-hook-registry",
+        "socket2",
         "sync",
         "time",
         "tokio-macros"
@@ -6637,21 +6772,23 @@
   ],
   "files": {
     "RUST_STANDARD_LIBRARY_NOTICES.html": "5647be074c8edf7339fd863055923a8fc80bc5610a8d4661ec3b767b9d392c27",
-    "THIRD_PARTY_LICENSES.txt": "80b7c146ba06cdd566d7e8da5bb7cbf6f500688c1ea92f52925ece9a51867df0"
+    "THIRD_PARTY_LICENSES.txt": "6515906e1a2343572c19904af331773798a72643f60f2b9804deb1487775b5d9"
   },
   "inputs": {
     ".cargo/config.toml": "f2e2fc8a56c1cf62697357291c53fe0321748664ac3abf68cce3f5c6970f06e5",
-    "Cargo.lock": "f4640a75e69bf9d350023940dce2f9a67439cbbecac9e7cc3c6fbd21839c0dd5",
-    "Cargo.toml": "b621aaa925aa82d721e14a4c0899c804a9b470b9f3525e6ad4aed62256085a01",
+    "Cargo.lock": "b9feb2cea3d1a991545e963c9cfeb761ee555f8e871e407d74212b50099a1a03",
+    "Cargo.toml": "e964dd8399a0a2662e8cbbd7fc9cb07448b73116231ecdd221f3f8853533de7a",
     "crates/kaban-api/Cargo.toml": "57a7ffc5d9461b97dec77801c92bf75fca3b948615570742af224cc0cfbced64",
     "crates/kaban-codegraph/Cargo.toml": "6c8d67acaf1146426d68cee04ae060d3f9caa26700115797b47b90adad770a99",
     "crates/kaban-core/Cargo.toml": "3bfbd5ec57dbef5bf0ba19be7036ba7ff40f8e60414c2f31dca07f137015f1e5",
+    "crates/kaban-index-graph/Cargo.toml": "f75a9e25e4a6837ba6a36b93b04295e937ac1fdc35cce1f66bf29e6c1b7226cb",
     "crates/kaban-index-tantivy/Cargo.toml": "e10b51abb72b61b0dd005135680741173e33b253d3e594a567576451266b2537",
     "crates/kaban-index/Cargo.toml": "5d02c9a9ac8689573110b50c30ed5f4e048b3b1f905ce7b0315d436203fb677e",
     "crates/kaban-ingest/Cargo.toml": "e78d235170a59d4abbed306de52b66a475f67d08df32dff48fd0d5703d82726a",
     "crates/kaban-policy/Cargo.toml": "2dfab010a9afeaf8ef04efb3c10793799f1a9605d6cc027389d5f7effaf17c37",
-    "crates/kaban-store-sqlite/Cargo.toml": "6170faf07a9f70c5bf4d24c0bb8c86a36a8f1d2a8294e5c7723c568ae46216e7",
-    "crates/kaban/Cargo.toml": "e68262018f64db5b306796f67c026776b4c901d581d8d675a4962122ceb38f96",
+    "crates/kaban-store-sqlite/Cargo.toml": "1dad62e1b1052aa374f35f1e1daf98ee7e5c41f468db63ffce5d665359c3ce2b",
+    "crates/kaban-vtab/Cargo.toml": "8b2751416ff19d26d2e28d0d8b76cf994b9cdb5dbf1a728b74078d241d986ef2",
+    "crates/kaban/Cargo.toml": "09a22662d949013f9ea120a8fe2d3eb0a2755d073a005f1620daff69feea1b4d",
     "licenses/release/upstream/alloc-stdlib-0.3.0-LICENSE": "c0c56f26d9c051cac4d200c34c84e7ae9aaa853e01a982a1df08b09931e518ae",
     "licenses/release/upstream/brotli-9.0.0-LICENSE.MIT": "3d180008e36922a4e8daec11c34c7af264fed5962d07924aea928c38e8663c94",
     "licenses/release/upstream/datasketches-0.2.0-LICENSE": "2a93522cc3e0d15510a70e0e7aaf33dc6a1588c39ca4a5c60c4b0121ed25eaf4",
@@ -6659,7 +6796,6 @@
     "licenses/release/upstream/htmlescape-0.3.1-LICENSE-APACHE": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
     "licenses/release/upstream/musl-1.2.5-COPYRIGHT": "f9bc4423732350eb0b3f7ed7e91d530298476f8fec0c6c427a1c04ade22655af",
     "licenses/release/upstream/ownedbytes-0.9.0-LICENSE": "acacd14bebbffdb30d62443c282fb4da3e81915a9f69c63d5d745a029f44de8a",
-    "licenses/release/upstream/rmcp-3.5.1-LICENSE": "0382b0057770ca05e9c350a50aa3b1c1fea84da0bc81d723bf00b9aa841be58a",
     "licenses/release/upstream/rust-1.99.0-COMPILER-BUILTINS-LICENSE.txt": "ab6eec6caf0fa5775e411c7a8bc6a45c4ef2956b0980b157ab74fc5cd62a928b",
     "licenses/release/upstream/rust-1.99.0-COPYRIGHT-library.html": "5647be074c8edf7339fd863055923a8fc80bc5610a8d4661ec3b767b9d392c27",
     "licenses/release/upstream/rust-1.99.0-LICENSE-Apache-2.0.txt": "074e6e32c86a4c0ef8b3ed25b721ca23aca83df277cd88106ef7177c354615ff",
@@ -6674,12 +6810,12 @@
     "licenses/release/upstream/rust-1.99.0-LICENSE-NCSA.txt": "39cb0234065c92b9e6cee3830cbb52b1aa289aa8fe9ba2e66730fec5cf05c630",
     "licenses/release/upstream/rust-1.99.0-LICENSE-OFL-1.1.txt": "8eea8287e5876b539670cadb82e99f9a7afddec6f6730811be1daf25d2e9bcfd",
     "licenses/release/upstream/rust-1.99.0-LICENSE-Unicode-3.0.txt": "f5062c9a188d81dfe66b56db4182dcf9e4b17c0d9b0d311a8e20b3a1b075c443",
-    "licenses/release/upstream/sources.json": "9569e74ad91f83e149e4f6484a124ef975ff7e990011280c14b493e4477ffd0e",
+    "licenses/release/upstream/sources.json": "4ac0df7cee80294d0ab8dd5260e1afdd67ee36defb9a8661f236961f75d43f21",
     "licenses/release/upstream/taffy-0.14.0-LICENSE": "f97daf1a0124413dccf399a4e6626b4b74acd05282f80b6d64ac82225650b77a",
     "licenses/release/upstream/tantivy-9e63fc5-LICENSE": "acacd14bebbffdb30d62443c282fb4da3e81915a9f69c63d5d745a029f44de8a",
     "licenses/release/upstream/whatlang-0.18.0-LICENSE": "9fb62b415784b27e358a03677cac6b56de73425f4fdbb5f4ecf19650af5dfe0c",
     "rust-toolchain.toml": "7efab7cecbc485510de8858da20618b9c4762cd40df3a9ff2a7788e5af5d9032",
-    "scripts/release/licenses.py": "73b603e9f87ce15879a8775543d5d76bf48eb7c2b45bca6446558ec0c451449f"
+    "scripts/release/licenses.py": "ee08edefc7ed8d3d36fd913db5c6d964861d51a304fa2e894813939e64fd6dae"
   },
   "packages": [
     "kaban",

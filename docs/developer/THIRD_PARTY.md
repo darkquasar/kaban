@@ -70,8 +70,11 @@ The collection includes these less obvious sources:
 - `zstd-sys`: the binding's terms and bundled libzstd `LICENSE` and `COPYING`.
 - Apache DataSketches: upstream `LICENSE` and `NOTICE`, omitted from its crate
   archive, retrieved at the crate's recorded upstream revision.
-- RMCP, Tantivy subcrates, `ownedbytes`, and `whatlang`: omitted licence texts
+- Tantivy subcrates, `ownedbytes`, and `whatlang`: omitted licence texts
   retrieved at their crate archives' `.cargo_vcs_info.json` revisions.
+- RMCP: from 3.9.0 the `rmcp` and `rmcp-macros` archives ship the upstream
+  `LICENSE` (Apache-2.0 with the MIT-to-Apache transition preamble), so it is
+  collected from the archives and no supplement is kept.
 - `htmlescape`: its manifest offers Apache-2.0, MIT, or MPL-2.0 but ships no
   licence text. Apache-2.0 is selected and its standard text is retained.
 - Rust 1.99.0: the standard-library copyright/dependency inventory and licence

@@ -65,9 +65,9 @@ class ReleaseLicenses(unittest.TestCase):
         self.assertIn("terms.txt", [item["path"] for item in result])
 
     def test_upgraded_dependency_cannot_reuse_an_old_supplement(self):
-        self.package.update(name="rmcp", version="99.0.0")
+        self.package.update(name="whatlang", version="99.0.0")
         (self.root / "LICENSE").write_text("New version terms\n")
-        with self.assertRaisesRegex(ValueError, "supplement.*rmcp.*99.0.0"):
+        with self.assertRaisesRegex(ValueError, "supplement.*whatlang.*99.0.0"):
             LICENSES.collect_notices(self.package, self.root / "upstream")
 
     def test_qcms_preserves_complete_embedded_copyright_variants(self):

@@ -25,8 +25,6 @@ SUPPLEMENTS = {
     "datasketches": ("datasketches-0.2.0-LICENSE", "datasketches-0.2.0-NOTICE"),
     "htmlescape": ("htmlescape-0.3.1-LICENSE-APACHE",),
     "ownedbytes": ("ownedbytes-0.9.0-LICENSE",),
-    "rmcp": ("rmcp-3.5.1-LICENSE",),
-    "rmcp-macros": ("rmcp-3.5.1-LICENSE",),
     "whatlang": ("whatlang-0.18.0-LICENSE",),
     **{name: ("tantivy-9e63fc5-LICENSE",) for name in (
         "tantivy-bitpacker", "tantivy-columnar", "tantivy-common", "tantivy-query-grammar",
@@ -36,7 +34,7 @@ SUPPLEMENTS = {
 SUPPLEMENT_VERSIONS = {
     "alloc-stdlib": "0.3.0", "taffy": "0.14.0", "brotli-decompressor": "6.0.1",
     "datasketches": "0.2.0", "htmlescape": "0.3.1", "ownedbytes": "0.9.0",
-    "rmcp": "3.5.1", "rmcp-macros": "3.5.1", "whatlang": "0.18.0",
+    "whatlang": "0.18.0",
     **{name: "0.7.0" for name in SUPPLEMENTS if name.startswith("tantivy-")},
     "tantivy-bitpacker": "0.10.0", "tantivy-common": "0.11.0",
     "tantivy-query-grammar": "0.26.0",
