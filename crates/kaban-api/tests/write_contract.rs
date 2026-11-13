@@ -53,7 +53,11 @@ fn a_remembered_decision_is_active_for_a_second_process_with_no_governance_state
     let (_, reader) = open(&s);
     let card = recall_one(&reader, "write contract store");
     assert_eq!(card["id"], json!(put.id), "{card}");
-    assert_eq!(card["lifecycle"], json!(Lifecycle::Active.as_str()), "{card}");
+    assert_eq!(
+        card["lifecycle"],
+        json!(Lifecycle::Active.as_str()),
+        "{card}"
+    );
     for field in ["governance", "policy_version", "candidate", "proposed"] {
         assert!(card.get(field).is_none(), "card.{field}: {card}");
     }

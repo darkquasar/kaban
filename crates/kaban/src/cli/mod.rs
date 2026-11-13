@@ -267,14 +267,14 @@ pub(crate) fn run(mut cli: Cli) -> ExitCode {
         },
         // its own open (diagnostic, never creating or migrating); a policy that does not load
         // is a config error like everywhere else
-        Cmd::Doctor {
-            vacuum, optimize
-        } => match (load_policy(cli.policy.as_deref()), keys_dir()) {
-            (Ok(policy), Ok(keys)) => {
-                doctor::run(&cli, policy, &keys, vacuum, optimize, format)
+        Cmd::Doctor { vacuum, optimize } => {
+            match (load_policy(cli.policy.as_deref()), keys_dir()) {
+                (Ok(policy), Ok(keys)) => {
+                    doctor::run(&cli, policy, &keys, vacuum, optimize, format)
+                }
+                (Err(code), _) | (_, Err(code)) => code,
             }
-            (Err(code), _) | (_, Err(code)) => code,
-        },
+        }
         // every hook path exits 0 (M4-8); the module owns the open, the watchdog and the body
         Cmd::Hook { event, host } => hook::run(cli, event, host),
         Cmd::Reindex { command } => reindex::run(cli, &command, format),

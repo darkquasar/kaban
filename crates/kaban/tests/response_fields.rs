@@ -163,7 +163,10 @@ fn doctor_drops_only_the_governance_audit_and_lag_checks() {
         .map(|c| c["name"].as_str().unwrap())
         .collect();
     let unknown: Vec<&&str> = names.difference(&before).collect();
-    assert!(unknown.is_empty(), "checks not in the baseline: {unknown:?}");
+    assert!(
+        unknown.is_empty(),
+        "checks not in the baseline: {unknown:?}"
+    );
     let kept: Vec<&str> = REMOVED_CHECKS
         .into_iter()
         .filter(|c| names.contains(c))

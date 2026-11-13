@@ -235,24 +235,25 @@ async fn ontology_reload_marks_job_stale_without_submit_graph_writes() {
 /// active rows in one commit, like `remember`; the report carries no claim or revision state.
 #[tokio::test]
 async fn submitted_records_and_edges_are_active_for_a_second_process() {
-    let rig = common::real::rig_on_disk(
-        "kaban-e39-submit",
-        "active",
-        kaban_policy::Policy::empty(),
-    );
+    let rig =
+        common::real::rig_on_disk("kaban-e39-submit", "active", kaban_policy::Policy::empty());
     std::fs::write(rig.root.join("a.md"), "# Source\n\nThree harmless facts.\n").unwrap();
     let api = api(&rig);
     let prepared = brief(&api, &rig.root, "a.md", &IngestOpts::default())
         .await
         .unwrap();
-    let report = submit(&api, &rig.root, json!({"job":prepared.job,"records":[
-        {"local_id":"one","kind":"Fact","text":"Alpha extractor fact"},
-        {"local_id":"two","kind":"Fact","text":"Beta extractor fact"},
-        {"local_id":"three","kind":"Fact","text":"Gamma extractor fact"}
-    ],"edges":[
-        {"from_local_id":"one","rel":"RELATES_TO","to_local_id":"two"},
-        {"from_local_id":"two","rel":"RELATES_TO","to_local_id":"three"}
-    ]}))
+    let report = submit(
+        &api,
+        &rig.root,
+        json!({"job":prepared.job,"records":[
+            {"local_id":"one","kind":"Fact","text":"Alpha extractor fact"},
+            {"local_id":"two","kind":"Fact","text":"Beta extractor fact"},
+            {"local_id":"three","kind":"Fact","text":"Gamma extractor fact"}
+        ],"edges":[
+            {"from_local_id":"one","rel":"RELATES_TO","to_local_id":"two"},
+            {"from_local_id":"two","rel":"RELATES_TO","to_local_id":"three"}
+        ]}),
+    )
     .await
     .unwrap();
     assert_eq!(report["created"], 3, "{report}");
@@ -318,9 +319,5 @@ async fn submitted_records_and_edges_are_active_for_a_second_process() {
         (ids[1].as_str(), ids[2].as_str()),
     ];
     expected.sort_unstable();
-    assert_eq!(
-        pairs,
-        expected,
-        "{expanded:?}"
-    );
+    assert_eq!(pairs, expected, "{expanded:?}");
 }

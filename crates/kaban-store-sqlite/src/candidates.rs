@@ -83,8 +83,8 @@ use crate::sql_error::SqlResultExt;
 use kaban_core::config::PromoteWhen;
 use kaban_core::ontology::meta::{Acceptance, DiscoveredPolicyName};
 use kaban_core::{
-    DiscoveredRules, GovernedSet, KindStat, OntologyError, PromoteReport, PruneReport,
-    ReadFilters, Result, StoreError, split_stored,
+    DiscoveredRules, GovernedSet, KindStat, OntologyError, PromoteReport, PruneReport, ReadFilters,
+    Result, StoreError, split_stored,
 };
 use rusqlite::{Connection, OptionalExtension, params};
 use std::time::Duration;
