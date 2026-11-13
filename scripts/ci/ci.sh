@@ -426,20 +426,23 @@ quality() {
   step "${CARGO:-cargo}" deny check
 
   # store-boundary dependency check (engine-spec EN-E10a hygiene, engine-plan E1.0, SO-5):
-  #   kaban-api and kaban-ingest declare no direct normal `rusqlite` dependency (dev-only is fine),
-  #   and the inverse normal tree of rusqlite under kaban-api is empty (today) or names
-  #   kaban-codegraph as the only direct parent (after v4 CG5.2). Any other parent fails. Across the
-  #   workspace the direct parents of rusqlite are kaban-store-sqlite, kaban-codegraph, kaban-vtab.
+  #   no workspace member other than kaban-store-sqlite, kaban-codegraph and kaban-vtab (spec 11
+  #   QRY-07) declares a normal `rusqlite` dependency, counting optional entries behind any feature
+  #   and `[target.'cfg(...)'.dependencies]` entries for any platform (dev-only is fine). The inverse
+  #   normal tree of rusqlite under kaban-api is empty (today) or names kaban-codegraph as the only
+  #   direct parent (after v4 CG5.2), and the resolved workspace tree has no other direct parent.
   store_boundary_deps() {
     local meta direct parents
     meta=$("${CARGO:-cargo}" metadata --format-version 1 --no-deps) || return 1
+    # --no-deps lists only workspace members, each with every declared dependency regardless of
+    # features or target; `.name` is the package name, so a renamed rusqlite is still caught
     direct=$(printf '%s' "$meta" | jq -r '.packages[]
-      | select(.name == "kaban-api" or .name == "kaban-ingest")
+      | select(.name as $n | ["kaban-store-sqlite", "kaban-codegraph", "kaban-vtab"] | index($n) | not)
       | .name as $pkg | .dependencies[]
       | select(.name == "rusqlite" and .kind == null)
-      | "\($pkg) -> rusqlite (normal)"') || return 1
+      | "\($pkg) -> rusqlite (normal\(if .optional then ", optional" else "" end)\(if .target then ", target \(.target)" else "" end))"') || return 1
     if [ -n "$direct" ]; then
-      echo "FAILED: direct rusqlite dependency outside the store crate:" >&2
+      echo "FAILED: normal rusqlite dependency outside kaban-store-sqlite, kaban-codegraph, kaban-vtab:" >&2
       echo "$direct" >&2
       return 1
     fi
@@ -474,7 +477,7 @@ quality() {
       echo "$unexpected" >&2
       return 1
     fi
-    echo "store boundary: no direct rusqlite in kaban-api/kaban-ingest; kaban-api inverse tree parents: ${parents:-none}; workspace rusqlite parents: $(printf '%s' "$all_parents" | tr '\n' ' ')"
+    echo "store boundary: no normal rusqlite outside kaban-store-sqlite, kaban-codegraph, kaban-vtab; kaban-api inverse tree parents: ${parents:-none}; workspace rusqlite parents: $(printf '%s' "$all_parents" | tr '\n' ' ')"
   }
   if command -v jq >/dev/null 2>&1; then
     step store_boundary_deps
