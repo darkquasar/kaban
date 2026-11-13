@@ -139,8 +139,7 @@ fn ingest_blocked(tree: &Tree) -> Vec<NodeId> {
                     &key,
                     tree.policy.effective_hash(),
                 );
-                let mut ctx = WriteCtx::new(tree.policy.effective_hash(), ws.clone(), Actor::Agent);
-                ctx.audit.push(blocked.audit);
+                let ctx = WriteCtx::new(ws.clone(), Actor::Agent);
                 tree.store.apply_batch(blocked.batch, &ctx).unwrap();
                 written.push(blocked.id);
             }
@@ -317,7 +316,7 @@ fn should_skip_is_true_only_when_every_component_is_unchanged() {
         })),
         ..NewNode::default()
     };
-    let ctx = WriteCtx::new(policy.effective_hash(), ws.clone(), Actor::Agent);
+    let ctx = WriteCtx::new(ws.clone(), Actor::Agent);
     store
         .apply_batch(
             WriteBatch::new(

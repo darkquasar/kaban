@@ -16,7 +16,7 @@ pub enum ApiError {
     Rejected {
         /// Field that triggered the rejection (`text`, `props`, `all` for the joined view, ...).
         field: String,
-        /// Reject-action rule ids (or `audit-unavailable`).
+        /// Reject-action rule ids.
         rules: Vec<String>,
     },
     /// No node with that id.

@@ -10,7 +10,7 @@ use kaban_store_sqlite::SqliteStore;
 use serde_json::{Value, json};
 
 fn ctx() -> WriteCtx {
-    WriteCtx::new("fixture-policy", WorkspaceId::default(), Actor::Agent)
+    WriteCtx::new(WorkspaceId::default(), Actor::Agent)
 }
 fn document(store: &SqliteStore, path: &str, workspace: &WorkspaceId) -> IngestJob {
     let id = NodeId::new();
@@ -108,7 +108,6 @@ fn finish_marker_release_and_report_rollback_together_and_retry_cannot_change_th
         .job_finish(finish_request(&store, &job, 1), &ctx(), &mut |_, _| {
             Ok(JobFinishStateUpdate {
                 report_json: "{}".into(),
-                audit: vec![],
             })
         })
         .unwrap();
@@ -131,7 +130,6 @@ fn finish_marker_release_and_report_rollback_together_and_retry_cannot_change_th
             .job_finish(finish_request(&store, &job, 1), &ctx(), &mut |_, _| Ok(
                 JobFinishStateUpdate {
                     report_json: "{\"changed\":true}".into(),
-                    audit: vec![]
                 }
             ))
             .is_err()
@@ -145,7 +143,6 @@ fn finish_marker_release_and_report_rollback_together_and_retry_cannot_change_th
         store.job_finish(finish_request(&store, &job, 1), &ctx(), &mut |_, _| Ok(
             JobFinishStateUpdate {
                 report_json: "{}".into(),
-                audit: vec![]
             }
         )),
         Err(StoreError::LeaseLost { .. })
@@ -186,7 +183,6 @@ fn source_and_workspace_are_independent_of_valid_fence_and_claim_rollback_is_ato
         store
             .job_finish(req, &ctx(), &mut |_, _| Ok(JobFinishStateUpdate {
                 report_json: "{}".into(),
-                audit: vec![]
             }))
             .is_err()
     );

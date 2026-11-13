@@ -30,7 +30,6 @@ fn api_over(store: &Arc<SqliteStore>, policy: &str) -> KabanApi {
         Arc::clone(store) as Arc<dyn kaban_core::GraphStore>,
         policy,
         store.signer(),
-        None,
         ApiConfig {
             workspace: WorkspaceId::new("enrich"),
             ..Default::default()

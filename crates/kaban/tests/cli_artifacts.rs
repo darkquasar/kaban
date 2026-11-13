@@ -20,7 +20,7 @@ fn explicit_ingestion_restores_reset_links_and_preserves_other_authority() {
     )
     .unwrap();
     let store = SqliteStore::open(&scratch.db(), &scratch.home().join("keys")).unwrap();
-    let ctx = WriteCtx::new("v1", WorkspaceId::default(), Actor::Agent);
+    let ctx = WriteCtx::new(WorkspaceId::default(), Actor::Agent);
     let target = match store
         .remember(
             NewNode {
@@ -75,7 +75,7 @@ fn explicit_ingestion_restores_reset_links_and_preserves_other_authority() {
             "MENTIONS",
             Some(0.8),
             None,
-            &WriteCtx::new("v1", WorkspaceId::default(), Actor::HumanCli),
+            &WriteCtx::new(WorkspaceId::default(), Actor::HumanCli),
         )
         .unwrap();
     // another layer's edge on the human's triple: a producer never overwrites a human edge
@@ -111,7 +111,7 @@ fn explicit_ingestion_restores_reset_links_and_preserves_other_authority() {
                 ..Default::default()
             },
             &[],
-            &WriteCtx::new("v1", WorkspaceId::new("foreign"), Actor::Agent),
+            &WriteCtx::new(WorkspaceId::new("foreign"), Actor::Agent),
         )
         .unwrap()
     {
@@ -202,7 +202,7 @@ fn layer_commands_are_db_only_and_refuse_invalid_or_human_layers() {
                     ..Default::default()
                 },
                 &[],
-                &WriteCtx::new("v1", WorkspaceId::default(), Actor::Agent),
+                &WriteCtx::new(WorkspaceId::default(), Actor::Agent),
             )
             .unwrap();
     }
@@ -266,7 +266,7 @@ fn doctor_optimize_is_explicit_and_missing_database_is_never_created() {
                     ..Default::default()
                 },
                 &[],
-                &WriteCtx::new("v1", WorkspaceId::default(), Actor::Agent),
+                &WriteCtx::new(WorkspaceId::default(), Actor::Agent),
             )
             .unwrap();
     }

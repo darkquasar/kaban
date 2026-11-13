@@ -40,7 +40,7 @@ pub trait SessionStore: Send + Sync {
     fn pending_failures(&self, q: &PendingFailuresQuery) -> Result<Vec<Node>>;
     /// Apply `patch` to an active Failure's props in one write transaction (M4-15): `fix` and
     /// `pending_fix` are set, `evidence_run` is appended, `rev` is bumped, the changes row
-    /// comes from the node trigger and `ctx.audit` is appended. The node must live in
+    /// comes from the node trigger. The node must live in
     /// `ctx.workspace_id` (core-spec S6).
     ///
     /// # Errors

@@ -223,7 +223,7 @@ pub trait IngestStore: Send + Sync {
     /// Apply one ingestion batch in one write transaction (core-plan C2.6; F16 store side):
     /// node ops in order, then edge ops, then the MD-23 edge diff (outgoing edges of each
     /// upserted node that the batch did not name are deleted; incoming edges are untouched),
-    /// with `ctx.audit` appended in the same transaction (D-17). A node whose WD-7 content
+    /// in one transaction. A node whose WD-7 content
     /// hash is unchanged writes no row and no changes row. The report's `ChangeLog` range covers
     /// exactly the `changes` rows this transaction wrote. Any failing op rolls the whole batch
     /// back.
@@ -238,23 +238,24 @@ pub trait IngestStore: Send + Sync {
     /// `NotFound` (unknown, purged or other-workspace id), `KindMismatch`, `InvalidTransition`
     /// or a backend error.
     fn apply_batch(&self, batch: WriteBatch, ctx: &WriteCtx) -> Result<BatchReport>;
-    /// Re-judge one batch of at most `batch` non-purged nodes whose `policy_version` differs
-    /// from `policy_version`, oldest row first, in one write transaction (core-spec S4;
-    /// core-plan C2.7): `f` decides per node and the store applies the [`RescanAction`]
-    /// (stamp; rewrite every rewritable string column in place with a new `rev` and a new
-    /// `content_hash` over the id and the masked strings; or tombstone with a `policy-reject`
-    /// event), with the action's audit entries in the same transaction. Every node the batch
-    /// judged ends up stamped with `policy_version`, so the caller loops until `scanned == 0`
-    /// and a cancelled or crashed run leaves the earlier batches committed and the rest pending
-    /// (idempotent re-run). An empty batch records `index_meta.policy_hash = policy_version`
-    /// in the same transaction (R2-3: the marker and the "nothing stale" check are atomic).
-    /// `f` must not call back into the store.
+    /// Re-judge one batch of at most `batch` non-purged nodes after position `after` (the
+    /// previous batch's [`RescanReport::cursor`], `0` to start), oldest row first, in one
+    /// write transaction (core-spec S4; core-plan C2.7): `f` decides per node and the store
+    /// applies the [`RescanAction`] (nothing; rewrite every rewritable string column in place
+    /// with a new `rev` and a new `content_hash` over the id and the masked strings; or
+    /// tombstone with a `policy-reject` event). Nodes carry no policy stamp (REC-08), so the
+    /// caller walks the table by cursor until `scanned == 0`; a cancelled or crashed run
+    /// leaves the earlier batches committed and the walk restarts on the next run (idempotent).
+    /// An empty batch records `index_meta.policy_hash = policy_version` in the same
+    /// transaction, the marker a later run compares the loaded policy with. `f` must not call
+    /// back into the store.
     ///
     /// # Errors
     /// Backend errors; the batch is rolled back.
     fn rescan(
         &self,
         policy_version: &str,
+        after: u64,
         batch: usize,
         f: &mut dyn FnMut(&Node) -> RescanAction,
     ) -> Result<RescanReport>;
@@ -373,7 +374,7 @@ pub trait IngestStore: Send + Sync {
     fn optimize_fts(&self) -> Result<MaintenanceOutcome>;
 
     // engine-plan E1.8: discovered labels (EN-F5, EN-F6). The placement itself happens inside
-    // `apply_batch` and `remember` under `WriteCtx.discovered`; these are its bookkeeping.
+    // `apply_batch` and `remember` under the store's discovered rules; these are its bookkeeping.
 
     /// The `kind_stats` rows of `workspace` (EN-F6, EN-S3: another workspace's rows never
     /// appear), ordered by `(ns, kind)`.

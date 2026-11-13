@@ -1,10 +1,8 @@
-//! Audit types shared by the service layer and every store: what gets recorded (rule ids,
-//! field names, keyed hashes; never the offending value) and the write context that carries
-//! the entries into the store's transaction (core-spec S3; core-plan C1.4).
+//! The write context every store write takes (REC-06), the workspace and actor identities, and
+//! the denylist verdict record the ingest gate and the JSONL audit writer of `kaban-policy`
+//! share (rule ids, field names, keyed hashes; never the offending value).
 
-use crate::lifecycle::GovernedSet;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Which gated operation an audit row records.
@@ -19,8 +17,6 @@ pub enum AuditOp {
     Forget,
     /// A node was purged (destructive).
     Purge,
-    /// A governance acceptance (M3).
-    Accept,
 }
 
 impl AuditOp {
@@ -31,7 +27,6 @@ impl AuditOp {
             Self::Redact => "redact",
             Self::Forget => "forget",
             Self::Purge => "purge",
-            Self::Accept => "accept",
         }
     }
 }
@@ -171,17 +166,13 @@ pub enum Durability {
     Full,
 }
 
-/// Context of one gated write: the policy version to stamp, the workspace, the audit entries
-/// to persist in the same transaction, the actor, the configured writer and the governed kinds the store decides
-/// governance by (engine-spec EN-F4).
+/// Context of one write (REC-06): the workspace, the actor and how hard the commit waits for
+/// the disk, plus the repository identity stamped on new records and the slot the store
+/// records the call's terminal sequence in (the receipt reads it; PC-4 survivors).
 #[derive(Debug, Clone)]
 pub struct WriteCtx {
-    /// Effective policy version stamped on stored nodes.
-    pub policy_version: String,
     /// Workspace the write belongs to.
     pub workspace_id: WorkspaceId,
-    /// Audit rows to append atomically with the write.
-    pub audit: Vec<AuditEntry>,
     /// Who is writing. The configured writer (`--actor-id`, SS-26) is not carried here: the
     /// store stamps the identity it was opened as, the one authority.
     pub actor: Actor,
@@ -190,14 +181,6 @@ pub struct WriteCtx {
     /// Identity of the repository this process runs in (its root directory name, M3-23), if
     /// any: stamped on a record's `repo` column when it is still unset.
     pub repo: Option<String>,
-    /// The governed kinds and `on_link` rels of the loaded ontology (engine-plan E1.4): a new
-    /// record of a kind in the set starts `proposed`, every other kind has no governance. The
-    /// service sets it from the registry; [`WriteCtx::new`] defaults to the shipped set.
-    pub governed: Arc<GovernedSet>,
-    /// The discovered-labels rules (engine-plan E1.8, EN-F5): the loaded ontologies' policy
-    /// and the per-workspace cap. The service sets it from the registry and the engine
-    /// config; [`WriteCtx::new`] defaults to the shipped `review` policy and the register cap.
-    pub discovered: crate::model::DiscoveredRules,
     /// The call's terminal `changes.seq` (spec 05 SS-10), recorded by the store from inside
     /// the write transaction right before its commit (the log head at that moment: the call's
     /// last change row, or the head it saw when it wrote none) and read by the service for
@@ -231,18 +214,13 @@ impl Clone for TerminalSeq {
 }
 
 impl WriteCtx {
-    /// A context with no pending audit entries, no repository identity and the shipped
-    /// governed set.
-    pub fn new(policy_version: impl Into<String>, workspace_id: WorkspaceId, actor: Actor) -> Self {
+    /// A context with normal durability and no repository identity.
+    pub fn new(workspace_id: WorkspaceId, actor: Actor) -> Self {
         Self {
-            policy_version: policy_version.into(),
             workspace_id,
-            audit: Vec::new(),
             actor,
             durability: Durability::Normal,
             repo: None,
-            governed: GovernedSet::shipped(),
-            discovered: crate::model::DiscoveredRules::default(),
             terminal_seq: TerminalSeq::unset(),
         }
     }
@@ -270,37 +248,17 @@ impl WriteCtx {
         self
     }
 
-    /// The same context deciding governance by `governed` (the registry's set).
+    /// The same context committing with `durability`.
     #[must_use]
-    pub fn with_governed(mut self, governed: Arc<GovernedSet>) -> Self {
-        self.governed = governed;
-        self
-    }
-
-    /// The same context placing undeclared labels by `discovered` (the registry's policy and
-    /// the engine's cap).
-    #[must_use]
-    pub fn with_discovered(mut self, discovered: crate::model::DiscoveredRules) -> Self {
-        self.discovered = discovered;
+    pub fn with_durability(mut self, durability: Durability) -> Self {
+        self.durability = durability;
         self
     }
 }
 
 impl Default for WriteCtx {
-    /// An empty policy version, the default workspace, the agent actor and the shipped set
-    /// (never an empty set: see [`GovernedSet`]).
+    /// The default workspace and the agent actor.
     fn default() -> Self {
-        Self::new(String::new(), WorkspaceId::default(), Actor::default())
+        Self::new(WorkspaceId::default(), Actor::default())
     }
-}
-
-/// Result of recomputing the audit chain.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AuditVerification {
-    /// Number of rows checked.
-    pub entries: u64,
-    /// Whether every row's HMAC matched and chained onto its predecessor.
-    pub ok: bool,
-    /// First sequence number that failed, when `ok` is false.
-    pub first_bad_seq: Option<u64>,
 }

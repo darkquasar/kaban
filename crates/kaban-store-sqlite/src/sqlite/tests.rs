@@ -5,11 +5,7 @@ use kaban_core::Op;
 
 /// Legacy tests passed the policy version string; the write context now carries it.
 fn ctx() -> WriteCtx {
-    WriteCtx::new(
-        "v1",
-        kaban_core::WorkspaceId::default(),
-        kaban_core::Actor::Agent,
-    )
+    WriteCtx::new(kaban_core::WorkspaceId::default(), kaban_core::Actor::Agent)
 }
 
 fn nid(id: &str) -> NodeId {
@@ -110,12 +106,12 @@ fn remember_link_recall_roundtrip() {
     // an undeclared kind is refused under the `deny` discovered policy (EN-F5; under the
     // default `review` it would be placed as an `x:Rumour` candidate, `tests/discovered.rs`);
     // an unknown rel is rejected until registered
-    let deny = ctx().with_discovered(kaban_core::DiscoveredRules {
+    let s = s.with_discovered(kaban_core::DiscoveredRules {
         policy: kaban_core::ontology::meta::DiscoveredPolicyName::Deny,
         cap: 500,
     });
     assert!(matches!(
-        s.remember(mk("Rumour", "x"), &[], &deny),
+        s.remember(mk("Rumour", "x"), &[], &ctx()),
         Err(StoreError::KindNotAllowed)
     ));
     assert!(matches!(
@@ -351,8 +347,8 @@ fn list_nodes_pages_active_rows_of_one_workspace_in_id_order() {
     let other = NodeId::parse(&kaban_core::new_id()).unwrap();
     let section = NodeId::parse(&kaban_core::new_id()).unwrap();
     let batch = |ws: &kaban_core::WorkspaceId, ops: Vec<Op>| WriteBatch::new(ws.clone(), ops);
-    let ctx_a = WriteCtx::new("v1", ws_a.clone(), kaban_core::Actor::Agent);
-    let ctx_b = WriteCtx::new("v1", ws_b.clone(), kaban_core::Actor::Agent);
+    let ctx_a = WriteCtx::new(ws_a.clone(), kaban_core::Actor::Agent);
+    let ctx_b = WriteCtx::new(ws_b.clone(), kaban_core::Actor::Agent);
     let mut ops: Vec<Op> = ids
         .iter()
         .map(|id| Op::UpsertNode {

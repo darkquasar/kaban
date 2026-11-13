@@ -51,7 +51,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 pub(crate) use nodes::content_hash;
 
@@ -135,6 +135,13 @@ pub struct SqliteStore {
     /// The ontology this store ranks and projects under (the shipped one until
     /// [`Self::with_ontology`]).
     ontology: Arc<Ontology>,
+    /// The governed kinds and `on_link` rels every write decides archive-on-link rels and
+    /// path-governing kinds by: the shipped set, or the service's loaded set once it published
+    /// one ([`SchemaStore::adopt_governed`]).
+    governed: RwLock<Arc<GovernedSet>>,
+    /// The discovered-labels rules undeclared labels are placed by (the shipped `review`
+    /// policy and the register cap until [`Self::with_discovered`]).
+    discovered: DiscoveredRules,
     /// The recall configuration this store ranks under.
     recall: kaban_core::config::Recall,
     /// The dedicated read connection the code-graph snapshot is attached on (CG-JOIN v1 §2
@@ -353,12 +360,20 @@ impl SqliteStore {
         &self.migration
     }
 
+    /// The same store placing undeclared labels by `discovered`.
+    #[must_use]
+    pub fn with_discovered(mut self, discovered: DiscoveredRules) -> Self {
+        self.discovered = discovered;
+        self
+    }
+
     /// The same store ranking and projecting under `ontology` (the service's loaded ontology)
     /// instead of the shipped one.
     ///
     /// # Errors
     /// Backend errors redeploying the identifier projection or rebuilding the index.
     pub fn with_ontology(mut self, ontology: Arc<Ontology>) -> Result<Self> {
+        self.governed = RwLock::new(Arc::new(GovernedSet::from_ontology(&ontology)));
         self.ontology = ontology;
         {
             let mut conn = self.write();
@@ -652,6 +667,8 @@ impl SqliteStore {
             signer,
             migration,
             ontology: shipped_ontology(),
+            governed: RwLock::new(GovernedSet::shipped()),
+            discovered: DiscoveredRules::default(),
             recall: kaban_core::config::Recall::default(),
             cg_read: Mutex::new(None),
             projector: None,
@@ -752,7 +769,7 @@ impl SqliteStore {
         if srid == drid {
             return Err(StoreError::SelfLink(src.to_string()));
         }
-        Self::edge_rule(conn, tenant.governed, rel, &skind, &dkind)?;
+        Self::edge_rule(conn, &tenant.governed, rel, &skind, &dkind)?;
         let now = now_iso();
         let props = props.unwrap_or_else(|| json!({}));
         // an existing (src, dst, rel) is refreshed, not created (review R1-8)
@@ -792,7 +809,7 @@ impl SqliteStore {
             .optional()
             .sql()?
             .ok_or_else(|| StoreError::NotFound(rel.to_owned()))?;
-        if let Some(effect) = LinkEffect::of(tenant.governed, rel) {
+        if let Some(effect) = LinkEffect::of(&tenant.governed, rel) {
             Self::mark_target(conn, dst, effect, &now)?;
         }
         Ok((edge, !existed))
@@ -932,21 +949,30 @@ const GOVERNS_REL: &str = "GOVERNS";
 /// (R3-3).
 struct Tenant<'a> {
     ws: &'a str,
-    /// The governed kinds and `on_link` rels this write decides by (`ctx.governed`, EN-F4).
-    governed: &'a GovernedSet,
-    /// The discovered-labels policy and cap this write places undeclared labels by
-    /// (`ctx.discovered`, EN-F5).
+    /// The governed kinds and `on_link` rels this write decides by (EN-F4).
+    governed: Arc<GovernedSet>,
+    /// The discovered-labels policy and cap the store places undeclared labels by (EN-F5).
     discovered: &'a DiscoveredRules,
 }
 
-impl<'a> Tenant<'a> {
-    /// The tenant of a write context in workspace `ws`.
-    fn of(ctx: &'a WriteCtx, ws: &'a str) -> Self {
-        Self {
+impl SqliteStore {
+    /// The tenant of a write in workspace `ws`, deciding by this store's ontology.
+    fn tenant<'a>(&'a self, ws: &'a str) -> Tenant<'a> {
+        Tenant {
             ws,
-            governed: &ctx.governed,
-            discovered: &ctx.discovered,
+            governed: self.governed(),
+            discovered: &self.discovered,
         }
+    }
+
+    /// The governed set writes decide by now.
+    pub(crate) fn governed(&self) -> Arc<GovernedSet> {
+        Arc::clone(
+            &self
+                .governed
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
     }
 }
 
@@ -1002,7 +1028,7 @@ impl MemoryStore for SqliteStore {
             .sql()?;
         let (e, _) = Self::link_in(
             &tx,
-            &Tenant::of(ctx, ctx.workspace_id.as_str()),
+            &self.tenant(ctx.workspace_id.as_str()),
             src.as_str(),
             dst.as_str(),
             rel,
@@ -1216,6 +1242,12 @@ impl MemoryStore for SqliteStore {
 impl SchemaStore for SqliteStore {
     fn schema(&self) -> Result<Vec<TypeDef>> {
         ontology::all_defs(&self.lock())
+    }
+    fn adopt_governed(&self, governed: Arc<GovernedSet>) {
+        *self
+            .governed
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = governed;
     }
     fn schema_extend(&self, def: TypeDef) -> Result<TypeDef> {
         match def.kind.as_str() {
@@ -1563,10 +1595,11 @@ impl IngestStore for SqliteStore {
     fn rescan(
         &self,
         policy_version: &str,
+        after: u64,
         batch: usize,
         f: &mut dyn FnMut(&Node) -> RescanAction,
     ) -> Result<RescanReport> {
-        self.rescan_impl(policy_version, batch, f)
+        self.rescan_impl(policy_version, after, batch, f)
     }
     fn index_meta(&self) -> Result<IndexMeta> {
         let conn = self.lock();

@@ -565,7 +565,6 @@ impl Session {
             store,
             policy,
             signer,
-            None,
             ApiConfig {
                 repo_root: Some(dir.clone()),
                 repo: Some("bench".to_owned()),

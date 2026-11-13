@@ -500,11 +500,8 @@ mod tests {
             "the worker died at its acquisition, holding lease and lock"
         );
         assert_eq!(thread.shared.state().holding, Some(false), "nothing held");
-        let ctx = kaban_core::WriteCtx::new(
-            "v1",
-            kaban_core::WorkspaceId::default(),
-            kaban_core::Actor::Agent,
-        );
+        let ctx =
+            kaban_core::WriteCtx::new(kaban_core::WorkspaceId::default(), kaban_core::Actor::Agent);
         let note = kaban_core::NewNode {
             kind: "Fact".into(),
             text: "quokka after the worker died".into(),

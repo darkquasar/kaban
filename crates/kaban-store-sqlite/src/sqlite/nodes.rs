@@ -37,7 +37,6 @@ impl SqliteStore {
         refs: &[NewNode],
         ctx: &WriteCtx,
     ) -> Result<RememberOutcome> {
-        let policy_version = ctx.policy_version.as_str();
         let mut conn = self.write();
         let tx = conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
@@ -47,7 +46,7 @@ impl SqliteStore {
             .as_deref()
             .unwrap_or(WorkspaceId::DEFAULT)
             .to_owned();
-        let tenant = Tenant::of(ctx, &workspace_id);
+        let tenant = self.tenant(&workspace_id);
         // EN-F5: the one-record batch; a refused label is the error, a new kind beyond the
         // cap is `discovered_cap_reached` with its `n_rejected` increment (and the audit rows)
         // committed and nothing else written
@@ -61,7 +60,7 @@ impl SqliteStore {
             // m2 N5: a retry still attaches its links (and refs); metadata differences are
             // reported, not applied
             let links_created = Self::attach_links(&tx, &tenant, &existing.id, links)?;
-            Self::attach_refs(&tx, &tenant, &existing.id, refs, policy_version)?;
+            Self::attach_refs(&tx, &tenant, &existing.id, refs)?;
             let fields_ignored = ignored_fields(&n, &existing);
             changelog::record_terminal(&tx, ctx)?;
             tx.commit().sql()?;
@@ -71,11 +70,11 @@ impl SqliteStore {
                 fields_ignored,
             });
         }
-        let id = Self::insert_node(&tx, &tenant, &placement, &n, &hash, policy_version)?;
+        let id = Self::insert_node(&tx, &tenant, &placement, &n, &hash)?;
         // a new node has no edges yet, so every distinct link is an insert; the API reports
         // the distinct count (review R1-8)
         Self::attach_links(&tx, &tenant, &id, links)?;
-        Self::attach_refs(&tx, &tenant, &id, refs, policy_version)?;
+        Self::attach_refs(&tx, &tenant, &id, refs)?;
         let node = tx
             .query_row(
                 &format!("SELECT {NODE_COLS} FROM node WHERE id=?"),
@@ -137,7 +136,6 @@ impl SqliteStore {
         placement: &Placement,
         n: &NewNode,
         hash: &str,
-        policy_version: &str,
     ) -> Result<String> {
         let id = new_id();
         let now = now_iso();
@@ -148,8 +146,8 @@ impl SqliteStore {
         let bodies = crate::body_codec::Writer::for_connection(conn)?;
         conn.execute(
             "INSERT INTO node(id,kind,text,summary,tags,confidence,importance,lifecycle,governance,store_scope,path_scope,dup_key,repo,created_at,updated_at,valid_from,session_id,agent_id,workspace_id,props,content_hash,policy_version)
-             VALUES (?,?,?,?,?,?,?,'active',?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            params![id, placement.stored_kind(), bodies.stored(&n.text), n.summary, tags, n.confidence, n.importance, governance.as_str(), n.store_scope.as_str(), path_scope, n.dup_key, n.repo, now, now, n.valid_from, n.session_id, n.agent_id, tenant.ws, props, hash, policy_version],
+             VALUES (?,?,?,?,?,?,?,'active',?,?,?,?,?,?,?,?,?,?,?,?,?,'')",
+            params![id, placement.stored_kind(), bodies.stored(&n.text), n.summary, tags, n.confidence, n.importance, governance.as_str(), n.store_scope.as_str(), path_scope, n.dup_key, n.repo, now, now, n.valid_from, n.session_id, n.agent_id, tenant.ws, props, hash],
         ).sql()?;
         let rid = conn.last_insert_rowid();
         candidates::record_discovered(conn, tenant.ws, rid, placement, &now)?;
@@ -179,7 +177,7 @@ impl SqliteStore {
                 props: n.props.as_ref().unwrap_or(&empty),
                 path_scope: &n.path_scope,
             },
-            tenant.governed,
+            &tenant.governed,
         )?;
         Ok(())
     }
@@ -187,7 +185,7 @@ impl SqliteStore {
     /// placement, or `None` when the cap refused a new discovered kind (`n_rejected` moved;
     /// the caller decides between a skipped record and `discovered_cap_reached`).
     fn place(conn: &Connection, tenant: &Tenant<'_>, kind: &str) -> Result<Option<Placement>> {
-        let placement = candidates::place_kind(conn, tenant.governed, tenant.discovered, kind)?;
+        let placement = candidates::place_kind(conn, &tenant.governed, tenant.discovered, kind)?;
         match candidates::admit_discovered(conn, tenant.ws, tenant.discovered, &placement)? {
             candidates::Admission::Admitted => Ok(Some(placement)),
             candidates::Admission::CapReached => Ok(None),
@@ -200,7 +198,6 @@ impl SqliteStore {
         tenant: &Tenant<'_>,
         id: &str,
         refs: &[NewNode],
-        policy_version: &str,
     ) -> Result<()> {
         for r in refs {
             let placement = Self::place(conn, tenant, &r.kind)?
@@ -208,7 +205,7 @@ impl SqliteStore {
             let hash = content_hash(tenant.ws, placement.stored_kind(), &r.text);
             let ref_id = match Self::active_by_hash(conn, &hash)? {
                 Some(existing) => existing.id,
-                None => Self::insert_node(conn, tenant, &placement, r, &hash, policy_version)?,
+                None => Self::insert_node(conn, tenant, &placement, r, &hash)?,
             };
             Self::link_in(
                 conn,
@@ -230,7 +227,6 @@ impl SqliteStore {
         tenant: &Tenant<'_>,
         id: &NodeId,
         n: &NewNode,
-        policy_version: &str,
         report: &mut BatchReport,
     ) -> Result<Option<i64>> {
         let ws = tenant.ws;
@@ -314,8 +310,8 @@ impl SqliteStore {
                 // insert and update (before E2.2 the batch path dropped them)
                 conn.execute(
                     "INSERT INTO node(id,kind,text,summary,tags,confidence,importance,lifecycle,governance,store_scope,path_scope,dup_key,repo,created_at,updated_at,valid_from,session_id,agent_id,workspace_id,props,content_hash,policy_version)
-                     VALUES (?,?,?,?,?,?,?,'active',?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                    params![id.as_str(), stored_kind, bodies.stored(&n.text), n.summary, tags, n.confidence, n.importance, governance.as_str(), n.store_scope.as_str(), path_scope, n.dup_key, n.repo, now, now, n.valid_from, n.session_id, n.agent_id, ws, props, hash, policy_version],
+                     VALUES (?,?,?,?,?,?,?,'active',?,?,?,?,?,?,?,?,?,?,?,?,?,'')",
+                    params![id.as_str(), stored_kind, bodies.stored(&n.text), n.summary, tags, n.confidence, n.importance, governance.as_str(), n.store_scope.as_str(), path_scope, n.dup_key, n.repo, now, now, n.valid_from, n.session_id, n.agent_id, ws, props, hash],
                 ).sql()?;
                 let rid = conn.last_insert_rowid();
                 candidates::record_discovered(conn, ws, rid, &placement, &now)?;
@@ -340,10 +336,10 @@ impl SqliteStore {
                 let bodies = crate::body_codec::Writer::for_connection(conn)?;
                 conn.execute(
                     "UPDATE node SET text=?1, summary=?2, tags=?3, confidence=?4, importance=?5, valid_from=?6,
-                         session_id=?7, agent_id=?8, props=?9, content_hash=?10, policy_version=?11,
-                         updated_at=?12, store_scope=?14, path_scope=?15, dup_key=?16, repo=?17, rev=rev+1
-                     WHERE rid=?13",
-                    params![bodies.stored(&n.text), n.summary, tags, n.confidence, n.importance, n.valid_from, n.session_id, n.agent_id, props, hash, policy_version, now, rid, n.store_scope.as_str(), path_scope, n.dup_key, n.repo],
+                         session_id=?7, agent_id=?8, props=?9, content_hash=?10,
+                         updated_at=?11, store_scope=?13, path_scope=?14, dup_key=?15, repo=?16, rev=rev+1
+                     WHERE rid=?12",
+                    params![bodies.stored(&n.text), n.summary, tags, n.confidence, n.importance, n.valid_from, n.session_id, n.agent_id, props, hash, now, rid, n.store_scope.as_str(), path_scope, n.dup_key, n.repo],
                 ).sql()?;
                 // the counters follow a content or source change (EN-F6; E1.9a RE3-7)
                 super::artifacts::invalidate_stale(conn, rid)?;

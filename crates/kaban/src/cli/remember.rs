@@ -162,7 +162,6 @@ pub(crate) fn run(api: &KabanApi, raw: Value, format: Format) -> ExitCode {
         api,
         "remember",
         raw,
-        &[],
         format,
         |api, request: RememberRequest| api.remember(request),
     )

@@ -16,7 +16,7 @@ use serde_json::Value;
 /// `stats` tool. Used by the service layer's remember/query/mutate paths, the MCP adapter and
 /// the bench.
 pub trait MemoryStore: Send + Sync {
-    /// Store a node and its inline links atomically (with `ctx.audit`); exact duplicates return
+    /// Store a node and its inline links atomically; exact duplicates return
     /// `Existing`.
     ///
     /// # Errors
@@ -50,7 +50,7 @@ pub trait MemoryStore: Send + Sync {
     /// # Errors
     /// Backend errors only; a missing or hidden node is `Ok(None)`.
     fn get(&self, id: &NodeId, include_hidden: bool) -> Result<Option<Node>>;
-    /// Create or update a typed edge (with `ctx.audit`); `SUPERSEDES`/`INVALIDATES` mark the
+    /// Create or update a typed edge; `SUPERSEDES`/`INVALIDATES` mark the
     /// destination.
     ///
     /// # Errors
@@ -131,7 +131,7 @@ pub trait MemoryStore: Send + Sync {
     /// # Errors
     /// Backend errors.
     fn chunk_covering(&self, workspace: &str, path: &str, offset: u64) -> Result<Option<Node>>;
-    /// Tombstone (default), invalidate, archive or purge a node (with `ctx.audit`, which the
+    /// Tombstone (default), invalidate, archive or purge a node (which the
     /// caller fills with the `Forget`/`Purge` entry). Lifecycle follows the spec §4 table;
     /// `Invalidate` also moves governance and writes an `invalidated` event.
     ///

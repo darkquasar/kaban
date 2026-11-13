@@ -1,32 +1,33 @@
 //! The rescan job (core-spec S4 "rescan job after policy change"; core-plan C2.7; MD-18,
-//! MD-19; M2 review R2-2, R2-3): on every start, every node stamped with another policy version
-//! than the loaded policy's `effective_hash()` is re-judged in batches of [`RESCAN_BATCH`], one
-//! write transaction per batch, the cancellation token checked between batches. The binary
-//! runs it on `spawn_blocking` after serving starts (`kaban serve`) or in the foreground
-//! (`kaban rescan`).
+//! MD-19): on every start, when the database's `index_meta.policy_hash` differs from the loaded
+//! policy's `effective_hash()`, every stored node is re-judged in batches of [`RESCAN_BATCH`],
+//! one write transaction per batch walking the table by row position, the cancellation token
+//! checked between batches. Nodes carry no policy stamp (REC-08): the marker, recorded with the
+//! final empty batch, is what a later start compares. The binary runs it on `spawn_blocking`
+//! after serving starts (`kaban serve`) or in the foreground (`kaban rescan`).
 //!
 //! ```text
 //!   rescan_if_policy_changed(token)                      store (one BEGIN IMMEDIATE per batch)
 //!   +------------------------------------------+        +-----------------------------------+
-//!   | loop:                                     |  =>    | SELECT <=500 nodes WHERE          |
-//!   |   store.rescan(version, 500, judge) ------+------->|   policy_version <> ?             |
-//!   |   scanned == 0 => UpToDate (no batch ran) |        |   AND lifecycle <> 'purged'       |
-//!   |                   or Completed            |        | none: index_meta.policy_hash :=   |
-//!   |   token cancelled => Cancelled            |        |   version (same transaction)      |
-//!   |   (earlier batches committed)             |        | per node: judge(node) ->          |
-//!   +------------------------------------------+        |   Keep   : stamp                  |
-//!                                                        |   Redact : rewrite every string   |
-//!   judge = scan_node_strings (inventory.rs):            |            column, new hash,      |
-//!   the same persisted strings the read projection       |            rev+1, audit           |
-//!   scans; reject anywhere => Reject                     |   Reject : tombstone, event, audit|
-//!                                                        | COMMIT                            |
+//!   | marker == version => UpToDate             |        | SELECT <=500 nodes WHERE          |
+//!   | loop:                                     |  =>    |   rid > cursor                    |
+//!   |   store.rescan(version, cursor, 500, f) --+------->|   AND lifecycle <> 'purged'       |
+//!   |   cursor := report.cursor                 |        | none: index_meta.policy_hash :=   |
+//!   |   scanned == 0 => Completed               |        |   version (same transaction)      |
+//!   |   token cancelled => Cancelled            |        | per node: judge(node) ->          |
+//!   |   (earlier batches committed)             |        |   Keep   : nothing                |
+//!   +------------------------------------------+        |   Redact : rewrite every string   |
+//!                                                        |            column, new hash,      |
+//!   judge = scan_node_strings (inventory.rs):            |            rev+1                  |
+//!   the same persisted strings the read projection       |   Reject : tombstone              |
+//!   scans; reject anywhere => Reject                     | COMMIT                            |
 //!                                                        +-----------------------------------+
 //! ```
 
 use crate::api::KabanApi;
 use crate::error::ApiError;
 use crate::types::{RescanOutcome, RescanStatus};
-use kaban_core::{Node, RescanAction, RescanReport, WorkspaceId};
+use kaban_core::{IndexMeta, Node, RescanAction, RescanReport};
 use kaban_policy::Policy;
 use std::sync::{Arc, RwLock};
 use tokio_util::sync::CancellationToken;
@@ -44,13 +45,12 @@ impl KabanApi {
         Arc::clone(&self.policy)
     }
 
-    /// Re-judge every node stamped with another policy version than the loaded policy's. The
-    /// stale-row query runs on every start (R2-3): `index_meta.policy_hash` is informational
-    /// (MD-19) and is recorded by the store in the same transaction as the final empty batch.
-    /// Synchronous and blocking: callers run it on a blocking thread. One transaction per
-    /// batch of [`RESCAN_BATCH`] nodes; `cancel` is checked between batches, so a cancelled run
-    /// leaves the batches that ran committed and the rest pending for the next start.
-    /// `UpToDate` means the first query found nothing stale.
+    /// Re-judge every stored node when the database's policy marker differs from the loaded
+    /// policy's version. Synchronous and blocking: callers run it on a blocking thread. One
+    /// transaction per batch of [`RESCAN_BATCH`] nodes; `cancel` is checked between batches, so
+    /// a cancelled run leaves the batches that ran committed and the marker unchanged, and the
+    /// next start walks the table again. `UpToDate` means the marker already matched or there
+    /// was no node to judge.
     ///
     /// # Errors
     /// Store errors; the batch that failed is rolled back and `policy_hash` is left unchanged.
@@ -68,19 +68,23 @@ impl KabanApi {
             redacted: 0,
             rejected: 0,
         };
-        // the database-wide marker is informational (MD-19, R2-3): the decision rests on the
-        // stale-row query the store runs under its write lock on every start, so a node another
-        // process stamped with an older policy after the marker was recorded is still found;
         // the store records the marker in the same transaction as the final empty batch
+        let marker = self.store.index_meta()?;
+        if marker.entries.get(IndexMeta::POLICY_HASH) == Some(&version) {
+            tracing::debug!(policy_version = %version, "policy unchanged; nothing to rescan");
+            return Ok(outcome);
+        }
         let mut total = RescanReport::default();
         loop {
             let report = self
                 .store
-                .rescan(&version, RESCAN_BATCH, &mut |node| self.judge(node))?;
+                .rescan(&version, total.cursor, RESCAN_BATCH, &mut |node| {
+                    self.judge(node)
+                })?;
             total += report;
             if report.scanned > 0 {
                 if outcome.batches == 0 {
-                    tracing::info!(policy_version = %version, "stale policy stamps found; rescanning stored nodes");
+                    tracing::info!(policy_version = %version, "policy changed; rescanning stored nodes");
                 }
                 outcome.batches += 1;
                 tracing::debug!(
@@ -92,11 +96,10 @@ impl KabanApi {
                 );
             }
             if report.scanned == 0 {
-                if outcome.batches == 0 {
-                    tracing::debug!(policy_version = %version, "no stale policy stamps; nothing to rescan");
-                    return Ok(outcome);
+                // an empty database has nothing to rescan: it stays `UpToDate`
+                if outcome.batches > 0 {
+                    outcome.status = RescanStatus::Completed;
                 }
-                outcome.status = RescanStatus::Completed;
                 break;
             }
             if cancel.is_cancelled() {
@@ -124,21 +127,13 @@ impl KabanApi {
     /// tombstones the node; redact hits are masked in place in every rewritable column; a
     /// redact hit confined to `kind` or `workspace_id` cannot be rewritten in place (it names a
     /// schema entry or a tenant) and stays masked by the read projection, so the node is kept.
-    /// Runs inside the store's batch transaction and must not call back into the store (the
-    /// audit entries are returned with the action).
+    /// Runs inside the store's batch transaction and must not call back into the store.
     fn judge(&self, n: &Node) -> RescanAction {
-        let mut ctx = self.write_ctx(Some(&n.workspace_id));
         let mut red = Vec::new();
-        let masked = self.scan_node_strings(&mut ctx, TOOL, n, &mut red);
-        for e in &mut ctx.audit {
-            e.node_id = Some(n.id.clone());
-            e.workspace_id = WorkspaceId::new(n.workspace_id.as_str());
-        }
-        match masked {
-            Err(_) => RescanAction::Reject { audit: ctx.audit },
+        match self.scan_node_strings(TOOL, n, &mut red) {
+            Err(_) => RescanAction::Reject,
             Ok(m) if m.strings.differs_from(n) => RescanAction::Redact {
                 strings: Box::new(m.strings),
-                audit: ctx.audit,
             },
             Ok(_) => RescanAction::Keep,
         }

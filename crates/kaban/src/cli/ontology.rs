@@ -86,7 +86,6 @@ pub(crate) fn run(api: &KabanApi, cmd: OntologyCmd, format: Format) -> ExitCode 
             api,
             "ontology_load",
             json!({ "file": file }),
-            &[],
             format,
             |api, request| api.registry().load_file(api, &request.file),
         ),
@@ -94,7 +93,6 @@ pub(crate) fn run(api: &KabanApi, cmd: OntologyCmd, format: Format) -> ExitCode 
             api,
             "ontology_promote",
             json!({ "from": from, "to": to }),
-            &[],
             format,
             |api, request| {
                 api.registry()
@@ -105,7 +103,6 @@ pub(crate) fn run(api: &KabanApi, cmd: OntologyCmd, format: Format) -> ExitCode 
             api,
             "ontology_prune",
             json!({ "dry_run": dry_run }),
-            &[],
             format,
             |api, request| api.registry().prune(api, request.dry_run),
         ),
@@ -113,7 +110,6 @@ pub(crate) fn run(api: &KabanApi, cmd: OntologyCmd, format: Format) -> ExitCode 
             api,
             "ontology_list",
             json!({}),
-            &[],
             format,
             |api, _| {
                 Ok(ListResponse {

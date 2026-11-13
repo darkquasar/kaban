@@ -12,7 +12,7 @@ use crate::types::{
 };
 use kaban_core::{
     AnchoredRow, CodeRef, CodeRefFilter, Fixed, Layer, Method, NodeId, ReadFilters, RecallQuery,
-    StoreScope, TraverseQuery, WriteCtx,
+    StoreScope, TraverseQuery,
 };
 
 const MAX_IDS: usize = 64;
@@ -32,43 +32,23 @@ impl KabanApi {
         // (review R1-3): the sanitized query is what FTS sees, and masked filter values match
         // the masked values that were stored
         let t = "recall";
-        let mut ctx = self.write_ctx(None);
         let mut red = Vec::new();
-        let query = self.gate(&mut ctx, t, "query", &p.query, &mut red)?;
-        let kinds = self.gate_all(&mut ctx, t, "kinds", &p.kinds, &mut red)?;
-        let tags = self.gate_all(&mut ctx, t, "tags", &p.tags, &mut red)?;
-        let workspace_id = self.gate_opt(
-            &mut ctx,
-            t,
-            "workspace_id",
-            p.workspace_id.as_deref(),
-            &mut red,
-        )?;
+        let query = self.gate(t, "query", &p.query, &mut red)?;
+        let kinds = self.gate_all(t, "kinds", &p.kinds, &mut red)?;
+        let tags = self.gate_all(t, "tags", &p.tags, &mut red)?;
+        let workspace_id = self.gate_opt(t, "workspace_id", p.workspace_id.as_deref(), &mut red)?;
         // the CodeRef filter fields are content (S1 lists CodeRef fields): gated like the rest
         let r#ref = match &p.r#ref {
             Some(f) => Some(CodeRefFilter {
-                relative_path: self.gate(
-                    &mut ctx,
-                    t,
-                    "ref.relative_path",
-                    &f.relative_path,
-                    &mut red,
-                )?,
-                name_path: self.gate_opt(
-                    &mut ctx,
-                    t,
-                    "ref.name_path",
-                    f.name_path.as_deref(),
-                    &mut red,
-                )?,
-                repo: self.gate_opt(&mut ctx, t, "ref.repo", f.repo.as_deref(), &mut red)?,
+                relative_path: self.gate(t, "ref.relative_path", &f.relative_path, &mut red)?,
+                name_path: self.gate_opt(t, "ref.name_path", f.name_path.as_deref(), &mut red)?,
+                repo: self.gate_opt(t, "ref.repo", f.repo.as_deref(), &mut red)?,
             }),
             None => None,
         };
         // enricher ids are content (gated, so the error can only echo the masked id) and are
         // resolved before any lookup
-        let enrich_ids = self.gate_all(&mut ctx, t, "enrich", &p.enrich, &mut red)?;
-        self.flush_audit(&mut ctx)?;
+        let enrich_ids = self.gate_all(t, "enrich", &p.enrich, &mut red)?;
         let enrichers = self.resolve_enrichers(&enrich_ids)?;
         let q = RecallQuery {
             layers: p.layers,
@@ -89,24 +69,11 @@ impl KabanApi {
         };
         // the read gate decides eligibility inside the recall (spec 05 SS-11): a record a
         // reject rule hides is no deliverable result and the store refills in its place. The
-        // predicate runs under the store's lock, so it reads nothing from the store: the
-        // hidden reads are audited once the recall has returned, the shown cards projected
-        // (and audited) below with their `why`
-        let hidden = std::cell::RefCell::new(Vec::new());
+        // predicate runs under the store's lock, so it reads nothing from the store; the
+        // shown cards are projected below with their `why`
         let hits = self
             .store
-            .recall_eligible(&q, &|node| match self.hidden_read(node) {
-                None => true,
-                Some(verdicts) => {
-                    hidden.borrow_mut().push((node.id.clone(), verdicts));
-                    false
-                }
-            })?;
-        for (id, verdicts) in hidden.into_inner() {
-            let mut ctx = self.write_ctx(None);
-            ctx.audit = verdicts;
-            self.record_read(&mut ctx, &id);
-        }
+            .recall_eligible(&q, &|node| !self.hidden_read(node))?;
         let mut results = Vec::with_capacity(hits.len());
         let mut visible: Vec<NodeId> = Vec::with_capacity(hits.len());
         for h in &hits {
@@ -158,9 +125,8 @@ impl KabanApi {
         let refs = &pointers[..pointers.len().min(budget.max_refs)];
         let mut out = Vec::new();
         for e in enrichers {
-            for (i, item) in e.enrich(refs, budget)?.into_iter().enumerate() {
-                let key = format!("enrich:{}:{i}", e.id());
-                if let Some(gated) = self.project_enrichment(&key, &item) {
+            for item in e.enrich(refs, budget)? {
+                if let Some(gated) = self.project_enrichment(&item) {
                     out.push(gated);
                 }
             }
@@ -183,13 +149,11 @@ impl KabanApi {
         // every string is gated before any lookup, so a `NotFound` can only echo the masked
         // value (review R1-3)
         let t = "traverse";
-        let mut ctx = self.write_ctx(None);
         let mut red = Vec::new();
         // start ids are control (validated by shape, scanned only when malformed)
         let mut start_ids = Vec::with_capacity(p.start_ids.len());
         for s in &p.start_ids {
             let gated = self.gate_control(
-                &mut ctx,
                 t,
                 ControlPath::request(t, "start_ids[]"),
                 "start_ids",
@@ -198,27 +162,20 @@ impl KabanApi {
             )?;
             start_ids.push(Self::node_id(&gated)?);
         }
-        let rels = self.gate_all(&mut ctx, t, "rels", &p.rels, &mut red)?;
-        let mut node_kinds = self.gate_all(&mut ctx, t, "node_kinds", &p.node_kinds, &mut red)?;
+        let rels = self.gate_all(t, "rels", &p.rels, &mut red)?;
+        let mut node_kinds = self.gate_all(t, "node_kinds", &p.node_kinds, &mut red)?;
         // EN-F46: the set name and the filter vocabulary are gated like `rels` (a masked value
         // then fails the closed-vocabulary match with a fixed word, never an echo)
-        let kind_set = self.gate_opt(&mut ctx, t, "kind_set", p.kind_set.as_deref(), &mut red)?;
+        let kind_set = self.gate_opt(t, "kind_set", p.kind_set.as_deref(), &mut red)?;
         let edge_filter = match &p.edge_filter {
             Some(f) => Some((
                 f.min_score,
-                self.gate_all(&mut ctx, t, "edge_filter.layers", &f.layers, &mut red)?,
-                self.gate_all(&mut ctx, t, "edge_filter.methods", &f.methods, &mut red)?,
+                self.gate_all(t, "edge_filter.layers", &f.layers, &mut red)?,
+                self.gate_all(t, "edge_filter.methods", &f.methods, &mut red)?,
             )),
             None => None,
         };
-        let workspace_id = self.gate_opt(
-            &mut ctx,
-            t,
-            "workspace_id",
-            p.workspace_id.as_deref(),
-            &mut red,
-        )?;
-        self.flush_audit(&mut ctx)?;
+        let workspace_id = self.gate_opt(t, "workspace_id", p.workspace_id.as_deref(), &mut red)?;
         // EN-F46 `kind_set`: resolved here into `node_kinds` (the union with the caller's);
         // `governing` is the one set the ontology defines in 3.0.0
         match kind_set.as_deref() {
@@ -345,22 +302,19 @@ impl KabanApi {
                 name: a.name.clone(),
             });
         }
-        let mut ctx = self.write_ctx(None);
         let mut red = Vec::new();
         let read_tool = "read";
-        let opt = |ctx: &mut WriteCtx,
-                   red: &mut Vec<String>,
+        let opt = |red: &mut Vec<String>,
                    field,
                    s: &Option<String>|
          -> Result<Option<String>, ApiError> {
             s.as_deref()
-                .map(|s| self.scan_str(ctx, read_tool, field, s, red))
+                .map(|s| self.scan_str(read_tool, field, s, red))
                 .transpose()
         };
         let gated = (|| -> Result<AnchoredCard, ApiError> {
             Ok(AnchoredCard {
                 from: self.scan_control(
-                    &mut ctx,
                     read_tool,
                     ControlPath::response(tool, "anchored[].from"),
                     "anchored.from",
@@ -368,20 +322,12 @@ impl KabanApi {
                     &mut red,
                 )?,
                 kind: a.kind,
-                path: self.scan_str(&mut ctx, read_tool, "anchored.path", &a.path, &mut red)?,
-                r#ref: opt(&mut ctx, &mut red, "anchored.ref", &a.r#ref)?,
-                key: opt(&mut ctx, &mut red, "anchored.key", &a.key)?,
-                name: opt(&mut ctx, &mut red, "anchored.name", &a.name)?,
+                path: self.scan_str(read_tool, "anchored.path", &a.path, &mut red)?,
+                r#ref: opt(&mut red, "anchored.ref", &a.r#ref)?,
+                key: opt(&mut red, "anchored.key", &a.key)?,
+                name: opt(&mut red, "anchored.name", &a.name)?,
             })
         })();
-        self.record_read(
-            &mut ctx,
-            &format!(
-                "anchored:{}:{}",
-                a.from,
-                a.r#ref.as_deref().unwrap_or(&a.path)
-            ),
-        );
         gated.ok()
     }
 
@@ -392,15 +338,12 @@ impl KabanApi {
     /// Store errors.
     #[allow(clippy::needless_pass_by_value)] // core-plan §6 interface: requests are taken by value
     pub fn stats(&self, p: StatsRequest) -> Result<StatsResponse, ApiError> {
-        let mut ctx = self.write_ctx(None);
         let requested = self.gate_opt(
-            &mut ctx,
             "stats",
             "workspace_id",
             p.workspace_id.as_deref(),
             &mut Vec::new(),
         )?;
-        self.flush_audit(&mut ctx)?;
         let v = self
             .store
             .stats(self.read_workspace(requested.as_deref()).as_deref())?;

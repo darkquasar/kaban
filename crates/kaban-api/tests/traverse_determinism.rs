@@ -44,14 +44,9 @@ fn fixture(order: &[usize]) -> KabanApi {
     let policy = Policy::from_file(Policy::parse(b"").unwrap(), "test".into()).unwrap();
     let store = Arc::new(SqliteStore::open_memory().unwrap());
     let signer = store.signer();
-    let api = KabanApi::new(
-        Arc::clone(&store) as Arc<dyn GraphStore>,
-        policy,
-        signer,
-        None,
-    );
+    let api = KabanApi::new(Arc::clone(&store) as Arc<dyn GraphStore>, policy, signer);
     let ids = ids();
-    let ctx = WriteCtx::new("v1", WorkspaceId::default(), Actor::Agent);
+    let ctx = WriteCtx::new(WorkspaceId::default(), Actor::Agent);
     let nodes = ids
         .iter()
         .enumerate()

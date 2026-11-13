@@ -220,7 +220,6 @@ fn service_with(
         store.clone(),
         policy,
         store.signer(),
-        None,
         ApiConfig {
             repo: Some("kaban".into()),
             repo_root,

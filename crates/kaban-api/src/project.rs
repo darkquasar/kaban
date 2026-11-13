@@ -3,15 +3,14 @@
 //! workspace, timestamp, `why`), edge cards (ids, relationship), schema definitions (names,
 //! descriptions, endpoint kinds, property schemas) and stats keys. A redact-rule hit masks the
 //! string; a reject-rule hit hides the whole item (card, edge, definition or stats entry).
-//! Read-path verdicts are audited once per `(item, policy_version)` through
-//! `audit_append_read`; an audit failure is logged and the masked item is still returned (m2 N8).
+//! Read-path verdicts are not recorded: the masked item is returned, a hidden one is dropped.
 
 use crate::api::KabanApi;
 use crate::control::ControlPath;
 use crate::enrich::{Enrichment, pointer_of};
 use crate::error::ApiError;
 use crate::types::{Card, EdgeCard, Provenance};
-use kaban_core::{AuditEntry, CodeRef, Edge, Node, TypeDef, WriteCtx};
+use kaban_core::{CodeRef, Edge, Node, TypeDef};
 use serde_json::Value;
 
 /// Tool name recorded for read-path verdicts.
@@ -23,41 +22,18 @@ impl KabanApi {
         self.pol().file.defaults.scan_on_read
     }
 
-    /// Record the read-path verdicts of one item (deduplicated per `(item_key, policy_version)`
-    /// by the store); a failure masks and logs, never hides.
-    pub(crate) fn record_read(&self, ctx: &mut WriteCtx, item_key: &str) {
-        if ctx.audit.is_empty() {
-            return;
-        }
-        for e in &mut ctx.audit {
-            e.node_id = Some(item_key.to_owned());
-        }
-        self.export_audit(&ctx.audit);
-        ctx.audit.clear();
-    }
-
     /// Outgoing projection of a node: every string re-scanned (the policy may have grown since
     /// the node was stored). `None` when the node must be hidden (a reject-rule hit).
     pub(crate) fn project(&self, n: &Node, full: bool, why: Option<&[String]>) -> Option<Card> {
         self.project_card(n, full, why).map(|(card, _)| card)
     }
 
-    /// The read verdict of a node without its projection and without its audit row: `None`
-    /// when the node may be shown, `Some(verdicts)` when a reject rule hides it (the entries
-    /// [`Self::record_read`] takes). The eligibility predicate of a store's recall (spec 05
-    /// SS-11) runs under the store's own lock, so it reads nothing from the store: the caller
-    /// records the hidden read once the recall has returned. Nothing is hidden without
-    /// `scan_on_read`.
-    pub(crate) fn hidden_read(&self, n: &Node) -> Option<Vec<AuditEntry>> {
-        if !self.scan_on_read() {
-            return None;
-        }
-        let mut ctx = self.write_ctx(None);
-        let mut red = Vec::new();
-        match self.scan_node(&mut ctx, n, None, &mut red) {
-            Some(_) => None,
-            None => Some(ctx.audit),
-        }
+    /// Whether the read gate hides a node, without its projection: a reject rule hits one of
+    /// its persisted strings. The eligibility predicate of a store's recall (spec 05 SS-11)
+    /// runs under the store's own lock, so it reads nothing from the store. Nothing is hidden
+    /// without `scan_on_read`.
+    pub(crate) fn hidden_read(&self, n: &Node) -> bool {
+        self.scan_on_read() && self.scan_node(n, None, &mut Vec::new()).is_none()
     }
 
     /// [`Self::project`] plus the `CodeRef` pointer the node is (core-spec F19, M3-27; the
@@ -72,9 +48,7 @@ impl KabanApi {
     ) -> Option<(Card, Option<CodeRef>)> {
         let (projected, red) = if self.scan_on_read() {
             let mut red = Vec::new();
-            let mut ctx = self.write_ctx(None);
-            let projected = self.scan_node(&mut ctx, n, why, &mut red);
-            self.record_read(&mut ctx, &n.id);
+            let projected = self.scan_node(n, why, &mut red);
             (projected?, red)
         } else {
             (Projected::raw(n, why), Vec::new())
@@ -95,21 +69,19 @@ impl KabanApi {
                 confidence: e.confidence,
             });
         }
-        let mut ctx = self.write_ctx(None);
         let mut red = Vec::new();
-        let at = |ctx: &mut WriteCtx, red: &mut Vec<String>, path, field, s: &str| {
-            self.scan_control(ctx, READ, ControlPath::response(tool, path), field, s, red)
+        let at = |red: &mut Vec<String>, path, field, s: &str| {
+            self.scan_control(READ, ControlPath::response(tool, path), field, s, red)
         };
         let gated = (|| -> Result<EdgeCard, ApiError> {
             Ok(EdgeCard {
-                id: at(&mut ctx, &mut red, "edges[].id", "edge.id", &e.id)?,
-                from: at(&mut ctx, &mut red, "edges[].from", "edge.from", &e.src)?,
-                rel: self.scan_str(&mut ctx, READ, "edge.rel", &e.rel, &mut red)?,
-                to: at(&mut ctx, &mut red, "edges[].to", "edge.to", &e.dst)?,
+                id: at(&mut red, "edges[].id", "edge.id", &e.id)?,
+                from: at(&mut red, "edges[].from", "edge.from", &e.src)?,
+                rel: self.scan_str(READ, "edge.rel", &e.rel, &mut red)?,
+                to: at(&mut red, "edges[].to", "edge.to", &e.dst)?,
                 confidence: e.confidence,
             })
         })();
-        self.record_read(&mut ctx, &format!("edge:{}", e.id));
         gated.ok()
     }
 
@@ -118,9 +90,8 @@ impl KabanApi {
         if !self.scan_on_read() {
             return Some(def);
         }
-        let key = format!("schema:{}:{}", def.kind, def.name);
         let value = serde_json::to_value(&def).ok()?;
-        let clean = self.project_value(&key, "schema", &value)?;
+        let clean = self.project_value("schema", &value)?;
         serde_json::from_value(clean).ok()
     }
 
@@ -135,11 +106,7 @@ impl KabanApi {
         }
         let mut out = serde_json::Map::new();
         for (k, v) in obj {
-            if let Some(Value::String(k2)) = self.project_value(
-                &format!("stats:{field}:{k}"),
-                field,
-                &Value::String(k.clone()),
-            ) {
+            if let Some(Value::String(k2)) = self.project_value(field, &Value::String(k.clone())) {
                 out.insert(k2, v.clone());
             }
         }
@@ -151,26 +118,23 @@ impl KabanApi {
         if !self.scan_on_read() {
             return Some(scope.clone());
         }
-        self.project_value("stats:scope", "scope", scope)
+        self.project_value("scope", scope)
     }
 
     /// Outgoing projection of an enricher's output (core-spec F19: "outputs pass the denylist
     /// like any read"); `None` when a string hits a reject rule.
-    pub(crate) fn project_enrichment(&self, item_key: &str, e: &Enrichment) -> Option<Enrichment> {
+    pub(crate) fn project_enrichment(&self, e: &Enrichment) -> Option<Enrichment> {
         if !self.scan_on_read() {
             return Some(e.clone());
         }
         let value = serde_json::to_value(e).ok()?;
-        let clean = self.project_value(item_key, "enrichment", &value)?;
+        let clean = self.project_value("enrichment", &value)?;
         serde_json::from_value(clean).ok()
     }
 
-    /// Gate a JSON value on the read path under `item_key`; `None` on a reject hit.
-    fn project_value(&self, item_key: &str, field: &str, value: &Value) -> Option<Value> {
-        let mut ctx = self.write_ctx(None);
-        let r = self.scan_json(&mut ctx, READ, field, value, &mut Vec::new());
-        self.record_read(&mut ctx, item_key);
-        r.ok()
+    /// Gate a JSON value on the read path as `field`; `None` on a reject hit.
+    fn project_value(&self, field: &str, value: &Value) -> Option<Value> {
+        self.scan_json(READ, field, value, &mut Vec::new()).ok()
     }
 }
 
@@ -195,20 +159,17 @@ impl KabanApi {
     /// rejected one dropped.
     fn scan_node(
         &self,
-        ctx: &mut WriteCtx,
         n: &Node,
         why: Option<&[String]>,
         red: &mut Vec<String>,
     ) -> Option<Projected> {
         let t = READ;
-        let masked = self.scan_node_strings(ctx, t, n, red).ok()?;
-        let created_at = self
-            .scan_str(ctx, t, "created_at", &n.created_at, red)
-            .ok()?;
+        let masked = self.scan_node_strings(t, n, red).ok()?;
+        let created_at = self.scan_str(t, "created_at", &n.created_at, red).ok()?;
         let why = why.map(|entries| {
             entries
                 .iter()
-                .filter_map(|w| self.scan_str(ctx, t, "why", w, red).ok())
+                .filter_map(|w| self.scan_str(t, "why", w, red).ok())
                 .collect()
         });
         Some(Projected {

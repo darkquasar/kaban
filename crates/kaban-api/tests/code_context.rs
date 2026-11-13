@@ -287,7 +287,6 @@ fn service(s: &Scratch, root: &Path, policy: Policy, git: GitRunner) -> KabanApi
         store.clone(),
         policy,
         store.signer(),
-        None,
         ApiConfig {
             repo_root: Some(root.to_path_buf()),
             repo: Some("fixture".to_owned()),

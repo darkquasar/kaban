@@ -17,7 +17,7 @@ async fn summary_and_props_masks_match_remember_and_commit_no_raw_canary() {
     .unwrap();
     let rig = common::real::rig_on_disk("kaban-e39-parity", "mask", Policy::empty());
     std::fs::write(rig.root.join("a.md"), "# Source\n\nHarmless source.\n").unwrap();
-    let api = KabanApi::new(rig.store.clone(), policy, rig.store.signer(), None);
+    let api = KabanApi::new(rig.store.clone(), policy, rig.store.signer());
     let remembered = api
         .remember(RememberRequest {
             kind: "Fact".into(),

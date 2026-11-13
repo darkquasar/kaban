@@ -47,5 +47,5 @@ pub use ontology::{
     DiscoveredKnobs, LoadReport, OntologyRegistry, OntologySummary, validate_kind_props,
 };
 pub use rescan::RESCAN_BATCH;
-pub use sanitize::{AUDIT_UNAVAILABLE, RawSecret};
+
 pub use types::*;

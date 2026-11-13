@@ -486,12 +486,13 @@ impl OntologyRegistry {
                 changed,
             });
         }
-        // the service's writes decide governance by the loaded set from here on (EN-F4, E1.4;
-        // the service reads this registry, E1.5)
+        // the service and its store decide by the loaded set from here on (EN-F4, E1.4; the
+        // service reads this registry, E1.5)
         *self
             .inner
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = State::new(files, ontology);
+        api.store.adopt_governed(self.governed_set());
         Ok(reports)
     }
 
@@ -838,14 +839,12 @@ fn read_and_gate(api: &KabanApi, root: &Path, path: &Path) -> Result<Loaded, Api
     let bytes =
         kaban_policy::read_contained(root, path, MAX_ONTOLOGY_FILE_BYTES).map_err(contain_error)?;
     let text = String::from_utf8(bytes).map_err(|_| malformed_file())?;
-    let mut ctx = api.write_ctx(None);
-    api.gate_joined(&mut ctx, TOOL, "file", &text)?;
+    api.gate_joined(TOOL, "file", &text)?;
     let hash = blake3_hex(text.as_bytes());
     let data: Value = yaml_serde::from_str(&text).map_err(|_| malformed_file())?;
     let mut redactions = Vec::new();
-    api.gate_json(&mut ctx, TOOL, "file", &data, &mut redactions)?;
+    api.gate_json(TOOL, "file", &data, &mut redactions)?;
     if !redactions.is_empty() {
-        api.flush_audit(&mut ctx)?;
         return Err(ApiError::Invalid(FILE_REDACTED.to_owned()));
     }
     let file = OntologyFile::from_yaml(&text).map_err(|e| invalid(&e))?;
@@ -986,7 +985,6 @@ mod tests {
             Arc::clone(store) as Arc<dyn kaban_core::GraphStore>,
             Policy::empty(),
             store.signer(),
-            None,
             ApiConfig::default(),
         )
     }
@@ -1002,12 +1000,10 @@ mod tests {
         assert_eq!(kinds, ["Decision", "Convention", "Failure"]);
     }
 
-    /// E1.4: a load publishes the governed set into the service, so `write_ctx` carries the
-    /// loaded kinds and a user kind with the mixin is `proposed` on write; before the load the
-    /// service decides by the shipped set. (E1.5: the service reads the registry it holds, so
-    /// the registry is handed to the service; the assertions are E1.4's.)
+    /// E1.4: a load publishes the governed set into the service's registry; before the load
+    /// the service reads the shipped set. A fresh record starts ungoverned whatever its kind.
     #[test]
-    fn a_load_publishes_the_governed_set_the_write_context_carries() {
+    fn a_load_publishes_the_governed_set_into_the_registry() {
         // Arrange
         let scratch = Scratch::new("publish");
         let store = Arc::new(SqliteStore::open_memory().unwrap());
@@ -1029,7 +1025,7 @@ mod tests {
         registry.load_file(&api, &path).unwrap();
 
         // Assert
-        let after = api.write_ctx(None).governed;
+        let after = api.governed();
         assert!(after.contains("incidents:Incident"));
         assert!(
             after.contains("Decision"),

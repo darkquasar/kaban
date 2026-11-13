@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 fn ctx() -> WriteCtx {
-    WriteCtx::new("v1", WorkspaceId::default(), Actor::Agent)
+    WriteCtx::new(WorkspaceId::default(), Actor::Agent)
 }
 
 fn note(text: &str) -> NewNode {
@@ -522,8 +522,7 @@ fn a_symbol_renamed_away_in_the_current_snapshot_is_listed_stale() {
 
     // the bound workspace and repository identity are the root's name (M3-23)
     let store = SqliteStore::open(&s.db(), &s.home().join("keys")).unwrap();
-    let ctx =
-        WriteCtx::new("v1", WorkspaceId::new("repo"), Actor::Agent).with_repo(Some("repo".into()));
+    let ctx = WriteCtx::new(WorkspaceId::new("repo"), Actor::Agent).with_repo(Some("repo".into()));
     let coderef = |symbol: &str| -> String {
         let node = NewNode {
             kind: "CodeRef".into(),

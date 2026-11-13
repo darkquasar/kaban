@@ -38,7 +38,6 @@ fn api_with(store: &Arc<SqliteStore>, policy: &str) -> KabanApi {
         Arc::clone(store) as Arc<dyn GraphStore>,
         policy,
         store.signer(),
-        None,
     )
 }
 
@@ -85,7 +84,6 @@ fn a_node_a_newer_policy_rejects_is_hidden_after_startup() {
     );
     let hidden = store.get(&nid(&secret.id), true).unwrap().unwrap();
     assert_eq!(hidden.lifecycle, Lifecycle::Tombstoned);
-    assert_eq!(hidden.policy_version, v2.policy_version());
     let found = v2
         .recall(RecallRequest {
             query: "codename".into(),
@@ -93,9 +91,8 @@ fn a_node_a_newer_policy_rejects_is_hidden_after_startup() {
         })
         .unwrap();
     assert_eq!(found.count, 0, "{found:?}");
-    // the clean node is untouched apart from its policy stamp
+    // the clean node is untouched
     let kept = store.get(&nid(&clean.id), false).unwrap().unwrap();
-    assert_eq!(kept.policy_version, v2.policy_version());
     assert_eq!(kept.rev, 1);
     // the database is now checked against v2: a second start does nothing
     assert_eq!(
@@ -109,13 +106,13 @@ fn a_node_a_newer_policy_rejects_is_hidden_after_startup() {
 }
 
 #[test]
-fn a_redactable_term_is_masked_in_place_with_a_new_rev_and_the_policy_version_updated() {
+fn a_redactable_term_is_masked_in_place_with_a_new_rev() {
     redactable_term_is_masked_in_place(false);
 }
 
 /// Spec 05 SS-17 (T7 review t7-5): the rescan over an encoded body is the rescan over a plain
 /// one. The node is written encoded under v1, the rescan decodes it, masks it and stores the
-/// masked body encoded again: the same outcome, revision and stamp, and the body
+/// masked body encoded again: the same outcome and revision, and the body
 /// reads back masked.
 #[test]
 fn a_redactable_term_is_masked_in_place_over_an_encoded_body() {
@@ -181,7 +178,6 @@ fn redactable_term_is_masked_in_place(compressed: bool) {
     );
     assert_eq!(masked.props["n"], serde_json::json!(1));
     assert_eq!(masked.rev, 2);
-    assert_eq!(masked.policy_version, v2.policy_version());
     assert!(
         !masked.text.contains("hunter2"),
         "the stored text still carries the term"
@@ -211,18 +207,6 @@ fn redactable_term_is_masked_in_place(compressed: bool) {
     );
 }
 
-/// Nodes still stamped with another policy version than `version`.
-fn pending(s: &Scratch, version: &str) -> usize {
-    let conn = rusqlite::Connection::open(s.db()).unwrap();
-    conn.query_row(
-        "SELECT count(*) FROM node WHERE policy_version <> ?1 AND lifecycle <> 'purged'",
-        [version],
-        |r| r.get::<_, i64>(0),
-    )
-    .map(|n| usize::try_from(n).unwrap())
-    .unwrap()
-}
-
 #[test]
 fn cancellation_between_batches_leaves_earlier_batches_committed_and_the_rest_pending() {
     // Arrange: 2 batches and a half of nodes under v1, a reject term in the first and the
@@ -241,14 +225,13 @@ fn cancellation_between_batches_leaves_earlier_batches_committed_and_the_rest_pe
     }
     let v2 = api_with(&store, V2);
     let version = v2.policy_version();
-    assert_eq!(pending(&s, &version), total);
 
     // Act: the token is already cancelled, so the job checks it after its first batch
     let cancelled = CancellationToken::new();
     cancelled.cancel();
     let first = v2.rescan_if_policy_changed(&cancelled).unwrap();
 
-    // Assert: exactly one batch committed, the rest pending, the hash not recorded
+    // Assert: exactly one batch committed, the hash not recorded
     assert_eq!(first.status, RescanStatus::Cancelled, "{first:?}");
     assert_eq!(
         (first.batches, first.scanned),
@@ -256,27 +239,26 @@ fn cancellation_between_batches_leaves_earlier_batches_committed_and_the_rest_pe
         "{first:?}"
     );
     assert_eq!(first.rejected, 1, "{first:?}");
-    assert_eq!(pending(&s, &version), total - RESCAN_BATCH);
     assert_ne!(
         store.index_meta().unwrap().get(IndexMeta::POLICY_HASH),
         Some(version.as_str()),
         "policy_hash must not claim a complete rescan"
     );
 
-    // Act again: the re-run resumes with what is pending and finishes
+    // Act again: nodes carry no stamp (REC-08), so the re-run walks the table again and
+    // finishes
     let second = v2
         .rescan_if_policy_changed(&CancellationToken::new())
         .unwrap();
 
-    // Assert: the remaining nodes only, the second reject found, nothing judged twice
+    // Assert: every node judged, the first reject still tombstoned, the second found
     assert_eq!(second.status, RescanStatus::Completed, "{second:?}");
-    assert_eq!(second.scanned, (total - RESCAN_BATCH) as u64, "{second:?}");
+    assert_eq!(second.scanned, total as u64, "{second:?}");
     assert_eq!(
-        second.batches, 2,
-        "one full and one partial batch; the empty terminating read is not a batch: {second:?}"
+        second.batches, 3,
+        "two full and one partial batch; the empty terminating read is not a batch: {second:?}"
     );
-    assert_eq!(second.rejected, 1, "{second:?}");
-    assert_eq!(pending(&s, &version), 0);
+    assert_eq!(second.rejected, 2, "{second:?}");
     assert_eq!(
         store.index_meta().unwrap().get(IndexMeta::POLICY_HASH),
         Some(version.as_str())
@@ -339,15 +321,8 @@ fn a_reject_hit_confined_to_session_id_hides_the_node_on_the_read_path() {
         })
         .unwrap();
     let v2 = api_with(&store, V2);
-    // not rescanned yet: the stored row still carries v1's stamp
-    assert_eq!(
-        store
-            .get(&nid(&node.id), false)
-            .unwrap()
-            .unwrap()
-            .policy_version,
-        v1.policy_version()
-    );
+    // not rescanned yet: the read projection hides it on its own
+    assert!(store.get(&nid(&node.id), false).unwrap().is_some());
     let found = v2
         .recall(RecallRequest {
             query: "build cache".into(),
@@ -555,63 +530,4 @@ fn content_hash_after_redact_is_neither_the_original_hash_nor_the_masked_remembe
         "{again:?}"
     );
     assert!(![a.id.as_str(), b.id.as_str()].contains(&again.id.as_str()));
-}
-
-/// R2-3: the startup decision does not trust the database-wide marker alone. A node stamped
-/// with an older policy by another process after `policy_hash` was recorded is found by the
-/// stale-row query at the next start and rescanned (here: a reject term, so it is hidden).
-#[test]
-fn a_stale_node_written_after_the_marker_was_set_is_rescanned_at_the_next_start() {
-    let s = Scratch::new("kaban-api-rescan", "stale-after-marker");
-    let store = s.store();
-    let v2 = api_with(&store, V2);
-    v2.remember(fact("a clean note under v2")).unwrap();
-    let first = v2
-        .rescan_if_policy_changed(&CancellationToken::new())
-        .unwrap();
-    assert_eq!(
-        store.index_meta().unwrap().get(IndexMeta::POLICY_HASH),
-        Some(v2.policy_version().as_str()),
-        "{first:?}"
-    );
-    // another process still running an older policy writes a node the old policy let through
-    let stale_ctx = kaban_core::WriteCtx::new(
-        "an-older-policy-version",
-        kaban_core::WorkspaceId::default(),
-        kaban_core::Actor::Agent,
-    );
-    let stale = match store
-        .remember(
-            kaban_core::NewNode {
-                kind: "Fact".into(),
-                text: "the nightjar codename written by an old process".into(),
-                ..Default::default()
-            },
-            &[],
-            &stale_ctx,
-        )
-        .unwrap()
-    {
-        kaban_core::RememberOutcome::Created(n) => n,
-        other @ kaban_core::RememberOutcome::Existing { .. } => panic!("{other:?}"),
-    };
-    assert_eq!(pending(&s, &v2.policy_version()), 1);
-
-    // the next start with v2 (marker already equal) must still find and judge it
-    let next = v2
-        .rescan_if_policy_changed(&CancellationToken::new())
-        .unwrap();
-    assert_eq!((next.scanned, next.rejected), (1, 1), "{next:?}");
-    assert_eq!(next.status, RescanStatus::Completed, "{next:?}");
-    assert!(store.get(&nid(&stale.id), false).unwrap().is_none());
-    assert_eq!(pending(&s, &v2.policy_version()), 0);
-    // and a start with nothing stale scans nothing
-    let idle = v2
-        .rescan_if_policy_changed(&CancellationToken::new())
-        .unwrap();
-    assert_eq!(
-        (idle.status, idle.scanned),
-        (RescanStatus::UpToDate, 0),
-        "{idle:?}"
-    );
 }

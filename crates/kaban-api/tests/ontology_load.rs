@@ -101,7 +101,6 @@ fn api_over(store: &Arc<SqliteStore>) -> KabanApi {
         Arc::clone(store) as Arc<dyn kaban_core::GraphStore>,
         Policy::empty(),
         store.signer(),
-        None,
         ApiConfig::default(),
     )
 }

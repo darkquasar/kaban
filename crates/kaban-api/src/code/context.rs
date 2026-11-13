@@ -75,17 +75,10 @@ impl KabanApi {
         &self,
         req: CodeContextRequest,
     ) -> Result<(CodeContextResponse, CodeContextTimings), ApiError> {
-        let mut ctx = self.write_ctx(None);
         let mut red = Vec::new();
-        let target = self.gate_selector(&mut ctx, TOOL, &req.target, &mut red)?;
-        let current_path = self.gate_opt(
-            &mut ctx,
-            TOOL,
-            "current_path",
-            req.current_path.as_deref(),
-            &mut red,
-        )?;
-        self.flush_audit(&mut ctx)?;
+        let target = self.gate_selector(TOOL, &req.target, &mut red)?;
+        let current_path =
+            self.gate_opt(TOOL, "current_path", req.current_path.as_deref(), &mut red)?;
         let inputs = ranking::RankInputs::checked(current_path)?;
 
         let started = Instant::now();

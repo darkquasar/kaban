@@ -545,7 +545,6 @@ fn api_under_policy(s: &Scratch, root: &Path, policy: Policy) -> KabanApi {
         store.clone(),
         policy,
         store.signer(),
-        None,
         ApiConfig {
             repo_root: Some(root.to_path_buf()),
             repo: Some("fixture".to_owned()),
@@ -1915,7 +1914,7 @@ fn no_snapshot_hint() {
     // without a repository root the class is the same
     let s2 = Scratch::new("no-repo");
     let store = Arc::new(SqliteStore::open(&s2.0.join("k.db"), &s2.0.join("keys")).unwrap());
-    let api = KabanApi::new(store.clone(), Policy::empty(), store.signer(), None)
+    let api = KabanApi::new(store.clone(), Policy::empty(), store.signer())
         .with_snapshot_provider(s2.codegraph_dir(), Arc::new(Tripwire::default()));
     let no_repo = class_text(
         api.code_definition(definition(by_path("x.go")))
@@ -4150,7 +4149,6 @@ fn code_index_api(s: &Scratch) -> (KabanApi, String) {
         store.clone(),
         redact_canary_policy(),
         store.signer(),
-        None,
         ApiConfig {
             repo_root: Some(root.clone()),
             repo: Some("fixture".to_owned()),
@@ -4259,7 +4257,6 @@ fn pinned_head_resolves_without_git() {
         store.clone(),
         policy,
         store.signer(),
-        None,
         ApiConfig {
             repo_root: Some(root),
             repo: Some("bench".to_owned()),

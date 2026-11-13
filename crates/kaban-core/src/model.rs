@@ -1,6 +1,6 @@
 //! Graph model types: nodes, edges, schema entries, queries and outcomes.
 
-use crate::audit::{AuditEntry, WorkspaceId};
+use crate::audit::WorkspaceId;
 use crate::ids::NodeId;
 use crate::lifecycle::{Governance, Lifecycle, StoreScope};
 use serde::{Deserialize, Serialize};
@@ -1217,10 +1217,10 @@ impl RedactedStrings {
 }
 
 /// What the rescan job decided for one node (core-spec S4; core-plan C2.7). The store applies
-/// the action inside the batch's transaction; the audit entries ride in the same transaction.
+/// the action inside the batch's transaction.
 #[derive(Debug, Clone)]
 pub enum RescanAction {
-    /// The node passes the loaded policy: only its `policy_version` is stamped.
+    /// The node passes the loaded policy: nothing changes.
     Keep,
     /// Redact hits: the masked strings replace the stored ones in place (new `rev`, new
     /// `content_hash`).
@@ -1228,14 +1228,9 @@ pub enum RescanAction {
         /// Every rewritable string after masking (boxed: the variant is much larger than
         /// `Keep`).
         strings: Box<RedactedStrings>,
-        /// Redact verdicts to record.
-        audit: Vec<AuditEntry>,
     },
     /// A reject hit: the node is tombstoned (lifecycle only) with a `policy-reject` event.
-    Reject {
-        /// Reject verdicts to record.
-        audit: Vec<AuditEntry>,
-    },
+    Reject,
 }
 
 /// What one `rescan` batch did.
@@ -1243,12 +1238,15 @@ pub enum RescanAction {
 pub struct RescanReport {
     /// Nodes judged in this batch (`0` = nothing left to rescan).
     pub scanned: u64,
-    /// Nodes that passed (stamped only).
+    /// Nodes that passed unchanged.
     pub kept: u64,
     /// Nodes masked in place.
     pub redacted: u64,
     /// Nodes tombstoned.
     pub rejected: u64,
+    /// The position after the last node this batch judged: the next batch starts there
+    /// (`0` before the first batch).
+    pub cursor: u64,
 }
 
 impl std::ops::AddAssign for RescanReport {
@@ -1257,6 +1255,7 @@ impl std::ops::AddAssign for RescanReport {
         self.kept += rhs.kept;
         self.redacted += rhs.redacted;
         self.rejected += rhs.rejected;
+        self.cursor = self.cursor.max(rhs.cursor);
     }
 }
 

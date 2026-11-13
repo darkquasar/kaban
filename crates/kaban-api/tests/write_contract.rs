@@ -23,7 +23,7 @@ fn open(s: &Scratch) -> (Arc<SqliteStore>, KabanApi) {
     let policy = Policy::from_file(Policy::parse(POLICY).unwrap(), "test".into()).unwrap();
     let store = Arc::new(SqliteStore::open(&s.db(), &s.keys()).unwrap());
     let signer = store.signer();
-    (store.clone(), KabanApi::new(store, policy, signer, None))
+    (store.clone(), KabanApi::new(store, policy, signer))
 }
 
 fn recall_one(api: &KabanApi, query: &str) -> serde_json::Value {

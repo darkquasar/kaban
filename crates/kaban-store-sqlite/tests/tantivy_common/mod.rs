@@ -88,7 +88,7 @@ pub(crate) fn encoded(db: &std::path::Path, id: &str) -> bool {
 }
 
 pub(crate) fn ctx(ws: &str) -> WriteCtx {
-    WriteCtx::new("v1", WorkspaceId::new(ws), Actor::Agent)
+    WriteCtx::new(WorkspaceId::new(ws), Actor::Agent)
 }
 
 /// Remember a fresh `kind` note in workspace `ws` and return it.

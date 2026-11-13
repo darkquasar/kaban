@@ -306,6 +306,9 @@ pub struct JobSubmitRequest {
     pub chunks: Vec<crate::NodeId>,
     /// Already-gated batch; submit never performs complete-edge deletion.
     pub batch: crate::WriteBatch,
+    /// Strings a redact rule masked while the batch was gated (the API's gate session sets
+    /// it when it publishes; added to the job's `redactions` counter).
+    pub redactions: u64,
 }
 
 /// Bounded runtime accumulation only; the backend owns the actual scalar counters.
@@ -366,11 +369,9 @@ pub struct JobFinishOutcome {
     pub terminal_seq: u64,
 }
 
-/// Gated canonical report and successful audit, committed with reconciliation.
+/// Gated canonical report, committed with reconciliation.
 #[derive(Debug)]
 pub struct JobFinishStateUpdate {
     /// Exact gated UTF-8 JSON bytes; retries must return these unchanged.
     pub report_json: String,
-    /// Successful gate audit derived by the API adapter.
-    pub audit: Vec<crate::AuditEntry>,
 }

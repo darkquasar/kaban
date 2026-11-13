@@ -157,7 +157,7 @@ mod tests {
     }
 
     fn ctx() -> WriteCtx {
-        WriteCtx::new("v1", WorkspaceId::default(), Actor::Agent)
+        WriteCtx::new(WorkspaceId::default(), Actor::Agent)
     }
 
     fn hits(index: &dyn TextIndex, text: &str) -> Vec<i64> {

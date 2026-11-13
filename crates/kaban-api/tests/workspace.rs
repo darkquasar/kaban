@@ -21,7 +21,6 @@ fn api_bound_to(store: &Arc<SqliteStore>, workspace: &str) -> KabanApi {
         Arc::clone(store) as Arc<dyn kaban_core::GraphStore>,
         Policy::empty(),
         store.signer(),
-        None,
         ApiConfig {
             workspace: WorkspaceId::new(workspace),
             ..Default::default()

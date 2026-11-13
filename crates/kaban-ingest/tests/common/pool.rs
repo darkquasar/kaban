@@ -228,7 +228,6 @@ pub(crate) fn ingestor_over(
         store.clone(),
         Policy::empty(),
         store.signer(),
-        None,
     ));
     Ingestor::new(api, store.clone(), store.signer(), fake, cfg)
 }

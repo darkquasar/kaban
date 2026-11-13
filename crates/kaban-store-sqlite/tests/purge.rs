@@ -16,7 +16,7 @@ use rusqlite::{Connection, OpenFlags};
 use std::fmt::Write;
 
 fn ctx() -> WriteCtx {
-    WriteCtx::new("v1", WorkspaceId::default(), Actor::Agent)
+    WriteCtx::new(WorkspaceId::default(), Actor::Agent)
 }
 
 fn raw(s: &Scratch) -> Connection {

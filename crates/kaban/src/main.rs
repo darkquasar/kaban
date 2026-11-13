@@ -456,7 +456,6 @@ fn assemble_api_with(
         store,
         policy,
         signer,
-        None,
         kaban_api::ApiConfig {
             workspace,
             repo_root,

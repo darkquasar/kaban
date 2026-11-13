@@ -18,7 +18,7 @@ use std::sync::Arc;
 fn api() -> KabanApi {
     let store = Arc::new(SqliteStore::open_memory().unwrap());
     let signer = store.signer();
-    KabanApi::new(store, Policy::empty(), signer, None)
+    KabanApi::new(store, Policy::empty(), signer)
 }
 
 #[test]

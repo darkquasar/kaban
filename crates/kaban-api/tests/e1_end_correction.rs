@@ -45,7 +45,6 @@ impl Repo {
             Arc::clone(&self.store) as Arc<dyn kaban_core::GraphStore>,
             Policy::empty(),
             self.store.signer(),
-            None,
             ApiConfig {
                 workspace: WorkspaceId::new(ws),
                 ..ApiConfig::default()

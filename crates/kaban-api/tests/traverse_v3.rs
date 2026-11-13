@@ -19,7 +19,7 @@ fn api() -> KabanApi {
     let policy = Policy::from_file(Policy::parse(b"").unwrap(), "test".into()).unwrap();
     let store = Arc::new(SqliteStore::open_memory().unwrap());
     let signer = store.signer();
-    KabanApi::new(store, policy, signer, None)
+    KabanApi::new(store, policy, signer)
 }
 
 // ---- EN-F46 (engine-plan E2.8): ontology filters, validated; the edge filter; `kind_set` ----
@@ -59,12 +59,7 @@ fn scored() -> Scored {
     let policy = Policy::from_file(Policy::parse(b"").unwrap(), "test".into()).unwrap();
     let store = Arc::new(SqliteStore::open_memory().unwrap());
     let signer = store.signer();
-    let api = KabanApi::new(
-        Arc::clone(&store) as Arc<dyn GraphStore>,
-        policy,
-        signer,
-        None,
-    );
+    let api = KabanApi::new(Arc::clone(&store) as Arc<dyn GraphStore>, policy, signer);
     let a = api.remember(fact("alpha, the start")).unwrap().id;
     let human = api
         .remember(RememberRequest {
@@ -117,10 +112,7 @@ fn scored() -> Scored {
         owner: Owner::KabanIngest,
     };
     store
-        .apply_batch(
-            b,
-            &WriteCtx::new("v1", WorkspaceId::default(), Actor::Agent),
-        )
+        .apply_batch(b, &WriteCtx::new(WorkspaceId::default(), Actor::Agent))
         .unwrap();
     Scored {
         api,

@@ -46,14 +46,14 @@ fn current_and_noncurrent_markers_are_diagnosed_without_mutation_or_disclosure()
                 ..Default::default()
             },
             &[],
-            &WriteCtx::new("v1", WorkspaceId::default(), Actor::Agent),
+            &WriteCtx::new(WorkspaceId::default(), Actor::Agent),
         )
         .unwrap();
     let RememberOutcome::Created(node) = outcome else {
         unreachable!()
     };
     let id = NodeId::parse(&node.id).unwrap();
-    let api = KabanApi::new(store.clone(), Policy::empty(), store.signer(), None);
+    let api = KabanApi::new(store.clone(), Policy::empty(), store.signer());
     let canary = "RAW_IDENT_METADATA_CANARY";
     for marker in [
         Some(IDENT_TERMS_VERSION),
@@ -96,7 +96,7 @@ fn current_and_noncurrent_markers_are_diagnosed_without_mutation_or_disclosure()
 fn metadata_read_failure_is_named_and_does_not_hide_siblings() {
     let scratch = Scratch::new("doctor-ident", "read-failure");
     let store = Arc::new(SqliteStore::open(&scratch.db(), &scratch.keys()).unwrap());
-    let api = KabanApi::new(store.clone(), Policy::empty(), store.signer(), None);
+    let api = KabanApi::new(store.clone(), Policy::empty(), store.signer());
     rusqlite::Connection::open(scratch.db())
         .unwrap()
         .execute("DROP TABLE index_meta", [])

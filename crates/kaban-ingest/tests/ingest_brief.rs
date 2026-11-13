@@ -150,7 +150,6 @@ fn api(rig: &common::real::Rig) -> KabanApi {
         rig.store.clone(),
         kaban_policy::Policy::empty(),
         rig.store.signer(),
-        None,
     )
 }
 
@@ -203,7 +202,7 @@ async fn gazetteer_advice_and_about_use_admitted_hits_without_edges_or_fake_chun
                     ..NewNode::default()
                 },
                 &[],
-                &WriteCtx::new("v1", WorkspaceId::default(), Actor::Agent),
+                &WriteCtx::new(WorkspaceId::default(), Actor::Agent),
             )
             .unwrap();
     }
@@ -216,7 +215,7 @@ async fn gazetteer_advice_and_about_use_admitted_hits_without_edges_or_fake_chun
                 ..NewNode::default()
             },
             &[],
-            &WriteCtx::new("v1", WorkspaceId::new("foreign"), Actor::Agent),
+            &WriteCtx::new(WorkspaceId::new("foreign"), Actor::Agent),
         )
         .unwrap();
     let foreign = match foreign {
@@ -648,7 +647,7 @@ async fn hidden_document_refuses_without_registry_graph_or_canary_persistence() 
         kaban_policy::Policy::from_file(kaban_policy::Policy::parse(b"rules:\n  - id: hidden\n    regex: 'SYNTHETIC-DUMP-[0-9]+'\n    action: reject\n    on_document: skip_file\n").unwrap(), "test".into()).unwrap()
     };
     let rig = common::real::rig_on_disk("kaban-e38-brief", "hidden", policy());
-    let api = KabanApi::new(rig.store.clone(), policy(), rig.store.signer(), None);
+    let api = KabanApi::new(rig.store.clone(), policy(), rig.store.signer());
     std::fs::write(rig.root.join("hidden.md"), format!("# Data\n\n{CANARY}\n")).unwrap();
     assert!(
         brief(&api, &rig.root, "hidden.md", &IngestOpts::default())

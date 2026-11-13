@@ -326,6 +326,7 @@ impl SqliteStore {
     pub(super) fn rescan_impl(
         &self,
         policy_version: &str,
+        after: u64,
         batch: usize,
         f: &mut dyn FnMut(&Node) -> RescanAction,
     ) -> Result<RescanReport> {
@@ -334,24 +335,27 @@ impl SqliteStore {
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .sql()?;
         // the batch is read under the write lock, so a node judged here cannot be rewritten by
-        // another writer before its stamp lands; purged ghosts carry no content to judge
+        // another writer before its action lands; purged ghosts carry no content to judge
         let nodes: Vec<(i64, Node)> = {
             let mut st = tx.prepare_cached(&format!(
-                "SELECT rid, {NODE_COLS} FROM node WHERE policy_version <> ?1 AND lifecycle <> 'purged' ORDER BY rid LIMIT ?2"
+                "SELECT rid, {NODE_COLS} FROM node WHERE rid > ?1 AND lifecycle <> 'purged' ORDER BY rid LIMIT ?2"
             )).sql()?;
             let limit = i64::try_from(batch).unwrap_or(i64::MAX);
+            let after = i64::try_from(after).unwrap_or(i64::MAX);
             let rows = st
-                .query_map(params![policy_version, limit], |r| {
+                .query_map(params![after, limit], |r| {
                     Ok((r.get(0)?, row_node_at(r, 1)?))
                 })
                 .sql()?;
             rows.collect::<rusqlite::Result<_>>().sql()?
         };
-        let mut report = RescanReport::default();
+        let mut report = RescanReport {
+            cursor: after,
+            ..RescanReport::default()
+        };
         if nodes.is_empty() {
-            // nothing stale under the write lock: the database-wide marker (MD-19) is recorded
-            // in this same transaction (R2-3), so no stale row can slip between the check and
-            // the marker; an equal marker is left untouched (no write, no changes row)
+            // the walk is complete: the database-wide marker (MD-19) is recorded in this same
+            // transaction; an equal marker is left untouched (no write, no changes row)
             tx.execute(
                 "INSERT INTO index_meta(key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value WHERE value <> excluded.value",
                 params![IndexMeta::POLICY_HASH, policy_version],
@@ -360,16 +364,12 @@ impl SqliteStore {
         let now = now_iso();
         for (rid, node) in &nodes {
             report.scanned += 1;
+            report.cursor = u64::try_from(*rid).unwrap_or_default();
             match f(node) {
                 RescanAction::Keep => {
-                    tx.execute(
-                        "UPDATE node SET policy_version=?1 WHERE rid=?2",
-                        params![policy_version, rid],
-                    )
-                    .sql()?;
                     report.kept += 1;
                 }
-                RescanAction::Redact { strings, .. } => {
+                RescanAction::Redact { strings } => {
                     // every rewritable string column is replaced (R2-2) and the content
                     // identity with it: the pre-redaction hash would keep a guess oracle on
                     // the masked secret, and a hash of the masked text alone would let two
@@ -378,7 +378,7 @@ impl SqliteStore {
                     let hash = redacted_content_hash(&node.id, &strings);
                     let bodies = crate::body_codec::Writer::for_connection(&tx)?;
                     tx.execute(
-                        "UPDATE node SET text=?1, summary=?2, tags=?3, props=?4, path_scope=?5, session_id=?6, agent_id=?7, repo=?8, commit_sha=?9, accepted_commit=?10, dup_key=?11, content_hash=?12, policy_version=?13, updated_at=?14, rev=rev+1 WHERE rid=?15",
+                        "UPDATE node SET text=?1, summary=?2, tags=?3, props=?4, path_scope=?5, session_id=?6, agent_id=?7, repo=?8, commit_sha=?9, accepted_commit=?10, dup_key=?11, content_hash=?12, updated_at=?13, rev=rev+1 WHERE rid=?14",
                         params![
                             bodies.stored(&strings.text),
                             strings.summary,
@@ -392,7 +392,6 @@ impl SqliteStore {
                             strings.accepted_commit,
                             strings.dup_key,
                             hash,
-                            policy_version,
                             now,
                             rid
                         ],
@@ -403,22 +402,15 @@ impl SqliteStore {
                     crate::anchors::rekey(&tx, *rid)?;
                     report.redacted += 1;
                 }
-                RescanAction::Reject { .. } => {
+                RescanAction::Reject => {
                     crate::jobs::revoke_document(&tx, node.id.as_str(), &node.workspace_id)?;
-                    // the `ForgetMode::Tombstone` path (lifecycle only, governance untouched,
-                    // edges kept) ; a node that is already
-                    // tombstoned is stamped only
-                    if node.lifecycle == Lifecycle::Tombstoned {
-                        tx.execute(
-                            "UPDATE node SET policy_version=?1 WHERE rid=?2",
-                            params![policy_version, rid],
-                        )
-                        .sql()?;
-                    } else {
+                    // the `ForgetMode::Tombstone` path (lifecycle only, edges kept); a node that
+                    // is already tombstoned is left as it is
+                    if node.lifecycle != Lifecycle::Tombstoned {
                         kaban_core::lifecycle_transition(node.lifecycle, Lifecycle::Tombstoned)?;
                         tx.execute(
-                            "UPDATE node SET lifecycle='tombstoned', valid_to=?1, updated_at=?1, rev=rev+1, policy_version=?2 WHERE rid=?3",
-                            params![now, policy_version, rid],
+                            "UPDATE node SET lifecycle='tombstoned', valid_to=?1, updated_at=?1, rev=rev+1 WHERE rid=?2",
+                            params![now, rid],
                         ).sql()?;
                     }
                     report.rejected += 1;

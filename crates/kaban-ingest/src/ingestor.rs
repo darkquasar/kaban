@@ -367,7 +367,6 @@ impl Ingestor {
             rx,
             Arc::clone(&gauge),
             ws.clone(),
-            policy_version.clone(),
             self.cfg.dry_run,
         ));
         let semaphore = Arc::clone(&self.workers);

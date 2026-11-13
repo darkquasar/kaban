@@ -13,7 +13,7 @@ fn api_with(policy_yaml: &str) -> KabanApi {
     let policy = Policy::from_file(file, "test".into()).unwrap();
     let store = Arc::new(SqliteStore::open_memory().unwrap());
     let signer = store.signer();
-    KabanApi::new(store, policy, signer, None)
+    KabanApi::new(store, policy, signer)
 }
 
 fn remember_props(api: &KabanApi, props: Value) -> Result<(), ApiError> {

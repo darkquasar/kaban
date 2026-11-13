@@ -73,7 +73,7 @@ fn write_snapshot(dir: &Path, commit: &str) -> PathBuf {
 fn api_on(s: &Scratch) -> KabanApi {
     let store = Arc::new(SqliteStore::open(&s.0.join("kaban.db"), &s.0.join("keys")).unwrap());
     let policy = Policy::from_file(Policy::parse(b"words: []\n").unwrap(), "t".into()).unwrap();
-    KabanApi::new(store.clone(), policy, store.signer(), None)
+    KabanApi::new(store.clone(), policy, store.signer())
 }
 
 #[test]

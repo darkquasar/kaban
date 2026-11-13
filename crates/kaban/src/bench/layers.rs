@@ -570,7 +570,6 @@ pub(super) fn run(
         sqlite.clone(),
         policy,
         sqlite.signer(),
-        None,
         ApiConfig {
             engine: Arc::new(engine.clone()),
             workspace: WorkspaceId::new("ws1"),

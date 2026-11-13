@@ -16,7 +16,7 @@ fn api() -> KabanApi {
     let policy = Policy::from_file(Policy::parse(b"").unwrap(), "test".into()).unwrap();
     let store = Arc::new(SqliteStore::open_memory().unwrap());
     let signer = store.signer();
-    KabanApi::new(store, policy, signer, None)
+    KabanApi::new(store, policy, signer)
 }
 
 fn decision(text: &str, props: serde_json::Value) -> RememberRequest {
@@ -58,7 +58,7 @@ fn store_api() -> (Arc<SqliteStore>, KabanApi) {
     let policy = Policy::from_file(Policy::parse(b"").unwrap(), "test".into()).unwrap();
     let store = Arc::new(SqliteStore::open_memory().unwrap());
     let signer = store.signer();
-    (store.clone(), KabanApi::new(store, policy, signer, None))
+    (store.clone(), KabanApi::new(store, policy, signer))
 }
 
 fn wire(relative_path: &str) -> CodeRefWire {
@@ -287,7 +287,7 @@ fn canary_in_info_is_rejected_and_absent_from_db_audit_and_response() {
     let store = Arc::new(SqliteStore::open(&db, &dir.join("keys")).unwrap());
     let policy = Policy::from_file(Policy::parse(b"").unwrap(), "test".into()).unwrap();
     let signer = store.signer();
-    let api = KabanApi::new(store.clone(), policy, signer, None);
+    let api = KabanApi::new(store.clone(), policy, signer);
     let mut w = wire("src/a.rs");
     w.info = Some(format!("key {CANARY} leaked here"));
     let err = api

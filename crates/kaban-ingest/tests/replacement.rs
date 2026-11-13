@@ -18,7 +18,6 @@ async fn a_changed_record_updates_in_place_and_repeats_are_unchanged() {
         rig.store.clone(),
         kaban_policy::Policy::empty(),
         rig.store.signer(),
-        None,
     );
     let prepared = brief(
         &api,

@@ -5,7 +5,7 @@ use super::{KabanApi, MAX_PROPS_BYTES, check_unit};
 use crate::control::ControlPath;
 use crate::error::ApiError;
 use crate::types::{ForgetRequest, ForgetResponse, LinkRequest, LinkResponse};
-use kaban_core::{Actor, AuditOp, ForgetMode};
+use kaban_core::Actor;
 
 // The `GOVERNS` source rule (core-spec §4; engine-spec EN-F4: `rels.GOVERNS.from` = the kinds
 // with `governs_paths: true`) is the store's, in its one edge-write path, since E1.7a RE2-8.
@@ -25,28 +25,13 @@ impl KabanApi {
             "retire_producer",
             &serde_json::json!({"layer":layer.as_str(),"producer":old_producer}),
         )?;
-        let mut ctx = self.write_ctx(None);
-        let producer = self.gate(
-            &mut ctx,
-            "retire_producer",
-            "producer",
-            old_producer,
-            &mut Vec::new(),
-        )?;
+        let ctx = self.write_ctx(None);
+        let producer = self.gate("retire_producer", "producer", old_producer, &mut Vec::new())?;
         if producer != old_producer {
-            self.flush_audit(&mut ctx)?;
             return Err(ApiError::Invalid("maintenance_identity_redacted".into()));
         }
         let authority = kaban_core::CurrentProducerAuthority::from_config(self.engine(), layer)
             .ok_or_else(|| ApiError::Invalid("unavailable_producer".into()))?;
-        ctx.audit.push(self.entry_for(
-            &ctx,
-            AuditOp::Forget,
-            "retire_producer",
-            "layer",
-            layer.as_str(),
-            vec![],
-        ));
         let report = self.store.retire_producer(
             authority,
             &producer,
@@ -84,15 +69,7 @@ impl KabanApi {
                 "reindex_layer",
                 &serde_json::json!({"layer":layer.as_str()}),
             )?;
-            let mut ctx = self.write_ctx(None);
-            ctx.audit.push(self.entry_for(
-                &ctx,
-                AuditOp::Forget,
-                "reindex_layer",
-                "layer",
-                layer.as_str(),
-                vec![],
-            ));
+            let ctx = self.write_ctx(None);
             let report =
                 self.store
                     .jobs_reindex(layer, self.engine().pipeline.retire_batch_rows, &ctx)?;
@@ -129,23 +106,13 @@ impl KabanApi {
             tool,
             &serde_json::json!({"layer":layer.as_str(),"document":document}),
         )?;
-        let mut ctx = self.write_ctx(None);
-        let gated_document =
-            self.gate_opt(&mut ctx, tool, "document", document, &mut Vec::new())?;
+        let ctx = self.write_ctx(None);
+        let gated_document = self.gate_opt(tool, "document", document, &mut Vec::new())?;
         if gated_document.as_deref() != document {
-            self.flush_audit(&mut ctx)?;
             return Err(ApiError::Invalid("maintenance_identity_redacted".into()));
         }
         let authority = kaban_core::CurrentProducerAuthority::from_config(self.engine(), layer)
             .ok_or_else(|| ApiError::Invalid("unavailable_producer".into()))?;
-        ctx.audit.push(self.entry_for(
-            &ctx,
-            AuditOp::Forget,
-            tool,
-            "layer",
-            layer.as_str(),
-            vec![],
-        ));
         let report = self.store.maintain_layer(
             authority,
             operation,
@@ -183,28 +150,20 @@ impl KabanApi {
         ctx.actor = actor;
         // the endpoint ids are control (validated by shape, scanned only when malformed)
         let from = self.gate_control(
-            &mut ctx,
             t,
             ControlPath::request(t, "from"),
             "from",
             &p.from,
             &mut red,
         )?;
-        let to = self.gate_control(
-            &mut ctx,
-            t,
-            ControlPath::request(t, "to"),
-            "to",
-            &p.to,
-            &mut red,
-        )?;
-        let rel = self.gate(&mut ctx, t, "rel", &p.rel, &mut red)?;
+        let to = self.gate_control(t, ControlPath::request(t, "to"), "to", &p.to, &mut red)?;
+        let rel = self.gate(t, "rel", &p.rel, &mut red)?;
         let props = match &p.props {
             Some(v) => {
                 if v.to_string().len() > MAX_PROPS_BYTES {
                     return Err(ApiError::Invalid("props too large".into()));
                 }
-                Some(self.gate_json(&mut ctx, t, "props", v, &mut red)?)
+                Some(self.gate_json(t, "props", v, &mut red)?)
             }
             None => None,
         };
@@ -214,7 +173,6 @@ impl KabanApi {
         let e = self
             .store
             .link(&from, &to, &rel, p.confidence, props, &ctx)?;
-        self.export_audit(&ctx.audit);
         let receipt = self.await_searchable(self.committed_receipt(ctx.terminal_seq()));
         Ok(LinkResponse {
             id: e.id,
@@ -235,29 +193,19 @@ impl KabanApi {
     #[allow(clippy::needless_pass_by_value)] // core-plan §6 interface: requests are taken by value
     pub fn forget(&self, p: ForgetRequest) -> Result<ForgetResponse, ApiError> {
         let mode = p.mode.unwrap_or_default();
-        let mut ctx = self.write_ctx(None);
+        let ctx = self.write_ctx(None);
         // the id is control: a node id is validated, anything else is gated before the lookup
         // (review R1-3), so a redact-class value is looked up (and reported) masked, never raw
         let id = self.gate_control(
-            &mut ctx,
             "forget",
             ControlPath::request("forget", "id"),
             "id",
             &p.id,
             &mut Vec::new(),
         )?;
-        self.flush_audit(&mut ctx)?; // a redaction verdict is recorded even if the lookup fails
-        let op = match mode {
-            ForgetMode::Purge => AuditOp::Purge,
-            ForgetMode::Tombstone | ForgetMode::Invalidate | ForgetMode::Archive => AuditOp::Forget,
-        };
         // a string that is not a node id names no node (D2); the gated (masked) form is echoed
         let node_id = Self::node_id(&id)?;
-        let mut entry = self.entry_for(&ctx, op, "forget", "node", &id, vec![]);
-        entry.node_id = Some(id.clone());
-        ctx.audit.push(entry);
         let outcome = self.store.forget(&node_id, mode, &ctx)?;
-        self.export_audit(&ctx.audit);
         // the store read the terminal `seq` inside the transaction (SS-10)
         let receipt = self.await_searchable(self.committed_receipt(Some(outcome.outbox_seq)));
         Ok(ForgetResponse {

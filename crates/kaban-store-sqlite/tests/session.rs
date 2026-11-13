@@ -94,8 +94,8 @@ fn failure_props_update_and_pending_lookup_stay_inside_the_workspace_and_the_bou
     };
     let s = Scratch::new("kaban-sess", "ops");
     let store = SqliteStore::open(&s.db(), &s.keys()).unwrap();
-    let ctx_a = WriteCtx::new("pv", WorkspaceId::new("ws-a"), Actor::Agent);
-    let ctx_b = WriteCtx::new("pv", WorkspaceId::new("ws-b"), Actor::Agent);
+    let ctx_a = WriteCtx::new(WorkspaceId::new("ws-a"), Actor::Agent);
+    let ctx_b = WriteCtx::new(WorkspaceId::new("ws-b"), Actor::Agent);
     let remember = |kind: &str, text: &str, ctx: &WriteCtx| -> String {
         match store
             .remember(

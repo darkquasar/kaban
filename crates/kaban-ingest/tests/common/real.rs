@@ -46,7 +46,7 @@ fn rig_with(prefix: &str, name: &str, policy: Policy, on_disk: bool) -> Rig {
     } else {
         (Arc::new(SqliteStore::open_memory().unwrap()), None)
     };
-    let api = Arc::new(KabanApi::new(store.clone(), policy, store.signer(), None));
+    let api = Arc::new(KabanApi::new(store.clone(), policy, store.signer()));
     let ingest_cfg = IngestConfig {
         workers: 2,
         queue_depth: 4,

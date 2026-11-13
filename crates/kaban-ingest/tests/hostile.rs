@@ -19,7 +19,7 @@ async fn credential_and_prompt_rejection_precede_parsing_and_never_publish_succe
     .unwrap();
     let rig = common::real::rig_on_disk("kaban-e39-hostile", "reject", Policy::empty());
     std::fs::write(rig.root.join("a.md"), "# Source\n\nA harmless source.\n").unwrap();
-    let api = KabanApi::new(rig.store.clone(), policy, rig.store.signer(), None);
+    let api = KabanApi::new(rig.store.clone(), policy, rig.store.signer());
     let prepared = brief(&api, &rig.root, "a.md", &IngestOpts::default())
         .await
         .unwrap();
@@ -56,7 +56,7 @@ async fn credential_and_prompt_rejection_precede_parsing_and_never_publish_succe
 async fn fake_governance_fields_are_refused_and_the_record_is_written_active() {
     let rig = common::real::rig("kaban-e39-hostile", "fake");
     std::fs::write(rig.root.join("a.md"), "# Decision\n\nHarmless source.\n").unwrap();
-    let api = KabanApi::new(rig.store.clone(), Policy::empty(), rig.store.signer(), None);
+    let api = KabanApi::new(rig.store.clone(), Policy::empty(), rig.store.signer());
     let prepared = brief(
         &api,
         &rig.root,

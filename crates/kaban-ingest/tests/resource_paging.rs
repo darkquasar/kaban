@@ -58,7 +58,7 @@ fn seed() -> Arc<SqliteStore> {
             }
         })
         .collect();
-    let ctx = WriteCtx::new("policy-v0", ws(), Actor::Agent);
+    let ctx = WriteCtx::new(ws(), Actor::Agent);
     store.apply_batch(WriteBatch::new(ws(), ops), &ctx).unwrap();
     store
 }

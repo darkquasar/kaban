@@ -333,7 +333,6 @@ pub(crate) fn run(
         store.clone(),
         policy,
         signer,
-        None,
         ApiConfig {
             workspace: WorkspaceId::new(WORKSPACES[0].0),
             repo_root: Some(fixture.clone()),

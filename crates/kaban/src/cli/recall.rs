@@ -106,12 +106,7 @@ impl ToolArgs for Flags {
 /// Run the raw request (flags or `--stdin-json`) through the seam and print the result as
 /// JSON.
 pub(crate) fn run(api: &KabanApi, raw: Value, format: Format) -> ExitCode {
-    run_tool(
-        api,
-        "recall",
-        raw,
-        &[],
-        format,
-        |api, request: RecallRequest| api.recall(request),
-    )
+    run_tool(api, "recall", raw, format, |api, request: RecallRequest| {
+        api.recall(request)
+    })
 }

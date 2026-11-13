@@ -49,9 +49,8 @@ pub struct TraverseRequest {
     /// unchanged. Default false; nothing is added when no snapshot resolves.
     #[serde(default)]
     pub follow_anchors: bool,
-    /// Also return candidate records (an `x:` record still under review, a record a
-    /// reconciliation left for review); default false: candidates are absent from the nodes,
-    /// the edges and the start ids alike. `kaban review` and `explain` list them either way.
+    /// Also return candidate records (an `x:` record of an undeclared label); default false:
+    /// candidates are absent from the nodes, the edges and the start ids alike.
     #[serde(default)]
     pub include_candidates: bool,
 }

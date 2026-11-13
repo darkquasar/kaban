@@ -55,7 +55,6 @@ impl HookScratch {
             store.clone(),
             Policy::empty(),
             store.signer(),
-            None,
             ApiConfig {
                 workspace: WorkspaceId::new(REPO),
                 repo_root: Some(self.repo()),

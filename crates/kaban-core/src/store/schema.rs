@@ -1,7 +1,9 @@
 //! [`SchemaStore`]: the label and relationship-type registry role trait.
 
 use crate::error::Result;
+use crate::lifecycle::GovernedSet;
 use crate::model::TypeDef;
+use std::sync::Arc;
 
 /// The label and relationship-type registry (core-spec F5): read it, extend it. Used by the
 /// service layer's schema path and the MCP adapter.
@@ -16,4 +18,10 @@ pub trait SchemaStore: Send + Sync {
     /// # Errors
     /// `InvalidName`, `UnknownKind` (endpoint kinds), `Builtin` or a backend error.
     fn schema_extend(&self, def: TypeDef) -> Result<TypeDef>;
+    /// Decide the archive-on-link rels and path-governing kinds of later writes by `governed`
+    /// (the service's loaded ontology, published on every load). A store that decides by no
+    /// ontology ignores it.
+    fn adopt_governed(&self, governed: Arc<GovernedSet>) {
+        let _ = governed;
+    }
 }

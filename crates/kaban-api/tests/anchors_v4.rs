@@ -190,7 +190,6 @@ fn service(s: &Scratch, snapshot: bool) -> (Arc<SqliteStore>, KabanApi) {
         store.clone(),
         policy,
         store.signer(),
-        None,
         ApiConfig {
             repo: Some(REPO.into()),
             repo_root,

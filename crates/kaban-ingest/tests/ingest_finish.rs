@@ -18,7 +18,6 @@ fn api(rig: &common::real::Rig, cap: u32) -> KabanApi {
         rig.store.clone(),
         kaban_policy::Policy::empty(),
         rig.store.signer(),
-        None,
         kaban_api::ApiConfig {
             engine: std::sync::Arc::new(engine),
             ..Default::default()
@@ -181,7 +180,6 @@ async fn overflow_default_no_edge_and_present_expired_vs_pruned_refusals() {
         rig.store.clone(),
         kaban_policy::Policy::empty(),
         rig.store.signer(),
-        None,
         kaban_api::ApiConfig {
             workspace: kaban_core::WorkspaceId::new("foreign"),
             ..Default::default()
@@ -210,7 +208,7 @@ async fn changed_policy_refuses_retained_success_without_remasking_or_rewriting_
     )
     .unwrap();
     let policy = kaban_policy::Policy::from_file(file, "new".into()).unwrap();
-    let changed = KabanApi::new(rig.store.clone(), policy, rig.store.signer(), None);
+    let changed = KabanApi::new(rig.store.clone(), policy, rig.store.signer());
     // Closed control values are validated, not scanned. A CONTENT map key is the
     // report-policy seam; use the public gate adapter to retain invented free content.
     let source = rig
@@ -251,7 +249,7 @@ async fn changed_policy_refuses_retained_success_without_remasking_or_rewriting_
         "reject".into(),
     )
     .unwrap();
-    let changed = KabanApi::new(rig.store.clone(), reject, rig.store.signer(), None);
+    let changed = KabanApi::new(rig.store.clone(), reject, rig.store.signer());
     assert!(finish(&changed, &rig.root, &job).await.is_err());
     assert_eq!(
         rig.store.job_get(&job, api.workspace()).unwrap().unwrap(),
@@ -289,11 +287,7 @@ async fn forget_revokes_next_and_finish_and_preview_never_prunes() {
             .unwrap()
             .is_some()
     );
-    let ctx = kaban_core::WriteCtx::new(
-        api.policy_version(),
-        api.workspace().clone(),
-        kaban_core::Actor::HumanCli,
-    );
+    let ctx = kaban_core::WriteCtx::new(api.workspace().clone(), kaban_core::Actor::HumanCli);
     rig.store
         .forget(
             &NodeId::parse(&prepared.document.id).unwrap(),

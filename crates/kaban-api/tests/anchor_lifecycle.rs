@@ -38,7 +38,6 @@ impl Fixture {
             store.clone(),
             Policy::empty(),
             store.signer(),
-            None,
             ApiConfig {
                 workspace: WorkspaceId::default(),
                 repo_root: None,
@@ -128,7 +127,7 @@ fn anchor_update_rewrites_key() {
                     },
                 }],
             ),
-            &WriteCtx::new("v1", WorkspaceId::default(), Actor::Agent),
+            &WriteCtx::new(WorkspaceId::default(), Actor::Agent),
         )
         .unwrap();
     let after = f.anchors(&id);

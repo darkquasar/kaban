@@ -95,14 +95,9 @@ pub(crate) fn run(api: &KabanApi, raw: Value, format: Format) -> ExitCode {
             #[serde(default)]
             document: Option<String>,
         }
-        return run_write_tool(
-            api,
-            "forget_layer",
-            raw,
-            &[],
-            format,
-            |api, request: Request| api.forget_layer(request.layer, request.document.as_deref()),
-        );
+        return run_write_tool(api, "forget_layer", raw, format, |api, request: Request| {
+            api.forget_layer(request.layer, request.document.as_deref())
+        });
     }
     #[cfg(feature = "ingest")]
     if raw.get("document").is_some() {
@@ -110,18 +105,14 @@ pub(crate) fn run(api: &KabanApi, raw: Value, format: Format) -> ExitCode {
             api,
             "forget",
             raw,
-            &[],
             format,
             |api, request: ForgetDocumentRequest| {
                 let policy = api.policy_handle();
                 let policy = policy
                     .read()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                let ctx = kaban_core::WriteCtx::new(
-                    api.policy_version(),
-                    api.workspace().clone(),
-                    kaban_core::Actor::Agent,
-                );
+                let ctx =
+                    kaban_core::WriteCtx::new(api.workspace().clone(), kaban_core::Actor::Agent);
                 kaban_ingest::forget_document(
                     api.store().as_ref(),
                     &policy,
@@ -131,12 +122,7 @@ pub(crate) fn run(api: &KabanApi, raw: Value, format: Format) -> ExitCode {
             },
         );
     }
-    run_write_tool(
-        api,
-        "forget",
-        raw,
-        &[],
-        format,
-        |api, request: ForgetRequest| api.forget(request),
-    )
+    run_write_tool(api, "forget", raw, format, |api, request: ForgetRequest| {
+        api.forget(request)
+    })
 }

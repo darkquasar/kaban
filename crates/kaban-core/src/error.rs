@@ -226,12 +226,12 @@ pub enum StoreError {
     /// `invalid_identifier` for a discovered label, `unknown_kind` for a promotion target).
     #[error(transparent)]
     Ontology(#[from] crate::ontology::OntologyError),
-    /// A producer `UpsertEdge` carrying a `layer` names no matching `edge` assertion in its
-    /// batch (engine-spec EN-F9; engine-plan E2.2): no producer writes an edge directly, the
-    /// projection of a verdict does, so the batch is refused before any write. The text is
-    /// the fixed class; the triple is caller data and is not echoed.
-    #[error("edge_requires_assertion")]
-    EdgeRequiresAssertion,
+    /// A producer's edge set or derived artifact does not match its owner, layer, workspace
+    /// or source (a gazetteer set or a layer maintenance the store refuses), so the batch is
+    /// refused before any write. The text is the fixed class; the triple is caller data and
+    /// is not echoed.
+    #[error("edge_set_refused")]
+    EdgeSetRefused,
     /// A batch assertion names a subject, span or object the batch's workspace does not hold (EN-S3, F17): unknown, purged or another tenant's; the whole
     /// batch fails before any claim row is written. The id is echoed as the other
     /// `NotFound` paths do (an id is control, not content).
@@ -355,7 +355,7 @@ impl std::fmt::Debug for StoreError {
             Self::PromoteConflict => f.write_str("PromoteConflict"),
             Self::PromoteTargetIncompatible => f.write_str("PromoteTargetIncompatible"),
             Self::Ontology(e) => f.debug_tuple("Ontology").field(e).finish(),
-            Self::EdgeRequiresAssertion => f.write_str("EdgeRequiresAssertion"),
+            Self::EdgeSetRefused => f.write_str("EdgeSetRefused"),
             Self::AssertionSubjectNotFound(id) => {
                 f.debug_tuple("AssertionSubjectNotFound").field(id).finish()
             }

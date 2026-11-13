@@ -231,14 +231,14 @@ pub(crate) fn done_artifact(
     conn: &Connection,
     job: &IngestJob,
     request: &kaban_core::JobFinishRequest,
-    ctx: &kaban_core::WriteCtx,
 ) -> Result<kaban_core::DerivedArtifact> {
     let layer = layer(&job.dialect)?;
-    let source_rid: i64 = conn
+    // the marker records the source's stored policy column, as the gazetteer's does
+    let (source_rid, policy_version): (i64, String) = conn
         .query_row(
-            "SELECT rid FROM node WHERE id=?1 AND workspace_id=?2",
+            "SELECT rid,policy_version FROM node WHERE id=?1 AND workspace_id=?2",
             params![request.document.as_str(), job.workspace.as_str()],
-            |r| r.get(0),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .sql()?;
     // The shipped job protocol, never a worker-supplied producer descriptor, owns this marker.
@@ -250,7 +250,7 @@ pub(crate) fn done_artifact(
             layer,
             &producer,
             &config_hash,
-            &ctx.policy_version,
+            &policy_version,
         ),
         workspace_id: job.workspace.clone(),
         layer,
@@ -258,7 +258,7 @@ pub(crate) fn done_artifact(
         source_rid,
         source_rev: request.source_rev.clone(),
         config_hash,
-        policy_version: ctx.policy_version.clone(),
+        policy_version,
         published_at: crate::edge_write::now_unix(),
     };
     Ok(artifact)
@@ -532,7 +532,7 @@ pub(crate) fn record_submit(
     mut job: IngestJob,
     report: &kaban_core::BatchReport,
     state: kaban_core::JobSubmitStateUpdate,
-    ctx: &kaban_core::WriteCtx,
+    redactions: u64,
 ) -> Result<IngestJob> {
     let original = kaban_core::JobSubmitContract::from_job(&job)?;
     let old_plan: serde_json::Value = serde_json::from_str(&job.plan_json)?;
@@ -549,13 +549,7 @@ pub(crate) fn record_submit(
     job.created = add_count(job.created, u64::from(report.inserted))?;
     job.updated = add_count(job.updated, u64::from(report.updated))?;
     job.unchanged = add_count(job.unchanged, u64::from(report.unchanged))?;
-    job.redactions = add_count(
-        job.redactions,
-        ctx.audit
-            .iter()
-            .filter(|a| a.op == kaban_core::AuditOp::Redact)
-            .count() as u64,
-    )?;
+    job.redactions = add_count(job.redactions, redactions)?;
     conn.execute(
         "UPDATE ingest_jobs SET plan=?1,named_edges=?2,submits=?3,created=?4,updated=?5,unchanged=?6,redactions=?7 WHERE job_id=?8 AND workspace_id=?9 AND status='open'",
         params![job.plan_json,serde_json::to_string(&job.named_edges)?,sql_count(job.submits)?,sql_count(job.created)?,sql_count(job.updated)?,sql_count(job.unchanged)?,sql_count(job.redactions)?,job.job.as_str(),job.workspace.as_str()],

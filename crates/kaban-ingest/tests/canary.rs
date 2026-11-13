@@ -857,7 +857,7 @@ fn commit(
 ) -> Vec<kaban_core::NodeId> {
     use kaban_core::{Actor, IngestStore, NewNode, Op, WriteBatch, WriteCtx};
     let ws = WorkspaceId::default();
-    let mut ctx = WriteCtx::new(policy.effective_hash(), ws.clone(), Actor::Agent);
+    let ctx = WriteCtx::new(ws.clone(), Actor::Agent);
     let mut ops = Vec::new();
     let mut ids = Vec::new();
     let node = |kind: &str, text: String, props: serde_json::Value| NewNode {
@@ -867,8 +867,7 @@ fn commit(
         ..NewNode::default()
     };
     match prepared {
-        PreparedDocument::Ready { graph, audit } => {
-            ctx.audit = audit;
+        PreparedDocument::Ready { graph, .. } => {
             let doc = graph.document;
             ops.push(Op::UpsertNode {
                 id: doc.id.clone(),
@@ -911,8 +910,7 @@ fn commit(
                 }
             }
         }
-        PreparedDocument::Blocked { props, audit } => {
-            ctx.audit = audit;
+        PreparedDocument::Blocked { props, .. } => {
             let id = kaban_ingest::document_id(&SourceId::new(
                 &ws,
                 &gate_path(policy, &props.path).unwrap(),

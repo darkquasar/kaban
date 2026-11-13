@@ -116,11 +116,7 @@ fn store(s: &Scratch) -> SqliteStore {
 }
 
 fn ctx() -> WriteCtx {
-    WriteCtx::new(
-        Policy::empty().effective_hash(),
-        WorkspaceId::default(),
-        Actor::Agent,
-    )
+    WriteCtx::new(WorkspaceId::default(), Actor::Agent)
 }
 
 fn fixed_id(i: usize) -> NodeId {

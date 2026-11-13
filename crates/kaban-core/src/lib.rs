@@ -36,8 +36,7 @@ pub use artifact::{
     SourceRev, artifact_key,
 };
 pub use audit::{
-    Actor, ActorId, AuditEntry, AuditOp, AuditVerification, Durability, InvalidActorId,
-    WorkspaceId, WriteCtx,
+    Actor, ActorId, AuditEntry, AuditOp, Durability, InvalidActorId, WorkspaceId, WriteCtx,
 };
 // canonical JSON, `props_schema` validator subset (engine-plan E1.1)
 pub use canon::canonical_json;

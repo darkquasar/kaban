@@ -14,7 +14,7 @@ use kaban_core::{
 use kaban_store_sqlite::SqliteStore;
 
 fn ctx() -> WriteCtx {
-    WriteCtx::new("v1", WorkspaceId::default(), Actor::Agent)
+    WriteCtx::new(WorkspaceId::default(), Actor::Agent)
 }
 
 fn node(kind: &str, text: &str) -> NewNode {
@@ -547,7 +547,7 @@ fn upsert_on_archived_purged_other_kind_and_other_workspace_rows() {
                 WorkspaceId::new("other-tenant"),
                 vec![upsert(&foreign, "Fact", "owned by another workspace")],
             ),
-            &WriteCtx::new("v1", WorkspaceId::new("other-tenant"), Actor::Agent),
+            &WriteCtx::new(WorkspaceId::new("other-tenant"), Actor::Agent),
         )
         .unwrap();
     store
@@ -642,7 +642,7 @@ fn upsert_on_archived_purged_other_kind_and_other_workspace_rows() {
 
 /// A context bound to `ws`.
 fn ctx_in(ws: &str) -> WriteCtx {
-    WriteCtx::new("v1", WorkspaceId::new(ws), Actor::Agent)
+    WriteCtx::new(WorkspaceId::new(ws), Actor::Agent)
 }
 
 /// Everything a rolled-back batch must leave untouched (the audit chain and the events went
@@ -676,7 +676,7 @@ fn two_tenants() -> (SqliteStore, NodeId, NodeId, NodeId) {
                 WorkspaceId::new("other-tenant"),
                 vec![upsert(&theirs, "Fact", "a note owned by another tenant")],
             ),
-            &WriteCtx::new("v1", WorkspaceId::new("other-tenant"), Actor::Agent),
+            &WriteCtx::new(WorkspaceId::new("other-tenant"), Actor::Agent),
         )
         .unwrap();
     store

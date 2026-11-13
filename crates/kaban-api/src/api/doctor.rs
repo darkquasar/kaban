@@ -253,7 +253,7 @@ impl KabanApi {
             }
             Err(error) => report.push("layers", false, format!("not checked: {error}")),
         }
-        // engine-plan E3.11 Step 6 (EN-F17): the anchors `explain` calls `stale`; facts, not damage
+        // engine-plan E3.11 Step 6 (EN-F17): anchors whose symbol the snapshot lost; facts, not damage
         let (ok, detail) = self.stale_anchors();
         report.push("stale_anchors", ok, detail);
         if ctx.vacuum {
@@ -269,7 +269,7 @@ impl KabanApi {
     }
 
     /// The `CodeRef`s of the bound workspace and repository whose `symbol` the current
-    /// snapshot does not hold (the `snapshot_mismatch` leg of `why`, `explain`'s `stale`),
+    /// snapshot does not hold (`snapshot_mismatch`),
     /// in id order: `n: <count>; snapshot: <commit>[; anchors: <id> code: snapshot_mismatch
     /// symbol: <key>, ..]`. An ambiguous key is not stale. Without a resolved snapshot nothing
     /// can be called renamed: the check cannot inspect and names no anchor. Reads only: the
@@ -314,7 +314,7 @@ impl KabanApi {
         }
         stale.truncate(ANCHORS_NAMED);
         if n > ANCHORS_NAMED {
-            stale.push(format!("+{} more (kaban review)", n - ANCHORS_NAMED));
+            stale.push(format!("+{} more", n - ANCHORS_NAMED));
         }
         let detail = format!("n: {n}; snapshot: {commit}; anchors: {}", stale.join(", "));
         (true, detail)

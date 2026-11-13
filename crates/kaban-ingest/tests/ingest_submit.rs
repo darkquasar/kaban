@@ -11,7 +11,6 @@ fn api(rig: &common::real::Rig) -> KabanApi {
         rig.store.clone(),
         kaban_policy::Policy::empty(),
         rig.store.signer(),
-        None,
     )
 }
 
@@ -87,7 +86,6 @@ async fn bounded_union_preserves_names_and_overflow_does_not_refuse_later_submit
         rig.store.clone(),
         kaban_policy::Policy::empty(),
         rig.store.signer(),
-        None,
         kaban_api::ApiConfig {
             engine: std::sync::Arc::new(engine),
             ..Default::default()
@@ -264,12 +262,7 @@ async fn submitted_records_and_edges_are_active_for_a_second_process() {
     let other = std::sync::Arc::new(
         kaban_store_sqlite::SqliteStore::open(&db, &db.parent().unwrap().join("keys")).unwrap(),
     );
-    let reader = KabanApi::new(
-        other.clone(),
-        kaban_policy::Policy::empty(),
-        other.signer(),
-        None,
-    );
+    let reader = KabanApi::new(other.clone(), kaban_policy::Policy::empty(), other.signer());
     let found = reader
         .recall(kaban_api::RecallRequest {
             query: "extractor fact".into(),

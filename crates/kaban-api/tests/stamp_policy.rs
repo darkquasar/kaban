@@ -39,7 +39,6 @@ fn api_on(s: &Scratch, config: ApiConfig) -> (KabanApi, Arc<SqliteStore>) {
         Arc::clone(&store) as Arc<dyn kaban_core::GraphStore>,
         Policy::empty(),
         store.signer(),
-        None,
         config,
     );
     (api, store)

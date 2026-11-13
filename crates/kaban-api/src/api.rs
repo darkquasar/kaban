@@ -23,7 +23,7 @@ use crate::types::{ReceiptIdentities, WriteReceipt};
 use kaban_codegraph::SnapshotProvider;
 use kaban_core::config::EngineConfig;
 use kaban_core::{Actor, GovernedSet, GraphStore, NodeId, WorkspaceId, WriteCtx};
-use kaban_policy::{AuditExport, AuditSigner, Policy};
+use kaban_policy::{AuditSigner, Policy};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock, RwLockReadGuard};
 
@@ -52,13 +52,12 @@ pub struct ApiConfig {
     pub engine: Arc<EngineConfig>,
 }
 
-/// The capability surface: store + denylist policy + audit signer (+ optional JSONL export).
+/// The capability surface: store + denylist policy + keyed-hash signer.
 #[derive(Clone)]
 pub struct KabanApi {
     pub(crate) store: Arc<dyn GraphStore>,
     pub(crate) policy: Arc<RwLock<Policy>>,
     pub(crate) signer: Arc<dyn AuditSigner>,
-    pub(crate) export: Option<Arc<AuditExport>>,
     pub(crate) config: ApiConfig,
     pub(crate) git: crate::git::GitRunner,
     /// Enrichers this process offers to `recall.enrich[]` (core-spec F19); none by default.
@@ -107,15 +106,10 @@ fn check_unit(name: &str, v: Option<f64>) -> Result<(), ApiError> {
 }
 
 impl KabanApi {
-    /// Assemble the service over a store, a compiled policy, the store's audit signer (for
-    /// `input_hmac` stubs) and an optional JSONL audit export.
-    pub fn new(
-        store: Arc<dyn GraphStore>,
-        policy: Policy,
-        signer: Arc<dyn AuditSigner>,
-        export: Option<AuditExport>,
-    ) -> Self {
-        Self::with_config(store, policy, signer, export, ApiConfig::default())
+    /// Assemble the service over a store, a compiled policy and the store's signer (the keyed
+    /// hashes of command fingerprints and ingest path ids).
+    pub fn new(store: Arc<dyn GraphStore>, policy: Policy, signer: Arc<dyn AuditSigner>) -> Self {
+        Self::with_config(store, policy, signer, ApiConfig::default())
     }
 
     /// [`Self::new`] with an explicit configuration (bound workspace).
@@ -123,7 +117,6 @@ impl KabanApi {
         store: Arc<dyn GraphStore>,
         policy: Policy,
         signer: Arc<dyn AuditSigner>,
-        export: Option<AuditExport>,
         config: ApiConfig,
     ) -> Self {
         // the only read of the identities: a store that cannot say them (a schema older than
@@ -137,7 +130,6 @@ impl KabanApi {
             store,
             policy: Arc::new(RwLock::new(policy)),
             signer,
-            export: export.map(Arc::new),
             config,
             git: crate::git::GitRunner::default(),
             enrichers: Vec::new(),
@@ -177,6 +169,7 @@ impl KabanApi {
     /// a load through it is seen by every clone of the service).
     #[must_use]
     pub fn with_registry(mut self, registry: Arc<OntologyRegistry>) -> Self {
+        self.store.adopt_governed(registry.governed_set());
         self.registry = registry;
         self
     }
@@ -208,7 +201,7 @@ impl KabanApi {
         &self.store
     }
 
-    /// The audit signer of this process (shared with the docs-ingest `Ingestor`, DI1.6).
+    /// The keyed-hash signer of this process (shared with the docs-ingest `Ingestor`, DI1.6).
     pub fn signer(&self) -> &Arc<dyn AuditSigner> {
         &self.signer
     }
@@ -317,16 +310,12 @@ impl KabanApi {
         self.registry.governed_set()
     }
 
-    /// A write context for the current policy, the given (or bound) workspace and the
-    /// governed set of the loaded ontologies.
+    /// A write context for the given (or bound) workspace.
     pub(crate) fn write_ctx(&self, workspace: Option<&str>) -> WriteCtx {
         WriteCtx::new(
-            self.policy_version(),
             workspace.map_or_else(|| self.config.workspace.clone(), WorkspaceId::new),
             Actor::Agent,
         )
-        .with_governed(self.governed())
-        .with_discovered(self.registry.discovered(self.engine()).rules)
     }
 
     /// A gated id string as a [`NodeId`] (D2): a string that is not a node id names no node,

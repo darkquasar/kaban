@@ -43,9 +43,8 @@ pub struct RecallRequest {
     /// Also return archived records of any governance reached through graph expansion.
     #[serde(default)]
     pub include_archived: bool,
-    /// Also return candidate records (an `x:` record still under review, a record a
-    /// reconciliation left for review); default false: a candidate neither seeds the result
-    /// nor joins it through graph expansion. `kaban review` and `explain` list them either way.
+    /// Also return candidate records (an `x:` record of an undeclared label); default false: a
+    /// candidate neither seeds the result nor joins it through graph expansion.
     #[serde(default)]
     pub include_candidates: bool,
     /// Return full text instead of summaries.

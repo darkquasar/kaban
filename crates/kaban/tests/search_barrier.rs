@@ -242,7 +242,6 @@ fn a_stopped_lock_holder_makes_committed_writes_pending_on_every_transport() {
             },
             &[],
             &kaban_core::WriteCtx::new(
-                "v1",
                 kaban_core::WorkspaceId::new(WORKSPACE),
                 kaban_core::Actor::Agent,
             ),

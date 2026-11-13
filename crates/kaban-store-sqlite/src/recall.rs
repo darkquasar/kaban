@@ -518,11 +518,7 @@ mod tests {
     use kaban_core::{ForgetMode, MemoryStore, NewNode, Node, NodeId, RecallQuery, WriteCtx};
 
     fn ctx(ws: &str) -> WriteCtx {
-        WriteCtx::new(
-            "v1",
-            kaban_core::WorkspaceId::new(ws),
-            kaban_core::Actor::Agent,
-        )
+        WriteCtx::new(kaban_core::WorkspaceId::new(ws), kaban_core::Actor::Agent)
     }
 
     fn created(store: &crate::SqliteStore, ws: &str, text: &str) -> Node {
@@ -706,11 +702,7 @@ mod tests {
     #[test]
     fn an_unavailable_index_yields_an_empty_recall_not_an_error() {
         let store = crate::SqliteStore::open_memory().unwrap();
-        let ctx = WriteCtx::new(
-            "v1",
-            kaban_core::WorkspaceId::default(),
-            kaban_core::Actor::Agent,
-        );
+        let ctx = WriteCtx::new(kaban_core::WorkspaceId::default(), kaban_core::Actor::Agent);
         let note = NewNode {
             kind: "Failure".into(),
             text: "linker could not find libssl".into(),

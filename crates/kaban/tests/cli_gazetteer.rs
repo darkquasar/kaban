@@ -130,7 +130,7 @@ fn admitted_symbol_source_drops_once_over_budget_and_forced_run_keeps_it() {
     write::finish(&conn).unwrap();
     drop(conn);
     let store = Arc::new(SqliteStore::open(&scratch.db(), &scratch.home().join("keys")).unwrap());
-    let ctx = WriteCtx::new("symbol-budget", WorkspaceId::default(), Actor::Agent);
+    let ctx = WriteCtx::new(WorkspaceId::default(), Actor::Agent);
     let remembered = |node| match store.remember(node, &[], &ctx).unwrap() {
         RememberOutcome::Created(node) | RememberOutcome::Existing { node, .. } => {
             kaban_core::NodeId::parse(&node.id).unwrap()
@@ -159,7 +159,6 @@ fn admitted_symbol_source_drops_once_over_budget_and_forced_run_keeps_it() {
             )
             .unwrap(),
             store.signer(),
-            None,
             ApiConfig {
                 engine: Arc::new(engine),
                 repo: Some("fixture".into()),

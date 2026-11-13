@@ -13,7 +13,7 @@ use kaban_store_sqlite::SqliteStore;
 use serde_json::json;
 
 fn ctx() -> WriteCtx {
-    WriteCtx::new("v1", WorkspaceId::default(), Actor::Agent)
+    WriteCtx::new(WorkspaceId::default(), Actor::Agent)
 }
 
 fn node(id: &NodeId, kind: &str, text: &str, props: serde_json::Value) -> Op {
@@ -448,7 +448,7 @@ fn bounded_layer_reindex_and_forget_preserve_a_human_edge() {
         )
         .unwrap();
     assert_eq!(hits(&store, &chunk), 1);
-    let human = WriteCtx::new("v1", WorkspaceId::default(), Actor::HumanCli);
+    let human = WriteCtx::new(WorkspaceId::default(), Actor::HumanCli);
     let linked = store
         .link(&chunk, &target, "MENTIONS", Some(0.75), None, &human)
         .unwrap();
@@ -636,7 +636,7 @@ fn tombstoned_document_complete_set_requires_exact_same_batch_reactivation() {
     );
     let mut foreign = resumed.clone();
     foreign.workspace_id = WorkspaceId::new("foreign");
-    let foreign_ctx = WriteCtx::new("v1", foreign.workspace_id.clone(), Actor::Agent);
+    let foreign_ctx = WriteCtx::new(foreign.workspace_id.clone(), Actor::Agent);
     assert!(store.apply_batch(foreign, &foreign_ctx).is_err());
     let mut hidden_again = resumed.clone();
     hidden_again.ops.push(Op::Tombstone {
@@ -876,7 +876,7 @@ fn complete_set_rejects_foreign_document_producer_source_and_rolls_back() {
     assert!(store.get(&sentinel, false).unwrap().is_none());
     let mut foreign = complete(&store, &document, vec![], false);
     foreign.workspace_id = WorkspaceId::new("foreign");
-    let foreign_ctx = WriteCtx::new("v1", WorkspaceId::new("foreign"), Actor::Agent);
+    let foreign_ctx = WriteCtx::new(WorkspaceId::new("foreign"), Actor::Agent);
     assert!(store.apply_batch(foreign, &foreign_ctx).is_err());
     let mut producer = complete(&store, &document, vec![], false);
     producer.edge_diff = EdgeDiff::Owned {
@@ -1074,7 +1074,7 @@ fn parse_artifact_publication_is_idempotent_and_refuses_owner_or_foreign_key_col
     store.apply_batch(batch.clone(), &ctx()).unwrap();
     for workspace in [WorkspaceId::default(), WorkspaceId::new("other-workspace")] {
         let other = NodeId::new();
-        let other_ctx = WriteCtx::new("v1", workspace.clone(), Actor::Agent);
+        let other_ctx = WriteCtx::new(workspace.clone(), Actor::Agent);
         store
             .apply_batch(
                 WriteBatch::new(

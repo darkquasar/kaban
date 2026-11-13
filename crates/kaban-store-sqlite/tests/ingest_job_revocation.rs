@@ -10,7 +10,7 @@ use serde_json::json;
 
 fn fixture() -> (SqliteStore, NodeId, IngestJob, WriteCtx) {
     let store = SqliteStore::open_memory().unwrap();
-    let ctx = WriteCtx::new("policy", WorkspaceId::default(), Actor::Agent);
+    let ctx = WriteCtx::new(WorkspaceId::default(), Actor::Agent);
     let document = NodeId::new();
     let mut batch = WriteBatch::new(
         ctx.workspace_id.clone(),
@@ -76,9 +76,9 @@ fn batch_tombstone_and_rescan_reject_revoke_and_failed_batch_rolls_back() {
         let (store, document, job, ctx) = fixture();
         if route == 1 {
             store
-                .rescan("changed", 100, &mut |n| {
+                .rescan("changed", 0, 100, &mut |n| {
                     if n.kind == "Document" {
-                        RescanAction::Reject { audit: vec![] }
+                        RescanAction::Reject
                     } else {
                         RescanAction::Keep
                     }

@@ -10,7 +10,7 @@ use std::sync::Arc;
 fn api(yaml: &str) -> KabanApi {
     let policy = Policy::from_file(Policy::parse(yaml.as_bytes()).unwrap(), "test".into()).unwrap();
     let store = Arc::new(SqliteStore::open_memory().unwrap());
-    KabanApi::new(store.clone(), policy, store.signer(), None)
+    KabanApi::new(store.clone(), policy, store.signer())
 }
 
 #[test]

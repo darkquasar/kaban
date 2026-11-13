@@ -47,7 +47,6 @@ fn swapped_plain_run(follow: bool) {
         store.clone(),
         Policy::empty(),
         store.signer(),
-        None,
     ));
     let config = IngestConfig {
         workers: 1,

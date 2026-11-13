@@ -15,7 +15,6 @@ mod remember;
 mod rescan;
 mod schema;
 mod stats;
-mod symbol;
 mod traverse;
 
 pub use remember::{
@@ -39,8 +38,6 @@ pub use layer::LayerMaintenanceResponse;
 pub use receipt::{ReceiptIdentities, WriteOutcome, WriteReceipt};
 
 pub use rescan::{RescanOutcome, RescanStatus};
-
-pub use symbol::{CodeField, CodeSnapshot, MatchedBy};
 
 pub use ingest::{
     DocumentSummary, DocumentsResource, FailedDocument, GazetteerTelemetry, IndexDocsRequest,

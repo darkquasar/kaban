@@ -134,7 +134,7 @@ fn doctor_reports_skipped_layer_without_mutating_metadata_or_hiding_siblings() {
         .unwrap();
     let before = store.index_meta().unwrap().entries;
     let signer = store.signer();
-    let api = KabanApi::new(store.clone(), Policy::empty(), signer, None);
+    let api = KabanApi::new(store.clone(), Policy::empty(), signer);
     let report = api.doctor(&DoctorContext {
         files: DatabaseFileModes {
             db: DatabaseFileModes::OWNER_ONLY,

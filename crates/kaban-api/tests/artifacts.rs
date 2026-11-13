@@ -32,10 +32,7 @@ fn maintenance_identity_case(field: &str, action: &str) {
             }],
         );
         store
-            .apply_batch(
-                batch,
-                &WriteCtx::new("v1", WorkspaceId::default(), Actor::Agent),
-            )
+            .apply_batch(batch, &WriteCtx::new(WorkspaceId::default(), Actor::Agent))
             .unwrap();
         let producer = if field == "producer" {
             identity
@@ -54,7 +51,7 @@ fn maintenance_identity_case(field: &str, action: &str) {
         "maintenance-policy".into(),
     )
     .unwrap();
-    let api = KabanApi::new(store.clone(), policy, store.signer(), None);
+    let api = KabanApi::new(store.clone(), policy, store.signer());
     let outcome = if field == "producer" {
         api.retire_producer(Layer::Gazetteer, raw)
     } else {
@@ -106,7 +103,7 @@ fn maintenance_clean_identities_mutate_and_reject_identities_preserve_targets() 
 fn layer_maintenance_gates_document_before_lookup_and_refuses_unavailable_layers() {
     let store = Arc::new(SqliteStore::open_memory().unwrap());
     let policy = Policy::from_file(Policy::parse(b"").unwrap(), "test".into()).unwrap();
-    let api = KabanApi::new(store.clone(), policy, store.signer(), None);
+    let api = KabanApi::new(store.clone(), policy, store.signer());
     assert_eq!(api.reindex_layer(Layer::Gazetteer).unwrap().report.rows, 0);
     assert_eq!(
         api.retire_producer(Layer::Gazetteer, "gazetteer@1")

@@ -665,13 +665,7 @@ fn recall(
         repo: Some("bench-fixture-repo".into()),
         ..Default::default()
     };
-    let api = KabanApi::with_config(
-        sqlite.clone(),
-        policy,
-        sqlite.signer(),
-        None,
-        config.clone(),
-    );
+    let api = KabanApi::with_config(sqlite.clone(), policy, sqlite.signer(), config.clone());
     let map = materialize(
         &api,
         sqlite.as_ref(),
@@ -744,7 +738,6 @@ fn edges(
         sqlite.clone(),
         policy,
         sqlite.signer(),
-        None,
         ApiConfig {
             workspace: WorkspaceId::new("ws1"),
             ..Default::default()
@@ -853,7 +846,6 @@ mod tests {
             store.clone(),
             Policy::empty(),
             store.signer(),
-            None,
             ApiConfig {
                 workspace: WorkspaceId::new("ws1"),
                 ..Default::default()
@@ -1022,10 +1014,7 @@ mod tests {
             });
         }
         store
-            .apply_batch(
-                batch,
-                &WriteCtx::new(api.policy_version(), WorkspaceId::new("ws1"), Actor::Agent),
-            )
+            .apply_batch(batch, &WriteCtx::new(WorkspaceId::new("ws1"), Actor::Agent))
             .unwrap();
         api.link(LinkRequest {
             from: src.as_str().into(),

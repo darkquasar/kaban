@@ -375,6 +375,8 @@ pub async fn submit(api: &KabanApi, root: &Path, raw: Value) -> Result<Value, Jo
             .map(|chunk| chunk.id.clone())
             .collect(),
         batch,
+        // the API's gate session sets the count it made when it publishes
+        redactions: 0,
     };
     let cap = usize::try_from(api.engine().ingest.finish_cap).map_err(|_| invalid())?;
     let mut previous_redactions = row.redactions;

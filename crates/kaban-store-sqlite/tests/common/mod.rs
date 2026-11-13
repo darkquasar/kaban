@@ -36,7 +36,7 @@ impl Drop for Scratch {
 
 /// An agent write context in the default workspace under policy version `pv`.
 pub(crate) fn ctx() -> WriteCtx {
-    WriteCtx::new("pv", WorkspaceId::default(), Actor::Agent)
+    WriteCtx::new(WorkspaceId::default(), Actor::Agent)
 }
 
 pub(crate) fn nid(id: &str) -> NodeId {

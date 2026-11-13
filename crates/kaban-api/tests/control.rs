@@ -93,7 +93,7 @@ fn api_and_store_with(policy_yaml: &str) -> (KabanApi, Arc<SqliteStore>) {
     let policy = Policy::from_file(file, "test".into()).unwrap();
     let store = Arc::new(SqliteStore::open_memory().unwrap());
     let signer = store.signer();
-    (KabanApi::new(store.clone(), policy, signer, None), store)
+    (KabanApi::new(store.clone(), policy, signer), store)
 }
 
 fn reject_rules(r: Result<(), ApiError>) -> Vec<String> {

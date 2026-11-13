@@ -591,13 +591,10 @@ impl KabanApi {
         })
     }
 
-    /// Gate a hook-level string (a session id, a path) under the `hook` scope and flush its
-    /// audit entries; `None` on a reject hit (the caller skips the row, M4-13).
+    /// Gate a hook-level string (a session id, a path) under the `hook` scope; `None` on a
+    /// reject hit (the caller skips the row, M4-13).
     fn hook_gate(&self, field: &str, s: &str) -> Option<String> {
-        let mut ctx = self.write_ctx(None);
-        self.gate(&mut ctx, "hook", field, s, &mut Vec::new())
-            .ok()
-            .and_then(|gated| self.flush_audit(&mut ctx).ok().map(|()| gated))
+        self.gate("hook", field, s, &mut Vec::new()).ok()
     }
 
     /// Record one `session_edits` row for a gated session id (best effort: a store error is
@@ -1027,9 +1024,9 @@ impl KabanApi {
         // string as the Improvement's text; a redaction is reported there). The patch is a
         // second transaction after the Improvement committed: should it fail, the outcome is
         // the Improvement's `committed` receipt and a note, never a rejection (SS-10)
-        let mut ctx = self.write_ctx(None);
+        let ctx = self.write_ctx(None);
         let patched = self
-            .gate(&mut ctx, "remember", "props", fix, &mut Vec::new())
+            .gate("remember", "props", fix, &mut Vec::new())
             .and_then(|gated_fix| {
                 let id = Self::node_id(failure_id)?;
                 Ok(self.store.update_failure_props(

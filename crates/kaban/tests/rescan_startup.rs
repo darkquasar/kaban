@@ -22,7 +22,7 @@ const STALE_NODES: usize = 20_000;
 /// with the key under the scratch's `$KABAN_HOME` so the server reuses it.
 fn seed_stale(s: &Scratch, n: usize) -> Arc<SqliteStore> {
     let store = Arc::new(SqliteStore::open(&s.db(), &s.home().join("keys")).unwrap());
-    let ctx = WriteCtx::new("stale", WorkspaceId::default(), Actor::Agent);
+    let ctx = WriteCtx::new(WorkspaceId::default(), Actor::Agent);
     for i in 0..n {
         store
             .remember(
@@ -122,7 +122,7 @@ fn kaban_rescan_runs_the_job_in_the_foreground_and_reports_it() {
     // reject (the CLI runs with the builtin policy only)
     let s = Scratch::new("kaban-rescan", "cli");
     let store = seed_stale(&s, 700);
-    let ctx = WriteCtx::new("stale", WorkspaceId::default(), Actor::Agent);
+    let ctx = WriteCtx::new(WorkspaceId::default(), Actor::Agent);
     store
         .remember(
             NewNode {

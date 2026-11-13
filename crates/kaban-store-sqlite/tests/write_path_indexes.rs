@@ -47,7 +47,7 @@ fn duplicate_lookup_is_nonunique_ordered_workspace_scoped_and_active_only() {
     let s = Scratch::new("s30-write-store", "duplicates");
     let store = SqliteStore::open(&s.db(), &s.keys()).unwrap();
     let remember = |text: &str, workspace: &str, key: Option<&str>| {
-        let write = WriteCtx::new("pv", WorkspaceId::new(workspace), kaban_core::Actor::Agent);
+        let write = WriteCtx::new(WorkspaceId::new(workspace), kaban_core::Actor::Agent);
         match store
             .remember(
                 NewNode {

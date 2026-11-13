@@ -15,7 +15,7 @@ use kaban_core::{
 use rusqlite::{Connection, OptionalExtension, params};
 use std::collections::BTreeSet;
 
-use super::{LinkEffect, SqliteStore, Tenant};
+use super::{LinkEffect, SqliteStore};
 
 impl SqliteStore {
     pub(super) fn jobs_reindex_impl(
@@ -29,7 +29,7 @@ impl SqliteStore {
             kaban_core::Layer::Llm | kaban_core::Layer::Gliner | kaban_core::Layer::Script
         ) || limit == 0
         {
-            return Err(StoreError::EdgeRequiresAssertion);
+            return Err(StoreError::EdgeSetRefused);
         }
         let dialect = if layer == kaban_core::Layer::Script {
             "none"
@@ -159,7 +159,7 @@ impl SqliteStore {
                 return Err(StoreError::InvalidName("job".into(), "report_changed"));
             }
         } else {
-            let marker = crate::jobs::done_artifact(&tx, &current, request, ctx)?;
+            let marker = crate::jobs::done_artifact(&tx, &current, request)?;
             super::artifacts::publish(&tx, &[marker])?;
             crate::jobs::release(&tx, &current)?;
             let _: serde_json::Value = serde_json::from_str(&state.report_json)?;
@@ -219,9 +219,10 @@ impl SqliteStore {
             &request.source_rev,
             &request.chunks,
         )?;
-        let report = self.apply_batch_body(&tx, request.batch, ctx)?;
+        let redactions = request.redactions;
+        let report = self.apply_batch_body(&tx, request.batch)?;
         if report.stale_source != 0 {
-            // Drop the uncommitted transaction, including any audit/body bookkeeping.
+            // Drop the uncommitted transaction, including any body bookkeeping.
             return Err(StoreError::InvalidName("job".into(), "stale"));
         }
         crate::jobs::check_source(
@@ -232,7 +233,7 @@ impl SqliteStore {
             &request.chunks,
         )?;
         let state = accumulate(&current, &report)?;
-        let updated = crate::jobs::record_submit(&tx, current, &report, state, ctx)?;
+        let updated = crate::jobs::record_submit(&tx, current, &report, state, redactions)?;
         tx.commit().sql()?;
         Ok(kaban_core::JobSubmitReceipt {
             batch: report,
@@ -258,7 +259,7 @@ impl SqliteStore {
         let tx = conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .sql()?;
-        let report = self.apply_batch_body(&tx, batch, ctx)?;
+        let report = self.apply_batch_body(&tx, batch)?;
         if report.stale_source == 0 {
             crate::changelog::record_terminal(&tx, ctx)?;
             tx.commit().sql()?;
@@ -271,15 +272,9 @@ impl SqliteStore {
         &self,
         tx: &Connection,
         mut batch: WriteBatch,
-        ctx: &WriteCtx,
     ) -> Result<BatchReport> {
         let owner = batch.edge_diff.owner();
-        let stale_source = super::artifacts::stale_sources(
-            tx,
-            &batch,
-            ctx.policy_version.as_str(),
-            &ctx.governed,
-        )?;
+        let stale_source = super::artifacts::stale_sources(tx, &batch, &self.governed())?;
         if stale_source != 0 {
             return Ok(BatchReport {
                 stale_source,
@@ -294,21 +289,14 @@ impl SqliteStore {
         let mut report = BatchReport::default();
         let workspace_id = batch.workspace_id.clone();
         let ws = workspace_id.as_str();
-        let tenant = Tenant::of(ctx, ws);
+        let tenant = self.tenant(ws);
         let scoring = edge_write::scoring_columns(tx)?;
         // node ops first, in order; the rids of upserted nodes drive the edge diff (MD-23)
         let mut upserted: Vec<i64> = Vec::new();
         for op in &batch.ops {
             match op {
                 Op::UpsertNode { id, node } => {
-                    if let Some(rid) = Self::upsert_node(
-                        tx,
-                        &tenant,
-                        id,
-                        node,
-                        ctx.policy_version.as_str(),
-                        &mut report,
-                    )? {
+                    if let Some(rid) = Self::upsert_node(tx, &tenant, id, node, &mut report)? {
                         upserted.push(rid);
                     }
                 }
@@ -349,7 +337,7 @@ impl SqliteStore {
                         && scoring
                     {
                         // the pointer of a reactivated source comes back
-                        anchors::refresh(tx, rid, tenant.governed)?;
+                        anchors::refresh(tx, rid, &tenant.governed)?;
                     }
                 }
                 Op::UpsertEdge { .. } => {}
@@ -377,7 +365,7 @@ impl SqliteStore {
                 if srid == drid {
                     return Err(StoreError::SelfLink(src.to_string()));
                 }
-                Self::edge_rule(tx, tenant.governed, rel, &skind, &dkind)?;
+                Self::edge_rule(tx, &tenant.governed, rel, &skind, &dkind)?;
                 let mut props = edge_write::owned_props(props.as_ref(), owner);
                 // a human's edge is never a producer's to overwrite (the write-side twin of
                 // the diff rule below, OWN-83 (4)): the triple stays the human's, named
@@ -410,7 +398,7 @@ impl SqliteStore {
                     },
                 )?;
                 if written.is_some()
-                    && let Some(effect) = LinkEffect::of(tenant.governed, rel)
+                    && let Some(effect) = LinkEffect::of(&tenant.governed, rel)
                 {
                     Self::mark_target(tx, dst.as_str(), effect, &now_iso())?;
                 }

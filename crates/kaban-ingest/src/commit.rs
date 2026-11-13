@@ -249,7 +249,6 @@ pub(crate) async fn run(
     mut rx: mpsc::Receiver<Dispatched>,
     gauge: Arc<QueueGauge>,
     workspace: WorkspaceId,
-    policy_version: String,
     dry_run: bool,
 ) -> Result<CommitStats, IngestError> {
     let mut stats = CommitStats::default();
@@ -259,15 +258,7 @@ pub(crate) async fn run(
         gauge.received(rx.len());
         pending.insert(item.prepared.seq, item);
         while let Some(Dispatched { prepared, slot }) = pending.remove(&next) {
-            commit_one(
-                &store,
-                prepared,
-                &workspace,
-                &policy_version,
-                dry_run,
-                &mut stats,
-            )
-            .await?;
+            commit_one(&store, prepared, &workspace, dry_run, &mut stats).await?;
             drop(slot); // committed: the window place is free (RD-4)
             next += 1;
         }
@@ -287,9 +278,8 @@ pub(crate) async fn run(
 
 async fn commit_one(
     store: &Arc<dyn GraphStore>,
-    mut item: Prepared,
+    item: Prepared,
     workspace: &WorkspaceId,
-    policy_version: &str,
     dry_run: bool,
     stats: &mut CommitStats,
 ) -> Result<(), IngestError> {
@@ -321,8 +311,7 @@ async fn commit_one(
     // source/generation guard has admitted this batch.
     let mut document_counts = CommitStats::default();
     document_counts.fold_document_props(&item.batch);
-    let mut ctx = WriteCtx::new(policy_version, workspace.clone(), Actor::Agent);
-    ctx.audit = std::mem::take(&mut item.audit);
+    let ctx = WriteCtx::new(workspace.clone(), Actor::Agent);
     let store = Arc::clone(store);
     let report = tokio::task::spawn_blocking(move || {
         // RD2-7: a failure batch reconciles against the stored child inventory here, at the

@@ -14,7 +14,7 @@ pub(super) fn retire_producer(
 ) -> Result<kaban_core::RetireReport> {
     use kaban_core::{MaintenanceRefusal, RetireReport};
     if batch_rows == 0 {
-        return Err(StoreError::EdgeRequiresAssertion);
+        return Err(StoreError::EdgeSetRefused);
     }
     if old_producer == authority.producer().producer_id() {
         return Ok(RetireReport {
@@ -32,7 +32,7 @@ pub(super) fn retire_producer(
     }
     let invalid_source: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM derived_artifact d LEFT JOIN node n ON n.rid=d.source_rid WHERE d.workspace_id=?1 AND d.layer='gazetteer' AND d.producer_id=?2 AND (n.rid IS NULL OR n.workspace_id<>?1 OR n.kind<>'Document' OR COALESCE(json_extract(n.props,'$.owner'),'')<>'kaban-ingest'))",params![workspace.as_str(),old_producer],|r|r.get(0)).sql()?;
     if invalid_source {
-        return Err(StoreError::EdgeRequiresAssertion);
+        return Err(StoreError::EdgeSetRefused);
     }
     let mut report = RetireReport::default();
     loop {
@@ -66,7 +66,7 @@ pub(super) fn maintain_layer(
 ) -> Result<kaban_core::RetireReport> {
     let ctx = context.write;
     if batch_rows == 0 {
-        return Err(StoreError::EdgeRequiresAssertion);
+        return Err(StoreError::EdgeSetRefused);
     }
     let mut report = kaban_core::RetireReport::default();
     let mut reset_documents = BTreeSet::new();
@@ -178,18 +178,22 @@ struct ProducerState {
 
 /// Source-indexed invalidation after a canonical source write, in that write's transaction.
 pub(crate) fn invalidate_stale(conn: &Connection, rid: i64) -> Result<()> {
-    let (hash, rev, policy, lifecycle): (String, i64, String, String) = conn
+    let (hash, rev, lifecycle): (String, i64, String) = conn
         .query_row(
-            "SELECT content_hash,rev,policy_version,lifecycle FROM node WHERE rid=?1",
+            "SELECT content_hash,rev,lifecycle FROM node WHERE rid=?1",
             [rid],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .sql()?;
     let expected = serde_json::to_string(&SourceRev {
         content_hash: hash,
         rev,
     })?;
-    conn.execute("DELETE FROM derived_artifact WHERE source_rid=?1 AND (source_rev <> ?2 OR policy_version <> ?3 OR ?4 <> 'active')",params![rid,expected,policy,lifecycle]).sql()?;
+    conn.execute(
+        "DELETE FROM derived_artifact WHERE source_rid=?1 AND (source_rev <> ?2 OR ?3 <> 'active')",
+        params![rid, expected, lifecycle],
+    )
+    .sql()?;
     Ok(())
 }
 
@@ -227,10 +231,10 @@ fn state(conn: &Connection, document: &NodeId, workspace: &WorkspaceId) -> Resul
             Ok(ProducerState {
                 generation: value["generation"]
                     .as_u64()
-                    .ok_or(StoreError::EdgeRequiresAssertion)?,
+                    .ok_or(StoreError::EdgeSetRefused)?,
                 fingerprint: value["fingerprint"]
                     .as_str()
-                    .ok_or(StoreError::EdgeRequiresAssertion)?
+                    .ok_or(StoreError::EdgeSetRefused)?
                     .to_owned(),
                 source_rev: value
                     .get("source_rev")
@@ -314,7 +318,7 @@ pub(super) fn reset_set(
     let generation = prior
         .generation
         .checked_add(1)
-        .ok_or(StoreError::EdgeRequiresAssertion)?;
+        .ok_or(StoreError::EdgeSetRefused)?;
     let encoded = serde_json::to_string(&json!({"generation":generation,"fingerprint":""}))?;
     conn.execute("INSERT INTO index_meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",params![state_key(document,workspace),encoded]).sql()?;
     Ok(())
@@ -324,11 +328,10 @@ pub(super) fn reset_set(
 pub(super) fn stale_sources(
     conn: &Connection,
     batch: &WriteBatch,
-    policy: &str,
     governed: &GovernedSet,
 ) -> Result<u32> {
     if !batch.gazetteer_claim_sets.is_empty() && batch.edge_diff.owner() != Owner::KabanIngest {
-        return Err(StoreError::EdgeRequiresAssertion);
+        return Err(StoreError::EdgeSetRefused);
     }
     let mut stale = BTreeSet::new();
     for artifact in &batch.artifacts {
@@ -336,14 +339,13 @@ pub(super) fn stale_sources(
             Layer::Gazetteer | Layer::V4 => Owner::KabanIngest,
             Layer::Script | Layer::Llm | Layer::Gliner => Owner::KabanParse,
             Layer::Reconcile => Owner::KabanReconcile,
-            _ => return Err(StoreError::EdgeRequiresAssertion),
+            _ => return Err(StoreError::EdgeSetRefused),
         };
         if artifact.workspace_id != batch.workspace_id
             || batch.edge_diff.owner() != allowed_owner
             || artifact.producer_id.is_empty()
-            || artifact.policy_version != policy
         {
-            return Err(StoreError::EdgeRequiresAssertion);
+            return Err(StoreError::EdgeSetRefused);
         }
         let source: Option<(String, i64)> = conn.query_row(
             "SELECT content_hash, rev FROM node WHERE rid=?1 AND workspace_id=?2 AND lifecycle='active'",
@@ -365,13 +367,13 @@ pub(super) fn stale_sources(
                 &artifact.policy_version,
             )
         {
-            return Err(StoreError::EdgeRequiresAssertion);
+            return Err(StoreError::EdgeSetRefused);
         }
     }
     let mut documents = BTreeSet::new();
     for set in &batch.gazetteer_claim_sets {
         if !documents.insert(set.document.as_str()) || set.source_id.is_empty() {
-            return Err(StoreError::EdgeRequiresAssertion);
+            return Err(StoreError::EdgeSetRefused);
         }
         let reactivates = batch
             .ops
@@ -397,7 +399,7 @@ pub(super) fn stale_sources(
         if let Some((_, props)) = &current
             && props["source_id"] != set.source_id
         {
-            return Err(StoreError::EdgeRequiresAssertion);
+            return Err(StoreError::EdgeSetRefused);
         }
         if current.map(|(rev, _)| rev) != set.source_rev
             || state(conn, &set.document, &batch.workspace_id)?.generation
@@ -419,7 +421,7 @@ pub(super) fn prepare_sets(
         let (revision, props) = document(conn, &set.document, &batch.workspace_id, false)?
             .ok_or_else(|| StoreError::NotFound(set.document.to_string()))?;
         if props["source_id"] != set.source_id {
-            return Err(StoreError::EdgeRequiresAssertion);
+            return Err(StoreError::EdgeSetRefused);
         }
         let mut identities = Vec::new();
         for op in &batch.ops {
@@ -438,11 +440,11 @@ pub(super) fn prepare_sets(
             if rel != "MENTIONS"
                 || !props_chunk(&props_of(conn, &set.document, &batch.workspace_id)?, src)
             {
-                return Err(StoreError::EdgeRequiresAssertion);
+                return Err(StoreError::EdgeSetRefused);
             }
             let owned: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM node WHERE id=?1 AND workspace_id=?2 AND kind='Chunk' AND lifecycle='active' AND json_extract(props,'$.owner')='kaban-ingest')", params![src.as_str(), batch.workspace_id.as_str()], |r| r.get(0)).sql()?;
             if !owned {
-                return Err(StoreError::EdgeRequiresAssertion);
+                return Err(StoreError::EdgeSetRefused);
             }
             identities.push(canonical_json(&serde_json::to_value(op)?));
         }
@@ -471,7 +473,7 @@ pub(super) fn prepare_sets(
             prior
                 .generation
                 .checked_add(1)
-                .ok_or(StoreError::EdgeRequiresAssertion)?
+                .ok_or(StoreError::EdgeSetRefused)?
         };
         let (rid, policy): (i64, String) = conn
             .query_row(
@@ -563,13 +565,13 @@ pub(super) fn publish(conn: &Connection, artifacts: &[DerivedArtifact]) -> Resul
                 || config != a.config_hash
                 || policy != a.policy_version
             {
-                return Err(StoreError::EdgeRequiresAssertion);
+                return Err(StoreError::EdgeSetRefused);
             }
             continue;
         }
         let current: Option<(String,i64)> = conn.query_row("SELECT content_hash,rev FROM node WHERE rid=?1 AND workspace_id=?2 AND lifecycle='active'",params![a.source_rid,a.workspace_id.as_str()],|r|Ok((r.get(0)?,r.get(1)?))).optional().sql()?;
         if current != Some((a.source_rev.content_hash.clone(), a.source_rev.rev)) {
-            return Err(StoreError::EdgeRequiresAssertion);
+            return Err(StoreError::EdgeSetRefused);
         }
         conn.execute("INSERT INTO derived_artifact(artifact_key,workspace_id,layer,producer_id,source_rid,source_rev,config_hash,policy_version,published_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9) ON CONFLICT(artifact_key) DO NOTHING", params![a.key.as_str(),a.workspace_id.as_str(),a.layer.as_str(),a.producer_id,a.source_rid,serde_json::to_string(&a.source_rev)?,a.config_hash,a.policy_version,a.published_at]).sql()?;
     }

@@ -289,7 +289,7 @@ mod tests {
     }
 
     fn ctx(ws: &str) -> WriteCtx {
-        WriteCtx::new("v1", WorkspaceId::new(ws), Actor::Agent)
+        WriteCtx::new(WorkspaceId::new(ws), Actor::Agent)
     }
 
     fn created(outcome: RememberOutcome) -> Node {

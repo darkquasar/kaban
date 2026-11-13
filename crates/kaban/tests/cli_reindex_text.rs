@@ -18,7 +18,7 @@ fn reindex_text_backfills_and_repeated_pass_preserves_content() {
                 ..Default::default()
             },
             &[],
-            &WriteCtx::new("v1", WorkspaceId::default(), Actor::Agent),
+            &WriteCtx::new(WorkspaceId::default(), Actor::Agent),
         )
         .unwrap();
     drop(store);

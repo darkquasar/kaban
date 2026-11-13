@@ -47,7 +47,6 @@ fn api(
         Arc::clone(store) as Arc<dyn GraphStore>,
         Policy::from_file(Policy::parse(b"").unwrap(), "test".into()).unwrap(),
         store.signer(),
-        None,
         ApiConfig {
             repo: Some(repo.into()),
             repo_root: Some(s.0.clone()),

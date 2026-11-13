@@ -29,7 +29,6 @@ async fn links_resolve_only_active_same_workspace_nodes() {
         rig.store.clone(),
         kaban_policy::Policy::empty(),
         rig.store.signer(),
-        None,
     );
     let same = NodeId::new();
     let foreign = NodeId::new();
@@ -51,7 +50,7 @@ async fn links_resolve_only_active_same_workspace_nodes() {
                         },
                     }],
                 ),
-                &WriteCtx::new("policy", ws, Actor::Agent),
+                &WriteCtx::new(ws, Actor::Agent),
             )
             .unwrap();
     }

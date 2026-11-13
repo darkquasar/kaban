@@ -720,7 +720,6 @@ fn multi_process_tantivy_mode_b_polls_takes_over_and_blocks_on_a_stopped_holder(
     // 1. a write outside any barrier (no drain on this handle) is published by alpha's loop
     let store = SqliteStore::open(&s.db(), &s.home().join("keys")).unwrap();
     let ctx = kaban_core::WriteCtx::new(
-        "v1",
         kaban_core::WorkspaceId::new(MODE_B_WORKSPACE),
         kaban_core::Actor::Agent,
     );

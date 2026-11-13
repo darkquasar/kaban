@@ -2,9 +2,9 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)] // public behavior assertions
 
 use kaban_core::{
-    Actor, AuditEntry, AuditOp, BatchReport, ChangeLogStore, EdgeDiff, IngestJob, IngestStore,
-    JobId, JobStatus, JobSubmitContract, JobSubmitRequest, JobSubmitStateUpdate, MemoryStore,
-    NewNode, NodeId, Op, SourceRev, StoreError, WorkspaceId, WriteBatch, WriteCtx,
+    Actor, BatchReport, ChangeLogStore, EdgeDiff, IngestJob, IngestStore, JobId, JobStatus,
+    JobSubmitContract, JobSubmitRequest, JobSubmitStateUpdate, MemoryStore, NewNode, NodeId, Op,
+    SourceRev, StoreError, WorkspaceId, WriteBatch, WriteCtx,
 };
 use kaban_store_sqlite::SqliteStore;
 use serde_json::json;
@@ -16,6 +16,8 @@ struct Fixture {
     chunk: NodeId,
     revision: SourceRev,
     ctx: WriteCtx,
+    /// Masked strings the gate session reports with each submit.
+    redactions: u64,
 }
 
 fn node(id: &NodeId, kind: &str, text: &str, props: serde_json::Value) -> Op {
@@ -38,7 +40,7 @@ fn batch(ops: Vec<Op>) -> WriteBatch {
 
 fn fixture() -> Fixture {
     let store = SqliteStore::open_memory().unwrap();
-    let ctx = WriteCtx::new("policy", WorkspaceId::default(), Actor::Agent);
+    let ctx = WriteCtx::new(WorkspaceId::default(), Actor::Agent);
     let document = NodeId::new();
     let chunk = NodeId::new();
     store.apply_batch(batch(vec![
@@ -68,6 +70,7 @@ fn fixture() -> Fixture {
         chunk,
         revision,
         ctx,
+        redactions: 0,
     }
 }
 
@@ -79,6 +82,7 @@ fn request(f: &Fixture, ops: Vec<Op>) -> JobSubmitRequest {
         source_rev: f.revision.clone(),
         chunks: vec![f.chunk.clone()],
         batch: batch(ops),
+        redactions: f.redactions,
     }
 }
 
@@ -133,23 +137,10 @@ fn late_holder_submit_cannot_publish_after_ownership_is_lost() {
     );
 }
 
-fn audit(ctx: &mut WriteCtx) {
-    ctx.audit.push(AuditEntry {
-        op: AuditOp::Redact,
-        tool: "ingest_submit".into(),
-        field: "text".into(),
-        workspace_id: ctx.workspace_id.clone(),
-        policy_version: ctx.policy_version.clone(),
-        input_hmac: "invented-hmac".into(),
-        rules: vec!["invented-rule".into()],
-        node_id: None,
-    });
-}
-
 #[test]
 fn graph_audit_and_actual_counters_commit_together_and_repeat_is_unchanged() {
     let mut f = fixture();
-    audit(&mut f.ctx);
+    f.redactions = 1;
     let id = NodeId::new();
     let ops = || vec![node(&id, "Fact", "masked record", json!({}))];
     let receipt = f
@@ -193,7 +184,7 @@ fn graph_audit_and_actual_counters_commit_together_and_repeat_is_unchanged() {
 #[test]
 fn accumulation_failure_rolls_back_graph_audit_and_counters() {
     let mut f = fixture();
-    audit(&mut f.ctx);
+    f.redactions = 1;
     let id = NodeId::new();
     let changes = f.store.changes_read(0, 10_000).unwrap();
     let mut fail = |_: &IngestJob, _: &BatchReport| {

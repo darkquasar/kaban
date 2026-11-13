@@ -24,9 +24,9 @@ use cg_fixture::{
 use common::{Scratch, created, ctx};
 use kaban_codegraph::{SnapshotError, validate_for_attach};
 use kaban_core::{
-    Actor, AnchorPredicates, GovernedSet, IngestStore, MemoryStore, NewNode, NodeId, Op,
-    RememberOutcome, SNAPSHOT_SYMBOL_PAGE, SnapshotAttach, StoreError, SymbolPage, WorkspaceFilter,
-    WorkspaceId, WriteBatch, WriteCtx,
+    Actor, AnchorPredicates, IngestStore, MemoryStore, NewNode, NodeId, Op, RememberOutcome,
+    SNAPSHOT_SYMBOL_PAGE, SnapshotAttach, StoreError, SymbolPage, WorkspaceFilter, WorkspaceId,
+    WriteBatch, WriteCtx,
 };
 use kaban_store_sqlite::SqliteStore;
 use serde_json::json;
@@ -384,8 +384,7 @@ fn coderef(
     if let Some(scope) = scope {
         props["snapshot_commit"] = json!(scope);
     }
-    let ctx = WriteCtx::new("pv", WorkspaceId::new(workspace), Actor::Agent)
-        .with_governed(GovernedSet::shipped());
+    let ctx = WriteCtx::new(WorkspaceId::new(workspace), Actor::Agent);
     match store
         .remember(
             NewNode {

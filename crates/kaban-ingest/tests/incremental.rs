@@ -368,11 +368,7 @@ fn forget_document_then_reingest_restores_the_same_ids() {
     let sections_before = rig.section_ids("a.md");
 
     // Act: forget, then ingest the unchanged file again
-    let ctx = WriteCtx::new(
-        Policy::empty().effective_hash(),
-        kaban_core::WorkspaceId::default(),
-        Actor::Agent,
-    );
+    let ctx = WriteCtx::new(kaban_core::WorkspaceId::default(), Actor::Agent);
     let forgotten =
         kaban_ingest::forget_document(rig.store.as_ref(), &Policy::empty(), &ctx, "a.md").unwrap();
     let hidden = rig.store.get(&doc, false).unwrap();
@@ -451,11 +447,7 @@ fn include_forgotten_and_edit_away_then_restore_reactivate_through_the_batch() {
     assert_eq!(report.chunks_upserted, 0, "nothing new written: {report:?}");
     assert_eq!(report.chunks_unchanged, 3, "{report:?}");
     // forget, then `--include-forgotten` on the directory
-    let ctx = WriteCtx::new(
-        Policy::empty().effective_hash(),
-        kaban_core::WorkspaceId::default(),
-        Actor::Agent,
-    );
+    let ctx = WriteCtx::new(kaban_core::WorkspaceId::default(), Actor::Agent);
     kaban_ingest::forget_document(rig.store.as_ref(), &Policy::empty(), &ctx, "a.md").unwrap();
     let mut cfg = rig.cfg.clone();
     cfg.include_forgotten = true;
@@ -474,17 +466,12 @@ fn include_forgotten_and_edit_away_then_restore_reactivate_through_the_batch() {
 #[test]
 fn foreign_edges_from_an_unchanged_chunk_survive_a_document_edit() {
     use kaban_core::{Actor, NewNode, NodeId, WriteCtx};
-    use kaban_policy::Policy;
     let rig = new_rig("foreign-edges");
     fs::write(rig.root.join("a.md"), A).unwrap();
     rig.run();
     let chunks = rig.chunk_ids("a.md");
     let first = NodeId::parse(&chunks[0]).unwrap();
-    let ctx = WriteCtx::new(
-        Policy::empty().effective_hash(),
-        kaban_core::WorkspaceId::default(),
-        Actor::Agent,
-    );
+    let ctx = WriteCtx::new(kaban_core::WorkspaceId::default(), Actor::Agent);
     let fact = match rig
         .store
         .remember(
@@ -584,11 +571,7 @@ fn a_failed_refresh_tombstones_the_old_children_and_keeps_the_inventory() {
     fs::write(rig.root.join("a.md"), "changed again\n").unwrap();
     make_unreadable(&rig.root.join("a.md"));
     rig.run();
-    let ctx = WriteCtx::new(
-        Policy::empty().effective_hash(),
-        kaban_core::WorkspaceId::default(),
-        Actor::Agent,
-    );
+    let ctx = WriteCtx::new(kaban_core::WorkspaceId::default(), Actor::Agent);
     let forgotten =
         kaban_ingest::forget_document(rig.store.as_ref(), &Policy::empty(), &ctx, "a.md").unwrap();
     assert_eq!(
@@ -723,7 +706,6 @@ fn a_whitespace_only_edit_refreshes_offsets_without_new_ids() {
 #[test]
 fn a_legacy_tombstone_without_an_owner_stays_hidden_instead_of_failing_the_batch() {
     use kaban_core::{Actor, EdgeDiff, Lifecycle, NewNode, NodeId, Op, WriteBatch, WriteCtx};
-    use kaban_policy::Policy;
     let rig = new_rig("legacy-tombstone");
     fs::write(rig.root.join("a.md"), A).unwrap();
     rig.run();
@@ -754,11 +736,7 @@ fn a_legacy_tombstone_without_an_owner_stays_hidden_instead_of_failing_the_batch
         }],
     );
     batch.edge_diff = EdgeDiff::None;
-    let ctx = WriteCtx::new(
-        Policy::empty().effective_hash(),
-        kaban_core::WorkspaceId::default(),
-        Actor::Agent,
-    );
+    let ctx = WriteCtx::new(kaban_core::WorkspaceId::default(), Actor::Agent);
     kaban_core::IngestStore::apply_batch(rig.store.as_ref(), batch, &ctx).unwrap();
     let legacy = rig.store.get(&gone, true).unwrap().unwrap();
     assert_eq!(legacy.lifecycle, Lifecycle::Tombstoned);

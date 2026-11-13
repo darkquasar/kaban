@@ -531,7 +531,7 @@ mod tests {
     }
 
     fn remember(store: &SqliteStore, text: &str) {
-        let ctx = WriteCtx::new("v1", WorkspaceId::default(), Actor::Agent);
+        let ctx = WriteCtx::new(WorkspaceId::default(), Actor::Agent);
         let note = NewNode {
             kind: "Fact".into(),
             text: text.into(),

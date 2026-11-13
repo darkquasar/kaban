@@ -37,20 +37,14 @@ fn policy(yaml: &str) -> Policy {
 fn store_api() -> (Arc<SqliteStore>, KabanApi) {
     let store = Arc::new(SqliteStore::open_memory().unwrap());
     let signer = store.signer();
-    (
-        store.clone(),
-        KabanApi::new(store, policy(""), signer, None),
-    )
+    (store.clone(), KabanApi::new(store, policy(""), signer))
 }
 
 /// A file-backed store (a second connection can inject a failure into one step of a call).
 fn file_store_api(s: &Scratch) -> (Arc<SqliteStore>, KabanApi) {
     let store = Arc::new(SqliteStore::open(&s.db(), &s.keys()).unwrap());
     let signer = store.signer();
-    (
-        store.clone(),
-        KabanApi::new(store, policy(""), signer, None),
-    )
+    (store.clone(), KabanApi::new(store, policy(""), signer))
 }
 
 fn raw(s: &Scratch) -> rusqlite::Connection {
@@ -241,8 +235,7 @@ fn the_store_records_the_terminal_sequence_of_a_write_in_its_context() {
     let a = api.remember(fact("left")).unwrap();
     let b = api.remember(fact("right")).unwrap();
     let (a, b) = (NodeId::parse(&a.id).unwrap(), NodeId::parse(&b.id).unwrap());
-    let ctx =
-        || kaban_core::WriteCtx::new(api.policy_version(), api.workspace().clone(), Actor::Agent);
+    let ctx = || kaban_core::WriteCtx::new(api.workspace().clone(), Actor::Agent);
 
     let linking = ctx();
     assert_eq!(
@@ -395,7 +388,6 @@ fn a_policy_rejecting_the_word_committed_never_withholds_a_receipt_on_any_write_
         store.clone(),
         policy("words:\n  - { term: committed, action: reject, id: no-commit }\n"),
         signer,
-        None,
     );
     let receipt = serde_json::to_value(api.committed_receipt(Some(7))).unwrap();
     assert_eq!(receipt["outcome"], json!("committed"));

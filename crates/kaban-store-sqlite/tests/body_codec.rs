@@ -460,7 +460,7 @@ fn a_rescan_redaction_rewrites_the_body_encoded_and_reads_back_masked() {
     let clean = created(&store, "Fact", &body("quokka", 3000));
 
     let report = store
-        .rescan("v2", 100, &mut |n| {
+        .rescan("v2", 0, 100, &mut |n| {
             if n.text.contains("hunter2") {
                 RescanAction::Redact {
                     strings: Box::new(RedactedStrings {
@@ -476,7 +476,6 @@ fn a_rescan_redaction_rewrites_the_body_encoded_and_reads_back_masked() {
                         accepted_commit: n.accepted_commit.clone(),
                         dup_key: n.dup_key.clone(),
                     }),
-                    audit: vec![],
                 }
             } else {
                 RescanAction::Keep

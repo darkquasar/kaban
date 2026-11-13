@@ -101,7 +101,6 @@ pub(crate) fn run(
         store,
         policy,
         signer,
-        None,
         ApiConfig {
             workspace,
             repo_root,
@@ -121,7 +120,6 @@ pub(crate) fn run(
         &api,
         "doctor",
         json!({ "vacuum": vacuum, "optimize": optimize }),
-        &[],
         format,
         |api, args| {
             let context = DoctorContext {

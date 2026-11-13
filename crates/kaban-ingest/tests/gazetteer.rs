@@ -86,7 +86,7 @@ fn foreign_workspace_placeholder_is_refused_without_local_publication() {
             kaban_core::IngestStore::apply_batch(
                 self.store.as_ref(),
                 batch,
-                &WriteCtx::new("v1", foreign, Actor::Agent),
+                &WriteCtx::new(foreign, Actor::Agent),
             )
             .unwrap();
             let node = self.store.get(&set.document, true).unwrap().unwrap();
@@ -212,7 +212,6 @@ fn stale_publication_case(name: &str, initially_existing: bool) {
     struct RacingPreparer {
         inner: DocumentPreparer,
         store: Arc<SqliteStore>,
-        policy_version: String,
     }
     impl kaban_ingest::Preparer for RacingPreparer {
         fn begin_run(
@@ -227,9 +226,7 @@ fn stale_publication_case(name: &str, initially_existing: bool) {
             ctx: &kaban_ingest::ExtractCtx,
         ) -> Result<kaban_ingest::Prepared, kaban_ingest::ExtractError> {
             let prepared = self.inner.prepare(input, ctx)?;
-            let mut write =
-                WriteCtx::new(&self.policy_version, WorkspaceId::default(), Actor::Agent);
-            write.audit.clone_from(&prepared.audit);
+            let write = WriteCtx::new(WorkspaceId::default(), Actor::Agent);
             let committed = kaban_core::IngestStore::apply_batch(
                 self.store.as_ref(),
                 prepared.batch.clone(),
@@ -269,12 +266,6 @@ fn stale_publication_case(name: &str, initially_existing: bool) {
             cfg.clone(),
         ),
         store: store.clone(),
-        policy_version: api
-            .policy_handle()
-            .read()
-            .unwrap()
-            .effective_hash()
-            .to_owned(),
     });
     let runner = Ingestor::new(api.clone(), store.clone(), store.signer(), preparer, cfg);
     let report = run_blocking(
@@ -308,7 +299,6 @@ fn fixture_config(
         store.clone(),
         policy,
         store.signer(),
-        None,
         ApiConfig {
             engine: Arc::new(engine),
             ..Default::default()
@@ -340,7 +330,7 @@ fn over_budget_skips_linking_without_losing_l0_and_forced_symbols_lifts_cap() {
                     ..Default::default()
                 },
                 &[],
-                &WriteCtx::new("v1", WorkspaceId::default(), Actor::Agent),
+                &WriteCtx::new(WorkspaceId::default(), Actor::Agent),
             )
             .unwrap();
     }
@@ -400,7 +390,6 @@ fn over_budget_skips_linking_without_losing_l0_and_forced_symbols_lifts_cap() {
         )
         .unwrap(),
         store.signer(),
-        None,
         ApiConfig {
             engine: Arc::new(raised),
             ..Default::default()
@@ -448,7 +437,7 @@ fn target(store: &SqliteStore, title: &str) -> NodeId {
                 ..Default::default()
             },
             &[],
-            &WriteCtx::new("v1", WorkspaceId::default(), Actor::Agent),
+            &WriteCtx::new(WorkspaceId::default(), Actor::Agent),
         )
         .unwrap()
     {
@@ -578,7 +567,7 @@ fn root_target_title_and_alias_changes_invalidate_referring_document() {
     kaban_core::IngestStore::apply_batch(
         store.as_ref(),
         batch,
-        &WriteCtx::new("builtin", WorkspaceId::default(), Actor::Agent),
+        &WriteCtx::new(WorkspaceId::default(), Actor::Agent),
     )
     .unwrap();
     ingest(&root, &store, &api);
@@ -718,7 +707,7 @@ fn turning_off_linking_preserves_human_mentions_and_other_document_claims() {
             "MENTIONS",
             None,
             None,
-            &WriteCtx::new("builtin", WorkspaceId::default(), Actor::HumanCli),
+            &WriteCtx::new(WorkspaceId::default(), Actor::HumanCli),
         )
         .unwrap();
     let cfg = IngestConfig {
@@ -892,7 +881,7 @@ fn dictionary_read_hides_rejected_targets_but_keeps_clean_targets() {
     .unwrap();
     let (root, store, api) = fixture("gate", policy);
     let hidden = target(&store, "forbidden-canary-7781");
-    store.remember(NewNode { kind: "Fact".into(), text: "Otherwise clean target".into(), props: Some(serde_json::json!({"title": "forbidden-canary-7781", "aliases": ["Public Hidden Alias"]})), ..Default::default() }, &[], &WriteCtx::new("v1", WorkspaceId::default(), Actor::Agent)).unwrap();
+    store.remember(NewNode { kind: "Fact".into(), text: "Otherwise clean target".into(), props: Some(serde_json::json!({"title": "forbidden-canary-7781", "aliases": ["Public Hidden Alias"]})), ..Default::default() }, &[], &WriteCtx::new( WorkspaceId::default(), Actor::Agent)).unwrap();
     let clean = target(&store, "Public Cart Architecture");
     std::fs::write(
         root.join("note.md"),
@@ -950,7 +939,7 @@ fn dictionary_masks_title_and_alias_patterns_before_matching() {
             kind: "Fact".into(), text: "Clean record body".into(),
             props: Some(serde_json::json!({"title": "privatecanary7781", "aliases": ["privatecanary7781", "Public Cart Alias"]})),
             ..Default::default()
-        }, &[], &WriteCtx::new("v1", WorkspaceId::default(), Actor::Agent),
+        }, &[], &WriteCtx::new( WorkspaceId::default(), Actor::Agent),
     ).unwrap();
     let id = match outcome {
         RememberOutcome::Created(node) | RememberOutcome::Existing { node, .. } => {

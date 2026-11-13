@@ -30,7 +30,6 @@ pub(crate) fn run(cli: Cli, command: &Command, format: Format) -> ExitCode {
                 &api,
                 "reindex_layer",
                 json!({"layer":name}),
-                &[],
                 format,
                 |api, request: LayerRequest| {
                     let report = api.reindex_layer(request.layer)?;
@@ -50,7 +49,6 @@ pub(crate) fn run(cli: Cli, command: &Command, format: Format) -> ExitCode {
                 &api,
                 "reindex",
                 json!({}),
-                &[],
                 format,
                 |api, _| {
                     api.store()

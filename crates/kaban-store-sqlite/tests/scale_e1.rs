@@ -187,7 +187,7 @@ fn one_thousand_records_across_two_ontologies_and_six_hundred_discovered_labels(
     let store = SqliteStore::open(&s.db(), &s.keys()).unwrap();
     let ws = WorkspaceId::default();
     let governed = declare_ontologies(&store);
-    let ctx = ctx().with_governed(governed.clone());
+    let ctx = ctx();
     assert!(
         governed.contains("ops:Runbook"),
         "the user governed kind is in the set"
@@ -244,12 +244,7 @@ fn one_thousand_records_across_two_ontologies_and_six_hundred_discovered_labels(
         ));
     }
     let seeding = seeding.elapsed();
-    assert_eq!(
-        runbooks[0].governance,
-        kaban_core::Governance::Proposed,
-        "a governed kind written by an agent is proposed: {:?}",
-        runbooks[0]
-    );
+    assert_eq!(runbooks[0].governance, kaban_core::Governance::None);
     assert_eq!(services[0].governance, kaban_core::Governance::None);
     for (kind, n) in [
         ("ops:Runbook", RECORDS_PER_KIND),

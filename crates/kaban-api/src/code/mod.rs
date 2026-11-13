@@ -50,7 +50,6 @@ use crate::control::ControlPath;
 use crate::enrich::FollowUp;
 use crate::error::ApiError;
 use kaban_codegraph::{CodeGraphReader, ReadError, Resolved, SnapshotRef};
-use kaban_core::WriteCtx;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -831,14 +830,12 @@ impl KabanApi {
     /// set is validated, anything else is scanned as content (the selector then refuses it).
     fn gate_selector(
         &self,
-        ctx: &mut WriteCtx,
         tool: &'static str,
         sel: &SymbolSelector,
         red: &mut Vec<String>,
     ) -> Result<SymbolSelector, ApiError> {
         let label = match sel.label.as_deref() {
             Some(l) => Some(self.gate_control(
-                ctx,
                 tool,
                 ControlPath::request(tool, "target.label"),
                 "target.label",
@@ -848,11 +845,11 @@ impl KabanApi {
             None => None,
         };
         Ok(SymbolSelector {
-            symbol: self.gate_opt(ctx, tool, "target.symbol", sel.symbol.as_deref(), red)?,
-            r#ref: self.gate_opt(ctx, tool, "target.ref", sel.r#ref.as_deref(), red)?,
+            symbol: self.gate_opt(tool, "target.symbol", sel.symbol.as_deref(), red)?,
+            r#ref: self.gate_opt(tool, "target.ref", sel.r#ref.as_deref(), red)?,
             label,
-            name: self.gate_opt(ctx, tool, "target.name", sel.name.as_deref(), red)?,
-            path: self.gate_opt(ctx, tool, "target.path", sel.path.as_deref(), red)?,
+            name: self.gate_opt(tool, "target.name", sel.name.as_deref(), red)?,
+            path: self.gate_opt(tool, "target.path", sel.path.as_deref(), red)?,
             line: sel.line,
         })
     }

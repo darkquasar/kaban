@@ -38,13 +38,11 @@ impl KabanApi {
         &self,
         req: CodeNeighboursRequest,
     ) -> Result<CodeNeighboursResponse, ApiError> {
-        let mut ctx = self.write_ctx(None);
         let mut red = Vec::new();
-        let target = self.gate_selector(&mut ctx, TOOL, &req.target, &mut red)?;
+        let target = self.gate_selector(TOOL, &req.target, &mut red)?;
         let mut names = Vec::with_capacity(req.edge_types.len());
         for t in &req.edge_types {
             names.push(self.gate_control(
-                &mut ctx,
                 TOOL,
                 ControlPath::request(TOOL, "edge_types[]"),
                 "edge_types",
@@ -52,14 +50,8 @@ impl KabanApi {
                 &mut red,
             )?);
         }
-        let current_path = self.gate_opt(
-            &mut ctx,
-            TOOL,
-            "current_path",
-            req.current_path.as_deref(),
-            &mut red,
-        )?;
-        self.flush_audit(&mut ctx)?;
+        let current_path =
+            self.gate_opt(TOOL, "current_path", req.current_path.as_deref(), &mut red)?;
         let inputs = ranking::RankInputs::checked(current_path)?;
         let mut edge_types = Vec::with_capacity(names.len());
         for name in &names {

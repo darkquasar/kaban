@@ -67,25 +67,23 @@ impl KabanApi {
     pub fn schema_extend(&self, p: SchemaExtendRequest) -> Result<TypeDef, ApiError> {
         let mut red = Vec::new();
         let t = "schema_extend";
-        let mut ctx = self.write_ctx(None);
-        let kind = self.gate(&mut ctx, t, "kind", &p.kind, &mut red)?;
-        let name = self.gate(&mut ctx, t, "name", &p.name, &mut red)?;
-        let description = self.gate(&mut ctx, t, "description", &p.description, &mut red)?;
+        let kind = self.gate(t, "kind", &p.kind, &mut red)?;
+        let name = self.gate(t, "name", &p.name, &mut red)?;
+        let description = self.gate(t, "description", &p.description, &mut red)?;
         let mut from_kinds = Vec::new();
         for s in &p.from_kinds {
-            from_kinds.push(self.gate(&mut ctx, t, "from_kinds", s, &mut red)?);
+            from_kinds.push(self.gate(t, "from_kinds", s, &mut red)?);
         }
         let mut to_kinds = Vec::new();
         for s in &p.to_kinds {
-            to_kinds.push(self.gate(&mut ctx, t, "to_kinds", s, &mut red)?);
+            to_kinds.push(self.gate(t, "to_kinds", s, &mut red)?);
         }
         let props_schema = match &p.props_schema {
-            Some(v) => Some(self.gate_json(&mut ctx, t, "props_schema", v, &mut red)?),
+            Some(v) => Some(self.gate_json(t, "props_schema", v, &mut red)?),
             None => None,
         };
         if !red.is_empty() {
             // schema entries cannot be redacted; record the redaction verdicts, then refuse
-            self.flush_audit(&mut ctx)?;
             return Err(ApiError::Invalid(
                 "denylist hit in schema definition; schema entries cannot be redacted, remove the value".into(),
             ));

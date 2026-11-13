@@ -18,7 +18,7 @@ fn stats_is_a_superset_with_engine_schema_version_stores_and_effective_hash() {
     let effective = policy.effective_hash().to_owned();
     let store = Arc::new(SqliteStore::open_memory().unwrap());
     let signer = store.signer();
-    let api = KabanApi::new(store, policy, signer, None);
+    let api = KabanApi::new(store, policy, signer);
     api.remember(RememberRequest {
         kind: "Fact".into(),
         text: "quokka counted".into(),
@@ -85,7 +85,6 @@ fn stats_reports_configured_layers_and_isolates_bad_run_metadata() {
         store,
         Policy::from_file(Policy::parse(b"").unwrap(), "f".repeat(64)).unwrap(),
         signer,
-        None,
         ApiConfig {
             engine: Arc::new(engine),
             ..ApiConfig::default()
@@ -115,7 +114,7 @@ fn matrix_enum_strings_remain_content_scanned_at_the_response_gate() {
     .unwrap();
     let store = Arc::new(SqliteStore::open_memory().unwrap());
     let signer = store.signer();
-    let api = KabanApi::new(store, policy, signer, None);
+    let api = KabanApi::new(store, policy, signer);
     let value = serde_json::to_value(api.stats(StatsRequest::default()).unwrap()).unwrap();
     assert!(matches!(
         api.gate_response("stats", &value),

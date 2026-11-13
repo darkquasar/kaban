@@ -27,7 +27,6 @@ fn eight_documents_racing_on_four_workers_create_one_placeholder_for_a_shared_mi
         store.clone(),
         Policy::empty(),
         store.signer(),
-        None,
     ));
     let cfg = IngestConfig {
         workers: 4,
