@@ -46,8 +46,7 @@ clap = { version = "=4.6.7", features = ["derive", "env"] }
 aho-corasick = "=1.1.5"
 yaml_serde = "=0.10.7"                 # MIT OR Apache-2.0: maintained YAML Organization fork; libyaml-rs backend
 unicode-normalization = "=0.1.25"
-zeroize = "=1.9.1"                      # Apache-2.0 OR MIT: audit key / token in zeroizing memory
-subtle = "=2.6.1"                       # BSD-3-Clause: constant-time compare of chain HMACs and tokens
+zeroize = "=1.9.1"                      # Apache-2.0 OR MIT: key bytes in zeroizing memory
 rustix = { version = "=1.1.6", features = ["fs", "process", "mount", "thread"] }  # 1.1.6 clears RUSTSEC-2026-0486; Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT: fchmod without unsafe (S5); process: process-group kill without unsafe (C3.3, R-C3.2-4; v4 CG1.1 runner); mount, thread: the v4 namespaces tier's mount view and unshare/setns helper (stage1-plan CG1.2, consumed from CG4.4; additive, no new package, no member uses them yet)
 
 # exact pin per spec 05 SS-13b (EN-N1 amended narrowly; s31-tantivy-integration-design.md §6): the latest stable on

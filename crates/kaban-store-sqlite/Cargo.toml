@@ -25,7 +25,6 @@ kaban-vtab.workspace = true          # pre-wired: the virtual-table glue (spec 1
 tantivy.workspace = true             # `MmapDirectory`/`OwnedBytes` for the graph index files (OD-7)
 open-cypher.workspace = true         # GRAPH_TABLE pattern parser (spec 11 T15)
 serde_json.workspace = true
-subtle.workspace = true
 rustix.workspace = true
 zstd.workspace = true   # the body codec (spec 05 SS-17, OWN-I): per-record zstd with the shipped dictionary
 crc32fast.workspace = true # the length and checksum framing of a body stored plain behind the tag (T8c review t8c-3)
