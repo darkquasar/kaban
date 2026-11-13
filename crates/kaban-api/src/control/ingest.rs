@@ -356,19 +356,7 @@ pub(super) const ROWS: &[ControlEntry] = &[
         "ingest_submit",
         Direction::Response,
         "records[].outcome",
-        Shape::Enum(&["created", "updated", "unchanged", "revision_candidate"]),
-    ),
-    entry(
-        "ingest_submit",
-        Direction::Response,
-        "revision_candidates[].id",
-        Shape::NodeId,
-    ),
-    entry(
-        "ingest_submit",
-        Direction::Response,
-        "revision_candidates[].of",
-        Shape::NodeId,
+        Shape::Enum(&["created", "updated", "unchanged"]),
     ),
     entry(
         "ingest_submit",

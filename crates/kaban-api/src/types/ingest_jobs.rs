@@ -46,18 +46,16 @@ pub struct IngestClaimResponse {
     pub lease: Option<IngestLease>,
 }
 
-/// Fixed placement outcomes; governed revisions are candidates, never acceptance.
+/// Fixed placement outcomes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum IngestRecordOutcome {
     /// A new record was committed.
     Created,
-    /// Proposed record content changed.
+    /// Record content changed in place.
     Updated,
     /// Identical content wrote no graph change.
     Unchanged,
-    /// New proposed content for an immutable predecessor.
-    RevisionCandidate,
 }
 
 /// Closed report skip vocabulary. References never convey foreign target information.
@@ -122,18 +120,6 @@ pub struct IngestPlacedRecord {
     pub id: String,
     /// Actual placement result.
     pub outcome: IngestRecordOutcome,
-}
-
-/// Acceptance-safe candidate and its immutable predecessor.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct IngestRevisionCandidate {
-    /// Gated extractor-local key.
-    pub local_id: String,
-    /// New proposed record identity.
-    pub id: String,
-    /// Accepted, superseded or invalidated predecessor identity.
-    pub of: String,
 }
 
 /// One fixed conversion refusal, with an optional value-free property pointer.
@@ -210,12 +196,6 @@ pub struct IngestFinishReport {
     pub redactions: u64,
     /// Accumulated named edges.
     pub edges: u64,
-    /// Accumulated newly inserted assertions.
-    pub assertions: u64,
-    /// Proposed revisions, never acceptance.
-    pub revision_candidates: u64,
-    /// Revisions of terminal predecessors.
-    pub predecessor_terminal: u64,
     /// Fixed skip reasons and counts.
     pub skipped: BTreeMap<String, u64>,
     /// Fixed discarded evidence reasons and counts.
@@ -248,10 +228,6 @@ pub struct IngestSubmitReport {
     pub chunk: Option<u32>,
     /// Committed records and actual outcomes.
     pub records: Vec<IngestPlacedRecord>,
-    /// Proposed revisions of immutable predecessors.
-    pub revision_candidates: Vec<IngestRevisionCandidate>,
-    /// Candidates whose predecessor was superseded or invalidated.
-    pub predecessor_terminal: u64,
     /// Fixed conversion refusals.
     pub skipped: Vec<IngestSkipped>,
     /// Evidence references discarded independently of record placement.
@@ -266,8 +242,6 @@ pub struct IngestSubmitReport {
     pub unchanged: u32,
     /// Successfully named edge triples.
     pub edges: u64,
-    /// Actual newly inserted assertion rows.
-    pub assertions: u32,
     /// Actual graph sequence range.
     pub changes: IngestChanges,
 }

@@ -81,30 +81,4 @@ async fn links_resolve_only_active_same_workspace_nodes() {
     assert_eq!(edges.len(), 1);
     assert_eq!(edges[0].dst, same.as_str());
     assert_eq!(edges[0].props["owner"], "kaban-parse");
-    let mut scores = Vec::new();
-    rig.store
-        .rescan_assertions("confidence-proof", &mut |claim, _| {
-            scores.push((
-                claim.method,
-                claim.rank,
-                claim.raw_score,
-                claim.lineage_id.clone(),
-            ));
-            Some(claim.value.as_value().clone())
-        })
-        .unwrap();
-    assert_eq!(
-        scores.len(),
-        3,
-        "record, provenance and valid link assertions only"
-    );
-    assert!(scores.iter().all(|(method, rank, score, _)| *method
-        == kaban_core::Method::IngestSubmit
-        && *rank == kaban_core::Rank::Normal
-        && score.0 == 8000));
-    assert!(
-        scores
-            .iter()
-            .all(|(_, _, _, lineage)| lineage == &scores[0].3)
-    );
 }

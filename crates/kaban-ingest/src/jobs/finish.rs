@@ -69,9 +69,6 @@ pub async fn finish_fenced(
                 unchanged: current.unchanged,
                 redactions: current.redactions,
                 edges: state.edges,
-                assertions: state.assertions,
-                revision_candidates: state.revision_candidates,
-                predecessor_terminal: state.predecessor_terminal,
                 skipped: state.skipped,
                 evidence_dropped: state.evidence_dropped,
                 reconcile: if outcome.skipped_cap {

@@ -32,28 +32,19 @@ async fn public_submit_places_repeats_without_changes_and_accumulates_actual_out
     assert_eq!(first["created"], 1);
     assert_eq!(first["skipped"], json!([]));
     assert_eq!(first["evidence_dropped"], json!([]));
-    assert!(first["assertions"].as_u64().unwrap() >= 3);
     let id = NodeId::parse(first["records"][0]["id"].as_str().unwrap()).unwrap();
     let stored = rig.store.get(&id, false).unwrap().unwrap();
     assert_eq!(stored.text, "A harmless source body.");
     assert_eq!(stored.props["evidence"][0]["quote"], "harmless   source");
     let (_, edges) = rig.hop(&id, &["DERIVED_FROM", "EVIDENCE_FOR"], 1);
     assert!(
-        edges.is_empty(),
-        "default Script missing prior rejects projections, never gains implicit authority"
-    );
-    assert!(
-        rig.store
-            .rescan_assertions("test-negative", &mut |_, _| None)
-            .unwrap()
-            .scanned
-            > 0
+        !edges.is_empty(),
+        "submitted provenance edges are active like the record"
     );
     let last = rig.last_seq();
     let second = submit(&api, &rig.root, body).await.unwrap();
     assert_eq!(second["created"], 0);
     assert_eq!(second["unchanged"], 1);
-    assert_eq!(second["assertions"], 0);
     assert_eq!(
         rig.last_seq(),
         last,

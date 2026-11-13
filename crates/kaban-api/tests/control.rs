@@ -48,8 +48,8 @@ fn ingest_submit_control_ids_and_closed_report_values_are_registered() {
         api.prepare_args("ingest_submit", &json!({"links":[{"to_id":malformed}]}))
             .is_err()
     );
-    let report = json!({"job":"a".repeat(64),"status":"open","records":[{"id":id,"outcome":"revision_candidate"}],
-        "revision_candidates":[{"id":id,"of":id}],"skipped":[{"reason":"unknown_target"}],
+    let report = json!({"job":"a".repeat(64),"status":"open","records":[{"id":id,"outcome":"updated"}],
+        "skipped":[{"reason":"unknown_target"}],
         "evidence_dropped":[{"reason":"quote_not_found"}]});
     assert_eq!(api.gate_response("ingest_submit", &report).unwrap(), report);
 }
@@ -603,19 +603,14 @@ const CODE_CONTROL_ALLOWANCE: &[(&str, Direction, &str)] = &[
 /// so a new enum-typed field, or a new variant of a rowed one, fails that test until the row
 /// moves or the path is named here. Free strings stay content by default (OWN-10).
 ///
-/// The response-side closed vocabularies kaban itself emits (card `lifecycle`, `governance`
-/// and `provenance.store`, the `follow_ups[].tool` names, `remember` `status`, `stats.stores[]`,
+/// The response-side closed vocabularies kaban itself emits (card `lifecycle` and
+/// `provenance.store`, the `follow_ups[].tool` names, `remember` `status`, `stats.stores[]`,
 /// `anchored[].kind`) are content on purpose: the response gate scans them
 /// as text and the adapter withholds a result whose enum value a redaction reshaped
 /// (`crates/kaban/src/mcp/mod.rs`, review R3-9), so a policy word rule is honoured on every
 /// string that leaves. Rowing them would make them unmaskable: an owner decision, not a lane's
 /// (E2.11 report, deviation).
 const CONTENT_ENUM_ALLOWANCE: &[(&str, Direction, &str)] = &[
-    (
-        "remember",
-        Direction::Response,
-        "candidate_duplicates[].governance",
-    ),
     (
         "remember",
         Direction::Response,
@@ -628,14 +623,11 @@ const CONTENT_ENUM_ALLOWANCE: &[(&str, Direction, &str)] = &[
     ),
     ("remember", Direction::Response, "status"),
     ("recall", Direction::Response, "follow_ups[].tool"),
-    ("recall", Direction::Response, "results[].governance"),
     ("recall", Direction::Response, "results[].lifecycle"),
     ("recall", Direction::Response, "results[].provenance.store"),
     ("traverse", Direction::Response, "anchored[].kind"),
-    ("traverse", Direction::Response, "nodes[].governance"),
     ("traverse", Direction::Response, "nodes[].lifecycle"),
     ("traverse", Direction::Response, "nodes[].provenance.store"),
-    ("forget", Direction::Response, "governance"),
     ("forget", Direction::Response, "lifecycle"),
     ("stats", Direction::Response, "stores[]"),
     ("stats", Direction::Response, "layers[].layer"),
