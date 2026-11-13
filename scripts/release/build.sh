@@ -33,7 +33,8 @@ stage=$scratch/kaban-v$version-$target
 mkdir "$stage"
 cp -p "$binary_dir/kaban" "$binary_dir/kaban-index" "$stage/"
 cp LICENSE NOTICE "$stage/"
-cp -R "licenses/release/$target" "$stage/third-party"
+# Regenerate notices from the locked sources and pinned rustc; refuse unreviewed drift.
+python3 scripts/release/licenses.py stage --target "$target" --output "$stage/third-party"
 python3 - "$stage" "$target" "$version" "$commit" "${args[@]}" <<'BUILD'
 import hashlib, json, sys
 from pathlib import Path

@@ -98,69 +98,122 @@ class ReleaseLicenses(unittest.TestCase):
         self.assertIn('Invented complete MIT terms', [item['text'] for item in result])
         self.assertIn('Invented Dropbox BSD terms', [item['text'] for item in result])
 
-    def test_generated_inventory_resolves_the_exact_full_profile(self):
-        (self.root/'LICENSE').write_text('Invented complete licence')
+    def make_release_inputs(self):
+        """Invent a repository, Rust sysroot and Cargo resolution for every target."""
+        crate = self.root/'registry/invented'
+        crate.mkdir(parents=True)
+        (crate/'LICENSE').write_text('Invented complete licence')
+        self.package['manifest_path'] = str(crate/'Cargo.toml')
         (self.root/'rust-toolchain.toml').write_text('[toolchain]\nchannel = "1.99.0"\n')
+        (self.root/'Cargo.lock').write_text('original locked versions\n')
         upstream = self.root/'licenses/release/upstream'
         upstream.mkdir(parents=True)
-        for name in ('rust-1.99.0-COMPILER-BUILTINS-LICENSE.txt', 'rust-1.99.0-COPYRIGHT-library.html'):
+        for name in ('rust-1.99.0-COMPILER-BUILTINS-LICENSE.txt', 'musl-1.2.5-COPYRIGHT'):
             (upstream/name).write_text('Invented runtime notice')
+        docs = self.root/'sysroot/share/doc/rust'
+        (docs/'licenses').mkdir(parents=True)
+        (docs/'COPYRIGHT-library.html').write_text('<p>Invented standard library inventory</p>\n')
+        (docs/'licenses/MIT.txt').write_text('Invented Rust MIT terms\n')
+        self.extra = []
         packages = [{'name': n, 'version': '1.0.0', 'source': None} for n in ('kaban', 'kaban-index')]
         packages.append({**self.package, 'source': 'registry+https://example.invalid'})
         def cargo(root, *args):
+            if args[0] == 'fetch':
+                return ''
             if args[0] == 'metadata':
-                return json.dumps({'packages': packages})
+                return json.dumps({'packages': packages + self.extra})
             tree = 'kaban v1.0.0|default\nkaban-index v1.0.0|default\n'
             if '--features' in args and args[args.index('--features')+1] == 'kaban-ingest/pdf,kaban-ingest/md-splitter':
                 tree += 'invented v1.0.0|pdf,splitter-data\n'
-            return tree
-        with patch.object(LICENSES, 'cargo_output', cargo):
-            LICENSES.generate(self.root, 'aarch64-apple-darwin')
-        manifest = json.loads((self.root/'licenses/release/aarch64-apple-darwin/manifest.json').read_text())
-        self.assertEqual(manifest['features'], ['default', 'kaban-ingest/pdf', 'kaban-ingest/md-splitter'])
-        self.assertEqual(manifest['dependencies'][0]['name'], 'invented')
-        LICENSES.check(self.root, 'aarch64-apple-darwin')
+            return tree + ''.join(f"{p['name']} v{p['version']}|default\n" for p in self.extra)
+        for patcher in (patch.object(LICENSES, 'cargo_output', cargo),
+                        patch.object(LICENSES, 'rust_sysroot', lambda root: self.root/'sysroot')):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        LICENSES.generate(self.root)
+        return self.root/'licenses/release/inventory.json'
 
-    def make_checked_bundle(self):
-        target = LICENSES.TARGETS[0]
-        output = self.root / "licenses/release" / target
-        output.mkdir(parents=True)
-        data = b"Invented complete notices\n"
-        (output / "THIRD_PARTY_LICENSES.txt").write_bytes(data)
-        (output / "RUST_STANDARD_LIBRARY_NOTICES.html").write_text("<p>Runtime terms</p>\n")
-        manifest = {"schema": 1, "target": target, "packages": ["kaban", "kaban-index"],
-                    "features": ["default", "kaban-ingest/pdf", "kaban-ingest/md-splitter"], "dependency_edges": ["normal", "build"],
-                    "inputs": LICENSES.input_hashes(self.root),
-                    "bundle_sha256": LICENSES.digest(data), "dependencies": [],
-                    "files": {path.name: LICENSES.digest(path.read_bytes()) for path in output.iterdir()}}
-        path = output / "manifest.json"
-        path.write_text(json.dumps(manifest))
-        return target, output, manifest, path
-
-    def test_check_rejects_changed_lock_and_damaged_notices(self):
-        (self.root / "Cargo.lock").write_text("original locked versions\n")
-        target, output, manifest, path = self.make_checked_bundle()
-        LICENSES.check(self.root, target)
-        (self.root / "Cargo.lock").write_text("different locked versions\n")
-        with self.assertRaisesRegex(ValueError, "inputs changed"):
-            LICENSES.check(self.root, target)
-        (self.root / "Cargo.lock").write_text("original locked versions\n")
-        (output / "THIRD_PARTY_LICENSES.txt").write_text("damaged")
-        with self.assertRaisesRegex(ValueError, "checksum"):
+    def test_generated_inventory_resolves_the_exact_full_profile(self):
+        path = self.make_release_inputs()
+        inventory = json.loads(path.read_text())
+        self.assertEqual(inventory['features'], ['default', 'kaban-ingest/pdf', 'kaban-ingest/md-splitter'])
+        self.assertEqual(set(inventory['targets']), set(LICENSES.TARGETS))
+        [dependency] = inventory['dependencies']
+        self.assertEqual((dependency['name'], dependency['license']), ('invented', 'MIT AND BSD-3-Clause'))
+        self.assertEqual(list(dependency['notices']), ['LICENSE'])
+        self.assertNotIn('targets', dependency)  # present in every target
+        for target in LICENSES.TARGETS:
             LICENSES.check(self.root, target)
 
-    def test_check_rejects_damage_to_the_separate_runtime_notices(self):
-        target, output, manifest, path = self.make_checked_bundle()
-        (output / "RUST_STANDARD_LIBRARY_NOTICES.html").write_text("changed runtime terms")
-        with self.assertRaisesRegex(ValueError, "checksum"):
-            LICENSES.check(self.root, target)
+    def test_committed_inventory_holds_no_generated_notice_texts(self):
+        self.make_release_inputs()
+        files = {p.relative_to(self.root/'licenses/release').as_posix()
+                 for p in (self.root/'licenses/release').rglob('*') if p.is_file()}
+        self.assertEqual(files, {'inventory.json', 'upstream/rust-1.99.0-COMPILER-BUILTINS-LICENSE.txt',
+                                 'upstream/musl-1.2.5-COPYRIGHT'})
+
+    def test_stage_writes_the_complete_archive_notices(self):
+        self.make_release_inputs()
+        output = self.root/'stage/third-party'
+        LICENSES.stage(self.root, 'x86_64-unknown-linux-musl', output)
+        self.assertEqual({p.name for p in output.iterdir()},
+                         {'manifest.json', 'THIRD_PARTY_LICENSES.txt', 'RUST_STANDARD_LIBRARY_NOTICES.html'})
+        manifest = json.loads((output/'manifest.json').read_text())
+        self.assertEqual((manifest['schema'], manifest['target'], manifest['dependency_edges']),
+                         (1, 'x86_64-unknown-linux-musl', ['normal', 'build']))
+        self.assertEqual(manifest['files'], {name: LICENSES.digest((output/name).read_bytes())
+                                             for name in ('THIRD_PARTY_LICENSES.txt', 'RUST_STANDARD_LIBRARY_NOTICES.html')})
+        self.assertEqual((output/'RUST_STANDARD_LIBRARY_NOTICES.html').read_text(),
+                         '<p>Invented standard library inventory</p>\n')
+        bundle = (output/'THIRD_PARTY_LICENSES.txt').read_text()
+        for text in ('Invented complete licence', 'Invented Rust MIT terms', 'Invented runtime notice',
+                     '--- rust-1.99.0-LICENSE-MIT.txt ---', '--- musl-1.2.5-COPYRIGHT ---'):
+            self.assertIn(text, bundle)
+
+    def test_check_rejects_changed_lock(self):
+        self.make_release_inputs()
+        (self.root/'Cargo.lock').write_text('different locked versions\n')
+        with self.assertRaisesRegex(ValueError, 'inputs changed'):
+            LICENSES.check(self.root, LICENSES.TARGETS[0])
+
+    def test_stage_refuses_notices_that_differ_from_the_reviewed_inventory(self):
+        self.make_release_inputs()
+        output = self.root/'stage/third-party'
+        for change in ('licence text', 'new dependency', 'runtime notice'):
+            with self.subTest(change=change):
+                if change == 'licence text':
+                    (self.root/'registry/invented/LICENSE').write_text('Changed upstream licence')
+                elif change == 'new dependency':
+                    (self.root/'registry/invented/LICENSE').write_text('Invented complete licence')
+                    extra = self.root/'extra'
+                    extra.mkdir()
+                    (extra/'LICENSE').write_text('Unreviewed terms')
+                    self.extra.append({'name': 'unreviewed', 'version': '2.0.0', 'license': 'MIT',
+                                       'manifest_path': str(extra/'Cargo.toml'),
+                                       'source': 'registry+https://example.invalid'})
+                else:
+                    self.extra.clear()
+                    (self.root/'sysroot/share/doc/rust/COPYRIGHT-library.html').write_text('changed')
+                with self.assertRaisesRegex(ValueError, 'reviewed inventory'):
+                    LICENSES.stage(self.root, LICENSES.TARGETS[0], output)
+                self.assertFalse(output.exists())
 
     def test_check_refuses_inventory_with_unexpected_dependency_scope(self):
-        target, output, manifest, path = self.make_checked_bundle()
-        manifest["dependency_edges"] = ["dev"]
-        path.write_text(json.dumps(manifest))
-        with self.assertRaisesRegex(ValueError, "configuration"):
-            LICENSES.check(self.root, target)
+        path = self.make_release_inputs()
+        inventory = json.loads(path.read_text())
+        inventory['dependency_edges'] = ['dev']
+        path.write_text(json.dumps(inventory))
+        with self.assertRaisesRegex(ValueError, 'configuration'):
+            LICENSES.check(self.root, LICENSES.TARGETS[0])
+
+    def test_repository_keeps_one_copy_of_each_licence_input(self):
+        release = Path(__file__).resolve().parents[2]/'licenses/release'
+        files = [p for p in release.rglob('*') if p.is_file()]
+        self.assertFalse([p.name for p in files if p.suffix == '.html'])
+        self.assertFalse([p.name for p in release.iterdir() if p.is_dir() and p.name != 'upstream'])
+        contents = [p.read_bytes() for p in files]
+        self.assertEqual(len(contents), len(set(contents)))
+        self.assertLess(sum(map(len, contents)), 1_000_000)
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Collect the selected packages' upstream notices; check committed bundles offline.
+"""Collect the selected packages' upstream notices against a small reviewed inventory.
+
+The repository keeps only inputs the collector cannot derive (supplements and their
+provenance) and `inventory.json`: resolved packages, licence expressions and notice
+hashes per target. `check` refuses changed inputs offline; `stage` regenerates the
+release notices from Cargo sources and the pinned toolchain and refuses any drift.
 
 Generation uses the locked Cargo tree, including build/proc-macro dependencies
 conservatively, and excludes dev-only dependencies. All supplied licence alternatives
@@ -18,13 +23,16 @@ ROOT = Path(__file__).resolve().parents[2]
 TARGETS = ("x86_64-unknown-linux-gnu", "x86_64-unknown-linux-musl", "aarch64-unknown-linux-gnu", "aarch64-apple-darwin")
 SELECTED = ("kaban", "kaban-index")
 FEATURES = ["default", "kaban-ingest/pdf", "kaban-ingest/md-splitter"]
+RUST = "1.99.0"
+INVENTORY = "licenses/release/inventory.json"
 SUPPLEMENTS = {
     "alloc-stdlib": ("alloc-stdlib-0.3.0-LICENSE",),
     "taffy": ("taffy-0.14.0-LICENSE",),
     "brotli-decompressor": ("brotli-9.0.0-LICENSE.MIT",),
     "datasketches": ("datasketches-0.2.0-LICENSE", "datasketches-0.2.0-NOTICE"),
     "htmlescape": ("htmlescape-0.3.1-LICENSE-APACHE",),
-    "ownedbytes": ("ownedbytes-0.9.0-LICENSE",),
+    # ownedbytes 0.9.0 records a tantivy revision whose LICENSE has identical bytes.
+    "ownedbytes": ("tantivy-9e63fc5-LICENSE",),
     "whatlang": ("whatlang-0.18.0-LICENSE",),
     **{name: ("tantivy-9e63fc5-LICENSE",) for name in (
         "tantivy-bitpacker", "tantivy-columnar", "tantivy-common", "tantivy-query-grammar",
@@ -120,9 +128,24 @@ def selected_packages(tree):
     return selected
 
 
-def generate(root, target):
-    if not re.search(r'^channel\s*=\s*"1\.99\.0"', (root / "rust-toolchain.toml").read_text(), re.M):
+def rust_sysroot(root):
+    return Path(subprocess.check_output([os.environ.get("RUSTC", "rustc"), "--print", "sysroot"],
+                                        cwd=root, text=True).strip())
+
+
+def rust_runtime(root):
+    """Read the standard-library notices that the pinned rustc component ships."""
+    docs = rust_sysroot(root) / "share/doc/rust"
+    files = {"COPYRIGHT-library.html": (docs / "COPYRIGHT-library.html").read_bytes()}
+    files.update({f"licenses/{path.name}": path.read_bytes() for path in sorted((docs / "licenses").glob("*.txt"))})
+    return files
+
+
+def collect(root, target):
+    """Resolve the target closure and render its notices; returns the shipped files."""
+    if not re.search(rf'^channel\s*=\s*"{re.escape(RUST)}"', (root / "rust-toolchain.toml").read_text(), re.M):
         raise ValueError("Review Rust runtime notices for the changed toolchain before regeneration")
+    cargo_output(root, "fetch", "--locked", "--target", target)
     metadata = json.loads(cargo_output(root, "metadata", "--locked", "--offline", "--format-version", "1", "--filter-platform", target, "--features", ",".join(FEATURES[1:])))
     tree = cargo_output(root, "tree", "--locked", "--offline", "--target", target,
                         "-p", "kaban", "-p", "kaban-index", "--edges", "normal,build",
@@ -167,58 +190,113 @@ def generate(root, target):
     for text_hash, text in texts.items():
         bundle += ["=" * 72 + "\n", "\n".join(associations[text_hash]) + "\n",
                    f"Text SHA256: {text_hash}\n\n", text, "\n"]
-    runtime_names = ["rust-1.99.0-COMPILER-BUILTINS-LICENSE.txt"]
-    runtime_names += sorted(path.name for path in upstream.glob("rust-1.99.0-LICENSE-*.txt"))
+    runtime = rust_runtime(root)
+    runtime_texts = {f"rust-{RUST}-COMPILER-BUILTINS-LICENSE.txt": (upstream / f"rust-{RUST}-COMPILER-BUILTINS-LICENSE.txt").read_text()}
+    runtime_texts.update({f"rust-{RUST}-LICENSE-{name.removeprefix('licenses/')}": data.decode()
+                          for name, data in runtime.items() if name.startswith("licenses/")})
     if target.endswith("musl"):
-        runtime_names.append("musl-1.2.5-COPYRIGHT")
+        runtime_texts["musl-1.2.5-COPYRIGHT"] = (upstream / "musl-1.2.5-COPYRIGHT").read_text()
     bundle += ["=" * 72 + "\nRuntime notices\n",
                "Rust runtime notices include the upstream standard-library dependency inventory conservatively.\n",
                "See the accompanying RUST_STANDARD_LIBRARY_NOTICES.html for its original notices.\n",
                "System shared libraries are supplied by the host; their binaries are not bundled.\n"]
-    for name in runtime_names:
-        bundle += [f"\n--- {name} ---\n", (upstream / name).read_text(), "\n"]
-    output = root / "licenses/release" / target
-    output.mkdir(parents=True, exist_ok=True)
+    for name, text in runtime_texts.items():
+        bundle += [f"\n--- {name} ---\n", text, "\n"]
     data = "".join(bundle).encode()
-    (output / "THIRD_PARTY_LICENSES.txt").write_bytes(data)
-    runtime_html = (upstream / "rust-1.99.0-COPYRIGHT-library.html").read_bytes()
-    (output / "RUST_STANDARD_LIBRARY_NOTICES.html").write_bytes(runtime_html)
+    runtime_html = runtime["COPYRIGHT-library.html"]
     manifest = {"schema": 1, "target": target, "packages": list(SELECTED), "features": FEATURES,
                 "dependency_edges": ["normal", "build"], "inputs": input_hashes(root),
                 "bundle_sha256": digest(data), "dependencies": packages,
                 "files": {"THIRD_PARTY_LICENSES.txt": digest(data),
                           "RUST_STANDARD_LIBRARY_NOTICES.html": digest(runtime_html)},
-                "runtime_notices": runtime_names}
-    (output / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
-    print(f"Generated {target}: {len(packages)} registry packages, {len(data)} notice bytes")
+                "runtime_notices": list(runtime_texts)}
+    files = {"THIRD_PARTY_LICENSES.txt": data, "RUST_STANDARD_LIBRARY_NOTICES.html": runtime_html,
+             "manifest.json": (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode()}
+    return manifest, {name: digest(data) for name, data in runtime.items()}, files
+
+
+def reviewed(manifest):
+    """The reviewable part of one target's notices: identities, licences and notice hashes."""
+    return {f"{item['name']} {item['version']}": {"license": item["license"],
+            "notices": {notice["path"]: notice["sha256"] for notice in item["notices"]}}
+            for item in manifest["dependencies"]}
+
+
+def generate(root):
+    """Record the reviewed inventory for all four targets from cached Cargo sources."""
+    targets, dependencies, runtimes = {}, {}, set()
+    for target in TARGETS:
+        manifest, runtime, _ = collect(root, target)
+        runtimes.add(json.dumps(runtime, sort_keys=True))
+        targets[target] = {"bundle_sha256": manifest["bundle_sha256"], "dependencies": len(manifest["dependencies"])}
+        for key, record in reviewed(manifest).items():
+            dependencies.setdefault(key, {**record, "targets": []})["targets"].append(target)
+        print(f"Collected {target}: {len(manifest['dependencies'])} registry packages, "
+              f"{targets[target]['bundle_sha256'][:12]} notice bundle")
+    if len(runtimes) != 1:
+        raise ValueError("Rust runtime notices changed during generation")
+    records = []
+    for key, record in sorted(dependencies.items()):
+        name, version = key.split(" ", 1)
+        if record["targets"] == list(TARGETS):
+            del record["targets"]
+        records.append({"name": name, "version": version, **record})
+    inventory = {"schema": 1, "packages": list(SELECTED), "features": FEATURES,
+                 "dependency_edges": ["normal", "build"], "inputs": input_hashes(root),
+                 "rust_runtime": json.loads(runtimes.pop()), "targets": targets, "dependencies": records}
+    (root / INVENTORY).write_text(json.dumps(inventory, indent=2, sort_keys=True) + "\n")
+    print(f"Wrote {INVENTORY}: {len(records)} registry packages across {len(TARGETS)} targets")
 
 
 def check(root, target):
-    """Refuse stale or damaged package notices without invoking Cargo or the network."""
-    output = root / "licenses/release" / target
-    manifest = json.loads((output / "manifest.json").read_text())
-    if (manifest.get("schema"), manifest.get("target"), manifest.get("packages"), manifest.get("features"), manifest.get("dependency_edges")) != (1, target, list(SELECTED), FEATURES, ["normal", "build"]):
-        raise ValueError("Licence bundle configuration does not match the release profile")
-    if manifest["inputs"] != input_hashes(root):
-        raise ValueError("Licence bundle inputs changed; regenerate and review before publishing")
-    if manifest["bundle_sha256"] != digest((output / "THIRD_PARTY_LICENSES.txt").read_bytes()):
-        raise ValueError("Licence bundle checksum does not match the reviewed manifest")
-    actual_files = {path.name for path in output.iterdir() if path.is_file()} - {"manifest.json"}
-    if actual_files != set(manifest["files"]):
-        raise ValueError("Licence bundle file list does not match the reviewed manifest")
-    for name, expected in manifest["files"].items():
-        if expected != digest((output / name).read_bytes()):
-            raise ValueError(f"Licence bundle checksum mismatch: {name}")
-    print(f"Licence bundle verified: {target} ({len(manifest['dependencies'])} registry packages)")
+    """Refuse a stale inventory without invoking Cargo or the network."""
+    inventory = json.loads((root / INVENTORY).read_text())
+    if (inventory.get("schema"), inventory.get("packages"), inventory.get("features"), inventory.get("dependency_edges")) != (1, list(SELECTED), FEATURES, ["normal", "build"]):
+        raise ValueError("Licence inventory configuration does not match the release profile")
+    if target not in inventory.get("targets", {}):
+        raise ValueError(f"Licence inventory has no reviewed closure for {target}")
+    if inventory["inputs"] != input_hashes(root):
+        raise ValueError("Licence inventory inputs changed; regenerate and review before publishing")
+    print(f"Licence inventory verified: {target} ({inventory['targets'][target]['dependencies']} registry packages)")
+    return inventory
+
+
+def stage(root, target, output):
+    """Regenerate one target's archive notices and refuse any drift from the inventory."""
+    inventory = check(root, target)
+    manifest, runtime, files = collect(root, target)
+    expected = {f"{item['name']} {item['version']}": {"license": item["license"], "notices": item["notices"]}
+                for item in inventory["dependencies"] if target in item.get("targets", TARGETS)}
+    actual = reviewed(manifest)
+    drift = sorted(f"{key}: {'unreviewed' if key not in expected else 'removed' if key not in actual else 'changed'}"
+                   for key in expected.keys() | actual.keys() if expected.get(key) != actual.get(key))
+    drift += [f"Rust runtime {name}: changed" for name in sorted(runtime.keys() | inventory["rust_runtime"].keys())
+              if runtime.get(name) != inventory["rust_runtime"].get(name)]
+    if not drift and manifest["bundle_sha256"] != inventory["targets"][target]["bundle_sha256"]:
+        drift.append("notice bundle bytes changed")
+    if drift:
+        raise ValueError("Collected notices differ from the reviewed inventory: " + "; ".join(drift[:20]))
+    output.mkdir(parents=True)
+    for name, data in files.items():
+        (output / name).write_bytes(data)
+    print(f"Staged {target} notices: {', '.join(f'{name} ({len(data)} bytes)' for name, data in sorted(files.items()))}")
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("generate", "check"))
-    parser.add_argument("--target", choices=TARGETS, required=True)
+    parser.add_argument("command", choices=("generate", "check", "stage"))
+    parser.add_argument("--target", choices=TARGETS, help="required for check and stage")
+    parser.add_argument("--output", type=Path, help="new third-party directory for stage")
     args = parser.parse_args()
+    if args.command != "generate" and not args.target or (args.command == "stage") != bool(args.output):
+        parser.error("check needs --target; stage needs --target and --output; generate covers all targets")
     try:
-        {"generate": generate, "check": check}[args.command](ROOT, args.target)
+        if args.command == "generate":
+            generate(ROOT)
+        elif args.command == "check":
+            check(ROOT, args.target)
+        else:
+            stage(ROOT, args.target, args.output)
     except (ValueError, OSError, KeyError, subprocess.CalledProcessError) as error:
         parser.exit(1, f"licences: {error}\n")
 
