@@ -518,38 +518,6 @@ impl From<Option<String>> for WorkspaceFilter {
     }
 }
 
-/// Parameters of a governing-record lookup (core-spec F2; core-plan C3.4, M3-7): active records
-/// of `kinds` in one of `governance` whose `path_scope` governs a path (an entry equal to one
-/// of `path_candidates`, the target and its ancestor directories, or a glob entry that may match
-/// the target: the store prefilters globs and the caller decides exactly) or that match `query`
-/// in the text index. Ordered accepted before proposed, then `importance DESC`, `created_at
-/// DESC`, id (N5).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GoverningQuery {
-    /// Node kinds (`Decision`, `Convention`).
-    pub kinds: Vec<String>,
-    /// Governance states to include (`Accepted`, `Proposed`).
-    pub governance: Vec<Governance>,
-    /// Workspace filter.
-    pub workspace: WorkspaceFilter,
-    /// The target path and its ancestor directories (empty for a query target).
-    pub path_candidates: Vec<String>,
-    /// Free-text query (a query target); `None` for a path target.
-    pub query: Option<String>,
-    /// Maximum rows.
-    pub limit: usize,
-    /// Rows to skip in the deterministic order (the caller pages past prefilter false
-    /// positives, M3 review R3-5).
-    pub offset: usize,
-    /// Candidate visibility (EN-F49; engine-plan E1.8): excluded unless `include_candidates`.
-    pub filters: ReadFilters,
-    /// EN-F10 `[why] anchor_prefilter` (`config.rs` `Why::anchor_prefilter`, default `true`):
-    /// prefilter a path target through the `node_anchor` path rows on a store past migration
-    /// 0004 before the `path_scope` scan decides; `false` runs the scan alone (the rollback of
-    /// engine-plan E2.7).
-    pub anchor_prefilter: bool,
-}
-
 /// Kind of a `session_edits` row (migration 0003; core-plan C4.3/C4.4 as amended by M4-13):
 /// what the hook layer scribbled for a host session. Closed set, mirrored by the table's
 /// `CHECK`.

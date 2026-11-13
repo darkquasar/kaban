@@ -106,9 +106,6 @@ fn an_absent_file_and_a_file_spelling_every_register_default_both_equal_default(
     // the §15.1 register, key by key (the table the plan asks for)
     let d = EngineConfig::default();
     let table: Vec<(&str, String)> = vec![
-        ("reconcile.tau_type", d.reconcile.tau_type.to_string()),
-        ("reconcile.tau_id", d.reconcile.tau_id.to_string()),
-        ("reconcile.priors", format!("{:?}", d.reconcile.priors)),
         ("discovered.cap", d.discovered.cap.to_string()),
         (
             "discovered.prune_after_days",
@@ -198,12 +195,6 @@ fn an_absent_file_and_a_file_spelling_every_register_default_both_equal_default(
             "ask.template_depth_max",
             d.ask.template_depth_max.to_string(),
         ),
-        ("er.m.title", d.er.m["title"].to_string()),
-        ("er.u.title", d.er.u["title"].to_string()),
-        ("er.m.anchors", d.er.m["anchors"].to_string()),
-        ("er.u.anchors", d.er.u["anchors"].to_string()),
-        ("er.match_threshold", d.er.match_threshold.to_string()),
-        ("er.possible_threshold", d.er.possible_threshold.to_string()),
         ("ingest.finish_cap", d.ingest.finish_cap.to_string()),
         ("ingest.retention_days", d.ingest.retention_days.to_string()),
         ("ingest.claim_ttl_s", d.ingest.claim_ttl_s.to_string()),
@@ -227,22 +218,14 @@ fn an_absent_file_and_a_file_spelling_every_register_default_both_equal_default(
             d.pipeline.retire_batch_rows.to_string(),
         ),
         ("link.default", d.link.default.clone()),
-        (
-            "briefing.max_candidates",
-            d.briefing.max_candidates.to_string(),
-        ),
         ("budget.l0_rss_mb", d.budget.l0_rss_mb.to_string()),
         ("bench.min_samples", d.bench.min_samples.to_string()),
         (
             "bench.why_regression_pct",
             d.bench.why_regression_pct.to_string(),
         ),
-        ("why.anchor_prefilter", d.why.anchor_prefilter.to_string()),
     ];
     let expected = [
-        ("reconcile.tau_type", "0.3"),
-        ("reconcile.tau_id", "0.4"),
-        ("reconcile.priors", "None"),
         ("discovered.cap", "500"),
         ("discovered.prune_after_days", "90"),
         ("discovered.promote_when.min_count", "20"),
@@ -275,12 +258,6 @@ fn an_absent_file_and_a_file_spelling_every_register_default_both_equal_default(
         ("recall.column_weights.ident_terms", "2"),
         ("ask.template_depth", "1"),
         ("ask.template_depth_max", "3"),
-        ("er.m.title", "0.9"),
-        ("er.u.title", "0.01"),
-        ("er.m.anchors", "0.95"),
-        ("er.u.anchors", "0.001"),
-        ("er.match_threshold", "8"),
-        ("er.possible_threshold", "3"),
         ("ingest.finish_cap", "10000"),
         ("ingest.retention_days", "7"),
         ("ingest.claim_ttl_s", "300"),
@@ -292,19 +269,15 @@ fn an_absent_file_and_a_file_spelling_every_register_default_both_equal_default(
         ("ingest.default_with", "None"),
         ("pipeline.retire_batch_rows", "1000"),
         ("link.default", "none"),
-        ("briefing.max_candidates", "5"),
         ("budget.l0_rss_mb", "64"),
         ("bench.min_samples", "30"),
         ("bench.why_regression_pct", "10"),
-        ("why.anchor_prefilter", "true"),
     ];
     assert_eq!(table.len(), expected.len());
     for ((key, got), (ekey, want)) in table.iter().zip(expected.iter()) {
         assert_eq!(key, ekey);
         assert_eq!(got, want, "{key}");
     }
-    assert_eq!(d.er.m.len(), 7);
-    assert_eq!(d.er.u.len(), 7);
 }
 
 #[test]
@@ -430,10 +403,6 @@ fn maps_are_replaced_whole_and_optional_keys_set_show_in_the_overrides() {
     // rejects enrollment in this release.
     cfg.ingest.default_with = Some("gliner".to_owned());
     assert_eq!(
-        cfg.reconcile.priors.as_deref(),
-        Some(std::path::Path::new("/tmp/priors.yaml"))
-    );
-    assert_eq!(
         cfg.effective_overrides(),
         vec![
             ("embed.model.dims".to_owned(), "256".to_owned()),
@@ -449,7 +418,6 @@ fn maps_are_replaced_whole_and_optional_keys_set_show_in_the_overrides() {
             ),
             ("recall.column_weights.tags".to_owned(), "unset".to_owned()),
             ("recall.column_weights.text".to_owned(), "2.0".to_owned()),
-            ("reconcile.priors".to_owned(), "/tmp/priors.yaml".to_owned()),
         ]
     );
 }

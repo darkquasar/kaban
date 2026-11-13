@@ -412,7 +412,7 @@ impl KabanServer {
     }
 
     #[tool(
-        description = "Forget a node: tombstone (default; keeps history, hidden from every read, never re-proposed as a duplicate), invalidate (tombstone plus governance invalidated with an event), archive (reachable by id and graph expansion only), or purge (destructive; removes text, index entries and edges, the id never reappears).",
+        description = "Forget a node: tombstone (default; keeps history, hidden from every read, never re-proposed as a duplicate), invalidate (the same effect as tombstone), archive (reachable by id and graph expansion only), or purge (destructive; removes text, index entries and edges, the id never reappears).",
         output_schema = output_schema::<ForgetResponse>(),
         annotations(
             title = "Forget",

@@ -52,10 +52,9 @@ pub use lifecycle::{
 pub use model::{
     AnchoredKind, AnchoredRow, BatchReport, BodyLocation, CodeRef, CodeRefFilter, ConventionProps,
     DecisionProps, Edge, EdgeDiff, EdgeFilter, Evidence, FailureProps, ForgetMode, ForgetOutcome,
-    GoverningQuery, Hit, IndexMeta, LinkReq, Location, NewNode, Node, Op, OpOutcome, OutcomeKind,
-    RecallLayer, RecallQuery, RedactedStrings, RememberOutcome, RescanAction, RescanReport,
-    TraverseDirection, TraverseQuery, TraverseResult, TypeDeclaration, TypeDef, WorkspaceFilter,
-    WriteBatch,
+    Hit, IndexMeta, LinkReq, Location, NewNode, Node, Op, OpOutcome, OutcomeKind, RecallLayer,
+    RecallQuery, RedactedStrings, RememberOutcome, RescanAction, RescanReport, TraverseDirection,
+    TraverseQuery, TraverseResult, TypeDeclaration, TypeDef, WorkspaceFilter, WriteBatch,
 };
 // discovered labels, candidates and `kind_stats` (engine-plan E1.8)
 pub use model::{DiscoveredRules, KindStat, PromoteReport, PruneReport, ReadFilters};

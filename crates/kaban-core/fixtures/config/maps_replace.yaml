@@ -5,5 +5,3 @@ embed:
   model: {}
 ingest:
   default_with: ""
-reconcile:
-  priors: /tmp/priors.yaml

@@ -52,13 +52,12 @@ and do not remove usable sibling-layer statistics.
 ## Remaining defaults register
 
 These are configuration defaults, not claims that every reserved capability ships.
+The sections of removed features, `reconcile`, `er`, `why` and `briefing`, are accepted and
+ignored: a file that still spells one loads, with one warning naming each section.
 Use quality/latency measurements from your own workload before changing a knob.
 
 | Key | Default | Measurement or trigger |
 | --- | --- | --- |
-| `reconcile.tau_type` | 0.3 | Judged type-link quality |
-| `reconcile.tau_id` | 0.4 | Judged identity-link quality |
-| `reconcile.priors` | unset | Explicit calibrated priors file |
 | `discovered.cap` | 500 | Review backlog and memory |
 | `discovered.prune_after_days` | 90 | Age of unused discoveries |
 | `discovered.promote_when.min_count` | 20 | Repeated evidence count |
@@ -89,22 +88,6 @@ Use quality/latency measurements from your own workload before changing a knob.
 | `recall.column_weights.ident_terms` | 2.0 | Judged identifier recall |
 | `ask.template_depth` | 1 | Reserved template traversal depth |
 | `ask.template_depth_max` | 3 | Reserved template traversal cap |
-| `er.m.title` | 0.9 | Match-pair title agreement |
-| `er.m.aliases` | 0.8 | Match-pair alias agreement |
-| `er.m.kind` | 0.95 | Match-pair kind agreement |
-| `er.m.tags` | 0.6 | Match-pair tag agreement |
-| `er.m.path_scope` | 0.7 | Match-pair path agreement |
-| `er.m.anchors` | 0.95 | Match-pair anchor agreement |
-| `er.m.summary` | 0.5 | Match-pair summary agreement |
-| `er.u.title` | 0.01 | Nonmatch-pair title agreement |
-| `er.u.aliases` | 0.02 | Nonmatch-pair alias agreement |
-| `er.u.kind` | 0.3 | Nonmatch-pair kind agreement |
-| `er.u.tags` | 0.1 | Nonmatch-pair tag agreement |
-| `er.u.path_scope` | 0.05 | Nonmatch-pair path agreement |
-| `er.u.anchors` | 0.001 | Nonmatch-pair anchor agreement |
-| `er.u.summary` | 0.1 | Nonmatch-pair summary agreement |
-| `er.match_threshold` | 8.0 | Judged entity-resolution matches |
-| `er.possible_threshold` | 3.0 | Judged entity-resolution review candidates |
 | `ingest.finish_cap` | 10000 | Submitted-record count and finish latency |
 | `ingest.retention_days` | 7 | Persistent job retention need |
 | `ingest.metadata_allowance_kib` | 4 | Admitted metadata size |
@@ -116,10 +99,8 @@ Use quality/latency measurements from your own workload before changing a knob.
 | `index.container_image` | unset | Explicit indexer container selection |
 | `index.container_cli` | unset | Explicit container runtime selection |
 | `link.default` | none | Explicit automatic linking selection |
-| `briefing.max_candidates` | 5 | Useful briefing size |
 | `bench.min_samples` | 30 | Benchmark sampling sufficiency |
 | `bench.why_regression_pct` | 10 | Benchmark regression tolerance |
-| `why.anchor_prefilter` | true | Anchor query latency and result parity |
 
 Indexer isolation, cache-sharing, deadline and quota semantics are specified in the
 [v4 stage-one plan](../../../specs/kaban/02-code-graph-v4/stage1-plan.md) CG4.2. The complete executable

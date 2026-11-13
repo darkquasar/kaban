@@ -20,9 +20,9 @@ use std::process::ExitCode;
 pub(crate) struct Flags {
     /// Node id (omit with --stdin-json)
     id: Option<String>,
-    /// tombstone (default: hidden, never re-proposed) | invalidate (tombstone plus governance
-    /// `invalidated` with an event) | archive | purge (destructive: removes text, index entries
-    /// and edges; the id never reappears)
+    /// tombstone (default: hidden, never re-proposed) | invalidate (the same effect as
+    /// tombstone) | archive | purge (destructive: removes text, index entries and edges; the id
+    /// never reappears)
     #[arg(long)]
     mode: Option<String>,
     /// Reject this machine layer's claims and clear its DB projections, preserving history

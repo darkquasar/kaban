@@ -10,9 +10,9 @@ use serde::{Deserialize, Serialize};
 pub struct ForgetRequest {
     /// Node id.
     pub id: String,
-    /// tombstone (default: hidden, never re-proposed) | invalidate (tombstone plus governance
-    /// `invalidated` with an event) | archive | purge (destructive: removes text, index entries
-    /// and edges; the id never reappears)
+    /// tombstone (default: hidden, never re-proposed) | invalidate (the same effect as
+    /// tombstone) | archive | purge (destructive: removes text, index entries and edges; the id
+    /// never reappears)
     pub mode: Option<ForgetMode>,
 }
 

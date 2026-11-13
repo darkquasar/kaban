@@ -2,10 +2,12 @@
 //! `[section] key` of the register is a field of the matching section struct, its `Default` is
 //! the register's value, and the YAML path is `section.key` in `~/.kaban/config.yaml`
 //! (`KABAN_HOME`). Fields are plain serde data (`f64`, `u32`, `bool`, `String`, `BTreeMap`,
-//! `Option`); the typed forms (`Fixed`, `Fusion`, `ModelIdentity`, `ErPriors`, `LinkMode`) are
+//! `Option`); the typed forms (`Fixed`, `Fusion`, `ModelIdentity`, `LinkMode`) are
 //! built once at the consuming seam by the task that owns them, so this module depends on
 //! nothing defined later. Unknown keys fail at every depth with the field path (never the value);
-//! an opt-in budget of 0 fails [`ConfigError::Range`].
+//! an opt-in budget of 0 fails [`ConfigError::Range`]. The sections of removed features
+//! ([`REMOVED_SECTIONS`]) are the one exception: they are accepted and ignored with one
+//! [`ConfigWarning`] each, so an older file does not refuse every verb.
 //!
 //! `[index]` carries, since v4 CG4.2, the `kaban-index` keys
 //! (`isolation`, `container_image`, `container_cli`, `deadline_secs`, `quota.*`,
@@ -21,28 +23,6 @@ use serde_json::Value;
 
 use crate::canon::canonical_json;
 use crate::validator::ValidatorLimits;
-
-/// `[reconcile]` (EN-F12).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields, default)]
-pub struct Reconcile {
-    /// Auto-accept threshold of a `type` winner (becomes `Fixed` at the E2.1 seam).
-    pub tau_type: f64,
-    /// Auto-accept threshold of a `canonical_id` winner.
-    pub tau_id: f64,
-    /// A `priors.yaml` replacing the EN-F12 table; unset by default.
-    pub priors: Option<PathBuf>,
-}
-
-impl Default for Reconcile {
-    fn default() -> Self {
-        Self {
-            tau_type: 0.3,
-            tau_id: 0.4,
-            priors: None,
-        }
-    }
-}
 
 /// `[discovered] promote_when.*` (EN-F5).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -290,47 +270,6 @@ impl Default for Ask {
     }
 }
 
-/// `[er]` (EN-F51; becomes `ErPriors` at the E2.10 seam).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields, default)]
-pub struct Er {
-    /// Fellegi-Sunter `m` probability per field.
-    pub m: BTreeMap<String, f64>,
-    /// Fellegi-Sunter `u` probability per field.
-    pub u: BTreeMap<String, f64>,
-    /// Match decision threshold.
-    pub match_threshold: f64,
-    /// Possible-match threshold.
-    pub possible_threshold: f64,
-}
-
-impl Default for Er {
-    fn default() -> Self {
-        Self {
-            m: BTreeMap::from([
-                ("title".to_owned(), 0.9),
-                ("aliases".to_owned(), 0.8),
-                ("kind".to_owned(), 0.95),
-                ("tags".to_owned(), 0.6),
-                ("path_scope".to_owned(), 0.7),
-                ("anchors".to_owned(), 0.95),
-                ("summary".to_owned(), 0.5),
-            ]),
-            u: BTreeMap::from([
-                ("title".to_owned(), 0.01),
-                ("aliases".to_owned(), 0.02),
-                ("kind".to_owned(), 0.3),
-                ("tags".to_owned(), 0.1),
-                ("path_scope".to_owned(), 0.05),
-                ("anchors".to_owned(), 0.001),
-                ("summary".to_owned(), 0.1),
-            ]),
-            match_threshold: 8.0,
-            possible_threshold: 3.0,
-        }
-    }
-}
-
 /// `[ingest]` (EN-F37, EN-F38, EN-F27a).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -490,20 +429,6 @@ impl Default for Link {
     }
 }
 
-/// `[briefing]` (EN-F49, OD-E-6).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields, default)]
-pub struct Briefing {
-    /// Candidate kinds listed in the briefing.
-    pub max_candidates: u32,
-}
-
-impl Default for Briefing {
-    fn default() -> Self {
-        Self { max_candidates: 5 }
-    }
-}
-
 /// `[budget]` (EN-N3; both opt-in budgets, 0 is out of range).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -537,28 +462,14 @@ impl Default for Bench {
     }
 }
 
-/// `[why]` (EN-F10 prefilter, EN-N7).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields, default)]
-pub struct Why {
-    /// Anchor prefilter on.
-    pub anchor_prefilter: bool,
-}
-
-impl Default for Why {
-    fn default() -> Self {
-        Self {
-            anchor_prefilter: true,
-        }
-    }
-}
-
 /// The engine configuration: every §15.1 section with its register defaults.
+///
+/// This is the configuration root of the whole kaban process (`Engine` keeps its spec 03
+/// meaning, the program), not the storage engine: the storage kernel is named the catalog,
+/// with its own `[catalog]` section (PC-10).
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct EngineConfig {
-    /// `[reconcile]`
-    pub reconcile: Reconcile,
     /// `[discovered]`
     pub discovered: Discovered,
     /// `[ontology]`
@@ -573,8 +484,6 @@ pub struct EngineConfig {
     pub recall: Recall,
     /// `[ask]`
     pub ask: Ask,
-    /// `[er]`
-    pub er: Er,
     /// `[ingest]`
     pub ingest: Ingest,
     /// `[pipeline]`
@@ -583,14 +492,27 @@ pub struct EngineConfig {
     pub index: Index,
     /// `[link]`
     pub link: Link,
-    /// `[briefing]`
-    pub briefing: Briefing,
     /// `[budget]`
     pub budget: Budget,
     /// `[bench]`
     pub bench: Bench,
-    /// `[why]`
-    pub why: Why,
+}
+
+/// Top-level sections of features that no longer exist: governance reconciliation
+/// (`[reconcile]`), entity resolution (`[er]`), the `why` prefilter (`[why]`) and the session
+/// briefing (`[briefing]`). A file that still spells one loads; the section is ignored with one
+/// [`ConfigWarning::RemovedSection`].
+pub const REMOVED_SECTIONS: [&str; 4] = ["reconcile", "er", "why", "briefing"];
+
+/// A configuration file loaded, but part of it was ignored. Content-free: a fixed section name.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ConfigWarning {
+    /// A top-level section of a removed feature ([`REMOVED_SECTIONS`]) was ignored.
+    #[error("config section [{section}] is no longer used and is ignored")]
+    RemovedSection {
+        /// The section name, one of [`REMOVED_SECTIONS`].
+        section: &'static str,
+    },
 }
 
 /// Why a configuration file failed to load. Content-free: an I/O class, a field path.
@@ -641,14 +563,30 @@ const BUDGETS: [&str; 11] = [
 
 /// Load `path`: an absent file is the register `Default`; any other read failure is
 /// [`ConfigError::Io`]; an unknown key at any depth or a wrong type is [`ConfigError::Parse`]
-/// with the field path; an opt-in budget of 0 is [`ConfigError::Range`].
+/// with the field path; an opt-in budget of 0 is [`ConfigError::Range`]. Each
+/// [`ConfigWarning`] of [`load_reporting`] is logged once at WARN.
 ///
 /// # Errors
 /// As listed above.
 pub fn load(path: &Path) -> Result<EngineConfig, ConfigError> {
+    let (cfg, warnings) = load_reporting(path)?;
+    for warning in &warnings {
+        tracing::warn!("{warning}");
+    }
+    Ok(cfg)
+}
+
+/// [`load`] without logging: the configuration and the parts of the file that were ignored, in
+/// [`REMOVED_SECTIONS`] order.
+///
+/// # Errors
+/// As [`load`].
+pub fn load_reporting(path: &Path) -> Result<(EngineConfig, Vec<ConfigWarning>), ConfigError> {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(EngineConfig::default()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            return Ok((EngineConfig::default(), Vec::new()));
+        }
         Err(e) => {
             return Err(ConfigError::Io {
                 class: io_class(e.kind()),
@@ -658,15 +596,23 @@ pub fn load(path: &Path) -> Result<EngineConfig, ConfigError> {
     parse(&text)
 }
 
-/// Parse the YAML text of a configuration file (the file-less half of [`load`]).
-fn parse(text: &str) -> Result<EngineConfig, ConfigError> {
+/// Parse the YAML text of a configuration file (the file-less half of [`load_reporting`]).
+fn parse(text: &str) -> Result<(EngineConfig, Vec<ConfigWarning>), ConfigError> {
     // one generic parse into JSON data first: the field paths of the errors below are found by
     // narrowing on this tree, never by quoting the YAML
-    let data: Value = yaml_serde::from_str(text).map_err(|_| ConfigError::Parse {
+    let mut data: Value = yaml_serde::from_str(text).map_err(|_| ConfigError::Parse {
         path: String::new(),
     })?;
     if data.is_null() {
-        return Ok(EngineConfig::default());
+        return Ok((EngineConfig::default(), Vec::new()));
+    }
+    let mut warnings = Vec::new();
+    if let Some(object) = data.as_object_mut() {
+        for section in REMOVED_SECTIONS {
+            if object.remove(section).is_some() {
+                warnings.push(ConfigWarning::RemovedSection { section });
+            }
+        }
     }
     let cfg: EngineConfig = match serde_json::from_value(data.clone()) {
         Ok(cfg) => cfg,
@@ -705,7 +651,7 @@ fn parse(text: &str) -> Result<EngineConfig, ConfigError> {
             });
         }
     }
-    Ok(cfg)
+    Ok((cfg, warnings))
 }
 
 /// The dotted path of the node that makes `data` fail to deserialize: the subtree under each
