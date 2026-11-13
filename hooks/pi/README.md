@@ -90,10 +90,15 @@ envelope (R4-4). The kaban pi selector reads exactly these fields (`toolName`, `
 
 Offline: `scripts/hooks-live/test-pi-extension.sh --kaban <bin>` runs, inside the harness image,
 `node --experimental-strip-types --check` (syntax) and an invented-data run with a fake `pi`
-object against the static binary with a recording shim: exact envelope keys per event (the
-allowlist above), no `content` secret and no image item forwarded, briefing nextTurn,
-pre-context steer, Failure recorded, one continuation, second settle silent, evidence appended
-(`../specs/kaban/00-project/archive/evidence/m4-logs/m4corr2-pi-ext-fake-pi-green.log`). Live: the Docker lane
+object against the static binary with a recording shim. It dispatches only the handlers the
+extension registers and asserts: exactly the four events above plus `tool_execution_start` are
+registered (no `session_shutdown`, so nothing runs at shutdown); exact envelope keys per event
+(the allowlist above); no `content` secret and no image item forwarded; no briefing and no
+pre-edit message for a seeded Decision; Failure recorded; one continuation naming it, second
+settle silent; the pending Failure briefed (nextTurn) in a second session; evidence appended.
+It ends with one summary line whose `exit` is 0 when every check passed (the earlier fake-pi
+capture, `../specs/kaban/00-project/archive/evidence/m4-logs/m4corr2-pi-ext-fake-pi-green.log`,
+predates the governance removal). Live: the Docker lane
 (`scripts/hooks-live/run.sh pi <s> --recipes …`, OWN-7), two round-2 sessions and one
 re-verification session after R4-4 (`m4corr2-sessions/pi-c1`), all green.
 

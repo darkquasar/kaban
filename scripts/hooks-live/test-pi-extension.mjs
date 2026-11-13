@@ -5,16 +5,19 @@
 //
 // Asserts (R4-4 intake allowlist, M4-7): each envelope carries exactly the allowlisted keys for its
 // event and nothing else; `type`, `reason`, `toolCallId`, `outcome`, `continue`, `context` and
-// `details` never appear; the secret planted in `input.content` never appears; and the W2-D2
-// behaviour holds (briefing nextTurn, pre context steer, Failure recorded, one continuation,
-// second settle silent, evidence appended; C5.3/M5-20: session_shutdown returns in under 1 s and
-// the detached `kaban sync` writes .kaban/adr/INDEX.md with the seeded Decision afterwards). The
-// envelope sequence is asserted exactly (RL-3):
-// session_start, the edit's tool_call, the failing tool_execution_end, one agent_before_settle
-// and the success tool_execution_end carrying `isError: false` (the evidence the wrapper then
-// recalls); a bash tool_call and the second settle send nothing. Prints one reduced JSON line
-// (booleans, counts, the extension's own key names) and exits 1 on any failed assertion.
-import { existsSync, readFileSync } from "node:fs";
+// `details` never appear; the secret planted in `input.content` and the image item never appear;
+// and the hook behaviour without governance holds: the extension registers exactly the five
+// handlers below (no `session_shutdown`, so no sync is started at shutdown); the first
+// session_start briefs nothing (the seeded Decision is never briefed); the edit's pre-tool-use is
+// recorded and injects nothing; the failing bash records a Failure; one continuation names it and
+// the second settle is silent; a session_start in a second session briefs the pending Failure
+// (nextTurn) and still not the Decision; evidence is appended. The envelope sequence is asserted
+// exactly (RL-3): session_start, the edit's tool_call, the failing tool_execution_end, one
+// agent_before_settle, the second session's session_start and the success tool_execution_end
+// carrying `isError: false` (the evidence the wrapper then recalls); a bash tool_call and the
+// second settle send nothing. Only registered handlers are dispatched. Prints one reduced JSON
+// line (booleans, counts, the extension's own key names) and exits 1 on any failed assertion.
+import { readFileSync } from "node:fs";
 
 const { createJiti } = await import(process.env.JITI);
 const jiti = createJiti(import.meta.url);
@@ -25,12 +28,16 @@ const sent = [];
 const pi = { on: (n, h) => handlers.set(n, h), sendMessage: async (m, o) => { sent.push({ m, o }); } };
 mod.default(pi);
 const ctx = { cwd: process.env.WORK, sessionManager: { getSessionId: () => "sess-ext-INVENTED" } };
-const fire = (n, e) => handlers.get(n)(e, ctx);
+const ctx2 = { cwd: process.env.WORK, sessionManager: { getSessionId: () => "sess-ext-INVENTED-2" } };
+const REGISTERED = ["session_start", "tool_call", "tool_execution_start", "tool_execution_end", "agent_before_settle"];
+const registered = [...handlers.keys()];
+// only events the extension registered are dispatched; the registered set is asserted below
+const fire = (n, e, c = ctx) => (handlers.has(n) ? handlers.get(n)(e, c) : undefined);
 const SECRET = "AKIAQWERTYUIOPASDFGH never forwarded";
 const r = {};
 
 await fire("session_start", { type: "session_start", reason: "startup" });
-r.brief = sent.find((s) => s.m.customType === "kaban-brief");
+r.brief1 = sent.find((s) => s.m.customType === "kaban-brief");
 await fire("tool_call", { type: "tool_call", toolCallId: "w1", toolName: "write", input: { path: "notes.txt", content: SECRET } });
 r.pre = sent.find((s) => s.m.customType === "kaban-pre");
 await fire("tool_call", { type: "tool_call", toolCallId: "b1", toolName: "bash", input: { command: "false" } });
@@ -40,20 +47,11 @@ await fire("tool_execution_end", {
 });
 r.settle1 = await fire("agent_before_settle", { type: "agent_before_settle", outcome: "completed", continue: false, context: { canContinue: false, llmMessages: [SECRET] } });
 r.settle2 = await fire("agent_before_settle", { type: "agent_before_settle", outcome: "completed", continue: false, context: { canContinue: false } });
+// a second session starts while the Failure is pending: the briefing lists it (nextTurn)
+await fire("session_start", { type: "session_start", reason: "startup" }, ctx2);
+r.brief2 = sent.find((s) => s.m.customType === "kaban-brief");
 await fire("tool_execution_start", { toolCallId: "b2", toolName: "bash", args: { command: "false" } });
 await fire("tool_execution_end", { type: "tool_execution_end", toolCallId: "b2", toolName: "bash", isError: false, result: { content: [{ type: "text", text: "" }], details: {} } });
-// session_shutdown (M5-20): the handler returns at once (the detached `kaban sync` is never
-// awaited) and the flush shows up in the scratch repo afterwards (.kaban/adr/INDEX.md from the
-// seeded Decision); it sends no envelope (no stdin), so the envelope sequence is unchanged
-const shutdownStart = Date.now();
-await fire("session_shutdown", { type: "session_shutdown", reason: "quit" });
-const shutdownMs = Date.now() - shutdownStart;
-const digestPath = `${process.env.WORK}/.kaban/adr/INDEX.md`;
-let syncSeen = false;
-for (let i = 0; i < 100 && !syncSeen; i++) {
-  syncSeen = existsSync(digestPath);
-  if (!syncSeen) await new Promise((r) => setTimeout(r, 100));
-}
 
 // the envelopes the recording shim saw, one JSON object per line
 const envelopes = readFileSync(process.env.KBN_ENVELOPES, "utf8").split("\n").filter((l) => l.trim()).map((l) => JSON.parse(l));
@@ -76,9 +74,13 @@ const keyReport = envelopes.map((e) => {
   return { event: e.hook_event_name, extra, missing, inputExtra, resultExtra, itemExtra };
 });
 const raw = readFileSync(process.env.KBN_ENVELOPES, "utf8");
-const EXPECTED_EVENTS = ["session_start", "tool_call", "tool_execution_end", "agent_before_settle", "tool_execution_end"];
+const EXPECTED_EVENTS = ["session_start", "tool_call", "tool_execution_end", "agent_before_settle", "session_start", "tool_execution_end"];
 const last = envelopes[envelopes.length - 1];
+const failureId = (r.settle1?.entries?.[0]?.content ?? "").match(/Failure ([0-9a-f-]{36})/)?.[1];
 const summary = {
+  registered,
+  registered_exact: JSON.stringify([...registered].sort()) === JSON.stringify([...REGISTERED].sort()),
+  session_shutdown_absent: !handlers.has("session_shutdown"),
   envelopes: envelopes.length,
   events: envelopes.map((e) => e.hook_event_name),
   events_exact: JSON.stringify(envelopes.map((e) => e.hook_event_name)) === JSON.stringify(EXPECTED_EVENTS),
@@ -89,24 +91,23 @@ const summary = {
   never_forwarded_absent: NEVER.every((k) => !envelopes.some((e) => k in e)),
   secret_absent: !raw.includes("AKIAQWERTYUIOPASDFGH"),
   image_item_absent: !raw.includes("INVENTED-IMAGE"),
-  brief_deliverAs: r.brief?.o?.deliverAs,
-  brief_has_sentinel: (r.brief?.m?.content ?? "").includes(process.env.SENT),
-  pre_deliverAs: r.pre?.o?.deliverAs,
-  pre_has_sentinel: (r.pre?.m?.content ?? "").includes(process.env.SENT),
+  brief1_silent: r.brief1 === undefined,
+  pre_silent: r.pre === undefined,
+  brief2_deliverAs: r.brief2?.o?.deliverAs,
+  brief2_names_failure: failureId !== undefined && (r.brief2?.m?.content ?? "").includes(failureId),
+  brief_no_decision: !sent.some((s) => (s.m?.content ?? "").includes(process.env.SENT)),
   settle1_continue: r.settle1?.continue === true,
   settle1_entry: r.settle1?.entries?.[0]?.type,
-  settle1_mentions_failure: /Failure [0-9a-f-]{36}/.test(r.settle1?.entries?.[0]?.content ?? ""),
+  settle1_mentions_failure: failureId !== undefined,
   settle2_silent: r.settle2 === undefined,
   messages_sent: sent.length,
-  shutdown_returned_ms: shutdownMs,
-  shutdown_sync_ran: syncSeen,
-  shutdown_digest_has_sentinel: syncSeen && readFileSync(digestPath, "utf8").includes(process.env.SENT),
 };
 const ok =
+  summary.registered_exact && summary.session_shutdown_absent &&
   summary.envelope_keys_exact && summary.never_forwarded_absent && summary.secret_absent && summary.image_item_absent &&
-  summary.brief_deliverAs === "nextTurn" && summary.brief_has_sentinel && summary.pre_deliverAs === "steer" && summary.pre_has_sentinel &&
+  summary.brief1_silent && summary.pre_silent &&
+  summary.brief2_deliverAs === "nextTurn" && summary.brief2_names_failure && summary.brief_no_decision &&
   summary.settle1_continue && summary.settle1_entry === "custom_message" && summary.settle1_mentions_failure && summary.settle2_silent &&
-  summary.envelopes === 5 && summary.events_exact && summary.evidence_sent &&
-  summary.shutdown_returned_ms < 1000 && summary.shutdown_sync_ran && summary.shutdown_digest_has_sentinel;
+  summary.messages_sent === 1 && summary.envelopes === 6 && summary.events_exact && summary.evidence_sent;
 console.log(JSON.stringify({ ...summary, ok }));
 process.exit(ok ? 0 : 1);
