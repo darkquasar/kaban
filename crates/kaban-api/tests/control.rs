@@ -642,51 +642,6 @@ const CONTENT_ENUM_ALLOWANCE: &[(&str, Direction, &str)] = &[
     ("stats", Direction::Response, "layers[].layer"),
     ("stats", Direction::Response, "layers[].producer_layers[]"),
     ("stats", Direction::Response, "layers[].last_outcome"),
-    ("accept", Direction::Response, "node.governance"),
-    ("accept", Direction::Response, "node.lifecycle"),
-    ("accept", Direction::Response, "node.provenance.store"),
-    ("accept", Direction::Response, "signer_kind"),
-    ("accept", Direction::Response, "status"),
-    ("why", Direction::Response, "follow_ups[].tool"),
-    ("why", Direction::Response, "results[].code"),
-    ("why", Direction::Response, "results[].currency.state"),
-    ("why", Direction::Response, "results[].governance"),
-    ("why", Direction::Response, "results[].matched_by"),
-    ("why", Direction::Response, "results[].node.governance"),
-    ("why", Direction::Response, "results[].node.lifecycle"),
-    (
-        "why",
-        Direction::Response,
-        "results[].node.provenance.store",
-    ),
-    ("explain", Direction::Response, "history[].signer_kind"),
-    ("explain", Direction::Response, "status.pending"),
-    ("explain", Direction::Response, "status.settled"),
-    (
-        "governance_history",
-        Direction::Response,
-        "records[].card.governance",
-    ),
-    (
-        "governance_history",
-        Direction::Response,
-        "records[].card.lifecycle",
-    ),
-    (
-        "governance_history",
-        Direction::Response,
-        "records[].card.provenance.store",
-    ),
-    (
-        "governance_history",
-        Direction::Response,
-        "records[].events[].signer_kind",
-    ),
-    (
-        "governance_history",
-        Direction::Response,
-        "records[].governance",
-    ),
     (
         "code_implementers",
         Direction::Response,
@@ -998,16 +953,9 @@ fn every_control_entry_points_at_a_string_path_of_its_tool_and_names_no_content_
             e.path
         );
     }
+    // the one kaban-issued secret (the `accept` confirmation token) left with governance
     let issuing: Vec<_> = REGISTRY.iter().filter(|e| e.issuing).collect();
-    assert_eq!(
-        issuing.len(),
-        1,
-        "exactly one issuing response entry: {issuing:?}"
-    );
-    assert_eq!(
-        (issuing[0].tool, issuing[0].direction, issuing[0].path),
-        ("accept", Direction::Response, "confirmation_token")
-    );
+    assert!(issuing.is_empty(), "no issuing response entry: {issuing:?}");
     // every string path of every tool is either listed above or content by default; the walk
     // itself must see every tool on both sides
     for t in &tools {

@@ -36,7 +36,7 @@ kaban-index-graph = { path = "crates/kaban-index-graph", version = "3.0.0" }
 kaban-vtab = { path = "crates/kaban-vtab", version = "3.0.0" }
 
 # exact pins per core-plan.md §3 (licences recorded there)
-rmcp = { version = "=3.9.0", features = ["server", "transport-io", "elicitation"] }  # elicitation (+ url): C3.2 accept handshake probe (M3-20, OWN-4); 3.9.0 clears RUSTSEC-2026-0457/0461/0462
+rmcp = { version = "=3.9.0", features = ["server", "transport-io"] }  # 3.9.0 clears RUSTSEC-2026-0457/0461/0462
 tokio = { version = "=1.53.3", features = ["rt-multi-thread", "macros", "io-std", "signal", "sync", "time"] }  # sync/time: LeaseKeeper (C2.5, D-18)
 tokio-util = "=0.7.19"                  # MIT: CancellationToken for the LeaseKeeper and the rescan job (C2.5, MD-18)
 rusqlite = { version = "=0.41.1", features = ["bundled", "backup", "vtab", "hooks", "limits"] }  # vtab/hooks/limits: unified query (spec 11, T1); `functions` stays per-crate; 0.41 pulls libsqlite3-sys 0.39 (RUSTSEC-2026-0459)
