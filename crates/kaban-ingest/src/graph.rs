@@ -663,11 +663,9 @@ pub fn forget_document(
         .get(&id, true)?
         .ok_or_else(|| kaban_api::ApiError::NotFound(id.to_string()))?;
     let previous = ExistingDocument::from_node(&node);
-    let mut removal_ctx = ctx.clone();
-    removal_ctx.removal_intent = kaban_core::RemovalIntent::Explicit;
     let report = store.apply_batch(
         forget_document_batch(&previous, &node, &ctx.workspace_id),
-        &removal_ctx,
+        ctx,
     )?;
     Ok(ForgottenDocument {
         document_id: id.to_string(),

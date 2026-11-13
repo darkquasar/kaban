@@ -161,16 +161,14 @@ pub struct AuditEntry {
     pub node_id: Option<String>,
 }
 
-/// Why trusted code removes graph entries. This is not serialized caller authority.
+/// How hard a write's commit waits for the disk (REC-06 write context, plan T3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum RemovalIntent {
-    /// Producer omission: durable pruning protection applies.
+pub enum Durability {
+    /// The store's configured synchronous mode.
     #[default]
-    Automatic,
-    /// An explicit forget operation overrides pruning protection.
-    Explicit,
-    /// Policy rejection/redaction overrides pruning protection.
-    Policy,
+    Normal,
+    /// A full sync at commit.
+    Full,
 }
 
 /// Context of one gated write: the policy version to stamp, the workspace, the audit entries
@@ -187,8 +185,8 @@ pub struct WriteCtx {
     /// Who is writing. The configured writer (`--actor-id`, SS-26) is not carried here: the
     /// store stamps the identity it was opened as, the one authority.
     pub actor: Actor,
-    /// Trusted removal cause; never selected by a serialized request.
-    pub removal_intent: RemovalIntent,
+    /// How hard the commit waits for the disk.
+    pub durability: Durability,
     /// Identity of the repository this process runs in (its root directory name, M3-23), if
     /// any: stamped on a record's `repo` column when it is still unset.
     pub repo: Option<String>,
@@ -241,7 +239,7 @@ impl WriteCtx {
             workspace_id,
             audit: Vec::new(),
             actor,
-            removal_intent: RemovalIntent::Automatic,
+            durability: Durability::Normal,
             repo: None,
             governed: GovernedSet::shipped(),
             discovered: crate::model::DiscoveredRules::default(),

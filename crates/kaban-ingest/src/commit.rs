@@ -323,16 +323,6 @@ async fn commit_one(
     document_counts.fold_document_props(&item.batch);
     let mut ctx = WriteCtx::new(policy_version, workspace.clone(), Actor::Agent);
     ctx.audit = std::mem::take(&mut item.audit);
-    if item.status == DocStatus::Blocked
-        || ctx.audit.iter().any(|entry| {
-            matches!(
-                entry.op,
-                kaban_core::AuditOp::Reject | kaban_core::AuditOp::Redact
-            )
-        })
-    {
-        ctx.removal_intent = kaban_core::RemovalIntent::Policy;
-    }
     let store = Arc::clone(store);
     let report = tokio::task::spawn_blocking(move || {
         // RD2-7: a failure batch reconciles against the stored child inventory here, at the
