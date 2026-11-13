@@ -636,31 +636,6 @@ expression: a
     }
   },
   "step3": {
-    "accept": {
-      "event_seq": 1,
-      "node": {
-        "confidence": 0.95,
-        "created_at": "<observed>",
-        "governance": "accepted",
-        "id": "@12",
-        "kind": "Decision",
-        "lifecycle": "active",
-        "provenance": {
-          "repo": "shop",
-          "store": "project"
-        },
-        "text": "Discounts are computed server-side",
-        "workspace_id": "default"
-      },
-      "receipt": {
-        "instance_id": "@7",
-        "outcome": "committed",
-        "pack_lineage_id": "@8",
-        "seq": 56
-      },
-      "signer_kind": "human-via-chat",
-      "status": "accepted"
-    },
     "brief": {
       "about_candidates": [],
       "candidates": [],
@@ -670,7 +645,7 @@ expression: a
             "byte_end": 131,
             "byte_start": 25,
             "bytes": 105,
-            "id": "@13",
+            "id": "@12",
             "kind": "text",
             "n": 0,
             "oversize": false,
@@ -681,7 +656,7 @@ expression: a
             "byte_end": 206,
             "byte_start": 146,
             "bytes": 59,
-            "id": "@14",
+            "id": "@13",
             "kind": "text",
             "n": 1,
             "oversize": false,
@@ -1279,84 +1254,30 @@ expression: a
       "uncertain_pairs": [],
       "with": "llm"
     },
-    "candidate": {
-      "explanation": {
-        "candidates": [
-          {
-            "lineages": [
-              {
-                "best": {
-                  "assertion_key": "4c8015b880039249cb0fa0917610347dad6248b2aff15f5f524a3f3b8164cb01",
-                  "layer": "llm",
-                  "method": "llm",
-                  "prior": "0.7500",
-                  "raw_score": "1.0000"
-                },
-                "lineage_id": "machine-governs",
-                "others": 0,
-                "rank": "normal"
-              }
-            ],
-            "p": "1.0000",
-            "value": {}
-          }
-        ],
-        "group_key": "[\"default\",\"edge\",{\"edge\":{\"dst\":5,\"rel\":\"GOVERNS\",\"src\":19}},null]",
-        "margin": "1.0000",
-        "min_confidence": "0.0000",
-        "rule": "weighted_vote_v1",
-        "threshold": "0.0000",
-        "verdict": "candidate"
-      },
-      "lineages": [
-        {
-          "lineage_id": "machine-governs",
-          "spans": []
-        }
-      ],
-      "next_actions": [
-        {
-          "command": "kaban forget @12",
-          "label": "retire the node"
-        }
-      ],
-      "policy": {
-        "acceptance": "human"
-      },
-      "sentence": "candidate: governed_semantics, the vote on the group did not clear its gate",
-      "status": {
-        "pending": {
-          "candidate": "governed_semantics"
-        }
-      },
-      "subject": {
-        "node": "@12"
-      }
-    },
-    "decision": "@12",
+    "decision": "@14",
     "evidence": {
       "anchored": [],
       "edges": [
         {
           "confidence": 0.7125,
-          "from": "@13",
+          "from": "@12",
           "id": "@15",
           "rel": "EVIDENCE_FOR",
-          "to": "@12"
+          "to": "@14"
         },
         {
           "confidence": 1.0,
           "from": "@1",
           "id": "@16",
           "rel": "EVIDENCE_FOR",
-          "to": "@12"
+          "to": "@14"
         }
       ],
       "nodes": [
         {
           "created_at": "<observed>",
           "governance": "none",
-          "id": "@13",
+          "id": "@12",
           "kind": "Chunk",
           "lifecycle": "active",
           "provenance": {
@@ -1380,8 +1301,8 @@ expression: a
         {
           "confidence": 0.95,
           "created_at": "<observed>",
-          "governance": "accepted",
-          "id": "@12",
+          "governance": "proposed",
+          "id": "@14",
           "kind": "Decision",
           "lifecycle": "active",
           "provenance": {
@@ -1438,7 +1359,7 @@ expression: a
       "predecessor_terminal": 0,
       "records": [
         {
-          "id": "@12",
+          "id": "@14",
           "local_id": "discounts",
           "outcome": "unchanged"
         }
@@ -1464,7 +1385,7 @@ expression: a
       "edges": [
         {
           "confidence": 1.0,
-          "from": "@12",
+          "from": "@14",
           "id": "@17",
           "rel": "GOVERNS",
           "to": "01a17a03-5344-7000-8000-000000000005"
@@ -1487,8 +1408,8 @@ expression: a
         {
           "confidence": 0.95,
           "created_at": "<observed>",
-          "governance": "accepted",
-          "id": "@12",
+          "governance": "proposed",
+          "id": "@14",
           "kind": "Decision",
           "lifecycle": "active",
           "provenance": {
@@ -1505,7 +1426,7 @@ expression: a
         "byte_end": 131,
         "byte_start": 25,
         "context_prefix": "ADR 0007 > Decision",
-        "id": "@13",
+        "id": "@12",
         "kind": "text",
         "n": 0,
         "section_path": [
@@ -1522,68 +1443,6 @@ expression: a
         "slice": 0
       }
     },
-    "provenance": {
-      "explanation": {
-        "candidates": [
-          {
-            "lineages": [
-              {
-                "best": {
-                  "assertion_key": "7138622cfd1e244393a6749217cd7e08e46deef1041dfd00e0fce8b76a5b50bc",
-                  "layer": "human",
-                  "method": "link",
-                  "prior": "1.0000",
-                  "raw_score": "1.0000"
-                },
-                "lineage_id": "human:agent",
-                "others": 0,
-                "rank": "preferred"
-              },
-              {
-                "best": {
-                  "assertion_key": "4c8015b880039249cb0fa0917610347dad6248b2aff15f5f524a3f3b8164cb01",
-                  "layer": "llm",
-                  "method": "llm",
-                  "prior": "0.7500",
-                  "raw_score": "1.0000"
-                },
-                "lineage_id": "machine-governs",
-                "others": 0,
-                "rank": "normal"
-              }
-            ],
-            "p": "1.0000",
-            "value": {}
-          }
-        ],
-        "group_key": "[\"default\",\"edge\",{\"edge\":{\"dst\":5,\"rel\":\"GOVERNS\",\"src\":19}},null]",
-        "margin": "1.0000",
-        "min_confidence": "0.0000",
-        "protected_by": "7138622cfd1e244393a6749217cd7e08e46deef1041dfd00e0fce8b76a5b50bc",
-        "rule": "weighted_vote_v1",
-        "threshold": "0.0000",
-        "verdict": "winner"
-      },
-      "lineages": [
-        {
-          "lineage_id": "human:agent",
-          "spans": []
-        },
-        {
-          "lineage_id": "machine-governs",
-          "spans": []
-        }
-      ],
-      "next_actions": [],
-      "policy": {},
-      "sentence": "active: nothing pending",
-      "status": {
-        "settled": "active"
-      },
-      "subject": {
-        "assertion": "4c8015b880039249cb0fa0917610347dad6248b2aff15f5f524a3f3b8164cb01"
-      }
-    },
     "replay": {
       "assertions": 0,
       "changes": {
@@ -1598,7 +1457,7 @@ expression: a
       "predecessor_terminal": 0,
       "records": [
         {
-          "id": "@12",
+          "id": "@14",
           "local_id": "discounts",
           "outcome": "unchanged"
         }
@@ -1624,7 +1483,7 @@ expression: a
       "predecessor_terminal": 0,
       "records": [
         {
-          "id": "@12",
+          "id": "@14",
           "local_id": "discounts",
           "outcome": "created"
         }
@@ -2098,35 +1957,6 @@ expression: a
       "uncertain_pairs": [],
       "with": "gliner"
     },
-    "explain": {
-      "next_actions": [
-        {
-          "command": "kaban accept 01a17a03-5344-7000-8000-000000000064 --reason reviewed --path-scope '**'",
-          "label": "accept the record as a person"
-        },
-        {
-          "command": "kaban ontology promote x:Org Entity",
-          "label": "promote the discovered kind to a declared kind"
-        },
-        {
-          "command": "kaban forget 01a17a03-5344-7000-8000-000000000064",
-          "label": "retire the node"
-        }
-      ],
-      "policy": {
-        "cap": 500,
-        "discovered_policy": "review"
-      },
-      "sentence": "candidate: discovered_kind, the vote on x:Org did not clear its gate",
-      "status": {
-        "pending": {
-          "candidate": "discovered_kind"
-        }
-      },
-      "subject": {
-        "node": "01a17a03-5344-7000-8000-000000000064"
-      }
-    },
     "kind_stats": [
       {
         "first_seen": "<observed>",
@@ -2235,62 +2065,11 @@ expression: a
       "job": "9dc4b5dd27dec64cd4324ba9c6f73d70f8a8c0ab0d1d721c174b1ce3b50e009e",
       "next": null
     },
-    "review": {
-      "items": [
-        {
-          "first_action": {
-            "command": "kaban accept 01a17a03-5344-7000-8000-000000000064 --reason reviewed --path-scope '**'",
-            "label": "accept the record as a person"
-          },
-          "group_key": "x:Org",
-          "kind": "x:Org",
-          "sentence": "candidate: discovered_kind, the vote on x:Org did not clear its gate",
-          "status": {
-            "candidate": "discovered_kind"
-          },
-          "subject": {
-            "node": "01a17a03-5344-7000-8000-000000000064"
-          }
-        },
-        {
-          "first_action": {
-            "command": "kaban resolve 01a17a03-5344-7000-8000-000000000064 --winner x:Org --group '[\"default\",\"type\",{\"span\":{\"chunk_rid\":18,\"len\":4,\"offset\":18}},null]'",
-            "label": "name the winning value as a person; the group is decided and leaves review"
-          },
-          "group_key": "[\"default\",\"type\",{\"span\":{\"chunk_rid\":18,\"len\":4,\"offset\":18}},null]",
-          "kind": "x:Org",
-          "sentence": "candidate: below_min_confidence, the vote on span 18:4 did not clear its gate",
-          "status": {
-            "candidate": "below_min_confidence"
-          },
-          "subject": {
-            "node": "01a17a03-5344-7000-8000-000000000064"
-          }
-        },
-        {
-          "first_action": {
-            "command": "kaban ontology promote x:Org Entity",
-            "label": "promote the discovered kind to a declared kind"
-          },
-          "kind": "x:Org",
-          "sentence": "discovered: x:Org is an undeclared kind with 1 record(s) awaiting promotion or pruning",
-          "status": {
-            "discovered": {
-              "count": 1
-            }
-          },
-          "subject": {
-            "discovered_kind": "x:Org"
-          }
-        }
-      ],
-      "partial": false
-    },
     "store": {
       "assertions_inserted": 1,
       "inserted": 1,
-      "outbox_first_seq": 71,
-      "outbox_last_seq": 73,
+      "outbox_first_seq": 66,
+      "outbox_last_seq": 68,
       "outcomes": [
         {
           "id": "01a17a03-5344-7000-8000-000000000064",
@@ -2308,8 +2087,8 @@ expression: a
     "submit": {
       "assertions": 2,
       "changes": {
-        "first_seq": 65,
-        "last_seq": 70
+        "first_seq": 60,
+        "last_seq": 65
       },
       "chunk": null,
       "created": 1,
@@ -2372,40 +2151,6 @@ expression: a
         "symbol": "rust-analyzer cargo shop . checkout/cart/CartService#apply_discount()."
       },
       "follow_ups": [],
-      "governing": [
-        {
-          "code": {
-            "snapshot": {
-              "commit": "b885c3534d1945376efd69a255c9b0263464ff7a",
-              "exact": true,
-              "policy": "current"
-            }
-          },
-          "currency": {
-            "checked_at": "<observed>",
-            "staleness": 0.0,
-            "state": "active"
-          },
-          "governance": "accepted",
-          "matched_by": "symbol",
-          "matched_target": "rust-analyzer cargo shop . checkout/cart/CartService#apply_discount().",
-          "node": {
-            "confidence": 0.95,
-            "created_at": "<observed>",
-            "governance": "accepted",
-            "id": "@12",
-            "kind": "Decision",
-            "lifecycle": "active",
-            "provenance": {
-              "repo": "shop",
-              "store": "project"
-            },
-            "text": "Discounts are computed server-side",
-            "workspace_id": "default"
-          },
-          "superseded_by": []
-        }
-      ],
       "last_change": {
         "author_date": "2026-10-26T08:16:02Z",
         "commit": "b885c3534d1945376efd69a255c9b0263464ff7a",
@@ -2425,24 +2170,24 @@ expression: a
       "edges": [
         {
           "confidence": 0.7125,
-          "from": "@13",
+          "from": "@12",
           "id": "@15",
           "rel": "EVIDENCE_FOR",
-          "to": "@12"
+          "to": "@14"
         },
         {
           "confidence": 1.0,
           "from": "@1",
           "id": "@16",
           "rel": "EVIDENCE_FOR",
-          "to": "@12"
+          "to": "@14"
         }
       ],
       "nodes": [
         {
           "created_at": "<observed>",
           "governance": "none",
-          "id": "@13",
+          "id": "@12",
           "kind": "Chunk",
           "lifecycle": "active",
           "provenance": {
@@ -2466,8 +2211,8 @@ expression: a
         {
           "confidence": 0.95,
           "created_at": "<observed>",
-          "governance": "accepted",
-          "id": "@12",
+          "governance": "proposed",
+          "id": "@14",
           "kind": "Decision",
           "lifecycle": "active",
           "provenance": {
@@ -2478,11 +2223,6 @@ expression: a
           "workspace_id": "default"
         }
       ]
-    },
-    "negative": {
-      "follow_ups": [],
-      "partial": false,
-      "results": []
     },
     "recall": {
       "count": 2,
@@ -2545,37 +2285,6 @@ expression: a
             "query_class: identifier"
           ],
           "workspace_id": "default"
-        }
-      ]
-    },
-    "why": {
-      "follow_ups": [],
-      "partial": false,
-      "results": [
-        {
-          "currency": {
-            "checked_at": "<observed>",
-            "staleness": 0.0,
-            "state": "active"
-          },
-          "governance": "accepted",
-          "matched_by": "path_scope",
-          "matched_target": "src/checkout/cart.rs",
-          "node": {
-            "confidence": 0.95,
-            "created_at": "<observed>",
-            "governance": "accepted",
-            "id": "@12",
-            "kind": "Decision",
-            "lifecycle": "active",
-            "provenance": {
-              "repo": "shop",
-              "store": "project"
-            },
-            "text": "Discounts are computed server-side",
-            "workspace_id": "default"
-          },
-          "superseded_by": []
         }
       ]
     }
@@ -2708,7 +2417,7 @@ expression: a
           "ok": true
         },
         {
-          "detail": "73",
+          "detail": "68",
           "name": "text_index_watermark",
           "ok": true
         },
@@ -2748,7 +2457,7 @@ expression: a
           "ok": true
         },
         {
-          "detail": "1 entries",
+          "detail": "0 entries",
           "name": "audit",
           "ok": true
         },
@@ -2774,26 +2483,6 @@ expression: a
         }
       ],
       "ok": true
-    },
-    "explain": {
-      "next_actions": [
-        {
-          "command": "kaban resolve 01a17a03-5344-7000-8000-000000000005 --symbol '<key>'",
-          "label": "re-target the anchor to the key the symbol has now, as a person; the CodeRef leaves review"
-        },
-        {
-          "command": "kaban forget 01a17a03-5344-7000-8000-000000000005",
-          "label": "retire the node"
-        }
-      ],
-      "policy": {},
-      "sentence": "stale: the resolved snapshot no longer holds the symbol this CodeRef anchors",
-      "status": {
-        "pending": "stale"
-      },
-      "subject": {
-        "node": "01a17a03-5344-7000-8000-000000000005"
-      }
     },
     "new_symbol": {
       "approximate": true,
@@ -2829,43 +2518,6 @@ expression: a
         "symbol": "rust-analyzer cargo shop . checkout/cart/CartService#apply_promotion()."
       },
       "follow_ups": [],
-      "governing": [
-        {
-          "code": {
-            "snapshot": {
-              "commit": "1e14091822ae41ff6429ac7a1feed71010489d4c",
-              "exact": true,
-              "policy": "current"
-            }
-          },
-          "currency": {
-            "changed": [
-              "src/checkout/cart.rs"
-            ],
-            "checked_at": "<observed>",
-            "staleness": 1.0,
-            "state": "needs_review"
-          },
-          "governance": "accepted",
-          "matched_by": "path_scope",
-          "matched_target": "rust-analyzer cargo shop . checkout/cart/CartService#apply_promotion().",
-          "node": {
-            "confidence": 0.95,
-            "created_at": "<observed>",
-            "governance": "accepted",
-            "id": "@12",
-            "kind": "Decision",
-            "lifecycle": "active",
-            "provenance": {
-              "repo": "shop",
-              "store": "project"
-            },
-            "text": "Discounts are computed server-side",
-            "workspace_id": "default"
-          },
-          "superseded_by": []
-        }
-      ],
       "last_change": {
         "author_date": "2026-10-26T09:04:36Z",
         "commit": "1e14091822ae41ff6429ac7a1feed71010489d4c",
@@ -2880,75 +2532,15 @@ expression: a
       },
       "tests": []
     },
-    "old_symbol": {
-      "follow_ups": [],
-      "partial": false,
-      "results": [
-        {
-          "code": {
-            "snapshot_mismatch": {
-              "snapshot": {
-                "commit": "1e14091822ae41ff6429ac7a1feed71010489d4c",
-                "exact": true,
-                "policy": "current"
-              }
-            }
-          },
-          "currency": {
-            "changed": [
-              "src/checkout/cart.rs"
-            ],
-            "checked_at": "<observed>",
-            "staleness": 1.0,
-            "state": "needs_review"
-          },
-          "governance": "accepted",
-          "matched_by": "symbol",
-          "matched_target": "rust-analyzer cargo shop . checkout/cart/CartService#apply_discount().",
-          "node": {
-            "confidence": 0.95,
-            "created_at": "<observed>",
-            "governance": "accepted",
-            "id": "@12",
-            "kind": "Decision",
-            "lifecycle": "active",
-            "provenance": {
-              "repo": "shop",
-              "store": "project"
-            },
-            "text": "Discounts are computed server-side",
-            "workspace_id": "default"
-          },
-          "superseded_by": []
-        }
-      ]
-    },
-    "review": {
-      "items": [
-        {
-          "first_action": {
-            "command": "kaban resolve 01a17a03-5344-7000-8000-000000000005 --symbol '<key>'",
-            "label": "re-target the anchor to the key the symbol has now, as a person; the CodeRef leaves review"
-          },
-          "kind": "CodeRef",
-          "sentence": "stale: the resolved snapshot no longer holds the symbol this CodeRef anchors",
-          "status": "stale",
-          "subject": {
-            "node": "01a17a03-5344-7000-8000-000000000005"
-          }
-        }
-      ],
-      "partial": false
-    },
     "revision_finish": {
-      "assertions": 4,
+      "assertions": 3,
       "changes": {
-        "first_seq": 79,
-        "last_seq": 94
+        "first_seq": 74,
+        "last_seq": 82
       },
-      "created": 1,
-      "deleted_edges": 2,
-      "edges": 3,
+      "created": 0,
+      "deleted_edges": 0,
+      "edges": 2,
       "evidence_dropped": {},
       "job": "ab9820ef3c82062552290711d3fd8b37f85a55d00e2a33716718cf193f31e8f2",
       "orphans": [],
@@ -2957,91 +2549,43 @@ expression: a
         "instance_id": "@7",
         "outcome": "committed",
         "pack_lineage_id": "@8",
-        "seq": 94
+        "seq": 82
       },
       "reconcile": "complete",
       "redactions": 0,
-      "retired_assertions": 2,
-      "revision_candidates": 1,
+      "retired_assertions": 0,
+      "revision_candidates": 0,
       "skipped": {},
       "status": "finished",
       "submits": 1,
       "unchanged": 0,
-      "updated": 0
+      "updated": 1
     },
     "revision_submit": {
-      "assertions": 4,
+      "assertions": 3,
       "changes": {
-        "first_seq": 79,
-        "last_seq": 90
+        "first_seq": 74,
+        "last_seq": 82
       },
       "chunk": null,
-      "created": 1,
-      "edges": 3,
+      "created": 0,
+      "edges": 2,
       "evidence_dropped": [],
       "job": "ab9820ef3c82062552290711d3fd8b37f85a55d00e2a33716718cf193f31e8f2",
       "predecessor_terminal": 0,
       "records": [
         {
-          "id": "@19",
+          "id": "@14",
           "local_id": "discounts",
-          "outcome": "revision_candidate"
+          "outcome": "updated"
         }
       ],
       "redactions": 0,
-      "revision_candidates": [
-        {
-          "id": "@19",
-          "local_id": "discounts",
-          "of": "@12"
-        }
-      ],
+      "revision_candidates": [],
       "skipped": [],
       "status": "open",
       "unchanged": 0,
-      "updated": 0
-    },
-    "revisions": {
-      "anchored": [],
-      "edges": [
-        {
-          "confidence": 0.7125,
-          "from": "@19",
-          "id": "@20",
-          "rel": "RELATES_TO",
-          "to": "@12"
-        }
-      ],
-      "nodes": [
-        {
-          "confidence": 0.95,
-          "created_at": "<observed>",
-          "governance": "accepted",
-          "id": "@12",
-          "kind": "Decision",
-          "lifecycle": "active",
-          "provenance": {
-            "repo": "shop",
-            "store": "project"
-          },
-          "text": "Discounts are computed server-side",
-          "workspace_id": "default"
-        },
-        {
-          "confidence": 0.95,
-          "created_at": "<observed>",
-          "governance": "proposed",
-          "id": "@19",
-          "kind": "Decision",
-          "lifecycle": "active",
-          "provenance": {
-            "repo": "shop",
-            "store": "project"
-          },
-          "text": "Discounts are computed server-side",
-          "workspace_id": "default"
-        }
-      ]
+      "updated": 1
     }
   }
 }
