@@ -488,7 +488,6 @@ expression: a
       "nodes": [
         {
           "created_at": "<observed>",
-          "governance": "none",
           "id": "@3",
           "kind": "Document",
           "lifecycle": "active",
@@ -500,7 +499,6 @@ expression: a
         },
         {
           "created_at": "<observed>",
-          "governance": "none",
           "id": "@4",
           "kind": "Section",
           "lifecycle": "active",
@@ -512,7 +510,6 @@ expression: a
         },
         {
           "created_at": "<observed>",
-          "governance": "none",
           "id": "@1",
           "kind": "Chunk",
           "lifecycle": "active",
@@ -584,7 +581,6 @@ expression: a
       "nodes": [
         {
           "created_at": "<observed>",
-          "governance": "none",
           "id": "01a17a03-5344-7000-8000-000000000005",
           "kind": "CodeRef",
           "lifecycle": "active",
@@ -597,7 +593,6 @@ expression: a
         },
         {
           "created_at": "<observed>",
-          "governance": "none",
           "id": "01a17a03-5344-7000-8000-000000000008",
           "kind": "CodeRef",
           "lifecycle": "active",
@@ -610,7 +605,6 @@ expression: a
         },
         {
           "created_at": "<observed>",
-          "governance": "none",
           "id": "@2",
           "kind": "Document",
           "lifecycle": "active",
@@ -622,7 +616,6 @@ expression: a
         },
         {
           "created_at": "<observed>",
-          "governance": "none",
           "id": "@1",
           "kind": "Chunk",
           "lifecycle": "active",
@@ -1276,7 +1269,6 @@ expression: a
       "nodes": [
         {
           "created_at": "<observed>",
-          "governance": "none",
           "id": "@12",
           "kind": "Chunk",
           "lifecycle": "active",
@@ -1288,7 +1280,6 @@ expression: a
         },
         {
           "created_at": "<observed>",
-          "governance": "none",
           "id": "@1",
           "kind": "Chunk",
           "lifecycle": "active",
@@ -1301,7 +1292,6 @@ expression: a
         {
           "confidence": 0.95,
           "created_at": "<observed>",
-          "governance": "proposed",
           "id": "@14",
           "kind": "Decision",
           "lifecycle": "active",
@@ -1394,7 +1384,6 @@ expression: a
       "nodes": [
         {
           "created_at": "<observed>",
-          "governance": "none",
           "id": "01a17a03-5344-7000-8000-000000000005",
           "kind": "CodeRef",
           "lifecycle": "active",
@@ -1408,7 +1397,6 @@ expression: a
         {
           "confidence": 0.95,
           "created_at": "<observed>",
-          "governance": "proposed",
           "id": "@14",
           "kind": "Decision",
           "lifecycle": "active",
@@ -1996,7 +1984,6 @@ expression: a
       "nodes": [
         {
           "created_at": "<observed>",
-          "governance": "none",
           "id": "01a17a03-5344-7000-8000-000000000005",
           "kind": "CodeRef",
           "lifecycle": "active",
@@ -2009,7 +1996,6 @@ expression: a
         },
         {
           "created_at": "<observed>",
-          "governance": "none",
           "id": "01a17a03-5344-7000-8000-000000000008",
           "kind": "CodeRef",
           "lifecycle": "active",
@@ -2022,7 +2008,6 @@ expression: a
         },
         {
           "created_at": "<observed>",
-          "governance": "none",
           "id": "@2",
           "kind": "Document",
           "lifecycle": "active",
@@ -2034,7 +2019,6 @@ expression: a
         },
         {
           "created_at": "<observed>",
-          "governance": "none",
           "id": "@1",
           "kind": "Chunk",
           "lifecycle": "active",
@@ -2186,7 +2170,6 @@ expression: a
       "nodes": [
         {
           "created_at": "<observed>",
-          "governance": "none",
           "id": "@12",
           "kind": "Chunk",
           "lifecycle": "active",
@@ -2198,7 +2181,6 @@ expression: a
         },
         {
           "created_at": "<observed>",
-          "governance": "none",
           "id": "@1",
           "kind": "Chunk",
           "lifecycle": "active",
@@ -2211,7 +2193,6 @@ expression: a
         {
           "confidence": 0.95,
           "created_at": "<observed>",
-          "governance": "proposed",
           "id": "@14",
           "kind": "Decision",
           "lifecycle": "active",
@@ -2230,7 +2211,6 @@ expression: a
       "results": [
         {
           "created_at": "<observed>",
-          "governance": "none",
           "id": "01a17a03-5344-7000-8000-000000000005",
           "kind": "CodeRef",
           "lifecycle": "active",
@@ -2253,7 +2233,6 @@ expression: a
         },
         {
           "created_at": "<observed>",
-          "governance": "none",
           "id": "@1",
           "kind": "Chunk",
           "lifecycle": "active",
@@ -2382,33 +2361,8 @@ expression: a
           "ok": true
         },
         {
-          "detail": "0",
-          "name": "reconcile_cursor_lag",
-          "ok": true
-        },
-        {
           "detail": "13",
           "name": "schema_version",
-          "ok": true
-        },
-        {
-          "detail": "0",
-          "name": "changes_lag",
-          "ok": true
-        },
-        {
-          "detail": "0",
-          "name": "outbox_lag",
-          "ok": true
-        },
-        {
-          "detail": "0",
-          "name": "conflicts",
-          "ok": true
-        },
-        {
-          "detail": "text-index: 0",
-          "name": "consumer_lag",
           "ok": true
         },
         {
@@ -2449,31 +2403,6 @@ expression: a
         {
           "detail": "explicit_selection_only",
           "name": "layer_extractors",
-          "ok": true
-        },
-        {
-          "detail": "present, mode 0600, 32 bytes",
-          "name": "key_file",
-          "ok": true
-        },
-        {
-          "detail": "0 entries",
-          "name": "audit",
-          "ok": true
-        },
-        {
-          "detail": "prunable: none; promote_when eligible (partial: min_count and min_sources only until E2 supplies mean_score): none; n_rejected: 0",
-          "name": "discovered",
-          "ok": true
-        },
-        {
-          "detail": "historical no_repository: 0, no_history: 0; current eligible: 10; status: pending",
-          "name": "unstamped",
-          "ok": true
-        },
-        {
-          "detail": "n: 0; groups: none",
-          "name": "unresolved",
           "ok": true
         },
         {

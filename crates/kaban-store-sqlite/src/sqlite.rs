@@ -1390,11 +1390,7 @@ impl MemoryStore for SqliteStore {
                 |r| r.get(0),
             )
             .sql()?;
-        // the `ChangeLog` lag is database-wide like the file size (F11: max(seq) - min(last_seq));
-        // `outbox_lag` is the EN-E10b deprecated alias of `changes_lag`, same value, removed in 3.2
-        let changes_lag = changelog::lag(&conn)?;
-        // v3 superset (M3-26): the engine, the migrated schema version and the open conflicts
-        // (F13), all database-wide
+        // v3 superset (M3-26): the engine and the migrated schema version, database-wide
         let schema_version: i64 = conn
             .query_row(
                 "SELECT value FROM index_meta WHERE key = ?",

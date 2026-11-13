@@ -51,11 +51,8 @@ fn tool_resource_and_cli_share_the_matrix_and_preserve_old_fields() {
         "edges",
         "by_kind",
         "by_rel",
-        "changes_lag",
-        "outbox_lag",
         "engine",
         "schema_version",
-        "conflicts",
         "policy",
         "stores",
     ] {

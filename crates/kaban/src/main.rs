@@ -115,10 +115,6 @@ enum Cmd {
         /// Also run VACUUM to reclaim free pages (reported as its own check)
         #[arg(long)]
         vacuum: bool,
-        /// Also print, per configured prior, the Beta posterior mean of the accept/forget
-        /// counters beside it (reported as its own check; never applied)
-        #[arg(long)]
-        priors: bool,
     },
     /// Host hook handler (core-spec F8): reads the host's event envelope as one JSON object
     /// from stdin, prints one JSON document and always exits 0; never creates or migrates the

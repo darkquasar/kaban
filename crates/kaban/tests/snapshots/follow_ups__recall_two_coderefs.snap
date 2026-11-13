@@ -23,7 +23,6 @@ expression: v
   "results": [
     {
       "created_at": "<ts>",
-      "governance": "none",
       "id": "<id-0>",
       "kind": "Fact",
       "lifecycle": "active",
@@ -40,7 +39,6 @@ expression: v
     },
     {
       "created_at": "<ts>",
-      "governance": "none",
       "id": "<id-1>",
       "kind": "CodeRef",
       "lifecycle": "active",
@@ -57,7 +55,6 @@ expression: v
     },
     {
       "created_at": "<ts>",
-      "governance": "none",
       "id": "<id-2>",
       "kind": "CodeRef",
       "lifecycle": "active",

@@ -1,7 +1,7 @@
 //! The read projection shared by `remember`, `accept`, `recall`, `traverse`, `why`, the
 //! project export and the sync job.
 
-use kaban_core::{Governance, Lifecycle, StoreScope};
+use kaban_core::{Lifecycle, StoreScope};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -35,8 +35,6 @@ pub struct Card {
     pub kind: String,
     /// Storage visibility (`active` unless the read opted into archived records).
     pub lifecycle: Lifecycle,
-    /// Governance state (`none` for kinds other than Decision, Convention and Failure).
-    pub governance: Governance,
     /// Creation time (RFC 3339).
     pub created_at: String,
     /// Text (present when full text was requested or the node has no summary).

@@ -186,10 +186,9 @@ fn a_committed_forget_carries_its_transaction_sequence_and_the_store_identities(
     assert_eq!(r.receipt.outcome, WriteOutcome::Committed);
     assert_eq!(
         r.receipt.seq,
-        Some(r.outbox_seq),
+        Some(store.changes_head().unwrap()),
         "the seq read inside the transaction"
     );
-    assert_eq!(r.receipt.seq, Some(store.changes_head().unwrap()));
     assert_identities(&store, &r.receipt);
 }
 

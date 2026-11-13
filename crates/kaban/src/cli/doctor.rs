@@ -26,7 +26,6 @@ use std::sync::Arc;
 #[derive(Debug, Deserialize)]
 struct DoctorArgs {
     vacuum: bool,
-    priors: bool,
     optimize: bool,
 }
 
@@ -36,7 +35,6 @@ pub(crate) fn run(
     policy: kaban_policy::Policy,
     keys_dir: &Path,
     vacuum: bool,
-    priors: bool,
     optimize: bool,
     format: Format,
 ) -> ExitCode {
@@ -122,7 +120,7 @@ pub(crate) fn run(
     let code = seam::run_tool::<DoctorArgs, DoctorReport, _>(
         &api,
         "doctor",
-        json!({ "vacuum": vacuum, "priors": priors, "optimize": optimize }),
+        json!({ "vacuum": vacuum, "optimize": optimize }),
         &[],
         format,
         |api, args| {
@@ -131,7 +129,6 @@ pub(crate) fn run(
                 schema_version,
                 keys_dir: keys_dir.to_path_buf(),
                 vacuum: args.vacuum,
-                priors: args.priors,
             };
             let mut report = if args.optimize {
                 api.doctor_optimize(&context)?

@@ -3488,36 +3488,6 @@ expression: tools
             }
           ]
         },
-        "Governance": {
-          "description": "Governance state of a `Decision`, `Convention` or `Failure`; [`Governance::None`] for every\nother kind.",
-          "oneOf": [
-            {
-              "const": "none",
-              "description": "The kind is not governed.",
-              "type": "string"
-            },
-            {
-              "const": "proposed",
-              "description": "Recorded, not yet accepted (ranked below accepted in `why`).",
-              "type": "string"
-            },
-            {
-              "const": "accepted",
-              "description": "Accepted with reason and path scope (event recorded).",
-              "type": "string"
-            },
-            {
-              "const": "superseded",
-              "description": "Replaced by a newer record (`SUPERSEDES` edge plus event).",
-              "type": "string"
-            },
-            {
-              "const": "invalidated",
-              "description": "Declared no longer valid (event recorded).",
-              "type": "string"
-            }
-          ]
-        },
         "Lifecycle": {
           "description": "Storage visibility of a node. Reads default to [`Lifecycle::Active`].",
           "oneOf": [
@@ -3606,10 +3576,6 @@ expression: tools
             "null"
           ]
         },
-        "governance": {
-          "$ref": "#/$defs/Governance",
-          "description": "Governance after the call."
-        },
         "id": {
           "description": "Node id.",
           "type": "string"
@@ -3621,12 +3587,6 @@ expression: tools
         "mode": {
           "$ref": "#/$defs/ForgetMode",
           "description": "Mode applied."
-        },
-        "outbox_seq": {
-          "description": "Outbox position of the write (F11).",
-          "format": "uint64",
-          "minimum": 0,
-          "type": "integer"
         },
         "physically_cleaned": {
           "description": "The purge's freed pages were reclaimed by this call; the post-commit cleanup (index\nmerged, WAL truncated) reclaims none, so a purge reports `false` with `cleanup` naming\nthe residue. `false` for the other modes.",
@@ -3645,8 +3605,6 @@ expression: tools
         "id",
         "mode",
         "lifecycle",
-        "governance",
-        "outbox_seq",
         "revoked",
         "physically_cleaned",
         "receipt"
@@ -7269,10 +7227,6 @@ expression: tools
               "description": "Creation time (RFC 3339).",
               "type": "string"
             },
-            "governance": {
-              "$ref": "#/$defs/Governance",
-              "description": "Governance state (`none` for kinds other than Decision, Convention and Failure)."
-            },
             "id": {
               "description": "Node id.",
               "type": "string"
@@ -7350,7 +7304,6 @@ expression: tools
             "id",
             "kind",
             "lifecycle",
-            "governance",
             "created_at",
             "workspace_id",
             "provenance"
@@ -7516,36 +7469,6 @@ expression: tools
             {
               "const": "serena.find_referencing_symbols",
               "description": "Serena `find_referencing_symbols` (`name_path` + `relative_path`).",
-              "type": "string"
-            }
-          ]
-        },
-        "Governance": {
-          "description": "Governance state of a `Decision`, `Convention` or `Failure`; [`Governance::None`] for every\nother kind.",
-          "oneOf": [
-            {
-              "const": "none",
-              "description": "The kind is not governed.",
-              "type": "string"
-            },
-            {
-              "const": "proposed",
-              "description": "Recorded, not yet accepted (ranked below accepted in `why`).",
-              "type": "string"
-            },
-            {
-              "const": "accepted",
-              "description": "Accepted with reason and path scope (event recorded).",
-              "type": "string"
-            },
-            {
-              "const": "superseded",
-              "description": "Replaced by a newer record (`SUPERSEDES` edge plus event).",
-              "type": "string"
-            },
-            {
-              "const": "invalidated",
-              "description": "Declared no longer valid (event recorded).",
               "type": "string"
             }
           ]
@@ -8029,10 +7952,6 @@ expression: tools
               "description": "Creation time (RFC 3339).",
               "type": "string"
             },
-            "governance": {
-              "$ref": "#/$defs/Governance",
-              "description": "Governance state (`none` for kinds other than Decision, Convention and Failure)."
-            },
             "id": {
               "description": "Node id.",
               "type": "string"
@@ -8110,42 +8029,11 @@ expression: tools
             "id",
             "kind",
             "lifecycle",
-            "governance",
             "created_at",
             "workspace_id",
             "provenance"
           ],
           "type": "object"
-        },
-        "Governance": {
-          "description": "Governance state of a `Decision`, `Convention` or `Failure`; [`Governance::None`] for every\nother kind.",
-          "oneOf": [
-            {
-              "const": "none",
-              "description": "The kind is not governed.",
-              "type": "string"
-            },
-            {
-              "const": "proposed",
-              "description": "Recorded, not yet accepted (ranked below accepted in `why`).",
-              "type": "string"
-            },
-            {
-              "const": "accepted",
-              "description": "Accepted with reason and path scope (event recorded).",
-              "type": "string"
-            },
-            {
-              "const": "superseded",
-              "description": "Replaced by a newer record (`SUPERSEDES` edge plus event).",
-              "type": "string"
-            },
-            {
-              "const": "invalidated",
-              "description": "Declared no longer valid (event recorded).",
-              "type": "string"
-            }
-          ]
         },
         "Lifecycle": {
           "description": "Storage visibility of a node. Reads default to [`Lifecycle::Active`].",
@@ -9272,10 +9160,6 @@ expression: tools
               "description": "Creation time (RFC 3339).",
               "type": "string"
             },
-            "governance": {
-              "$ref": "#/$defs/Governance",
-              "description": "Governance state (`none` for kinds other than Decision, Convention and Failure)."
-            },
             "id": {
               "description": "Node id.",
               "type": "string"
@@ -9353,7 +9237,6 @@ expression: tools
             "id",
             "kind",
             "lifecycle",
-            "governance",
             "created_at",
             "workspace_id",
             "provenance"
@@ -9396,36 +9279,6 @@ expression: tools
             "confidence"
           ],
           "type": "object"
-        },
-        "Governance": {
-          "description": "Governance state of a `Decision`, `Convention` or `Failure`; [`Governance::None`] for every\nother kind.",
-          "oneOf": [
-            {
-              "const": "none",
-              "description": "The kind is not governed.",
-              "type": "string"
-            },
-            {
-              "const": "proposed",
-              "description": "Recorded, not yet accepted (ranked below accepted in `why`).",
-              "type": "string"
-            },
-            {
-              "const": "accepted",
-              "description": "Accepted with reason and path scope (event recorded).",
-              "type": "string"
-            },
-            {
-              "const": "superseded",
-              "description": "Replaced by a newer record (`SUPERSEDES` edge plus event).",
-              "type": "string"
-            },
-            {
-              "const": "invalidated",
-              "description": "Declared no longer valid (event recorded).",
-              "type": "string"
-            }
-          ]
         },
         "Lifecycle": {
           "description": "Storage visibility of a node. Reads default to [`Lifecycle::Active`].",

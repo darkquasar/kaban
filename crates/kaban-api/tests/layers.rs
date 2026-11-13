@@ -144,7 +144,6 @@ fn doctor_reports_skipped_layer_without_mutating_metadata_or_hiding_siblings() {
         schema_version: LATEST_SCHEMA_VERSION,
         keys_dir: std::env::temp_dir().join("kaban-layer-diagnostic-no-keys"),
         vacuum: false,
-        priors: false,
     });
     let layer = report
         .checks

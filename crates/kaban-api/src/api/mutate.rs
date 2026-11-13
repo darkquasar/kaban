@@ -277,8 +277,6 @@ impl KabanApi {
             id,
             mode,
             lifecycle: outcome.lifecycle,
-            governance: outcome.governance,
-            outbox_seq: outcome.outbox_seq,
             revoked: outcome.revoked,
             physically_cleaned: outcome.physically_cleaned,
             cleanup: outcome.cleanup,

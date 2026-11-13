@@ -23,7 +23,6 @@ fn context(scratch: &Scratch) -> DoctorContext {
         schema_version: LATEST_SCHEMA_VERSION,
         keys_dir: scratch.keys(),
         vacuum: false,
-        priors: false,
     }
 }
 

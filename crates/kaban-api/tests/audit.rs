@@ -342,8 +342,6 @@ fn forget_defaults_to_tombstone_and_reports_the_resulting_states() {
         .unwrap();
     assert_eq!(r.mode, ForgetMode::Tombstone);
     assert_eq!(r.lifecycle, kaban_core::Lifecycle::Tombstoned);
-    assert_eq!(r.governance, kaban_core::Governance::Proposed);
-    assert!(r.outbox_seq > 0);
     assert!(
         store
             .get(&NodeId::parse(&rule.id).unwrap(), false)

@@ -1,11 +1,9 @@
 ---
 source: crates/kaban/tests/mcp_docs.rs
-assertion_line: 139
 expression: card
 ---
 {
   "created_at": "[created_at]",
-  "governance": "none",
   "id": "[id]",
   "kind": "Chunk",
   "lifecycle": "active",

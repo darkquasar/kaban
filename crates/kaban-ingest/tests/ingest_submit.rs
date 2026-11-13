@@ -230,3 +230,97 @@ async fn ontology_reload_marks_job_stale_without_submit_graph_writes() {
     assert_eq!(row.status, kaban_core::JobStatus::Stale);
     assert_eq!(row.submits, 0);
 }
+
+/// REC-08 for extractor output: a structured submit writes its records and named edges as
+/// active rows in one commit, like `remember`; the report carries no claim or revision state.
+#[tokio::test]
+async fn submitted_records_and_edges_are_active_for_a_second_process() {
+    let rig = common::real::rig_on_disk(
+        "kaban-e39-submit",
+        "active",
+        kaban_policy::Policy::empty(),
+    );
+    std::fs::write(rig.root.join("a.md"), "# Source\n\nThree harmless facts.\n").unwrap();
+    let api = api(&rig);
+    let prepared = brief(&api, &rig.root, "a.md", &IngestOpts::default())
+        .await
+        .unwrap();
+    let report = submit(&api, &rig.root, json!({"job":prepared.job,"records":[
+        {"local_id":"one","kind":"Fact","text":"Alpha extractor fact"},
+        {"local_id":"two","kind":"Fact","text":"Beta extractor fact"},
+        {"local_id":"three","kind":"Fact","text":"Gamma extractor fact"}
+    ],"edges":[
+        {"from_local_id":"one","rel":"RELATES_TO","to_local_id":"two"},
+        {"from_local_id":"two","rel":"RELATES_TO","to_local_id":"three"}
+    ]}))
+    .await
+    .unwrap();
+    assert_eq!(report["created"], 3, "{report}");
+    for field in ["assertions", "revision_candidates"] {
+        assert!(report.get(field).is_none(), "report.{field}: {report}");
+    }
+    let ids: Vec<NodeId> = report["records"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| NodeId::parse(r["id"].as_str().unwrap()).unwrap())
+        .collect();
+    assert_eq!(ids.len(), 3, "{report}");
+
+    // a second process: its own connection to the same database
+    let db = rig.db.clone().unwrap();
+    let other = std::sync::Arc::new(
+        kaban_store_sqlite::SqliteStore::open(&db, &db.parent().unwrap().join("keys")).unwrap(),
+    );
+    let reader = KabanApi::new(
+        other.clone(),
+        kaban_policy::Policy::empty(),
+        other.signer(),
+        None,
+    );
+    let found = reader
+        .recall(kaban_api::RecallRequest {
+            query: "extractor fact".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    let mut hits: Vec<&str> = found
+        .results
+        .iter()
+        .filter(|c| c.kind == "Fact")
+        .map(|c| c.id.as_str())
+        .collect();
+    hits.sort_unstable();
+    let mut want: Vec<&str> = ids.iter().map(NodeId::as_str).collect();
+    want.sort_unstable();
+    assert_eq!(hits, want, "{found:?}");
+    for card in &found.results {
+        assert_eq!(card.lifecycle, kaban_core::Lifecycle::Active, "{card:?}");
+    }
+    let expanded = other
+        .traverse(&kaban_core::TraverseQuery {
+            start_ids: vec![ids[0].clone()],
+            rels: vec!["RELATES_TO".into()],
+            direction: kaban_core::TraverseDirection::Out,
+            max_depth: 2,
+            limit: 50,
+            ..Default::default()
+        })
+        .unwrap();
+    let mut pairs: Vec<(&str, &str)> = expanded
+        .edges
+        .iter()
+        .map(|e| (e.src.as_str(), e.dst.as_str()))
+        .collect();
+    pairs.sort_unstable();
+    let mut expected = [
+        (ids[0].as_str(), ids[1].as_str()),
+        (ids[1].as_str(), ids[2].as_str()),
+    ];
+    expected.sort_unstable();
+    assert_eq!(
+        pairs,
+        expected,
+        "{expanded:?}"
+    );
+}

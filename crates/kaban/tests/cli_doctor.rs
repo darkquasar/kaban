@@ -117,7 +117,6 @@ fn stale_identifier_marker_requires_explicit_reindex_and_doctor_never_repairs_it
                 .unwrap()
                 .contains("kaban reindex text")
         );
-        assert_eq!(check(&value, "audit")["ok"], true);
         assert_eq!(store.index_meta().unwrap().entries, metadata);
         assert_eq!(
             serde_json::to_value(store.get(&ids[0], false).unwrap()).unwrap(),
@@ -215,29 +214,6 @@ fn a_healthy_database_passes_and_a_corrupted_fts_shadow_table_fails_deterministi
             "doctor checks the index against itself",
         ],
     );
-    // spec 05 SS-21: a consumer registered at the head (SS-06) that one more write leaves
-    // behind; doctor reports its retention lag by name (the rows of that write)
-    let lag = {
-        let store = SqliteStore::open(&s.db(), &s.home().join("keys")).unwrap();
-        let lease = store
-            .lease_acquire("export", "doctor-test", 60)
-            .unwrap()
-            .unwrap();
-        let cursor = store.changes_register("export", lease.fence).unwrap();
-        store.lease_release(&lease).unwrap();
-        created(
-            store
-                .remember(note("one write after the consumer registered"), &[], &ctx())
-                .unwrap(),
-        );
-        let head = store
-            .changes_read(cursor, 10_000)
-            .unwrap()
-            .last()
-            .map_or(cursor, |c| c.seq);
-        head - cursor
-    };
-    assert!(lag > 0, "the write left the consumer behind");
     // the key must already exist: a fresh home gets no key created for this database
     let other = s.0.join("other-home");
     let out = Command::new(env!("CARGO_BIN_EXE_kaban"))
@@ -267,14 +243,7 @@ fn a_healthy_database_passes_and_a_corrupted_fts_shadow_table_fails_deterministi
             "claim_exhausted",
             "stale_artifacts",
             "retired_producers",
-            "reconcile_cursor_lag",
             "schema_version",
-            // engine-plan E2.0 (EN-E10b): `changes_lag` with the deprecated alias row
-            "changes_lag",
-            "outbox_lag",
-            "conflicts",
-            // spec 05 SS-21: the retention lag of every registered consumer, by name
-            "consumer_lag",
             // spec 05 SS-21: the text index, its payload watermark and its lag behind the
             // canonical head (OWN-M: every database serves its own Tantivy index)
             "text_index",
@@ -285,14 +254,6 @@ fn a_healthy_database_passes_and_a_corrupted_fts_shadow_table_fails_deterministi
             "layer_gazetteer",
             "layer_embed",
             "layer_extractors",
-            "key_file",
-            "audit",
-            // engine-plan E1.8 (EN-F5): the discovered-kinds facts of the bound workspace
-            "discovered",
-            // engine-plan E2.0 (OWN-65): `unstamped` events per reason
-            "unstamped",
-            // engine-plan E2.4 (EN-F12b): the unresolved conflict groups of the workspace
-            "unresolved",
             // engine-plan E3.11 Step 6: CodeRef anchors the current snapshot no longer holds
             "stale_anchors"
         ]
@@ -317,12 +278,6 @@ fn a_healthy_database_passes_and_a_corrupted_fts_shadow_table_fails_deterministi
         check(&healthy, "schema_version")["detail"],
         kaban_store_sqlite::LATEST_SCHEMA_VERSION.to_string()
     );
-    assert_eq!(
-        check(&healthy, "consumer_lag")["detail"],
-        format!("export: {lag}; text-index: 0"),
-        "{healthy}"
-    );
-    assert_eq!(check(&healthy, "audit")["detail"], "0 entries");
     assert_eq!(check(&healthy, "text_index")["detail"], "tantivy");
 }
 
@@ -405,14 +360,10 @@ fn fts_integrity_passes_with_archived_and_tombstoned_rows_and_vacuum_is_its_own_
     assert_eq!(check(&v, "fts_integrity")["ok"], true, "{v}");
     assert_eq!(check(&v, "integrity")["ok"], true, "{v}");
     assert_eq!(check(&v, "vacuum")["ok"], true, "{v}");
-    // the seven checks, the E2.0 `outbox_lag` alias row of `changes_lag` (EN-E10b, until 3.2),
-    // the E1.8 `discovered` line, the E2.0 `unstamped` line (OWN-65), the E2.4 `unresolved`
-    // line, the three artifact/cursor checks, the E3.11 `stale_anchors` line, the spec 05
-    // SS-21 `consumer_lag`, `text_index`, `text_index_watermark` and `text_index_lag` lines
-    // and the vacuum line
-    assert_eq!(v["checks"].as_array().unwrap().len(), 27);
-    // the store's own projector is a registered consumer at the head (spec 05 OWN-M)
-    assert_eq!(check(&v, "consumer_lag")["detail"], "text-index: 0");
+    // the checks without the governance, audit and lag rows (REC-08): the artifact checks,
+    // the E3.11 `stale_anchors` line, the spec 05 SS-21 `text_index`, `text_index_watermark`
+    // and `text_index_lag` lines and the vacuum line
+    assert_eq!(v["checks"].as_array().unwrap().len(), 17);
     // without the flag there is no vacuum line
     let v = report(&doctor(&s, &s.db(), &[]));
     assert!(

@@ -267,7 +267,6 @@ impl Projected {
             id: n.id.clone(),
             kind: self.kind,
             lifecycle: n.lifecycle,
-            governance: n.governance,
             created_at: self.created_at,
             text: show_text.then_some(self.text),
             summary: self.summary,
