@@ -243,7 +243,7 @@ impl SqliteStore {
 
     /// Rank the store's own adapter with the ontology and recall configuration bound now.
     fn configure_index(&self) {
-        if let Some(index) = self.text_index.as_ref().and_then(Attached::adapter) {
+        if let Some(index) = self.text_index.as_ref().and_then(Attached::tantivy) {
             index.configure(self.ontology(), self.recall_config());
         }
     }

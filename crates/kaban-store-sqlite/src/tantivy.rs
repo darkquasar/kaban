@@ -110,18 +110,10 @@ impl Attached {
         }
     }
 
-    /// The composed adapter this store publishes into, `None` for an injected index.
-    pub(crate) fn tantivy(&self) -> Option<&Arc<TantivyIndex>> {
-        match self {
-            Self::Tantivy(index) => Some(index),
-            #[cfg(feature = "text-index-override")]
-            Self::Override(_) => None,
-        }
-    }
-
-    /// The adapter the store configures, `None` for an injected index.
+    /// The composed adapter this store publishes into and configures, `None` for an injected
+    /// index.
     #[cfg_attr(not(feature = "text-index-override"), allow(clippy::unnecessary_wraps))]
-    pub(crate) fn adapter(&self) -> Option<&Arc<TantivyIndex>> {
+    pub(crate) fn tantivy(&self) -> Option<&Arc<TantivyIndex>> {
         match self {
             Self::Tantivy(index) => Some(index),
             #[cfg(feature = "text-index-override")]
