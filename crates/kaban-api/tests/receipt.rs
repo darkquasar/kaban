@@ -9,13 +9,10 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // test code: failures are the assertion
 
 mod common;
-#[path = "common/status.rs"]
-mod status;
 
 use common::{Scratch, fact};
 use kaban_api::{
-    ApiError, DeprecateRequest, ForgetRequest, HookEvent, HookHost, KabanApi, LinkRequest,
-    LinkSpec, PruningOperation, PruningProtectionRequest, PruningTargetKind, RememberRequest,
+    ApiError, ForgetRequest, HookEvent, HookHost, KabanApi, LinkRequest, LinkSpec, RememberRequest,
     WriteOutcome, WriteReceipt,
 };
 use kaban_core::{
@@ -353,8 +350,7 @@ fn assert_receipt_shape(response: &Value) {
 /// D3 review d3-3 (SS-27): every receipt-bearing response type this suite can produce,
 /// serialized as the adapters serialize it, carries no local record reference (`rid`,
 /// `rowid`, `chunk_rid`, numeric `src`/`dst`), not even as JSON inside a string: `remember`,
-/// `link`, `pruning_protection`, `forget`, `explain --deprecate` and `resolve --winner` (the
-/// one that used to echo the conflict group's canonical key, whose subject is a row id).
+/// `link` and `forget`.
 #[test]
 fn no_local_record_reference_leaves_in_any_receipt_bearing_response() {
     let (store, api) = store_api();
@@ -369,70 +365,19 @@ fn no_local_record_reference_leaves_in_any_receipt_bearing_response() {
             props: None,
         })
         .unwrap();
-    let protected = api
-        .pruning_protection(
-            PruningProtectionRequest {
-                operation: PruningOperation::Set,
-                target_kind: PruningTargetKind::Node,
-                id: Some(other.id.clone()),
-                key: None,
-                src: None,
-                dst: None,
-                rel: None,
-            },
-            Actor::HumanCli,
-        )
-        .unwrap();
     let forgotten = api
         .forget(ForgetRequest {
             id: remembered.id.clone(),
             mode: None,
         })
         .unwrap();
-    let mut responses = vec![
+    let responses = vec![
         ("remember", serde_json::to_value(&remembered).unwrap()),
         ("link", serde_json::to_value(&linked).unwrap()),
-        (
-            "pruning_protection",
-            serde_json::to_value(&protected).unwrap(),
-        ),
         ("forget", serde_json::to_value(&forgotten).unwrap()),
     ];
     // the position is a log position, not the node's row id (the one node row is 1)
     assert!(store.changes_head().unwrap() > 1);
-
-    // the claim-bearing responses over the reconcile fixture (a chunk with a candidate group)
-    let s = status::Scratch::new("receipt-scan");
-    let it = status::items(&s);
-    let winner = it
-        .api
-        .explain_status(kaban_api::ExplainStatusRequest {
-            address: it.chunk.to_string(),
-        })
-        .unwrap()
-        .explanation
-        .unwrap()
-        .candidates[0]
-        .value
-        .as_str()
-        .unwrap()
-        .to_owned();
-    let resolved = it
-        .api
-        .resolve_winner(&it.chunk, &winner, None, Actor::HumanCli)
-        .unwrap();
-    let deprecated = it
-        .api
-        .deprecate(
-            DeprecateRequest {
-                key: status::key_of(&s, "a1"),
-                reason: "reviewed".into(),
-            },
-            Actor::HumanCli,
-        )
-        .unwrap();
-    responses.push(("resolve", serde_json::to_value(&resolved).unwrap()));
-    responses.push(("explain", serde_json::to_value(&deprecated).unwrap()));
 
     for (scope, response) in &responses {
         assert_receipt_shape(response);
@@ -441,9 +386,7 @@ fn no_local_record_reference_leaves_in_any_receipt_bearing_response() {
 }
 
 /// D3 review d3-4: the receipt's outcome and identities are control under every scope whose
-/// response carries one (`remember`, `link`, `forget`, `unmerge`, `pruning_protection`, the
-/// CLI's `explain --deprecate` and `resolve`, `sync`'s and `import`'s import report,
-/// `ingest_finish`), so a policy that rejects the word `committed` can never withhold or
+/// response carries one (`remember`, `link`, `forget`, `ingest_finish`), so a policy that rejects the word `committed` can never withhold or
 /// alter a committed mutation's own outcome at the response gate.
 #[test]
 fn a_policy_rejecting_the_word_committed_never_withholds_a_receipt_on_any_write_scope() {
@@ -458,18 +401,11 @@ fn a_policy_rejecting_the_word_committed_never_withholds_a_receipt_on_any_write_
     let receipt = serde_json::to_value(api.committed_receipt(Some(7))).unwrap();
     assert_eq!(receipt["outcome"], json!("committed"));
     let plain = json!({"receipt": receipt});
-    let nested = json!({"import": {"receipt": receipt}});
     for (scope, value) in [
         ("remember", &plain),
         ("link", &plain),
         ("forget", &plain),
-        ("unmerge", &plain),
-        ("pruning_protection", &plain),
-        ("explain", &plain),
-        ("resolve", &plain),
-        ("import", &plain),
         ("ingest_finish", &plain),
-        ("sync", &nested),
     ] {
         let gated = api
             .gate_response(scope, value)
@@ -479,8 +415,8 @@ fn a_policy_rejecting_the_word_committed_never_withholds_a_receipt_on_any_write_
     // the same policy still gates content under those scopes
     let err = api
         .gate_response(
-            "resolve",
-            &json!({"value": "committed", "receipt": receipt}),
+            "remember",
+            &json!({"text": "committed", "receipt": receipt}),
         )
         .unwrap_err();
     assert!(matches!(err, ApiError::Rejected { .. }), "{err:?}");

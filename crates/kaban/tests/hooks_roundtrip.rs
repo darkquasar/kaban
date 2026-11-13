@@ -1,10 +1,10 @@
 //! Hook round trip per host (core-spec F4 (iii), F7, F8, F8b, S1; core-plan C4.6 as amended by
 //! `reviews/m4-prep-dispositions.md` M4-3, M4-4, M4-7, M4-8): the whole CLI seam, black-box
 //! through the built binary over the shipped fixtures under `tests/fixtures/hooks/<host>/`. A
-//! Decision is seeded with `kaban remember` and `kaban accept` (the CLI, not the API), then one
-//! session runs `session-start` (the briefing), `pre-tool-use` (the context for the fixture
-//! path), the host's failure event, `kaban recall` by the error string (the pending Failure
-//! with the session id), `stop` twice (one prompt, then silence), `hook fix`, and `recall
+//! Decision is seeded with `kaban remember` (the CLI, not the API), then one session runs
+//! `session-start` (nothing to brief: a Decision is never briefed), `pre-tool-use` (nothing
+//! injected), the host's failure event, `kaban recall` by the error string (the pending Failure
+//! with the session id), `session-start` again (the briefing names the Failure), `stop` twice (one prompt, then silence), `hook fix`, and `recall
 //! --hops 1` again (`pending_fix: false` and the `FIXED_BY` neighbour). Every hook call exits 0
 //! and prints exactly one JSON document; the fixtures' file-content canary reaches no output
 //! and no database byte. The per-event field checks live in `hook_claude.rs`, `hook_hosts.rs`
@@ -41,7 +41,6 @@ struct Host {
     recall_query: &'static str,
     stop: &'static str,
     session_start_name: &'static str,
-    pre_tool_use_name: &'static str,
 }
 
 const CLAUDE: Host = Host {
@@ -55,7 +54,6 @@ const CLAUDE: Host = Host {
     recall_query: "nightjar-store FAILED",
     stop: "stop",
     session_start_name: "SessionStart",
-    pre_tool_use_name: "PreToolUse",
 };
 
 const CODEX: Host = Host {
@@ -69,7 +67,6 @@ const CODEX: Host = Host {
     recall_query: "pytest failed",
     stop: "stop",
     session_start_name: "SessionStart",
-    pre_tool_use_name: "PreToolUse",
 };
 
 const PI: Host = Host {
@@ -83,7 +80,6 @@ const PI: Host = Host {
     recall_query: "npm failed",
     stop: "agent-before-settle",
     session_start_name: "session_start",
-    pre_tool_use_name: "tool_call",
 };
 
 /// `kaban --db <db> --json <args>` run from inside the scratch repository (so the workspace is
@@ -110,9 +106,9 @@ fn document(out: &Output) -> Value {
         .unwrap_or_else(|e| panic!("stdout is not one JSON document: {e}: {text:?}"))
 }
 
-/// The accepted Decision governing `SCOPE`, seeded through the CLI as a person would
-/// (`remember`, then `accept` as `human-cli`); the database is created by the first command.
-fn seed_accepted_decision(s: &HookScratch) -> String {
+/// A Decision scoped to `SCOPE`, seeded through the CLI as a person would; the database is
+/// created by this first command.
+fn seed_decision(s: &HookScratch) -> String {
     let remembered = document(&cli(
         s,
         &[
@@ -126,14 +122,7 @@ fn seed_accepted_decision(s: &HookScratch) -> String {
         ],
     ));
     assert_eq!(remembered["status"], json!("created"), "{remembered}");
-    let id = remembered["id"].as_str().unwrap().to_owned();
-    let accepted = document(&cli(
-        s,
-        &["accept", &id, "--reason", "reviewed", "--path-scope", SCOPE],
-    ));
-    assert_eq!(accepted["status"], json!("accepted"), "{accepted}");
-    assert_eq!(accepted["signer_kind"], json!("human-cli"), "{accepted}");
-    id
+    remembered["id"].as_str().unwrap().to_owned()
 }
 
 /// The fixture `name` of `host` bound to the scratch repository and the round trip's session.
@@ -186,32 +175,16 @@ fn the_failure(cards: &[Value]) -> &Value {
 }
 
 fn round_trip(host: &Host) {
-    // Arrange: the governing Decision through the CLI seam
+    // Arrange: a Decision through the CLI seam
     let s = HookScratch::new(&format!("roundtrip-{}", host.name));
-    let decision = seed_accepted_decision(&s);
+    let decision = seed_decision(&s);
 
-    // session-start: the briefing names the accepted Decision
-    let (_, out) = hook_call(
-        &s,
-        host,
-        "session-start",
-        &envelope(&s, host, host.session_start),
-    );
-    let hso = &out["hookSpecificOutput"];
-    assert_eq!(
-        hso["hookEventName"],
-        json!(host.session_start_name),
-        "{out}"
-    );
-    let briefing = hso["additionalContext"]
-        .as_str()
-        .expect("additionalContext");
-    assert!(
-        briefing.contains(&decision) && briefing.contains(DECISION),
-        "{briefing}"
-    );
+    // session-start: nothing pending, and a Decision is never briefed
+    let start = envelope(&s, host, host.session_start);
+    let (_, out) = hook_call(&s, host, "session-start", &start);
+    assert_eq!(out, empty(), "{out}");
 
-    // pre-tool-use: the context for the fixture path under the Decision's scope
+    // pre-tool-use: the edit is recorded, nothing is injected
     let mut edit = envelope(&s, host, host.edit);
     if let Some((pointer, relative)) = host.edit_path {
         set(
@@ -225,15 +198,7 @@ fn round_trip(host: &Host) {
         "fixture: the edit content carries the canary"
     );
     let (_, out) = hook_call(&s, host, "pre-tool-use", &edit);
-    let hso = &out["hookSpecificOutput"];
-    assert_eq!(hso["hookEventName"], json!(host.pre_tool_use_name), "{out}");
-    let context = hso["additionalContext"]
-        .as_str()
-        .expect("additionalContext");
-    assert!(
-        context.contains(&decision) && context.contains("src/store/sqlite.rs"),
-        "{context}"
-    );
+    assert_eq!(out, empty(), "{out}");
 
     // the failure event: nothing to say, a pending Failure recorded with the session id
     let (_, out) = hook_call(
@@ -252,6 +217,22 @@ fn round_trip(host: &Host) {
         "{failure}"
     );
     let failure_id = failure["id"].as_str().unwrap().to_owned();
+
+    // session-start again: the briefing names the pending Failure, not the Decision
+    let (_, out) = hook_call(&s, host, "session-start", &start);
+    let hso = &out["hookSpecificOutput"];
+    assert_eq!(
+        hso["hookEventName"],
+        json!(host.session_start_name),
+        "{out}"
+    );
+    let briefing = hso["additionalContext"]
+        .as_str()
+        .expect("additionalContext");
+    assert!(
+        briefing.contains(&failure_id) && !briefing.contains(&decision),
+        "{briefing}"
+    );
 
     // stop: the one-time prompt names the Failure; the second stop is silent
     let stop = envelope(&s, host, host.stop);

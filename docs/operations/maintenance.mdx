@@ -13,7 +13,6 @@ mutating maintenance on valuable data.
 ```bash
 kaban doctor
 kaban stats
-kaban verify-audit
 ```
 
 Ordinary `doctor` diagnoses the database as it exists: it does not create,
@@ -25,8 +24,7 @@ rejection, so this is not a forensic promise of zero writes to the file.
 
 `stats` reports counters, policy information, budgets, and the layer matrix. It
 uses the normal service open path, so do not substitute it for diagnostic opening
-when investigating an absent or older database. `verify-audit` needs the existing
-matching key and returns `5` for a broken chain or an open/key failure.
+when investigating an absent or older database.
 
 ## Full-text maintenance
 
@@ -65,44 +63,6 @@ Inspect the ingestion report for blocked, failed, or skipped work.
 `forget --layer` is different: it rejects existing machine claims while keeping
 their history. It is not the repair command for a derived index you want rebuilt.
 
-## Export, sync, and import
-
-| Operation | Effect |
-| --- | --- |
-| `kaban export --format markdown` | Prints JSON containing a managed block of accepted exportable records |
-| `kaban export --write AGENTS.md` | Creates or replaces Kaban's managed block; preserves text outside it |
-| `kaban sync --repo /path/to/repo` | Imports advanced record files, writes stale records/tombstones and digests under `.kaban/` |
-| `kaban sync --stage --repo /path/to/repo` | Also stages `.kaban/` changes; does not commit |
-| `kaban import --repo /path/to/repo` | Full record import into the bound workspace, without writing repository files |
-
-Use `import`, not the retired `rebuild` spelling. **Import is a database mutation**:
-its absence pass can tombstone previously serialized records whose file deletion
-is recorded in Git. Sync can rewrite files and move the old pre-engine layout;
-review local changes before committing. `--deadline 60` bounds a sync run; if it
-expires, the next sync continues from completed work.
-
-Serialization is transport for supported records, not a full database backup.
-It does not restore every graph edge or code-reference node into a fresh store.
-Protect `.kaban/` as data and review what will enter repository history.
-
-### Resolve conflicts deliberately
-
-Equal revisions with different content produce a conflict instead of silently
-choosing a winner. `stats` counts conflicts and `doctor` reports them. Inspect
-both versions before selecting one:
-
-```bash
-kaban resolve RECORD_ID --take db
-# Alternative, not a second step:
-kaban resolve RECORD_ID --take file
-```
-
-Replace `RECORD_ID` with the actual conflicted record ID. **Both choices mutate
-state and replace the losing representation**: `db` rewrites the file from the
-database, while `file` imports the file and reserializes it. The revision advances
-above both versions. Forbidden governance transitions are still refused. If a
-file write fails, the conflict remains pending; do not call it resolved.
-
 ## Policy changes
 
 After reviewing a new policy and protecting the current store, run:
@@ -133,7 +93,7 @@ procedure, not a live copy of just `kaban.db`:
    protected/encrypted backup destination.
 4. Restore into an isolated location while clients are stopped. Restore the
    matching keys and use explicit paths; do not overwrite the only surviving
-   copy while investigating damage. Run `doctor` and `verify-audit` against the
+   copy while investigating damage. Run `doctor` against the
    restored store before reconnecting clients.
 
 Losing the audit key is not fixed by generating another one. Restore the matching

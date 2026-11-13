@@ -279,17 +279,6 @@ impl SqliteStore {
         Ok(self)
     }
 
-    /// This store as the index component of a pack build (spec 05 SS-18;
-    /// `crate::pack::BuildRequest::index`): `Some` when the store owns a Tantivy index whose
-    /// projection the builder may hold and drain, `None` for a store with nothing to capture.
-    #[must_use]
-    pub fn text_index_component(&self) -> Option<&dyn crate::pack::TextIndexComponent> {
-        self.text_index
-            .as_ref()
-            .and_then(Attached::tantivy)
-            .map(|_| self as &dyn crate::pack::TextIndexComponent)
-    }
-
     pub(crate) fn cg_read(&self) -> std::sync::MutexGuard<'_, Option<CgRead>> {
         self.cg_read
             .lock()

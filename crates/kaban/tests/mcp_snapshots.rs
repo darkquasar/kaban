@@ -14,14 +14,11 @@ use std::time::Duration;
 
 /// Tools that only read (`readOnlyHint: true`).
 #[cfg(all(feature = "ingest", feature = "code-graph"))]
-const READS: [&str; 15] = [
+const READS: [&str; 12] = [
     "recall",
-    "explain",
     "traverse",
     "schema_describe",
     "stats",
-    "why",
-    "governance_history",
     "index_status",
     "code_implementers",
     "code_members",
@@ -39,8 +36,7 @@ const DESTRUCTIVE: [&str; 2] = ["forget", "ingest_finish"];
 /// The tools that exist today (engine-spec EN-F4, E1.5): their catalog entries are
 /// byte-identical under the engine; later tools (EN-F50) are appended after them and never
 /// change these. Sorted, like the wire.
-const TODAY_TOOLS: [&str; 10] = [
-    "accept",
+const TODAY_TOOLS: [&str; 8] = [
     "forget",
     "link",
     "recall",
@@ -49,7 +45,6 @@ const TODAY_TOOLS: [&str; 10] = [
     "schema_extend",
     "stats",
     "traverse",
-    "why",
 ];
 
 fn tools_list() -> Vec<Value> {

@@ -17,9 +17,7 @@
 //!   `KABAN_WORKSPACE`, else the enclosing repository's root name).
 //!
 //! The envelope always comes from stdin (`--stdin-json` is accepted for the recipes' sake and
-//! is the only body form). One event has no envelope: `post-commit` (C5.3, M5-14) comes from
-//! git, which sends no JSON and may leave stdin on a terminal, so the dispatcher never reads
-//! stdin for it (`--stdin-json` is accepted and ignored, `--host` is irrelevant).
+//! is the only body form).
 
 use crate::Cli;
 use crate::cli::output::{self, Format};
@@ -62,8 +60,6 @@ pub(crate) enum EventArg {
     SubagentStop,
     Stop,
     Fix,
-    /// The git post-commit hook: no host, no envelope (M5-14).
-    PostCommit,
 }
 
 impl From<EventArg> for HookEvent {
@@ -76,7 +72,6 @@ impl From<EventArg> for HookEvent {
             EventArg::SubagentStop => Self::SubagentStop,
             EventArg::Stop => Self::Stop,
             EventArg::Fix => Self::Fix,
-            EventArg::PostCommit => Self::PostCommit,
         }
     }
 }
@@ -169,15 +164,9 @@ pub(crate) fn run(cli: Cli, event: EventArg, host: HostArg) -> ExitCode {
 /// Every failure is an empty outcome with a fixed note.
 fn handle(cli: Cli, event: EventArg, host: HostArg) -> HookOutcome {
     let empty = |what: &str| refused(event, what);
-    // the envelope first (an oversized or malformed body fails before the database is touched);
-    // `post-commit` has none and stdin may never close (M5-14): it is not read at all
-    let envelope = if event == EventArg::PostCommit {
-        Value::Object(serde_json::Map::new())
-    } else {
-        let Ok(envelope) = read_envelope() else {
-            return empty("the envelope on stdin is not one JSON object of at most 1 MiB");
-        };
-        envelope
+    // the envelope first (an oversized or malformed body fails before the database is touched)
+    let Ok(envelope) = read_envelope() else {
+        return empty("the envelope on stdin is not one JSON object of at most 1 MiB");
     };
     test_stall();
     let policy = match cli.policy.as_deref() {

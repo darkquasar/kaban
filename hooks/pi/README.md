@@ -13,7 +13,6 @@ small allowlisted envelope on stdin, and delivers kaban's answer through pi's ow
     bash
   agent_before_settle  =>  stop          --host pi            ->  one continuation
                                                                  (custom_message, continue: true)
-  session_shutdown     =>  nothing in M4 (`kaban sync` is M5)
 ```
 
 ## Files
@@ -61,9 +60,10 @@ envelope (R4-4). The kaban pi selector reads exactly these fields (`toolName`, `
   with `pi.sendMessage({customType: "kaban-brief", content, display: true}, {deliverAs: "nextTurn"})`.
   Reached the model in every live session (round 1 sentinel 3/3; round 2 the seeded Decision
   text was echoed in the first reply).
-- **Pre-edit context.** `tool_call` for `edit`/`write` -> `kaban hook pre-tool-use` -> the
-  governing records for `input.path` as a `deliverAs: "steer"` message (reached the model 3/3 in
-  round 1); the handler returns nothing, so the edit is never blocked or changed. `edit` was not
+- **Pre-edit record.** `tool_call` for `edit`/`write` -> `kaban hook pre-tool-use` records the
+  attempted edit of `input.path` for the session and injects nothing (a non-empty
+  `additionalContext` would be sent as a `deliverAs: "steer"` message); the handler returns
+  nothing, so the edit is never blocked or changed. `edit` was not
   used by the model live (**unverified**; `write` 5/5).
 - **Failures and evidence.** `tool_execution_end` for `bash` -> `kaban hook post-tool-use`, which
   records a Failure (`pending_fix: true`, command, error text) when `isError` is true and
@@ -85,8 +85,6 @@ envelope (R4-4). The kaban pi selector reads exactly these fields (`toolName`, `
 - **Silence.** The extension writes nothing to stdout (pi's `--print --mode json` streams stayed
   intact in every live session) and never throws into pi: any failure (binary missing, timeout,
   non-JSON output) is ignored.
-- `session_shutdown` does nothing in M4; `kaban sync` (M5) will be called there with
-  argument-only `pi.exec`, which needs no stdin.
 
 ## Verification
 

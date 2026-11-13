@@ -11,7 +11,7 @@
 
 mod hook_common;
 
-use hook_common::{HookScratch, accepted_decision, fixture, hook, session_rows, set};
+use hook_common::{HookScratch, fixture, hook, session_rows, set};
 use serde_json::{Value, json};
 
 const CANARY: &str = "AKIAQWERTYUIOPASDFGH";
@@ -178,15 +178,13 @@ fn codex_without_an_exit_code_marker_records_no_failure() {
 
 /// Codex `PreToolUse` on `apply_patch` (`tool_input.command` holds the patch, HOST-EVENTS §2):
 /// the `*** Update File:` / `*** Add File:` headers name the targets (the patch body, carrying
-/// a canary, is never read as content); the context comes back as `hookSpecificOutput` for
-/// `PreToolUse` (consumed live, M4-30), and Codex `Stop` carries the prompt as
-/// `decision: block` (M4-16 switch: `systemMessage` did not reach the model live).
+/// a canary, is never read as content) and are recorded as the session's edits with nothing
+/// injected, and Codex `Stop` carries the prompt as `decision: block` (M4-16 switch:
+/// `systemMessage` did not reach the model live).
 #[test]
 fn codex_apply_patch_paths_come_from_the_patch_headers_and_stop_uses_decision_block() {
     let s = HookScratch::new("codex-patch");
-    let api = s.api();
-    let governing = accepted_decision(&api, "Use WAL mode", &["src/store/**"], None);
-    drop(api);
+    drop(s.api());
     let env = in_repo(&s, "codex", "pre-tool-use-apply-patch");
     assert!(
         env["tool_input"]["command"].is_string(),
@@ -194,20 +192,7 @@ fn codex_apply_patch_paths_come_from_the_patch_headers_and_stop_uses_decision_bl
     );
     let run = hook(&s, "pre-tool-use", Some("codex"), &env);
     assert_eq!(run.code(), Some(0), "{}", run.stderr());
-    let out = run.json();
-    assert_eq!(
-        out["hookSpecificOutput"]["hookEventName"],
-        json!("PreToolUse"),
-        "{out}"
-    );
-    let context = out["hookSpecificOutput"]["additionalContext"]
-        .as_str()
-        .unwrap();
-    assert!(context.contains(&governing), "{context}");
-    assert!(
-        context.contains("src/store/sqlite.rs") && context.contains("src/store/hooks.rs"),
-        "both headers are targets: {context}"
-    );
+    assert_eq!(run.json(), empty(), "{}", run.stdout());
     assert!(!run.stdout().contains(CANARY) && !run.stderr().contains(CANARY));
     assert!(!String::from_utf8_lossy(&s.db_bytes()).contains(CANARY));
     assert_eq!(
@@ -251,15 +236,14 @@ fn codex_apply_patch_paths_come_from_the_patch_headers_and_stop_uses_decision_bl
 
 /// pi: `tool_execution_end` with `isError: true` for `bash` records a Failure (the result's
 /// `content[].text` is the error output); `isError: false` records nothing new and is
-/// evidence; `tool_call` for `edit` injects the governing records (path from `input.path`,
-/// `args.path` accepted too, the edit content never read); `agent_before_settle` carries the
+/// evidence; `tool_call` for `edit` records the edit and injects nothing (path from
+/// `input.path`, `args.path` accepted too, the edit content never read); `agent_before_settle`
+/// carries the
 /// prompt in the `decision: block` shape for the extension's one continuation.
 #[test]
 fn pi_is_error_records_a_failure_and_the_pi_events_echo_their_own_names() {
     let s = HookScratch::new("pi");
-    let api = s.api();
-    let governing = accepted_decision(&api, "Use WAL mode", &["src/store/**"], None);
-    drop(api);
+    drop(s.api());
 
     let error = in_repo(&s, "pi", "tool-execution-end-bash-error");
     let run = hook(&s, "post-tool-use", Some("pi"), &error);
@@ -298,18 +282,7 @@ fn pi_is_error_records_a_failure_and_the_pi_events_echo_their_own_names() {
     let edit = in_repo(&s, "pi", "tool-call-edit");
     let run = hook(&s, "pre-tool-use", Some("pi"), &edit);
     assert_eq!(run.code(), Some(0), "{}", run.stderr());
-    let out = run.json();
-    assert_eq!(
-        out["hookSpecificOutput"]["hookEventName"],
-        json!("tool_call"),
-        "{out}"
-    );
-    assert!(
-        out["hookSpecificOutput"]["additionalContext"]
-            .as_str()
-            .unwrap()
-            .contains(&governing)
-    );
+    assert_eq!(run.json(), empty(), "{}", run.stdout());
     assert!(
         !run.stdout().contains(CANARY) && !String::from_utf8_lossy(&s.db_bytes()).contains(CANARY)
     );
@@ -320,11 +293,14 @@ fn pi_is_error_records_a_failure_and_the_pi_events_echo_their_own_names() {
     set(&mut args_shape, "/toolName", json!("write"));
     let run = hook(&s, "pre-tool-use", Some("pi"), &args_shape);
     assert_eq!(run.code(), Some(0), "{}", run.stderr());
-    assert!(
-        run.json()["hookSpecificOutput"]["additionalContext"]
-            .as_str()
-            .unwrap()
-            .contains(&governing)
+    assert_eq!(run.json(), empty(), "{}", run.stdout());
+    assert_eq!(
+        session_rows(&s, "sess-pi-0001"),
+        vec![
+            ("edit".to_owned(), "src/store/sqlite.rs".to_owned()),
+            ("edit".to_owned(), "src/store/sqlite.rs".to_owned()),
+        ],
+        "both shapes name the edited path"
     );
 
     let run = hook(

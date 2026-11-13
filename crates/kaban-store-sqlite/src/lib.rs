@@ -25,7 +25,6 @@ mod jobs;
 mod layers;
 mod leases;
 mod ontology;
-pub mod pack;
 mod projector_thread;
 mod pruning_protection;
 mod recall;

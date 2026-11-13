@@ -49,17 +49,8 @@ HMAC-SHA256 and a 32-byte key under `KABAN_HOME/keys/<db-id>.key`, created with 
 `0600`. Audit metadata uses rule identifiers and keyed hashes rather than storing
 the rejected payload as an audit message.
 
-`--audit-export` (alias `--audit`) optionally writes a JSONL copy. That copy is not
-the chain of record and the flag does not itself upload anything. Protect its
-directory and any external shipping system separately.
-
-```bash
-kaban --db /absolute/path/kaban.db verify-audit
-```
-
 Use the same `KABAN_HOME` as the process that created the database. Do not delete
-or replace the key to work around a verification failure: a fresh key cannot
-verify the existing chain. Keep keys with the protected backup set, not in Git.
+or replace the key: a fresh key cannot verify the existing chain. Keep keys with the protected backup set, not in Git.
 The chain is not protection against an attacker who controls both the database
 and its signing key.
 

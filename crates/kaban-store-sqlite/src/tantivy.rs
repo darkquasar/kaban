@@ -41,14 +41,12 @@
 
 use crate::changelog;
 use crate::index_rows::{IndexRows, canonical};
-use crate::pack::{HeldTextIndex, Manifest, PackError, TextIndexComponent};
 use crate::sqlite::SqliteStore;
 use kaban_core::text_index::{TextIndex, Visibility, index_dir};
 use kaban_core::{Result, StoreError};
 use kaban_index_tantivy::TantivyIndex;
 use kaban_index_tantivy::admission::DatabaseHold;
 use kaban_index_tantivy::projector::Projector;
-use kaban_index_tantivy::projector::capture::Capture;
 use rusqlite::Connection;
 use std::any::Any;
 use std::ops::{Deref, DerefMut};
@@ -88,10 +86,6 @@ pub(crate) enum Attach {
 /// (whose publication is the injector's business: the store projects nothing into it).
 pub(crate) enum Attached {
     Tantivy(Arc<TantivyIndex>),
-    /// The index a pack captured, opened as it stands over the immutable pack (SS-19; T6
-    /// review t6-2): searched and configured like the store's own, never published into
-    /// (no projection, no thread, no capture).
-    Captured(Arc<TantivyIndex>),
     #[cfg(feature = "text-index-override")]
     Override(Box<dyn TextIndex + Send + Sync>),
 }
@@ -99,7 +93,7 @@ pub(crate) enum Attached {
 impl std::fmt::Debug for Attached {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Tantivy(index) | Self::Captured(index) => index.fmt(f),
+            Self::Tantivy(index) => index.fmt(f),
             #[cfg(feature = "text-index-override")]
             Self::Override(_) => f.write_str("TextIndexOverride"),
         }
@@ -110,29 +104,26 @@ impl Attached {
     /// The index behind the seam.
     pub(crate) fn text_index(&self) -> &(dyn TextIndex + Send + Sync) {
         match self {
-            Self::Tantivy(index) | Self::Captured(index) => index.as_ref(),
+            Self::Tantivy(index) => index.as_ref(),
             #[cfg(feature = "text-index-override")]
             Self::Override(index) => index.as_ref(),
         }
     }
 
-    /// The composed adapter this store publishes into, `None` for a captured or an injected
-    /// index.
+    /// The composed adapter this store publishes into, `None` for an injected index.
     pub(crate) fn tantivy(&self) -> Option<&Arc<TantivyIndex>> {
         match self {
             Self::Tantivy(index) => Some(index),
-            Self::Captured(_) => None,
             #[cfg(feature = "text-index-override")]
             Self::Override(_) => None,
         }
     }
 
-    /// The adapter the store configures (its own or a captured one), `None` for an injected
-    /// index.
+    /// The adapter the store configures, `None` for an injected index.
     #[cfg_attr(not(feature = "text-index-override"), allow(clippy::unnecessary_wraps))]
     pub(crate) fn adapter(&self) -> Option<&Arc<TantivyIndex>> {
         match self {
-            Self::Tantivy(index) | Self::Captured(index) => Some(index),
+            Self::Tantivy(index) => Some(index),
             #[cfg(feature = "text-index-override")]
             Self::Override(_) => None,
         }
@@ -508,50 +499,6 @@ impl Drop for Write<'_> {
                 thread.signal_commit();
             }
         }
-    }
-}
-
-/// The lease of a pack build's capture (SS-18): the builder holds lock and lease while it
-/// drains, snapshots and copies the directory, renewing only while it drains.
-const CAPTURE_LEASE_TTL_S: u32 = 60;
-
-/// A pack build's capture (spec 05 SS-18, `crate::pack`; lane T8b moved it in from the
-/// binary): the builder holds the projector lease and the writer lock through the adapter's
-/// capture session while it drains, snapshots and copies the directory. A serving store's own
-/// thread, or another process's, holds them already: the build reports busy.
-impl TextIndexComponent for SqliteStore {
-    fn with_held(
-        &self,
-        body: &mut dyn FnMut(&mut dyn HeldTextIndex) -> std::result::Result<Manifest, PackError>,
-    ) -> std::result::Result<Option<Manifest>, PackError> {
-        let Some(index) = self.text_index.as_ref().and_then(Attached::tantivy) else {
-            return Ok(None);
-        };
-        let owner = format!("{}:pack", self.owner);
-        let projector = Projector::new(index, self, self, &owner, CAPTURE_LEASE_TTL_S);
-        match projector.capture()? {
-            Ok(mut capture) => body(&mut Held(&mut capture)).map(Some),
-            Err(halt) => {
-                tracing::debug!(?halt, "the pack build could not take the projection");
-                Ok(None)
-            }
-        }
-    }
-}
-
-/// The capture session behind the pack builder's seam.
-struct Held<'c, 'p, 'a>(&'c mut Capture<'p, 'a>);
-
-impl HeldTextIndex for Held<'_, '_, '_> {
-    fn drain(&mut self, target: u64, deadline: Instant) -> Result<Option<u64>> {
-        Ok(self.0.drain(target, deadline)?.ok())
-    }
-
-    fn captured(&self) -> Result<Option<(PathBuf, serde_json::Value)>> {
-        Ok(self
-            .0
-            .captured()?
-            .map(|(dir, payload)| (dir.to_path_buf(), payload)))
     }
 }
 

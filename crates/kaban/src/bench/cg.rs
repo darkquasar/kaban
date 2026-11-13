@@ -24,8 +24,8 @@
 //!                    (the fixture's `git ls-files`): every node defined in those files through
 //!                    the reader's `nodes_in_file`; without it the op reports nothing scanned
 //!        per op: warmup calls, then `runs` timed calls ==> us_runs[], p50, p95
-//!        code_context_split ==> four series from the same calls (reader, governance,
-//!                               last_change, total)
+//!        code_context_split ==> three series from the same calls (reader, last_change,
+//!                               total)
 //!        denylist_fp_rate   ==> informational.denylist_fp_rate (counts, never text)
 //!        ==> the bench_schema 3 document (`codegraph` section; the §18 gates with pass
 //!            recorded: N1, N2, N6 and the N7 reader part binding, the rest informational)
@@ -138,16 +138,11 @@ pub(crate) const OPS: [&str; 10] = [
 
 /// The `ops.<name>` series of `code_context_split`, one per part plus the whole call, from
 /// the same measured calls.
-const SPLIT_SERIES: [&str; 4] = [
+const SPLIT_SERIES: [&str; 3] = [
     "code_context_split_reader",
-    "code_context_split_governance",
     "code_context_split_last_change",
     "code_context_split_total",
 ];
-
-/// The `why(symbol)` baseline the governance part is read against (19.6 ms p50 at 100k
-/// notes, OWN-13; informational).
-const WHY_BASELINE_MS: f64 = 19.6;
 
 /// The `GitRunner` bound of `last_change` (stage1-spec G1-N7; informational).
 const LAST_CHANGE_BOUND_MS: f64 = 200.0;
@@ -312,12 +307,11 @@ fn files_from_env() -> anyhow::Result<Vec<String>> {
         .collect())
 }
 
-/// The four series of one `code_context_split` run (microseconds): the three parts from the
+/// The three series of one `code_context_split` run (microseconds): the two parts from the
 /// handler's own clocks, the whole call from ours.
 #[derive(Debug, Default)]
 struct Split {
     reader: Vec<f64>,
-    governance: Vec<f64>,
     last_change: Vec<f64>,
     total: Vec<f64>,
 }
@@ -335,27 +329,21 @@ fn context_split(
     warmup: usize,
     runs: usize,
 ) -> anyhow::Result<Split> {
-    let call = || -> anyhow::Result<(Duration, Duration, Duration, Duration)> {
+    let call = || -> anyhow::Result<(Duration, Duration, Duration)> {
         let t = Instant::now();
         let (_, parts) = api.code_context_timed(CodeContextRequest {
             target: by_ref(target),
             current_path: None,
         })?;
-        Ok((
-            parts.reader,
-            parts.governance,
-            parts.last_change,
-            t.elapsed(),
-        ))
+        Ok((parts.reader, parts.last_change, t.elapsed()))
     };
     for _ in 0..warmup {
         call()?;
     }
     let mut split = Split::default();
     for _ in 0..runs {
-        let (reader, governance, last_change, total) = call()?;
+        let (reader, last_change, total) = call()?;
         split.reader.push(us(reader));
-        split.governance.push(us(governance));
         split.last_change.push(us(last_change));
         split.total.push(us(total));
     }
@@ -699,12 +687,11 @@ pub(crate) fn run(
             })?,
             "code_context_split" => {
                 let split = context_split(api, &targets.hub, a.warmup, a.runs)?;
-                for (name, series_us) in SPLIT_SERIES.iter().zip([
-                    &split.reader,
-                    &split.governance,
-                    &split.last_change,
-                    &split.total,
-                ]) {
+                for (name, series_us) in
+                    SPLIT_SERIES
+                        .iter()
+                        .zip([&split.reader, &split.last_change, &split.total])
+                {
                     ops.insert((*name).to_owned(), series(series_us));
                 }
                 continue;
@@ -724,8 +711,8 @@ pub(crate) fn run(
     }
 
     // the §18 gates: N1 open_ro p50 < 1 ms; N2 p50 < 5 ms and p95 < 20 ms per tool; N6 VmHWM
-    // delta < 10 MB; N7 the code_context reader part p50 < 5 ms, its governance part against
-    // the `why` baseline and `last_change` against the runner bound (both informational)
+    // delta < 10 MB; N7 the code_context reader part p50 < 5 ms and `last_change` against the
+    // runner bound (informational)
     let ms = |op: &str, key: &str| ops.get(op).and_then(|v| v[key].as_f64()).map(|us| us / 1e3);
     let mut gates = Map::new();
     gates.insert(
@@ -749,12 +736,8 @@ pub(crate) fn run(
         gate(ms(SPLIT_SERIES[0], "p50_us"), 5.0, false),
     );
     gates.insert(
-        "code_context_governance_p50_ms".to_owned(),
-        gate(ms(SPLIT_SERIES[1], "p50_us"), WHY_BASELINE_MS, true),
-    );
-    gates.insert(
         "code_context_last_change_p50_ms".to_owned(),
-        gate(ms(SPLIT_SERIES[2], "p50_us"), LAST_CHANGE_BOUND_MS, true),
+        gate(ms(SPLIT_SERIES[1], "p50_us"), LAST_CHANGE_BOUND_MS, true),
     );
 
     let mut informational = json!({
@@ -885,7 +868,7 @@ mod tests {
         )
         .unwrap();
         let ops = doc["codegraph"]["ops"].as_object().unwrap();
-        assert_eq!(ops.len(), 4, "the four series and nothing else");
+        assert_eq!(ops.len(), 3, "the three series and nothing else");
         let runs = |name: &str| -> Vec<f64> {
             ops[name]["us_runs"]
                 .as_array()
@@ -895,12 +878,11 @@ mod tests {
                 .collect()
         };
         let reader = runs(SPLIT_SERIES[0]);
-        let governance = runs(SPLIT_SERIES[1]);
-        let last_change = runs(SPLIT_SERIES[2]);
-        let total = runs(SPLIT_SERIES[3]);
+        let last_change = runs(SPLIT_SERIES[1]);
+        let total = runs(SPLIT_SERIES[2]);
         assert_eq!(total.len(), 4);
         for i in 0..4 {
-            let parts = reader[i] + governance[i] + last_change[i];
+            let parts = reader[i] + last_change[i];
             assert!(
                 parts <= total[i],
                 "run {i}: the parts ({parts} us) exceed the whole ({} us)",
@@ -913,7 +895,7 @@ mod tests {
         assert_eq!(gate["limit"], 5.0);
         assert!(gate["pass"].is_boolean(), "pass recorded");
         assert_eq!(
-            doc["codegraph"]["gates"]["code_context_governance_p50_ms"]["informational"],
+            doc["codegraph"]["gates"]["code_context_last_change_p50_ms"]["informational"],
             true
         );
         assert_eq!(doc["codegraph"]["informational"]["targets_source"], "meta");

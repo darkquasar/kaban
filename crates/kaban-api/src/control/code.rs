@@ -354,8 +354,8 @@ pub(super) const ROWS: &[ControlEntry] = &[
         Shape::Enum(RESOURCE_VALUES),
     ),
     // CG9.1 `code_context` (stage1-spec G1-F14, §6.1): the selector's `label` on the way in;
-    // the snapshot ref, the card enums at the four card positions, `tests[].matched_by`, the
-    // governing ids (`WhyCard`, as the `why` rows) and `last_change.commit` on the way out
+    // the snapshot ref, the card enums at the four card positions, `tests[].matched_by` and
+    // `last_change.commit` on the way out
     // (`approximate` is a bool, `author_date` and `summary` are content: no row)
     entry(
         "code_context",
@@ -389,18 +389,6 @@ pub(super) const ROWS: &[ControlEntry] = &[
         Direction::Response,
         "tests[].how",
         Shape::Enum(HOW_VALUES),
-    ),
-    entry(
-        "code_context",
-        Direction::Response,
-        "governing[].node.id",
-        Shape::NodeId,
-    ),
-    entry(
-        "code_context",
-        Direction::Response,
-        "governing[].superseded_by[]",
-        Shape::NodeId,
     ),
     entry(
         "code_context",

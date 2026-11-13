@@ -48,11 +48,7 @@ and optionally install the [host/git hooks](hooks/README.md).
 ## What you can do
 
 - Remember Facts, Decisions, Conventions, Failures and Episodes; recall matching
-  cards and follow their graph relationships. Governance proposals need human
-  acceptance; `why` explains which records govern a path.
-- Review, accept, protect and explain records with the CLI. Serialize/import
-  repository records and resolve conflicts with the [sync guide](docs/developer/SYNC.md);
-  [review guidance](docs/developer/REVIEW.md) explains provenance and human decisions.
+  cards and follow their graph relationships.
 - Ingest Markdown and text documents with `kaban ingest docs/`; unchanged input
   is skipped. Structured ingestion provides bounded briefs for a host extractor,
   not an embedded model. See [ingestion](docs/developer/INGEST.md) for dialects, jobs and limits.
@@ -84,7 +80,7 @@ The denylist gates writes and rechecks reads under current policy; it is not a
 guarantee that every possible secret will be detected. Existing database copies,
 migration backups and filesystem snapshots remain separate sensitive copies.
 A purge cannot erase those copies or guarantee physical erasure of SQLite free
-pages; see the [storage/sync guide](docs/developer/SYNC.md) and `kaban doctor --vacuum`.
+pages; see `kaban doctor --vacuum`.
 
 There is no working HTTP/REST transport or OpenAPI service. `serve --http` is a
 rejected placeholder, not a listener. Embedding retrieval, `ask`/workflow

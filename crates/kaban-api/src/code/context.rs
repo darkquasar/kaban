@@ -1,5 +1,5 @@
 //! `code_context` (stage1-spec G1-F14, G1-N7, §6; stage1-plan CG9.1): the one-call view of a
-//! node, composed from the CG7 queries, CG6.1 `why(symbol)` and one bounded `git log`.
+//! node, composed from the CG7 queries and one bounded `git log`.
 //!
 //! ```text
 //!   CodeContextRequest
@@ -11,14 +11,13 @@
 //!                  callees: nodes at e.to   where e.from == row
 //!                  each ranked by (distance, path, ref), cut to 3; approximate: true
 //!   tests      = reader.tests_for(row), ranked, cut to 3
-//!   governing  = why(symbol) when the card carries a key, else []
 //!   last_change = git log -1 --format=%H%x00%aI%x00%s -- <path>  (runner deadline; None on
 //!                  any failure, never an error)
 //! ```
 //!
-//! The span records the three budgets of G1-N7 (`reader_ms`, `governance_ms`,
-//! `last_change_ms`) and nothing else: no target, no path, no commit. The same three
-//! durations come back from the hidden `code_context_timed` (CG10.1: the bench reads the split
+//! The span records the two budgets of G1-N7 (`reader_ms`, `last_change_ms`) and nothing
+//! else: no target, no path, no commit. The same two durations come back from the hidden
+//! `code_context_timed` (CG10.1: the bench reads the split
 //! without a subscriber and at microsecond resolution; `code_context` is its one-line wrapper).
 
 use std::collections::BTreeMap;
@@ -27,7 +26,6 @@ use std::time::{Duration, Instant};
 use crate::api::KabanApi;
 use crate::error::ApiError;
 use crate::git::{self, GitError};
-use crate::types::{WhyRequest, WhyTarget};
 use kaban_codegraph::reader::TestsTarget;
 use kaban_codegraph::{
     CodeGraphReader, Depth, EdgeType, Limits, NodeKind, NodeRow, check_repo_relative_path,
@@ -49,27 +47,27 @@ const LEG_LIMIT: usize = 3;
 const LOG_FORMAT: &str = "--format=%H%x00%aI%x00%s";
 
 impl KabanApi {
-    /// The context of the target: definition, approximate call legs, tests, governing records
-    /// and the file's last change (`why.rs` pipeline: gate, flush, check `current_path`,
-    /// resolve, select, then compose).
+    /// The context of the target: definition, approximate call legs, tests and the file's
+    /// last change (the `definition.rs` pipeline: gate, flush, check `current_path`, resolve,
+    /// select, then compose).
     ///
     /// # Errors
     /// `Rejected` (a content string hits the denylist), `Invalid` with a fixed `CodeError`
     /// class (stage1-spec G1-S8; a `current_path` failing the repository-relative path rule is
-    /// `selector_invalid`), store errors from the audit flush or from `why`. A git failure is
+    /// `selector_invalid`), store errors from the audit flush. A git failure is
     /// never one: `last_change` is `None`.
     #[allow(clippy::needless_pass_by_value)] // core-plan §6 interface: requests are taken by value
     #[tracing::instrument(
         name = "code_context",
         skip_all,
-        fields(reader_ms = Empty, governance_ms = Empty, last_change_ms = Empty)
+        fields(reader_ms = Empty, last_change_ms = Empty)
     )]
     pub fn code_context(&self, req: CodeContextRequest) -> Result<CodeContextResponse, ApiError> {
         self.code_context_timed(req).map(|(response, _)| response)
     }
 
-    /// `code_context` with the three G1-N7 durations of the call (reader, governance,
-    /// `last_change`) beside the response; the bench's seam (`kaban bench cg run`,
+    /// `code_context` with the two G1-N7 durations of the call (reader, `last_change`) beside
+    /// the response; the bench's seam (`kaban bench cg run`,
     /// `code_context_split`), not a tool surface. Errors as `code_context`.
     #[doc(hidden)]
     #[allow(clippy::needless_pass_by_value)] // the `code_context` request contract, by value
@@ -103,20 +101,6 @@ impl KabanApi {
         tracing::Span::current().record("reader_ms", whole_ms(reader_took));
 
         let started = Instant::now();
-        let governing = match definition.symbol.as_deref() {
-            Some(key) => {
-                self.why(WhyRequest {
-                    targets: vec![WhyTarget::Symbol(key.to_owned())],
-                    ..WhyRequest::default()
-                })?
-                .results
-            }
-            None => Vec::new(),
-        };
-        let governance_took = started.elapsed();
-        tracing::Span::current().record("governance_ms", whole_ms(governance_took));
-
-        let started = Instant::now();
         let last_change = definition
             .path
             .as_deref()
@@ -133,7 +117,6 @@ impl KabanApi {
             callees: outbound,
             approximate: true,
             tests,
-            governing,
             last_change,
             follow_ups: Vec::new(),
         };
@@ -141,7 +124,6 @@ impl KabanApi {
             response,
             CodeContextTimings {
                 reader: reader_took,
-                governance: governance_took,
                 last_change: last_change_took,
             },
         ))
@@ -269,14 +251,13 @@ fn tests(
     Ok(ranking::order_then_limit(links, inputs, Some(LEG_LIMIT)).0)
 }
 
-/// The three G1-N7 budgets of one `code_context` call, as measured around each part (the
-/// reader part: resolve, select, definition, both legs, tests; the governance part:
-/// `why(symbol)`; `last_change`: the one git call).
+/// The two G1-N7 budgets of one `code_context` call, as measured around each part (the
+/// reader part: resolve, select, definition, both legs, tests; `last_change`: the one git
+/// call).
 #[doc(hidden)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CodeContextTimings {
     pub reader: Duration,
-    pub governance: Duration,
     pub last_change: Duration,
 }
 

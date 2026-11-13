@@ -25,9 +25,6 @@
 //!        through the real pipeline after the notes, plus `recall_chunks`; 0 = today's bench
 //!   bench cg gen|run (feature `bench`, stage1-plan §18, CG7.3): the code-graph snapshot bench
 //!        in `cg.rs`, a separate corpus and result document (`bench_schema: 3`)
-//!   bench why-paired --before <0003 copy> --after <migrated copy> (EN-N7, engine-plan E2.7):
-//!        the `why` path prefilter against the scan, paired rounds in one process
-//!        (`why_paired.rs`, `bench_schema: 4`, informational)
 //!   bench recall --measure <layer set> (EN-N3, engine-plan E3.12 RP-13; feature `ingest`):
 //!        one `LayerMeasurement` per fresh process (`layers.rs`)
 //! ```
@@ -50,6 +47,5 @@ pub(crate) mod recall_classes;
 pub(crate) mod recall_runtime;
 mod report;
 mod runner;
-pub(crate) mod why_paired;
 
 pub(crate) use runner::{Shape, run};

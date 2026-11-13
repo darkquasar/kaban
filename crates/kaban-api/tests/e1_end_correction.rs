@@ -1,7 +1,6 @@
 //! The E1-end correction through `KabanApi` (E1.9a; astra review RE3-1, RE3-2, RE3-4, RE3-6
-//! as dispositioned in `../specs/kaban/03-engine-v5/archive/reviews/e1-end-astra-review-dispositions.md`): human
-//! acceptance of a review candidate reaches the store's EN-F5a branch, the gated kind is
-//! canonicalised before every registry lookup, a promotion target is judged against the
+//! as dispositioned in `../specs/kaban/03-engine-v5/archive/reviews/e1-end-astra-review-dispositions.md`): the
+//! gated kind is canonicalised before every registry lookup, a promotion target is judged against the
 //! registry before anything moves, and `schema_describe` projects `x:` labels through the
 //! bound workspace's `kind_stats` with their persisted namespace.
 
@@ -11,10 +10,9 @@ mod common;
 
 use common::Scratch;
 use kaban_api::{
-    AcceptRequest, AcceptResponse, ApiConfig, ApiError, Caller, KabanApi, OntologyRegistry,
-    RecallRequest, RememberRequest, RememberStatus,
+    ApiConfig, KabanApi, OntologyRegistry, RecallRequest, RememberRequest, RememberStatus,
 };
-use kaban_core::{Actor, IngestStore, InvalidTransition, SignerKind, StoreError, WorkspaceId};
+use kaban_core::{Actor, IngestStore, WorkspaceId};
 use kaban_policy::Policy;
 use kaban_store_sqlite::SqliteStore;
 use std::sync::Arc;
@@ -64,21 +62,6 @@ impl Repo {
     }
 }
 
-fn human() -> Caller {
-    Caller {
-        kind: Actor::HumanCli,
-        ..Default::default()
-    }
-}
-
-fn agent() -> Caller {
-    Caller {
-        kind: Actor::Agent,
-        host: Some("test-host".into()),
-        session: Some("sess-1".into()),
-    }
-}
-
 fn remember(api: &KabanApi, kind: &str, text: &str, props: Option<serde_json::Value>) -> String {
     let r = api
         .remember(RememberRequest {
@@ -90,15 +73,6 @@ fn remember(api: &KabanApi, kind: &str, text: &str, props: Option<serde_json::Va
         .unwrap();
     assert_eq!(r.status, RememberStatus::Created, "{r:?}");
     r.id
-}
-
-fn accept_request(id: &str) -> AcceptRequest {
-    AcceptRequest {
-        id: id.into(),
-        reason: Some("reviewed".into()),
-        path_scope: vec!["src/**".into()],
-        ..Default::default()
-    }
 }
 
 fn recall_kinds(api: &KabanApi, query: &str) -> Vec<String> {
@@ -125,65 +99,6 @@ kinds:
     description: "A supplier."
 rels: {}
 "#;
-
-/// RE3-1 (EN-F5a): a `discovered_kind` review candidate remembered through the service is
-/// hidden until a human accepts it through `KabanApi::accept`; the acceptance releases the
-/// candidate row and the record is recalled; an agent accepts one the same way at the agent
-/// tier (OWN-84 (1), E2.5g: the shipped set declares no `discovered.acceptance`), recorded
-/// as the agent's. Negatives: another workspace's service does not see the id, and a
-/// released (non-candidate) `x:` node keeps `NotGoverned`.
-#[test]
-fn a_human_accepts_a_review_candidate_through_the_api_and_the_record_is_recalled() {
-    let repo = Repo::new("accept");
-    let api = repo.api("ws-a");
-    let id = remember(&api, "Vendor", "quokka supplies widgets", None);
-    assert_eq!(recall_kinds(&api, "quokka"), Vec::<String>::new());
-
-    let accepted = api.accept(accept_request(&id), &human()).unwrap();
-    let AcceptResponse::Accepted {
-        node, signer_kind, ..
-    } = accepted
-    else {
-        panic!("a human acceptance is immediate: {accepted:?}");
-    };
-    assert_eq!(signer_kind, SignerKind::HumanCli);
-    assert_eq!(node.kind, "x:Vendor");
-    assert_eq!(node.governance, kaban_core::Governance::None);
-    assert_eq!(recall_kinds(&api, "quokka"), vec!["x:Vendor".to_owned()]);
-
-    // OWN-84 (1) (E2.5g): an agent accepts a candidate at the agent tier, as the agent
-    let other = remember(&api, "Supplier", "numbat supplies gadgets", None);
-    assert_eq!(recall_kinds(&api, "numbat"), Vec::<String>::new());
-    let by_agent = api.accept(accept_request(&other), &agent()).unwrap();
-    assert!(
-        matches!(
-            by_agent,
-            AcceptResponse::Accepted {
-                signer_kind: SignerKind::Agent,
-                ..
-            }
-        ),
-        "{by_agent:?}"
-    );
-    assert_eq!(recall_kinds(&api, "numbat"), vec!["x:Supplier".to_owned()]);
-    // another workspace's service does not see the candidate (S6)
-    let elsewhere = repo
-        .api("ws-b")
-        .accept(accept_request(&other), &human())
-        .unwrap_err();
-    assert!(matches!(elsewhere, ApiError::NotFound(_)), "{elsewhere:?}");
-    // a released `x:` node is no candidate and not governed: today's refusal
-    let again = api.accept(accept_request(&id), &human()).unwrap_err();
-    assert!(
-        matches!(
-            again,
-            ApiError::Store(StoreError::InvalidTransition(
-                InvalidTransition::NotGoverned(_)
-            ))
-        ),
-        "{again:?}"
-    );
-}
 
 /// RE3-2 (EN-F3, EN-F4): the gated kind is canonicalised before the registry lookups of
 /// `remember`, so `adr:Decision` meets Decision's `props_schema` (`rationale` required) and

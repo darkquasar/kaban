@@ -17,18 +17,16 @@ use std::time::{Duration, Instant};
 
 use common::Scratch;
 use kaban_api::{
-    AcceptRequest, ApiConfig, ApiError, Caller, CodeContextRequest, CodeContextResponse,
-    CodeDefinitionRequest, GitRunner, KabanApi, LastChange, LinkRequest, MatchedBy,
-    RememberRequest, SymbolSelector,
+    ApiConfig, ApiError, CodeContextRequest, CodeContextResponse, CodeDefinitionRequest, GitRunner,
+    KabanApi, LastChange, SymbolSelector,
 };
 use kaban_codegraph::IsolationTier;
 use kaban_codegraph::testing::FixedSnapshot;
-use kaban_core::{Actor, Governance};
 use kaban_index::writer::{self, Commit, Meta, Provenance, Rows};
 use kaban_index::{admit_index, decode_and_gate};
 use kaban_policy::Policy;
 use kaban_store_sqlite::SqliteStore;
-use serde_json::{Value, json};
+use serde_json::Value;
 
 /// `<repo-id>` of the fixture snapshot.
 const REPO_ID: &str = "0123456789abcdef0123456789abcdef";
@@ -303,70 +301,6 @@ fn service(s: &Scratch, root: &Path, policy: Policy, git: GitRunner) -> KabanApi
 }
 
 // ---------------------------------------------------------------------------------------------
-// governing records (`why_symbol.rs` helpers)
-
-fn human() -> Caller {
-    Caller {
-        kind: Actor::HumanCli,
-        ..Default::default()
-    }
-}
-
-/// A proposed Decision.
-fn decision(api: &KabanApi, text: &str) -> String {
-    api.remember(RememberRequest {
-        kind: "Decision".into(),
-        text: text.into(),
-        props: Some(json!({"rationale": "because"})),
-        ..Default::default()
-    })
-    .unwrap()
-    .id
-}
-
-/// Accept `id` with `scope` (a human action; `accepted_commit` is stamped from HEAD).
-fn accept(api: &KabanApi, id: &str, scope: &[&str]) {
-    api.accept(
-        AcceptRequest {
-            id: id.into(),
-            reason: Some("reviewed".into()),
-            path_scope: scope.iter().map(|s| (*s).to_owned()).collect(),
-            ..Default::default()
-        },
-        &human(),
-    )
-    .unwrap();
-}
-
-/// A `CodeRef` of this process's repository (`fixture`) at `key`, scoped to the fixture
-/// snapshot.
-fn coderef(api: &KabanApi, key: &str) -> String {
-    api.remember(RememberRequest {
-        kind: "CodeRef".into(),
-        text: format!("fixture drivers/postgres.go {key}"),
-        props: Some(json!({
-            "repo": "fixture", "commit": GO_COMMIT, "tool": "fixture",
-            "relative_path": "drivers/postgres.go", "name_path": "PostgresDriver/Open",
-            "kind": "Method", "line": 10, "symbol": key, "snapshot_commit": GO_COMMIT,
-        })),
-        ..Default::default()
-    })
-    .unwrap()
-    .id
-}
-
-fn link(api: &KabanApi, from: &str, rel: &str, to: &str) {
-    api.link(LinkRequest {
-        from: from.into(),
-        rel: rel.into(),
-        to: to.into(),
-        confidence: None,
-        props: None,
-    })
-    .unwrap();
-}
-
-// ---------------------------------------------------------------------------------------------
 // requests and projections
 
 fn open_key() -> String {
@@ -419,20 +353,13 @@ fn assert_legs_intact(r: &CodeContextResponse) {
 /// [red] G1-F14 `code_context_golden_go_drivers`: over the go-drivers snapshot and its scripted
 /// history, `PostgresDriver#Open()` answers with the `code_definition` card, the one caller
 /// (`TestPostgresOpen`), its three non-local callees, `approximate: true`, the one
-/// `reference` test link, the accepted Decision D2 governing it through its `CodeRef`
-/// (`matched_by: symbol`, no successor, currency `active`) and C2 as `last_change`.
+/// `reference` test link and C2 as `last_change`.
 #[test]
 fn code_context_golden_go_drivers() {
     let s = Scratch::new("kaban-api-code-context", "golden");
     let (root, head) = fixture_repo(&s.0);
     let api = service(&s, &root, builtin_policy(), patient_git());
     let key = open_key();
-    let d2 = decision(&api, "PostgresDriver.Open must not retry");
-    accept(&api, &d2, &["drivers/**"]);
-    let anchor = coderef(&api, &key);
-    link(&api, &d2, "GOVERNS", &anchor);
-    let elsewhere = decision(&api, "the sqlite driver is read-only");
-    accept(&api, &elsewhere, &["sqlite/**"]);
 
     let r = api.code_context(context(by_symbol(&key))).unwrap();
     assert_eq!(r.snapshot.commit, GO_COMMIT);
@@ -460,14 +387,6 @@ fn code_context_golden_go_drivers() {
     assert_eq!(r.tests[0].test.r#ref, format!("{GO}TestPostgresOpen()."));
     assert_eq!(r.tests[0].matched_by, "reference");
     assert!(!r.tests[0].heuristic);
-    let ids: Vec<&str> = r.governing.iter().map(|c| c.node.id.as_str()).collect();
-    assert_eq!(ids, vec![d2.as_str()], "governing: {:?}", r.governing);
-    let card = &r.governing[0];
-    assert_eq!(card.matched_by, MatchedBy::Symbol);
-    assert_eq!(card.governance, Governance::Accepted);
-    assert_eq!(card.superseded_by, Vec::<String>::new());
-    let currency = serde_json::to_value(&card.currency).unwrap();
-    assert_eq!(currency["state"], json!("active"), "{currency}");
     let change = r.last_change.clone().expect("C2 is the last change");
     assert_eq!(change.commit, head);
     assert_eq!(

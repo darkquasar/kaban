@@ -8,10 +8,6 @@
 
 pub(crate) mod doctor;
 mod mutate;
-pub use mutate::{
-    DEPRECATE_HUMAN_ONLY, RESOLVE_SYMBOL_HUMAN_ONLY, RESOLVE_SYMBOL_INVALID,
-    RESOLVE_WINNER_HUMAN_ONLY, ResolveSymbolResponse, ResolveWinnerResponse, UnmergeResponse,
-};
 mod query;
 mod remember;
 mod schema;
