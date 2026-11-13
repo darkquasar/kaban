@@ -592,8 +592,16 @@ class CiToolSelection(unittest.TestCase):
         result, calls = self.run_gate(args=("quality",), tools=("deny",), fail="", missing_tool="musl-gcc")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         checks = [c for c in calls if "--version" not in c and c != ["--list"]]
-        self.assertEqual([c[0] for c in checks], ["fmt", "clippy", "clippy", "clippy", "deny", "metadata", "tree"])
+        self.assertEqual([c[0] for c in checks], ["fmt", "clippy", "clippy", "clippy", "deny", "metadata", "tree", "tree"])
         self.assertIn(["clippy", "-p", "kaban-ingest", "--all-targets", "--no-default-features", "--", "-D", "warnings"], calls)
+        # store boundary: the kaban-api inverse tree, then the workspace-wide direct-parent check
+        self.assertEqual(
+            [c for c in checks if c[0] == "tree"],
+            [
+                ["tree", "-e", "normal", "-p", "kaban-api", "-i", "rusqlite", "--prefix", "depth"],
+                ["tree", "-e", "normal", "-i", "rusqlite", "--prefix", "depth"],
+            ],
+        )
 
     def test_installed_nextest_runs_and_preserves_failure_with_forced_color(self):
         result, calls = self.run_gate()
