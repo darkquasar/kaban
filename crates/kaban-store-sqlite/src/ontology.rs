@@ -83,8 +83,8 @@ pub(crate) struct TypeRow {
     /// The bare name.
     pub(crate) name: String,
     pub(crate) description: String,
-    /// The declared endpoints as JSON arrays of stored names (`path` literal included for
-    /// `GOVERNS`); written on the 0004 shape.
+    /// The declared endpoints as JSON arrays of stored names (the `path` literal included);
+    /// written on the 0004 shape.
     pub(crate) declared_from: String,
     pub(crate) declared_to: String,
     /// The declared direction; written on the 0004 shape.
@@ -93,7 +93,7 @@ pub(crate) struct TypeRow {
     pub(crate) declared_props_schema: Option<String>,
     /// The parent's stored name.
     pub(crate) is_a: Option<String>,
-    /// JSON array of the mixins' qualified names (`adr:Governed`).
+    /// JSON array of the mixins' qualified names.
     pub(crate) mixins: String,
     pub(crate) fts_fields: Option<String>,
     pub(crate) ident_fields: Option<String>,
@@ -364,13 +364,14 @@ pub(crate) fn extend(conn: &Connection, def: &TypeDef, now: &str) -> Result<bool
                     return Ok(false);
                 }
             }
-            let [governed, rank, column_weights, extract, display] = def.declaration.texts();
+            // the `rules` block lands in the `governed` column until the v14 format
+            let [rules, rank, column_weights, extract, display] = def.declaration.texts();
             conn.execute(
                 "INSERT INTO schema_type(ns, kind, name, description, from_kinds, to_kinds, directed, props_schema, builtin, created_at, governed, rank, column_weights, extract, display) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)
                  ON CONFLICT(ns, kind, name) DO UPDATE SET description = excluded.description, from_kinds = excluded.from_kinds, to_kinds = excluded.to_kinds, directed = excluded.directed, props_schema = excluded.props_schema,
                    governed = excluded.governed, rank = excluded.rank, column_weights = excluded.column_weights, extract = excluded.extract, display = excluded.display
                  WHERE schema_type.builtin = 0",
-                params![ns, def.kind, bare, def.description, from, to, i64::from(def.directed), schema, now, governed, rank, column_weights, extract, display],
+                params![ns, def.kind, bare, def.description, from, to, i64::from(def.directed), schema, now, rules, rank, column_weights, extract, display],
             )
             .sql()?
         }
@@ -492,18 +493,18 @@ mod tests {
     #[test]
     fn the_builtin_rows_are_the_thirty_shipped_names_sorted_by_kind_and_stored_name() {
         let rows = builtin_rows().unwrap();
-        assert_eq!(rows.len(), 30);
+        assert_eq!(rows.len(), 29);
         assert!(
             rows.windows(2)
                 .all(|w| (w[0].kind, w[0].stored()) < (w[1].kind, w[1].stored()))
         );
         assert!(rows.iter().all(|r| !r.description.is_empty()));
         assert!(rows.iter().all(|r| r.ns == "core" || r.ns == "adr"));
-        let governs = rows
+        let supersedes = rows
             .iter()
-            .find(|r| r.kind == "rel" && r.name == "GOVERNS")
+            .find(|r| r.kind == "rel" && r.name == "SUPERSEDES")
             .unwrap();
-        assert_eq!(governs.declared_to, r#"["CodeRef","path"]"#);
+        assert_eq!(supersedes.declared_to, r#"["Decision"]"#);
     }
 
     #[test]

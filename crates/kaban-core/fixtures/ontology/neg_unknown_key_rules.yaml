@@ -1,0 +1,7 @@
+ontology: shop
+version: 1
+kinds:
+  Thing:
+    description: "a thing"
+    rules: {display: {label: Thing, plural: Things}, dedup: none, typo: 1}
+rels: {}

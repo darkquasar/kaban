@@ -604,8 +604,8 @@ const CODE_CONTROL_ALLOWANCE: &[(&str, Direction, &str)] = &[
 /// moves or the path is named here. Free strings stay content by default (OWN-10).
 ///
 /// The response-side closed vocabularies kaban itself emits (card `lifecycle` and
-/// `provenance.store`, the `follow_ups[].tool` names, `remember` `status`, `stats.stores[]`,
-/// `anchored[].kind`) are content on purpose: the response gate scans them
+/// `provenance.store`, the `follow_ups[].tool` names, `remember` `status`, `stats.stores[]`)
+/// are content on purpose: the response gate scans them
 /// as text and the adapter withholds a result whose enum value a redaction reshaped
 /// (`crates/kaban/src/mcp/mod.rs`, review R3-9), so a policy word rule is honoured on every
 /// string that leaves. Rowing them would make them unmaskable: an owner decision, not a lane's
@@ -625,7 +625,6 @@ const CONTENT_ENUM_ALLOWANCE: &[(&str, Direction, &str)] = &[
     ("recall", Direction::Response, "follow_ups[].tool"),
     ("recall", Direction::Response, "results[].lifecycle"),
     ("recall", Direction::Response, "results[].provenance.store"),
-    ("traverse", Direction::Response, "anchored[].kind"),
     ("traverse", Direction::Response, "nodes[].lifecycle"),
     ("traverse", Direction::Response, "nodes[].provenance.store"),
     ("forget", Direction::Response, "lifecycle"),
@@ -1005,8 +1004,7 @@ fn vocabularies_have_schema_output_equal_to_their_spellings_and_the_traverse_row
 
 /// EN-E6: a valid producer or method spelling under `edge_filter` is validated, not scanned
 /// (a word rule naming it cannot reject the request), while an unknown spelling is scanned as
-/// content and then refused by the handler; `node_kinds[]`, `rels[]` and `kind_set` stay
-/// content (a canary under `node_kinds[0]` is `Rejected` before any ontology lookup).
+/// content and then refused by the handler; `node_kinds[]` and `rels[]` stay content (a canary under `node_kinds[0]` is `Rejected` before any ontology lookup).
 #[test]
 fn traverse_producers_and_methods_are_control_while_node_kinds_stay_content() {
     let api = api_with("words:\n  - { term: gazetteer, action: reject, id: no-gaz }\n");
@@ -1023,7 +1021,6 @@ fn traverse_producers_and_methods_are_control_while_node_kinds_stay_content() {
     assert_eq!(rules, vec!["no-gaz".to_owned()], "node_kinds[] is content");
     assert!(control_entry("traverse", Direction::Request, "node_kinds[]").is_none());
     assert!(control_entry("traverse", Direction::Request, "rels[]").is_none());
-    assert!(control_entry("traverse", Direction::Request, "kind_set").is_none());
     // the canary under `node_kinds[0]` is a policy rejection, never `unknown_kind`
     let err = api
         .prepare_args(

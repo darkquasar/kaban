@@ -682,7 +682,7 @@ impl KabanApi {
                 scope: kaban_core::PendingScope::Workspace,
                 limit: BRIEFING_FAILURES,
             })?;
-        let governed = self.governed();
+        let rules = self.rules();
         let mut lines: Vec<String> = Vec::with_capacity(BRIEFING_FAILURES);
         for node in &failures {
             // S4: the projected (masked) card, a hidden record skipped
@@ -694,9 +694,9 @@ impl KabanApi {
                 .as_deref()
                 .or(card.text.as_deref())
                 .unwrap_or("");
-            // the kind's display label (`governed.display.label`, EN-F4), the stored name for
-            // a kind without one
-            let label = governed
+            // the kind's display label (`rules.display.label`, EN-F4), the stored name for a
+            // kind without one
+            let label = rules
                 .display(&node.kind)
                 .map_or(card.kind.as_str(), |d| d.label.as_str());
             lines.push(format!(

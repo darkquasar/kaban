@@ -348,10 +348,9 @@ fn judge_node(
                     rid
                 ],
             ).sql()?;
-            // EN-F10 (E2.7b): the rewritten `path_scope` (and a `CodeRef`'s masked `props`)
-            // move the record's anchor keys in this transaction, as every other node write's
-            // do, or the `governing` prefilter keeps a stale key
-            crate::anchors::rekey(conn, rid)?;
+            // EN-F10 (E2.7b): a `CodeRef`'s masked `props` move its anchor keys in this
+            // transaction, as every other node write's do
+            crate::anchors::refresh(conn, rid)?;
             report.redacted += 1;
         }
         RescanAction::Reject => {

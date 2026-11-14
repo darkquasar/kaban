@@ -337,8 +337,8 @@ pub struct TypeDef {
     /// Builtin entries cannot be changed.
     #[serde(default)]
     pub builtin: bool,
-    /// The declaration columns migration 0004 added (`governed`, `rank`, `column_weights`,
-    /// `extract`, `display`), flattened into the entry; empty for rels and for a kind that
+    /// The declaration columns migration 0004 added (`rules`, stored in the `governed` column
+    /// until the v14 format; `rank`, `column_weights`, `extract`, `display`), flattened into the entry; empty for rels and for a kind that
     /// declares none (engine-plan E1.8, E1.7 R2).
     #[serde(default, flatten)]
     pub declaration: TypeDeclaration,
@@ -349,9 +349,9 @@ pub struct TypeDef {
 /// `canon.rs`), `None` where the kind declares none.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct TypeDeclaration {
-    /// The `governed` block (EN-F4).
+    /// The `rules` block (EN-F4).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub governed: Option<Value>,
+    pub rules: Option<Value>,
     /// The `rank` block (EN-F29).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rank: Option<Value>,
@@ -361,7 +361,7 @@ pub struct TypeDeclaration {
     /// The `extract` block (EN-F25, EN-F36).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extract: Option<Value>,
-    /// The display labels (`governed.display`).
+    /// The display labels (`rules.display`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display: Option<Value>,
 }
@@ -376,21 +376,25 @@ impl TypeDeclaration {
             serde_json::from_str(&crate::canon::canonical_json(&value)).ok()
         }
         Self {
-            governed: kind.governed.as_ref().and_then(canon),
+            rules: kind.rules.as_ref().and_then(canon),
             rank: kind.rank.as_ref().and_then(canon),
             column_weights: kind.column_weights.as_ref().and_then(canon),
             extract: kind.extract.as_ref().and_then(canon),
-            display: kind.governed.as_ref().and_then(|g| canon(&g.display)),
+            display: kind
+                .rules
+                .as_ref()
+                .and_then(|r| r.display.as_ref())
+                .and_then(canon),
         }
     }
 
-    /// Each column as its canonical JSON text, in table order `(governed, rank,
-    /// column_weights, extract, display)`.
+    /// Each column as its canonical JSON text, in table order `(rules, rank, column_weights,
+    /// extract, display)`.
     #[must_use]
     pub fn texts(&self) -> [Option<String>; 5] {
         let text = |v: &Option<Value>| v.as_ref().map(crate::canon::canonical_json);
         [
-            text(&self.governed),
+            text(&self.rules),
             text(&self.rank),
             text(&self.column_weights),
             text(&self.extract),
@@ -666,37 +670,15 @@ pub struct TraverseQuery {
     /// Keep only these node kinds (empty = any; EN-F46 `kinds`). The store refuses an entry
     /// the loaded ontology does not declare (`UnknownKind`) instead of matching nothing.
     pub node_kinds: Vec<String>,
-    /// EN-F46: an ontology-defined kind set (`governing` is the one set in 3.0.0). The API
-    /// resolves it into `node_kinds` before the call (`kaban-api` `query.rs`); the store does
-    /// not read it. The field stays on the core query for E2.9's templates.
-    #[serde(default)]
-    pub kind_set: Option<String>,
     /// EN-F46: the edge-level filter, appended to every neighbour query before the hub cut.
     #[serde(default)]
     pub edge_filter: Option<EdgeFilter>,
-    /// Keep only nodes in these governance states (empty = any; core-spec F6 "of any governance
-    /// state unless filtered").
-    #[serde(default)]
-    pub governance: Vec<Governance>,
     /// Max nodes (0 = default 100, capped at 500).
     pub limit: usize,
     /// Restrict to this workspace (`None` = any); start ids outside it are not found and
     /// neighbours outside it are not returned (core-spec S6).
     #[serde(default)]
     pub workspace_id: Option<String>,
-    /// EN-F19 (engine-plan E2.7): expand each reached node with a `symbol` or `path` anchor one
-    /// step into the attached code-graph snapshot; the snapshot rows come back as
-    /// [`TraverseResult::anchored`] cards (200 per anchored node, 500 in total). Off, the
-    /// result is today's, byte for byte. The flag is this request's admission (E2.5e, S7):
-    /// the API sets it only under a snapshot resolution it attached in the same call, never
-    /// from the caller's wish alone, so an attachment an earlier request left on the read
-    /// connection expands nothing on its own.
-    #[serde(default)]
-    pub follow_anchors: bool,
-    /// The repository identity the anchor rows must carry (`ApiConfig.repo`, CG-JOIN v1 §3
-    /// SD-5); `None` follows nothing.
-    #[serde(default)]
-    pub anchor_repo: Option<String>,
 }
 
 impl Default for TraverseQuery {
@@ -708,13 +690,9 @@ impl Default for TraverseQuery {
             direction: TraverseDirection::Both,
             max_depth: 1,
             node_kinds: Vec::new(),
-            kind_set: None,
             edge_filter: None,
-            governance: Vec::new(),
             limit: 0,
             workspace_id: None,
-            follow_anchors: false,
-            anchor_repo: None,
         }
     }
 }
@@ -726,76 +704,6 @@ pub struct TraverseResult {
     pub nodes: Vec<Node>,
     /// Edges whose endpoints are both in `nodes`.
     pub edges: Vec<Edge>,
-    /// The code-graph cards of [`TraverseQuery::follow_anchors`] (EN-F19): empty when the
-    /// flag is off, no snapshot is attached or no reached node has an anchor row.
-    #[serde(default)]
-    pub anchored: Vec<AnchoredRow>,
-}
-
-/// What kind of snapshot row an [`AnchoredRow`] is (the stage 1 card kinds).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(rename_all = "lowercase")]
-pub enum AnchoredKind {
-    /// A `cg.symbols` row (`kind = 'symbol'`, `external = 0`).
-    Symbol,
-    /// A `cg.files` row.
-    File,
-}
-
-/// One code-graph card reached through an anchor of a traversed node (EN-F19; CG-JOIN v1 §9:
-/// complete candidate sets ordered by `(path, ref)`, truncated by the store after ordering).
-/// Constructed by the store through [`AnchoredRow::new`] (`#[non_exhaustive]`: a later field is
-/// additive for every reader).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[non_exhaustive]
-pub struct AnchoredRow {
-    /// The traversed node whose anchor reached this row.
-    pub from: NodeId,
-    /// `symbol` or `file`.
-    pub kind: AnchoredKind,
-    /// The file's path (`cg.files.path`): the row itself for a `file`, the defining file for a
-    /// `symbol`.
-    pub path: String,
-    /// The symbol's `ref` (`None` for a file).
-    pub r#ref: Option<String>,
-    /// The symbol's cross-commit `key` (`None` for a file or a key-less symbol).
-    pub key: Option<String>,
-    /// The symbol's `name` (`None` for a file).
-    pub name: Option<String>,
-}
-
-impl AnchoredRow {
-    /// A `file` card of `path` reached from `from`.
-    #[must_use]
-    pub fn file(from: NodeId, path: String) -> Self {
-        Self {
-            from,
-            kind: AnchoredKind::File,
-            path,
-            r#ref: None,
-            key: None,
-            name: None,
-        }
-    }
-
-    /// A `symbol` card defined in `path` reached from `from`.
-    #[must_use]
-    pub fn symbol(
-        from: NodeId,
-        path: String,
-        r#ref: String,
-        key: Option<String>,
-        name: Option<String>,
-    ) -> Self {
-        Self {
-            from,
-            kind: AnchoredKind::Symbol,
-            path,
-            r#ref: Some(r#ref),
-            key,
-            name,
-        }
-    }
 }
 
 /// What `forget` left behind.
@@ -975,7 +883,7 @@ pub enum Op {
     },
     /// The ingestion reconciliation transition (DI1.8, RD2-5; docs-ingest-spec D5): bring a
     /// tombstoned node whose deterministic id re-appears in the source back to `active`. The
-    /// store accepts it only under [`crate::GovernedSet::reconciliation_transition`] (an
+    /// store accepts it only under [`crate::reconciliation_transition`] (an
     /// ingest-owned Document, Section or Chunk): `rev` bumped, a `reactivated` event, an outbox
     /// row. Already active: a no-op counted `unchanged`; purged or unknown: `NotFound`; every
     /// other node: `InvalidTransition::Reactivate`, failing the batch.

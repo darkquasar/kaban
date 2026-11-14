@@ -35,9 +35,9 @@ use crate::traverse;
 use kaban_core::Result;
 use kaban_core::{
     ActorId, BatchReport, Change, ChangeLogStore, Edge, FailurePatch, ForgetMode, ForgetOutcome,
-    GovernedSet, Hit, IndexMeta, IngestStore, Lease, LeaseStore, Lifecycle, LinkReq, MemoryStore,
-    Method, NewNode, Node, NodeId, Ontology, PendingFailuresQuery, RecallQuery, RememberOutcome,
-    RescanCursor, RescanJudge, RescanReport, SchemaStore, SessionEdit, SessionEditKind,
+    Hit, IndexMeta, IngestStore, Lease, LeaseStore, Lifecycle, LinkReq, MemoryStore, Method,
+    NewNode, Node, NodeId, Ontology, PendingFailuresQuery, RecallQuery, RememberOutcome,
+    RescanCursor, RescanJudge, RescanReport, RuleSet, SchemaStore, SessionEdit, SessionEditKind,
     SessionStore, StoreError, TraverseQuery, TraverseResult, TypeDef, WorkspaceId, WriteBatch,
     WriteCtx, new_id, now_iso,
 };
@@ -70,24 +70,23 @@ const HOOK_BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1)
 
 /// The rel whose edge invalidates (tombstones) its target (OD-4). The ontology's `on_link`
 /// vocabulary has `archive_target` only (engine-spec §3.1), so this side effect is still keyed
-/// by name; [`GovernedSet::archives_on_link`] decides the archive side effect.
+/// by name; [`RuleSet::archives_on_link`] decides the archive side effect.
 const INVALIDATES_REL: &str = "INVALIDATES";
 
 /// The lifecycle side effect a new edge has on its target (EN-F4 `on_link`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LinkEffect {
-    /// `on_link: archive_target` (`SUPERSEDES` in `adr.yaml`): the target becomes `superseded`
-    /// when governed, `archived` otherwise.
+    /// `on_link: archive_target` (`SUPERSEDES` in `adr.yaml`): an active target becomes
+    /// `archived`.
     ArchiveTarget,
-    /// [`INVALIDATES_REL`]: the target becomes `invalidated` when governed, `tombstoned`
-    /// otherwise.
+    /// [`INVALIDATES_REL`]: an active target becomes `tombstoned`.
     InvalidateTarget,
 }
 
 impl LinkEffect {
-    /// The effect of a `rel` edge under `governed`, if any.
-    fn of(governed: &GovernedSet, rel: &str) -> Option<Self> {
-        if governed.archives_on_link(rel) {
+    /// The effect of a `rel` edge under `rules`, if any.
+    fn of(rules: &RuleSet, rel: &str) -> Option<Self> {
+        if rules.archives_on_link(rel) {
             Some(Self::ArchiveTarget)
         } else if rel == INVALIDATES_REL {
             Some(Self::InvalidateTarget)
@@ -95,7 +94,7 @@ impl LinkEffect {
             None
         }
     }
-    /// The lifecycle a non-governed active target takes.
+    /// The lifecycle an active target takes.
     fn lifecycle(self) -> Lifecycle {
         match self {
             Self::ArchiveTarget => Lifecycle::Archived,
@@ -133,10 +132,9 @@ pub struct SqliteStore {
     /// The ontology this store ranks and projects under (the shipped one until
     /// [`Self::with_ontology`]).
     ontology: Arc<Ontology>,
-    /// The governed kinds and `on_link` rels every write decides archive-on-link rels and
-    /// path-governing kinds by: the shipped set, or the service's loaded set once it published
-    /// one ([`SchemaStore::adopt_governed`]).
-    governed: RwLock<Arc<GovernedSet>>,
+    /// The ontology rules every write decides archive-on-link rels by: the shipped set, or the
+    /// service's loaded set once it published one ([`SchemaStore::adopt_rules`]).
+    rules: RwLock<Arc<RuleSet>>,
     /// The recall configuration this store ranks under.
     recall: kaban_core::config::Recall,
     /// The dedicated read connection the code-graph snapshot is attached on (CG-JOIN v1 §2
@@ -361,7 +359,7 @@ impl SqliteStore {
     /// # Errors
     /// Backend errors redeploying the identifier projection or rebuilding the index.
     pub fn with_ontology(mut self, ontology: Arc<Ontology>) -> Result<Self> {
-        self.governed = RwLock::new(Arc::new(GovernedSet::from_ontology(&ontology)));
+        self.rules = RwLock::new(Arc::new(RuleSet::from_ontology(&ontology)));
         self.ontology = ontology;
         {
             let mut conn = self.write();
@@ -655,7 +653,7 @@ impl SqliteStore {
             signer,
             migration,
             ontology: shipped_ontology(),
-            governed: RwLock::new(GovernedSet::shipped()),
+            rules: RwLock::new(RuleSet::shipped()),
             recall: kaban_core::config::Recall::default(),
             cg_read: Mutex::new(None),
             projector: None,
@@ -754,7 +752,7 @@ impl SqliteStore {
         if srid == drid {
             return Err(StoreError::SelfLink(src.to_string()));
         }
-        Self::edge_rule(conn, &tenant.governed, rel, &skind, &dkind)?;
+        Self::edge_rule(conn, rel, &skind, &dkind)?;
         let now = now_iso();
         let props = props.unwrap_or_else(|| json!({}));
         // an existing (src, dst, rel) is refreshed, not created (review R1-8)
@@ -793,7 +791,7 @@ impl SqliteStore {
             .optional()
             .sql()?
             .ok_or_else(|| StoreError::NotFound(rel.to_owned()))?;
-        if let Some(effect) = LinkEffect::of(&tenant.governed, rel) {
+        if let Some(effect) = LinkEffect::of(&tenant.rules, rel) {
             Self::mark_target(conn, dst, effect, &now)?;
         }
         Ok((edge, !existed))
@@ -802,29 +800,14 @@ impl SqliteStore {
     /// `dkind` (`UnknownRel`, `EndpointNotAllowed`); the one judgement every edge write
     /// shares: `link`, the inline links of `remember`, a batch's structural edges and the
     /// `edge` claims of a batch (E1.7a RE2-8).
-    pub(crate) fn edge_rule(
-        conn: &Connection,
-        governed: &GovernedSet,
-        rel: &str,
-        skind: &str,
-        dkind: &str,
-    ) -> Result<()> {
+    pub(crate) fn edge_rule(conn: &Connection, rel: &str, skind: &str, dkind: &str) -> Result<()> {
         let def =
             Self::rel_def(conn, rel)?.ok_or_else(|| StoreError::UnknownRel(rel.to_string()))?;
-        // the declared endpoints, and the `GOVERNS` source rule (engine-spec EN-F4, E1.5): the
-        // source is a record of a kind that governs paths in the tenant's set. Judged here, in
-        // the one transactional edge write, so `link`, the inline links of `remember` and every
-        // other producer agree (E1.7a RE2-8); both endpoints are already known to be the
+        // the declared endpoints, enforced as data for every rel (E1.8, E1.7 R1). Judged here,
+        // in the one transactional edge write, so `link`, the inline links of `remember` and
+        // every other producer agree (E1.7a RE2-8); both endpoints are already known to be the
         // tenant's, so no existence leaks across workspaces
-        // E1.8 (E1.7 R1): the declared lists are enforced as data for every rel; for `GOVERNS`
-        // the source side is the dynamic `governs_paths` rule alone (a user ontology's
-        // governing kind is not in the shipped `from:` list, which stays documentary on the
-        // row; coordinator decision 2026-10-26), the `to:` list stays enforced
-        let from_allowed = if rel == GOVERNS_REL {
-            governed.governs_paths(skind)
-        } else {
-            def.from_kinds.is_empty() || def.from_kinds.iter().any(|k| k == skind)
-        };
+        let from_allowed = def.from_kinds.is_empty() || def.from_kinds.iter().any(|k| k == skind);
         if !from_allowed || (!def.to_kinds.is_empty() && !def.to_kinds.iter().any(|k| k == dkind)) {
             return Err(StoreError::EndpointNotAllowed {
                 rel: rel.into(),
@@ -922,15 +905,12 @@ pub(crate) fn in_workspace(node: &Node, ws: Option<&str>) -> bool {
     ws.is_none_or(|ws| node.workspace_id == ws)
 }
 
-/// The rel whose source must govern paths (the shipped `adr:GOVERNS`, stored bare).
-const GOVERNS_REL: &str = "GOVERNS";
-
 /// In which workspace a write lands: every endpoint of an edge write is resolved inside `ws`
 /// (R3-3).
 struct Tenant<'a> {
     ws: &'a str,
-    /// The governed kinds and `on_link` rels this write decides by (EN-F4).
-    governed: Arc<GovernedSet>,
+    /// The ontology rules (`on_link` rels) this write decides by (EN-F4).
+    rules: Arc<RuleSet>,
 }
 
 impl SqliteStore {
@@ -938,15 +918,15 @@ impl SqliteStore {
     fn tenant<'a>(&'a self, ws: &'a str) -> Tenant<'a> {
         Tenant {
             ws,
-            governed: self.governed(),
+            rules: self.rules(),
         }
     }
 
-    /// The governed set writes decide by now.
-    pub(crate) fn governed(&self) -> Arc<GovernedSet> {
+    /// The ontology rules writes decide by now.
+    pub(crate) fn rules(&self) -> Arc<RuleSet> {
         Arc::clone(
             &self
-                .governed
+                .rules
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
         )
@@ -1057,11 +1037,7 @@ impl MemoryStore for SqliteStore {
         self.publish_until(target, deadline)
     }
     fn traverse(&self, q: &TraverseQuery) -> Result<TraverseResult> {
-        // lock order main then read (E2.7 default 2): `attach_snapshot` and `snapshot_symbols`
-        // take the read slot alone, so no path takes the two reversed
-        let conn = self.lock();
-        let cg = self.cg_read();
-        traverse::traverse(&conn, cg.as_ref(), q)
+        traverse::traverse(&self.lock(), q)
     }
     fn chunk_covering(&self, workspace: &str, path: &str, offset: u64) -> Result<Option<Node>> {
         crate::recall::chunk_covering(&self.lock(), workspace, path, offset)
@@ -1220,11 +1196,11 @@ impl SchemaStore for SqliteStore {
     fn schema(&self) -> Result<Vec<TypeDef>> {
         ontology::all_defs(&self.lock())
     }
-    fn adopt_governed(&self, governed: Arc<GovernedSet>) {
+    fn adopt_rules(&self, rules: Arc<RuleSet>) {
         *self
-            .governed
+            .rules
             .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = governed;
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = rules;
     }
     fn schema_extend(&self, def: TypeDef) -> Result<TypeDef> {
         match def.kind.as_str() {

@@ -211,7 +211,7 @@ impl SqliteStore {
         mut batch: WriteBatch,
     ) -> Result<BatchReport> {
         let batch_producer = batch.edge_diff.producer();
-        let stale_source = super::artifacts::stale_sources(tx, &batch, &self.governed())?;
+        let stale_source = super::artifacts::stale_sources(tx, &batch)?;
         if stale_source != 0 {
             return Ok(BatchReport {
                 stale_source,
@@ -272,7 +272,7 @@ impl SqliteStore {
                         && scoring
                     {
                         // the pointer of a reactivated source comes back
-                        anchors::refresh(tx, rid, &tenant.governed)?;
+                        anchors::refresh(tx, rid)?;
                     }
                 }
                 Op::UpsertEdge { .. } => {}
@@ -302,7 +302,7 @@ impl SqliteStore {
                 if srid == drid {
                     return Err(StoreError::SelfLink(src.to_string()));
                 }
-                Self::edge_rule(tx, &tenant.governed, rel, &skind, &dkind)?;
+                Self::edge_rule(tx, rel, &skind, &dkind)?;
                 let mut props = props.clone().unwrap_or_else(|| serde_json::json!({}));
                 let scored = Scored::take(&mut props, batch_producer);
                 let written = edge_write::write_edge(
@@ -325,7 +325,7 @@ impl SqliteStore {
                 if written == edge_write::Written::KeptByFirstWriter {
                     report.edges_kept_by_first_writer += 1;
                 } else if written.wrote()
-                    && let Some(effect) = LinkEffect::of(&tenant.governed, rel)
+                    && let Some(effect) = LinkEffect::of(&tenant.rules, rel)
                 {
                     Self::mark_target(tx, dst.as_str(), effect, &now_iso())?;
                 }

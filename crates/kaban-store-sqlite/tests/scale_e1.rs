@@ -19,9 +19,9 @@ mod common;
 use common::{Scratch, ctx, nid};
 use kaban_core::ontology::resolve::RelEnd;
 use kaban_core::{
-    GovernedSet, IngestStore, LinkReq, MemoryStore, NamespaceSet, NewNode, Node, Qualified,
-    RememberOutcome, SchemaStore, TraverseDirection, TraverseQuery, TypeDeclaration, TypeDef,
-    WorkspaceId, WriteCtx, resolve, stored_name,
+    IngestStore, LinkReq, MemoryStore, NamespaceSet, NewNode, Node, Qualified, RememberOutcome,
+    RuleSet, SchemaStore, TraverseDirection, TraverseQuery, TypeDeclaration, TypeDef, WorkspaceId,
+    WriteCtx, resolve, stored_name,
 };
 use kaban_store_sqlite::SqliteStore;
 use std::sync::Arc;
@@ -33,32 +33,29 @@ const RECORDS_PER_KIND: usize = RECORDS_PER_ONTOLOGY / 2;
 /// One link per record pair: `Service OPERATES Runbook`, `Vendor SUPPLIES Product`.
 const LINKS: usize = 2 * RECORDS_PER_KIND;
 
-/// `ops`: the governed `Runbook` (acceptance human, serialized under `runbooks`) and the plain
-/// `Service`, linked `Service OPERATES Runbook`.
+/// `ops`: the `Runbook` with a `rules` block and the plain `Service`, linked
+/// `Service OPERATES Runbook`.
 const OPS_YAML: &str = r#"ontology: ops
 version: 1
 kinds:
   Runbook:
     description: "An operational runbook."
     props_schema: {type: object, additionalProperties: false, properties: {owner: {type: string}}}
-    governed: {acceptance: human, serialize: {dir: runbooks, format: md-frontmatter},
-               export: {digest: true, marker: false, heading: Runbooks}, display: {label: Runbook, plural: Runbooks},
-               governs_paths: true, dedup: none}
+    rules: {display: {label: Runbook, plural: Runbooks}, dedup: none}
   Service:
     description: "A deployed service."
 rels:
   OPERATES: {from: [ops:Service], to: [ops:Runbook], directed: true, description: "The service is operated by the runbook."}
 "#;
 
-/// `shop`: the governed `Contract` (agent tier, store only) and the plain `Vendor` and
-/// `Product`, linked `Vendor SUPPLIES Product`.
+/// `shop`: the `Contract` with a `rules` block and the plain `Vendor` and `Product`, linked
+/// `Vendor SUPPLIES Product`.
 const SHOP_YAML: &str = r#"ontology: shop
 version: 1
 kinds:
   Contract:
     description: "A supply contract kept in the store only."
-    governed: {acceptance: agent, serialize: none, export: {digest: false, marker: false},
-               display: {label: Contract, plural: Contracts}, governs_paths: false, dedup: none}
+    rules: {display: {label: Contract, plural: Contracts}, dedup: none}
   Vendor:
     description: "A vendor."
   Product:
@@ -70,8 +67,8 @@ rels:
 /// Declare the two user ontologies in `store` the way the service's load seam does
 /// (`kaban-api/src/ontology.rs::write_namespace`): the shipped files plus the two user files
 /// resolved together, every non-builtin kind and rel upserted under its stored name with the
-/// canonical declaration columns. Returns the governed set of the resolved ontology.
-fn declare_ontologies(store: &SqliteStore) -> Arc<GovernedSet> {
+/// canonical declaration columns. Returns the rule set of the resolved ontology.
+fn declare_ontologies(store: &SqliteStore) -> Arc<RuleSet> {
     let mut files = kaban_core::shipped::files().unwrap();
     files.push(kaban_core::OntologyFile::from_yaml(OPS_YAML).unwrap());
     files.push(kaban_core::OntologyFile::from_yaml(SHOP_YAML).unwrap());
@@ -120,7 +117,7 @@ fn declare_ontologies(store: &SqliteStore) -> Arc<GovernedSet> {
             })
             .unwrap();
     }
-    Arc::new(GovernedSet::from_ontology(&ontology))
+    Arc::new(RuleSet::from_ontology(&ontology))
 }
 
 /// `remember` one `kind` record with `text` and the inline links; a fresh store never reports
@@ -158,13 +155,13 @@ fn one_thousand_records_across_two_ontologies() {
     let s = Scratch::new("kaban-scale-e1", "records");
     let store = SqliteStore::open(&s.db(), &s.keys()).unwrap();
     let ws = WorkspaceId::default();
-    let governed = declare_ontologies(&store);
+    let rules = declare_ontologies(&store);
     let ctx = ctx();
     assert!(
-        governed.contains("ops:Runbook"),
-        "the user governed kind is in the set"
+        rules.rules("ops:Runbook").is_some(),
+        "the user kind's rules are in the set"
     );
-    assert!(!governed.contains("ops:Service"));
+    assert!(rules.rules("ops:Service").is_none());
 
     // 1,000 records: 250 of each kind, every pair linked through the ontology's rel
     let seeding = Instant::now();
@@ -237,7 +234,6 @@ fn one_thousand_records_across_two_ontologies() {
             direction: TraverseDirection::Both,
             max_depth: 1,
             node_kinds: vec![],
-            governance: vec![],
             limit: 50,
             workspace_id: None,
             ..Default::default()

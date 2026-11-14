@@ -42,7 +42,7 @@ const TODAYS_LABELS: [(&str, &str); 14] = [
     ),
     (
         "Convention",
-        "A rule the project follows, with its rationale (governed).",
+        "A rule the project follows, with its rationale.",
     ),
     (
         "CodeRef",
@@ -55,7 +55,7 @@ const TODAYS_LABELS: [(&str, &str); 14] = [
 ];
 
 /// `SEED_RELS` before E1.3, the same way.
-const TODAYS_RELS: [(&str, &str); 16] = [
+const TODAYS_RELS: [(&str, &str); 15] = [
     ("RELATES_TO", "Generic association."),
     ("ABOUT", "Memory is about an Entity."),
     ("PART_OF", "Containment / membership."),
@@ -68,10 +68,6 @@ const TODAYS_RELS: [(&str, &str); 16] = [
     ("DEPENDS_ON", "Dependency."),
     ("MENTIONS", "Mentions an entity."),
     ("EVIDENCE_FOR", "Supports the target claim."),
-    (
-        "GOVERNS",
-        "A Decision or Convention governs the target (CodeRef or path).",
-    ),
     ("NEXT", "Reading order between sections or chunks."),
     ("LINKS_TO", "A document links to another document."),
     ("TAGGED", "Tagged with a Tag node."),
@@ -181,16 +177,12 @@ fn the_shipped_files_reproduce_todays_seed_rows_and_schema_describe_adds_only_ns
             .unwrap()
     };
     assert_eq!(rel("SUPERSEDES").from_kinds, vec!["Decision".to_owned()]);
-    assert_eq!(
-        rel("GOVERNS").to_kinds,
-        vec!["CodeRef".to_owned(), "path".to_owned()]
-    );
     assert!(rel("RELATES_TO").from_kinds.is_empty() && rel("RELATES_TO").to_kinds.is_empty());
     assert!(!rel("CONTRADICTS").directed);
     let label = |name: &str| described.labels.iter().find(|d| d.name == name).unwrap();
     assert!(label("Decision").props_schema.is_some());
-    assert!(label("Decision").declaration.governed.is_some());
-    assert!(label("Fact").declaration.governed.is_none());
+    assert!(label("Decision").declaration.rules.is_some());
+    assert!(label("Fact").declaration.rules.is_none());
     assert!(
         described
             .relationships
@@ -200,7 +192,7 @@ fn the_shipped_files_reproduce_todays_seed_rows_and_schema_describe_adds_only_ns
     // the raw store rows carry their namespace, persisted since 0004 (E1.7): the stored
     // name is bare in the table and `ns` is read from the column
     let raw = store.schema().unwrap();
-    assert_eq!(raw.len(), 30);
+    assert_eq!(raw.len(), 29);
     assert!(raw.iter().all(|d| d.ns.is_some() && d.builtin));
 }
 
@@ -286,15 +278,14 @@ impl Repo {
 }
 
 /// The shipped `adr.yaml` renamed to namespace `incidents` (the plan's fixture): the same eight
-/// kinds and seven rels, the `Governed` mixin and Decision's EN-F3a schema. Every bare
+/// kinds and six rels, the `Labelled` mixin and Decision's EN-F3a schema. Every bare
 /// reference is qualified with `incidents:` because a bare name declared both here and in
 /// `adr` is `ambiguous_kind` by engine-spec §3.1 (no owning-namespace exception; E1.3a).
 const INCIDENTS_YAML: &str = r#"ontology: incidents
 version: 1
 extends: [core]
 mixins:
-  Governed: {governed: {acceptance: human, serialize: none, export: {digest: false, marker: false},
-                        display: {label: Record, plural: Records}, governs_paths: false, dedup: none}}
+  Labelled: {rules: {display: {label: Record, plural: Records}}}
 kinds:
   Fact: {description: "A verified statement.", props_schema: {type: object}}
   Idea: {description: "A proposal.", props_schema: {type: object}}
@@ -303,36 +294,27 @@ kinds:
   Episode: {description: "Provenance.", props_schema: {type: object}}
   Decision:
     description: "A choice made, with its rationale."
-    mixins: [incidents:Governed]
     props_schema: {"type": "object", "additionalProperties": false, "required": ["rationale"], "properties": {"decision": {"type": "string"}, "rationale": {"type": "string", "minLength": 1}}}
-    governed: {acceptance: human, serialize: {dir: decisions, format: md-frontmatter},
-               export: {digest: true, marker: true, heading: Decisions}, display: {label: Decision, plural: Decisions},
-               governs_paths: true, dedup: title+scope}
+    rules: {display: {label: Decision, plural: Decisions}, dedup: title+scope}
     rank: {boost: 1.2, expand_rels: [CAUSED_BY, FIXED_BY, SUPERSEDES], expand_depth: 2}
     fts_fields: [props.rationale]
   Convention:
     description: "A rule the project follows."
-    mixins: [incidents:Governed]
     props_schema: {type: object, additionalProperties: false, properties: {rule: {type: string}}}
-    governed: {acceptance: agent, serialize: {dir: conventions, format: md-frontmatter},
-               export: {digest: true, marker: true, heading: Conventions}, display: {label: Convention, plural: Conventions},
-               governs_paths: true, dedup: title+scope}
+    rules: {display: {label: Convention, plural: Conventions}, dedup: title+scope}
   Failure:
     description: "Something that went wrong."
-    mixins: [incidents:Governed]
+    mixins: [incidents:Labelled]
     props_schema: {type: object, additionalProperties: false, properties: {error_text: {type: string}}}
 rels:
-  SUPERSEDES: {from: [incidents:Decision], to: [incidents:Decision], directed: true, description: "Newer replaces older.", on_link: archive_target, governed_semantics: true}
+  SUPERSEDES: {from: [incidents:Decision], to: [incidents:Decision], directed: true, description: "Newer replaces older.", on_link: archive_target}
   CONTRADICTS: {from: [], to: [], directed: false, description: "Two memories conflict."}
   INVALIDATES: {from: [], to: [], directed: true, description: "Target no longer valid."}
   DEPENDS_ON: {from: [], to: [], directed: true, description: "Dependency."}
   CAUSED_BY: {from: [incidents:Failure], to: [], directed: true, description: "Caused by the target."}
   FIXED_BY: {from: [incidents:Failure], to: [], directed: true, description: "Fixed by the target."}
-  GOVERNS: {from: [incidents:Decision, incidents:Convention], to: [CodeRef, path], directed: true, description: "Governs the target.", governed_semantics: true}
 source_types: {adr: {kinds: [incidents:Decision, incidents:Fact], paths: ["docs/adr/**"]}}
 default_kind: incidents:Fact
-questions:
-  governing_decisions: {kinds: governs_paths, where: {path_scope: {governs: $path}}, exclude_via: incidents:SUPERSEDES, order: [governance, currency], depth: 1}
 "#;
 
 fn incidents_yaml() -> String {
@@ -357,7 +339,7 @@ fn a_user_namespace_loads_under_stored_names_records_its_hash_and_reloads_idempo
         report.hash,
         blake3::hash(text.as_bytes()).to_hex().to_string()
     );
-    assert_eq!((report.kinds, report.rels), (8, 7));
+    assert_eq!((report.kinds, report.rels), (8, 6));
     assert!(report.changed);
     let described = repo.api.schema_describe().unwrap();
     let decision = described
@@ -405,12 +387,8 @@ fn a_user_namespace_loads_under_stored_names_records_its_hash_and_reloads_idempo
     // the registry sees the kind
     let view = repo.registry.kind("incidents:Decision").unwrap();
     assert_eq!(view.id.to_string(), "incidents:Decision");
-    assert!(view.governed.is_some());
-    assert!(
-        repo.registry
-            .governing_kinds()
-            .contains(&"incidents:Decision".to_owned())
-    );
+    assert!(view.rules.is_some());
+    assert!(repo.registry.rule_set().dedups("incidents:Decision"));
 
     // reload: same bytes, nothing written
     let again = repo.registry.load_file(&repo.api, &path).unwrap();
@@ -641,8 +619,7 @@ fn schema_extend_accepts_stored_names_keeps_todays_rejections_and_remember_round
 #[test]
 fn the_json_declaration_columns_are_written_at_the_load_seam_and_described() {
     let repo = Repo::new("json-columns");
-    // the kaban-core fixture: a governed `Incident` with a file, a governed `Outage` without
-    // one, an ungoverned `Decision`
+    // the kaban-core fixture: `Incident` and `Outage` with a `rules` block, `Decision` without
     let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../kaban-core/fixtures/ontology/incidents.yaml");
     let path = repo.write("incidents.yaml", &std::fs::read_to_string(fixture).unwrap());
@@ -658,13 +635,10 @@ fn the_json_declaration_columns_are_written_at_the_load_seam_and_described() {
     };
 
     let incident = label("incidents:Incident");
-    let governed = incident.declaration.governed.expect("Incident is governed");
-    assert_eq!(governed["acceptance"], "human");
-    assert_eq!(governed["serialize"]["dir"], "incidents");
-    assert_eq!(governed["serialize"]["format"], "md-frontmatter");
-    assert_eq!(governed["export"]["heading"], "Incidents");
-    assert_eq!(governed["governs_paths"], true);
-    assert_eq!(governed["dedup"], "none");
+    let rules = incident.declaration.rules.expect("Incident has rules");
+    assert_eq!(rules["dedup"], "none");
+    assert_eq!(rules["display"]["plural"], "Incidents");
+    assert!(rules.get("acceptance").is_none() && rules.get("serialize").is_none());
     // the block as declared (an undeclared optional leaf such as `icon` renders `null`: the
     // meta types serialize by derive only, E1.8)
     let display = incident.declaration.display.clone().unwrap();
@@ -682,19 +656,16 @@ fn the_json_declaration_columns_are_written_at_the_load_seam_and_described() {
     );
     // canonical JSON (E1.1 `canon.rs`): sorted keys, no spaces
     assert_eq!(
-        serde_json::to_string(&governed).unwrap(),
-        kaban_core::canonical_json(&governed)
+        serde_json::to_string(&rules).unwrap(),
+        kaban_core::canonical_json(&rules)
     );
 
     let outage = label("incidents:Outage");
-    assert_eq!(outage.declaration.governed.unwrap()["serialize"], "none");
+    assert_eq!(outage.declaration.rules.unwrap()["dedup"], "none");
 
     let decision = label("Decision");
     assert!(decision.builtin);
-    assert_eq!(
-        decision.declaration.governed.unwrap()["dedup"],
-        "title+scope"
-    );
+    assert_eq!(decision.declaration.rules.unwrap()["dedup"], "title+scope");
     assert_eq!(decision.declaration.rank.unwrap()["expand_depth"], 2);
     assert_eq!(decision.declaration.extract.unwrap()["enabled"], true);
     assert_eq!(decision.declaration.display.unwrap()["plural"], "Decisions");
@@ -702,7 +673,7 @@ fn the_json_declaration_columns_are_written_at_the_load_seam_and_described() {
     for plain in ["incidents:Decision", "Fact"] {
         let d = label(plain);
         assert!(
-            d.declaration.governed.is_none()
+            d.declaration.rules.is_none()
                 && d.declaration.rank.is_none()
                 && d.declaration.display.is_none(),
             "{plain} declares none"

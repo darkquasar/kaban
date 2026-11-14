@@ -8,7 +8,6 @@ use crate::error::ApiError;
 use crate::ontology::validate_kind_props;
 use crate::types::{CodeRefWire, RememberRequest, RememberResponse, RememberStatus};
 use kaban_codegraph::{CodeGraphReader, HeadInput, Resolved};
-use kaban_core::ontology::meta::Dedup;
 use kaban_core::ontology::resolve::normalise_stored;
 use kaban_core::{CodeRef, LinkReq, NewNode, NodeId, RememberOutcome, StoreScope, WorkspaceId};
 use std::sync::Arc;
@@ -121,7 +120,7 @@ impl KabanApi {
             tags.push(self.gate(t, "tag", s, &mut red)?);
         }
         // stored as its canonical set (R3-6), the denominator of its F14 currency
-        let path_scope = crate::currency::canonical_path_scope(&self.gate_all(
+        let path_scope = crate::path_scope::canonical_path_scope(&self.gate_all(
             t,
             "path_scope",
             &p.path_scope,
@@ -232,16 +231,9 @@ impl KabanApi {
                 });
             }
         }
-        // the near-duplicate key of a kind whose mixin says `dedup: title+scope` (EN-F4; the
+        // the near-duplicate key of a kind whose rules say `dedup: title+scope` (EN-F4; the
         // shipped Decision)
-        let dedups = self
-            .registry
-            .with_kind(&kind, |k| {
-                k.governed
-                    .as_ref()
-                    .is_some_and(|g| g.dedup == Dedup::TitleScope)
-            })
-            .unwrap_or(false);
+        let dedups = self.rules().dedups(&kind);
         let n = NewNode {
             dup_key: dedups.then(|| dup_key(summary.as_deref(), &text, &path_scope)),
             kind,

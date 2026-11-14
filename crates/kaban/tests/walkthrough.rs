@@ -187,7 +187,7 @@ fn step3(s: &Scratch, _root: &Path, mcp: &mut McpClient, arch: &str, adr: &str) 
         .unwrap();
     let mut forbidden = body.clone();
     forbidden["edges"] = json!([
-        {"from_local_id":"discounts","rel":"GOVERNS","to_id":code.id},
+        {"from_local_id":"discounts","rel":"INVALIDATES","to_id":code.id},
         {"from_local_id":"discounts","rel":"SUPERSEDES","to_id":decision.id}
     ]);
     let refusal = mcp.call("ingest_submit", &forbidden);
@@ -200,26 +200,26 @@ fn step3(s: &Scratch, _root: &Path, mcp: &mut McpClient, arch: &str, adr: &str) 
         mcp.call("ingest_finish", &json!({"job":brief["job"]})),
         finish
     );
-    let governs = |mcp: &mut McpClient| {
+    let depends = |mcp: &mut McpClient| {
         mcp.call(
             "traverse",
             &json!({
-                "start_ids":[decision.id],"rels":["GOVERNS"],"max_depth":1
+                "start_ids":[decision.id],"rels":["DEPENDS_ON"],"max_depth":1
             }),
         )
     };
-    assert_eq!(governs(mcp)["edges"], json!([]));
+    assert_eq!(depends(mcp)["edges"], json!([]));
     // Explicitly human-authorized link request.
     mcp.call(
         "link",
-        &json!({"from":decision.id,"rel":"GOVERNS","to":code.id}),
+        &json!({"from":decision.id,"rel":"DEPENDS_ON","to":code.id}),
     );
     // Both original source chunks are citations; the architecture link is an explicit human act.
     mcp.call(
         "link",
         &json!({"from":arch,"rel":"EVIDENCE_FOR","to":decision.id}),
     );
-    let human = governs(mcp);
+    let human = depends(mcp);
     assert_eq!(human["edges"].as_array().unwrap().len(), 1, "{human}");
     let evidence = mcp.call(
         "traverse",

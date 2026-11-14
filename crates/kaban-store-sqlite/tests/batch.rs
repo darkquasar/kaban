@@ -379,7 +379,6 @@ fn out_neighbours(store: &SqliteStore, from: &NodeId) -> Vec<String> {
             direction: kaban_core::TraverseDirection::Out,
             max_depth: 1,
             node_kinds: vec![],
-            governance: vec![],
             limit: 0,
             workspace_id: None,
             ..Default::default()
@@ -1107,17 +1106,17 @@ fn reactivate_restores_an_ingest_owned_tombstoned_chunk() {
 }
 
 /// RD2-5: every other `Tombstoned -> Active` attempt is refused with a fixed class (core F5):
-/// a human-tombstoned Decision (governed kind), an ingest-owned governed kind, and a Chunk
-/// without the ingest owner; the refusing batch rolls back entirely.
+/// a human-tombstoned Decision (a kind the pipeline does not write), an ingest-owned Decision,
+/// and a Chunk without the ingest owner; the refusing batch rolls back entirely.
 #[test]
-fn reactivate_refuses_governed_kinds_and_foreign_owners() {
+fn reactivate_refuses_kinds_the_pipeline_does_not_write_and_foreign_owners() {
     let store = SqliteStore::open_memory().unwrap();
     let cases = [
         ("Decision", None, "human-tombstoned Decision"),
         (
             "Decision",
             Some(kaban_core::INGEST_OWNER),
-            "ingest-owned governed kind",
+            "ingest-owned Decision",
         ),
         ("Chunk", None, "chunk without owner"),
         ("Chunk", Some("kaban-parse"), "chunk of another producer"),
@@ -1342,7 +1341,6 @@ fn out_edge_rows(store: &SqliteStore, from: &NodeId) -> Vec<serde_json::Value> {
             direction: kaban_core::TraverseDirection::Out,
             max_depth: 1,
             node_kinds: vec![],
-            governance: vec![],
             limit: 0,
             workspace_id: None,
             ..Default::default()
@@ -1557,7 +1555,6 @@ fn out_edges(store: &SqliteStore, from: &NodeId) -> Vec<(String, serde_json::Val
             direction: kaban_core::TraverseDirection::Out,
             max_depth: 1,
             node_kinds: vec![],
-            governance: vec![],
             limit: 0,
             workspace_id: None,
             ..Default::default()

@@ -92,7 +92,7 @@ fn qualified_spellings_of_bare_namespaces_meet_the_registry_rules_through_the_ap
     repo.load(
         &api,
         "widgets.yaml",
-        "ontology: user\nversion: 1\nkinds:\n  Widget:\n    description: \"A widget.\"\n    governed: {acceptance: agent, serialize: none, export: {digest: false, marker: false}, display: {label: Widget, plural: Widgets}, governs_paths: false, dedup: title+scope}\nrels: {}\n",
+        "ontology: user\nversion: 1\nkinds:\n  Widget:\n    description: \"A widget.\"\n    rules: {display: {label: Widget, plural: Widgets}, dedup: title+scope}\nrels: {}\n",
     );
     let widget = |kind: &str, text: &str| {
         api.remember(RememberRequest {

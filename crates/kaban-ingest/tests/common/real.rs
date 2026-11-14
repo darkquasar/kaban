@@ -172,7 +172,6 @@ impl Rig {
                 direction: kaban_core::TraverseDirection::Both,
                 max_depth: depth,
                 node_kinds: Vec::new(),
-                governance: Vec::new(),
                 limit: 500,
                 workspace_id: None,
                 ..Default::default()

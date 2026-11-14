@@ -1,14 +1,14 @@
 //! `traverse`.
 
 use super::card::{Card, EdgeCard};
-use kaban_core::{Governance, TraverseDirection};
+use kaban_core::TraverseDirection;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-pub use kaban_core::AnchoredKind;
-
-/// `traverse` input.
+/// `traverse` input. Closed: a removed key (`follow_anchors`, `kind_set`, `governance`,
+/// `include_superseded`, `include_candidates`) is refused naming it, with no alias.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct TraverseRequest {
     /// Starting node ids (1..64).
     pub start_ids: Vec<String>,
@@ -24,31 +24,16 @@ pub struct TraverseRequest {
     /// (`unknown_kind`), as is an undeclared relationship type in `rels` (`unknown_rel`).
     #[serde(default)]
     pub node_kinds: Vec<String>,
-    /// Keep only the kinds of this ontology-defined set, in addition to `node_kinds`:
-    /// `governing` (the kinds whose records govern paths) is the one set; any other value is
-    /// refused (`unknown_kind_set`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub kind_set: Option<String>,
     /// Follow only the edges that pass every clause: a producer in `producers`, a method in
     /// `methods`, a score of at least `min_score`. An edge without a value in a filtered column
     /// (a structural edge carries no method or score) does not pass that clause. Default:
     /// every edge.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub edge_filter: Option<EdgeFilter>,
-    /// Keep only nodes in these governance states (`none`, `proposed`, `accepted`,
-    /// `superseded`, `invalidated`); default: any.
-    #[serde(default)]
-    pub governance: Vec<Governance>,
     /// Max nodes (default 100, max 500).
     pub limit: Option<usize>,
     /// Workspace to traverse (default: the server's bound workspace; `"*"` for all).
     pub workspace_id: Option<String>,
-    /// Expand each reached node that anchors a code symbol or path one step into the current
-    /// code-graph snapshot (EN-F19): the snapshot rows come back in `anchored` as `symbol` and
-    /// `file` cards, 200 per anchored node and 500 in total; depth and the node limit are
-    /// unchanged. Default false; nothing is added when no snapshot resolves.
-    #[serde(default)]
-    pub follow_anchors: bool,
 }
 
 /// The edge filter of `traverse` (EN-F46). Values are the stored vocabulary spellings:
@@ -78,28 +63,4 @@ pub struct TraverseResponse {
     pub nodes: Vec<Card>,
     /// Edges among the returned nodes.
     pub edges: Vec<EdgeCard>,
-    /// Code-graph cards reached through the anchors of the returned nodes
-    /// (`follow_anchors`); empty otherwise.
-    #[serde(default)]
-    pub anchored: Vec<AnchoredCard>,
-}
-
-/// One code-graph card of `anchored[]` (EN-F19; CG-JOIN v1 §9 order `(path, ref)`).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct AnchoredCard {
-    /// The returned node whose anchor reached this card.
-    pub from: String,
-    /// `symbol` or `file`.
-    pub kind: AnchoredKind,
-    /// The file path: the card itself for a `file`, the defining file for a `symbol`.
-    pub path: String,
-    /// The symbol's stable `ref` (absent for a file).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub r#ref: Option<String>,
-    /// The symbol's cross-commit key (absent for a file or a key-less symbol).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub key: Option<String>,
-    /// The symbol's name (absent for a file).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
 }

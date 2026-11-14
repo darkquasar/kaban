@@ -61,13 +61,13 @@ pub fn target_schema(
     lint(&wire)?;
     let names = stored_names(&kinds);
     let mut allowed_edges = Vec::new();
-    for rel in ontology.rels.values().filter(|rel| {
-        !rel.governed_semantics
-            && !matches!(
-                rel.id.name.as_str(),
-                "SUPERSEDES" | "INVALIDATES" | "CONTRADICTS" | "GOVERNS"
-            )
-    }) {
+    // the extractor trust rule (PC-20): no lifecycle-affecting rel, named or by its `on_link`
+    // effect, is ever offered to an extractor
+    for rel in ontology
+        .rels
+        .values()
+        .filter(|rel| !kaban_core::is_lifecycle_rel(&rel.id.name) && rel.on_link.is_none())
+    {
         let ends = |ends: &[kaban_core::ontology::resolve::RelEnd]| -> Vec<String> {
             if ends.is_empty() {
                 return names.clone();

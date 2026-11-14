@@ -166,9 +166,7 @@ impl SqliteStore {
                 kind: stored_kind,
                 repo: n.repo.as_deref(),
                 props: n.props.as_ref().unwrap_or(&empty),
-                path_scope: &n.path_scope,
             },
-            &tenant.governed,
         )?;
         Ok(())
     }

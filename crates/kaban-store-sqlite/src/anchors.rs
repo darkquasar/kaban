@@ -9,9 +9,8 @@
 //!   `props.symbol` (when present and non-empty; `name_path` is never a key), both with
 //!   `repo = node.repo` and `snapshot_scope = props.snapshot_commit` when it is 40 hex
 //!   (lowercased), `NULL` otherwise;
-//! * a record of a kind that governs paths gets one `path` row per `path_scope` glob, keyed
-//!   by the glob's literal prefix, or by the universal key `""` for a prefix-less glob
-//!   (E1.7a RE2-2); `repo = node.repo`, no scope;
+//! * no other kind gets a row (records no longer anchor their `path_scope` globs: path
+//!   scoping is gone, PC-20);
 //! * no `id` rows: E1.7 derives none from the stored data either (an external document id
 //!   seam arrives with its producer).
 //!
@@ -25,17 +24,11 @@ use crate::connection::CgRead;
 use crate::rows::{NODE_COLS, row_node};
 use crate::sql_error::SqlResultExt;
 use kaban_core::{
-    AnchorPredicates, GovernedSet, Node, Result, SnapshotSymbol, StoreError, SymbolPage,
-    WorkspaceFilter,
+    AnchorPredicates, Node, Result, SnapshotSymbol, StoreError, SymbolPage, WorkspaceFilter,
 };
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::Value;
 use std::collections::BTreeSet;
-
-/// The `node_anchor.key` of a governed record whose glob has no literal prefix (RE2-2): every
-/// path of the repository is a candidate. A consumer selecting anchors by prefix must include
-/// the rows with this key.
-pub(crate) const UNIVERSAL_PREFIX: &str = "";
 
 /// `props.snapshot_commit` as a scope: 40 hex, lowercased; `None` when absent or not 40 hex
 /// (the caller counts the second case).
@@ -52,14 +45,6 @@ pub(crate) fn scope_of(props: &serde_json::Value) -> (Option<String>, bool) {
     }
 }
 
-/// The key of a governed `path` anchor: the literal prefix of a glob (the bytes before the
-/// first metacharacter `*`, `?`, `[`, `{`), or [`UNIVERSAL_PREFIX`] when the glob starts with
-/// one (the glob matches paths under every prefix).
-pub(crate) fn literal_prefix(glob: &str) -> &str {
-    let end = glob.find(['*', '?', '[', '{']).unwrap_or(glob.len());
-    &glob[..end]
-}
-
 /// One desired or stored anchor row of a node: `(anchor_kind, key, repo, snapshot_scope)`.
 type Row = (&'static str, String, Option<String>, Option<String>);
 
@@ -71,13 +56,10 @@ pub(crate) struct NodeFacts<'a> {
     pub(crate) repo: Option<&'a str>,
     /// The stored `props` JSON (object).
     pub(crate) props: &'a Value,
-    /// The stored `path_scope` globs.
-    pub(crate) path_scope: &'a [String],
 }
 
-/// The rows a node should have (sorted, deduplicated); `governs_paths` is the writer's answer
-/// for `facts.kind` (`GovernedSet::governs_paths`).
-fn derive(facts: &NodeFacts<'_>, governs_paths: bool) -> BTreeSet<Row> {
+/// The rows a node should have (sorted, deduplicated).
+fn derive(facts: &NodeFacts<'_>) -> BTreeSet<Row> {
     let mut rows = BTreeSet::new();
     let repo = facts.repo.map(str::to_owned);
     if facts.kind == "CodeRef" {
@@ -91,12 +73,6 @@ fn derive(facts: &NodeFacts<'_>, governs_paths: bool) -> BTreeSet<Row> {
             && !symbol.is_empty()
         {
             rows.insert(("symbol", symbol.to_owned(), repo.clone(), scope));
-        }
-    }
-    if governs_paths {
-        for glob in facts.path_scope {
-            let prefix = literal_prefix(glob);
-            rows.insert(("path", prefix.to_owned(), repo.clone(), None));
         }
     }
     rows
@@ -131,20 +107,8 @@ fn stored(conn: &Connection, rid: i64) -> Result<BTreeSet<Row>> {
 
 /// Bring the node's anchor rows to the derived set inside the caller's transaction. Returns
 /// how many rows were inserted and deleted.
-pub(crate) fn maintain(
-    conn: &Connection,
-    facts: &NodeFacts<'_>,
-    governed: &GovernedSet,
-) -> Result<(usize, usize)> {
-    maintain_rows(conn, facts, governed.governs_paths(facts.kind))
-}
-
-fn maintain_rows(
-    conn: &Connection,
-    facts: &NodeFacts<'_>,
-    governs_paths: bool,
-) -> Result<(usize, usize)> {
-    let want = derive(facts, governs_paths);
+pub(crate) fn maintain(conn: &Connection, facts: &NodeFacts<'_>) -> Result<(usize, usize)> {
+    let want = derive(facts);
     let have = stored(conn, facts.rid)?;
     let mut deleted = 0;
     for (kind, key, ..) in have.difference(&want) {
@@ -168,37 +132,23 @@ fn maintain_rows(
     Ok((inserted, deleted))
 }
 
-/// Re-derive the anchors of a stored node from its row (the reactivation and import paths,
-/// where the caller holds no [`NodeFacts`]).
-pub(crate) fn refresh(conn: &Connection, rid: i64, governed: &GovernedSet) -> Result<()> {
-    refresh_with(conn, rid, &|kind| governed.governs_paths(kind))
-}
-
-/// Re-derive the anchors of a node whose strings a policy rescan rewrote (E2.7b; EN-F10 "every
-/// node write"). The rescan runs without a `WriteCtx` and the store's `reconcile::Setup` keeps
-/// its ontology to itself, so the governed answer is read off the row's own anchor rows: a
-/// redaction rewrites strings and never a kind, so a record that had a `path` row at its write
-/// governs paths still, and one without had none to follow (a redaction adds no glob).
-pub(crate) fn rekey(conn: &Connection, rid: i64) -> Result<()> {
-    let had_path_rows = stored(conn, rid)?.iter().any(|(kind, ..)| *kind == "path");
-    refresh_with(conn, rid, &|kind| kind != "CodeRef" && had_path_rows)
-}
-
-fn refresh_with(conn: &Connection, rid: i64, governs_paths: &dyn Fn(&str) -> bool) -> Result<()> {
-    let row: Option<(String, String, Option<String>, String, String)> = conn
+/// Re-derive the anchors of a stored node from its row: the reactivation and import paths,
+/// where the caller holds no [`NodeFacts`], and a policy rescan that rewrote a `CodeRef`'s
+/// masked `props` (E2.7b; EN-F10 "every node write").
+pub(crate) fn refresh(conn: &Connection, rid: i64) -> Result<()> {
+    let row: Option<(String, String, Option<String>, String)> = conn
         .query_row(
-            "SELECT workspace_id, kind, repo, props, path_scope FROM node WHERE rid = ?1 AND lifecycle IN ('active', 'archived')",
+            "SELECT workspace_id, kind, repo, props FROM node WHERE rid = ?1 AND lifecycle IN ('active', 'archived')",
             [rid],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )
         .optional()
         .sql()?;
-    let Some((ws, kind, repo, props, path_scope)) = row else {
+    let Some((ws, kind, repo, props)) = row else {
         return remove(conn, rid);
     };
     let props: Value = serde_json::from_str(&props)?;
-    let path_scope: Vec<String> = serde_json::from_str(&path_scope)?;
-    maintain_rows(
+    maintain(
         conn,
         &NodeFacts {
             rid,
@@ -206,9 +156,7 @@ fn refresh_with(conn: &Connection, rid: i64, governs_paths: &dyn Fn(&str) -> boo
             kind: &kind,
             repo: repo.as_deref(),
             props: &props,
-            path_scope: &path_scope,
         },
-        governs_paths(&kind),
     )?;
     Ok(())
 }
@@ -219,10 +167,6 @@ pub(crate) fn remove(conn: &Connection, rid: i64) -> Result<()> {
         .sql()?;
     Ok(())
 }
-
-/// Whether the universal key names every path (kept here so a consumer reads one constant).
-#[allow(dead_code)] // E2.7's prefilter reads it; the derivation above writes it
-pub(crate) const UNIVERSAL: &str = UNIVERSAL_PREFIX;
 
 /// `MemoryStore::coderefs_by_symbol` (CG-JOIN v1 §3, §7; E2.6): the active `CodeRef` rows
 /// whose `symbol` anchor equals `key` under the predicate set, ordered by row id. Runs on the
@@ -344,11 +288,8 @@ mod tests {
             kind: "CodeRef",
             repo: Some("repo"),
             props: &props,
-            path_scope: &[],
         };
-        let rows: Vec<Row> = derive(&facts, GovernedSet::shipped().governs_paths("CodeRef"))
-            .into_iter()
-            .collect();
+        let rows: Vec<Row> = derive(&facts).into_iter().collect();
         let scope = Some("0123456789abcdef0123456789abcdef01234567".to_owned());
         assert_eq!(
             rows,
@@ -365,46 +306,23 @@ mod tests {
     }
 
     #[test]
-    fn a_scoped_decision_derives_prefix_rows_and_the_universal_row() {
+    fn a_record_with_a_path_scope_derives_no_rows() {
         let props = json!({});
-        let scope = vec!["src/api/**".to_owned(), "**/*.rs".to_owned()];
         let facts = NodeFacts {
             rid: 2,
             workspace_id: "default",
             kind: "Decision",
             repo: None,
             props: &props,
-            path_scope: &scope,
         };
-        let rows: Vec<Row> = derive(&facts, GovernedSet::shipped().governs_paths("Decision"))
-            .into_iter()
-            .collect();
-        assert_eq!(
-            rows,
-            vec![
-                ("path", String::new(), None, None),
-                ("path", "src/api/".into(), None, None),
-            ]
-        );
+        assert!(derive(&facts).is_empty());
     }
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // test code: failures are the assertion
 mod anchor_key_tests {
-    use super::{UNIVERSAL_PREFIX, literal_prefix, scope_of};
-
-    #[test]
-    fn the_literal_prefix_stops_at_the_first_metacharacter() {
-        assert_eq!(literal_prefix("src/api/**"), "src/api/");
-        assert_eq!(literal_prefix("docs/adr-1.md"), "docs/adr-1.md");
-        assert_eq!(literal_prefix("**/*.rs"), UNIVERSAL_PREFIX);
-        assert_eq!(literal_prefix("*"), UNIVERSAL_PREFIX);
-        assert_eq!(literal_prefix("{a,b}/x"), UNIVERSAL_PREFIX);
-        assert_eq!(literal_prefix("src/{a,b}/x"), "src/");
-        assert_eq!(literal_prefix("src/?.rs"), "src/");
-        assert_eq!(literal_prefix("src/[ab].rs"), "src/");
-    }
+    use super::scope_of;
 
     #[test]
     fn a_scope_is_forty_lowercase_hex_or_dropped_and_counted() {

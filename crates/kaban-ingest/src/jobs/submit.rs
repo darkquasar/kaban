@@ -509,10 +509,7 @@ fn owned_edge(src: &NodeId, rel: &str, dst: &NodeId, props: Value) -> Op {
 }
 
 fn forbidden(rel: &str) -> bool {
-    matches!(
-        rel,
-        "SUPERSEDES" | "INVALIDATES" | "CONTRADICTS" | "GOVERNS"
-    )
+    kaban_core::is_lifecycle_rel(rel)
 }
 
 fn allowed_edge(envelope: &JobEnvelope, from: &str, rel: &str, to: &str) -> bool {

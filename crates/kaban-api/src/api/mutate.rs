@@ -6,16 +6,15 @@ use crate::error::ApiError;
 use crate::types::{ForgetRequest, ForgetResponse, LinkRequest, LinkResponse};
 use kaban_core::Actor;
 
-// The `GOVERNS` source rule (core-spec §4; engine-spec EN-F4: `rels.GOVERNS.from` = the kinds
-// with `governs_paths: true`) is the store's, in its one edge-write path, since E1.7a RE2-8.
+// The declared endpoint rule is the store's, in its one edge-write path, since E1.7a RE2-8.
 
 impl KabanApi {
-    /// Create or update a typed relationship between two existing nodes; a `GOVERNS` edge
-    /// starts at a governing kind (`governs_paths: true` in the loaded ontology).
+    /// Create or update a typed relationship between two existing nodes, within the rel's
+    /// declared endpoints.
     ///
     /// # Errors
-    /// `Invalid`, `Rejected`, `NotFound`, `Store(EndpointNotAllowed)` (a `GOVERNS` source that
-    /// does not govern paths) or store errors.
+    /// `Invalid`, `Rejected`, `NotFound`, `Store(EndpointNotAllowed)` (an endpoint outside the
+    /// rel's declared kinds), `Store(UnknownRel)` or store errors.
     #[allow(clippy::needless_pass_by_value)] // core-plan §6 interface: requests are taken by value
     pub fn link(&self, p: LinkRequest) -> Result<LinkResponse, ApiError> {
         self.link_as(p, Actor::Agent)
@@ -50,8 +49,8 @@ impl KabanApi {
             None => None,
         };
         let (from, to) = (Self::node_id(&from)?, Self::node_id(&to)?);
-        // the `GOVERNS` source rule is the store's, in the one edge-write path shared with the
-        // inline links of `remember` (E1.7a RE2-8); nothing is pre-judged here
+        // the endpoint rule is the store's, in the one edge-write path shared with the inline
+        // links of `remember` (E1.7a RE2-8); nothing is pre-judged here
         let e = self
             .store
             .link(&from, &to, &rel, p.confidence, props, &ctx)?;

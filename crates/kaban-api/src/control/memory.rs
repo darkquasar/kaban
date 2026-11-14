@@ -16,10 +16,6 @@ const FORGET_MODES: &[&str] = &["tombstone", "invalidate", "archive", "purge"];
 /// MT-5, `c30-review-dispositions.md` note for C3.6).
 const TRAVERSE_DIRECTIONS: &[&str] = &["out", "in", "both"];
 
-/// `traverse.governance[]` wire values (`kaban_core::Governance`, `rename_all = "lowercase"`;
-/// RE-15, E2.11): the governance states a traversal keeps.
-const GOVERNANCE_VALUES: &[&str] = &["none", "proposed", "accepted", "superseded", "invalidated"];
-
 /// `remember.scope` wire values (`kaban_core::StoreScope`, `rename_all = "lowercase"`).
 const STORE_SCOPES: &[&str] = &["project", "personal"];
 /// The write outcomes of a receipt (spec 05 SS-10 `WriteOutcome`, `rename_all = "snake_case"`).
@@ -91,14 +87,8 @@ pub(super) const ROWS: &[ControlEntry] = &[
     ),
     // RE-15 (E2.11): the closed request vocabularies of `traverse` and `remember`; a valid
     // spelling is validated, any other string is scanned as content and then refused by the
-    // typed parse (`governance[]`, `scope`) or the handler (`unknown_layer`, `unknown_method`).
-    // `node_kinds[]`, `rels[]` and `kind_set` stay content (EN-E6: kind names are content).
-    entry(
-        "traverse",
-        Direction::Request,
-        "governance[]",
-        Shape::Enum(GOVERNANCE_VALUES),
-    ),
+    // typed parse (`scope`) or the handler (`unknown_producer`, `unknown_method`).
+    // `node_kinds[]` and `rels[]` stay content (EN-E6: kind names are content).
     entry(
         "traverse",
         Direction::Request,
@@ -151,13 +141,6 @@ pub(super) const ROWS: &[ControlEntry] = &[
         Shape::NodeId,
     ),
     entry("traverse", Direction::Response, "edges[].to", Shape::NodeId),
-    // EN-F19 (E2.7 deviation 9, E2.7b): the anchored node of a `follow_anchors` card
-    entry(
-        "traverse",
-        Direction::Response,
-        "anchored[].from",
-        Shape::NodeId,
-    ),
     entry("forget", Direction::Response, "id", Shape::NodeId),
     entry(
         "forget",

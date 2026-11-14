@@ -1,7 +1,7 @@
 //! Lifecycle semantics in the store (core-spec §4, F5, F6; DEL-08 survivors of the claim-era
 //! file): purge keeps a ghost row with one purge changes row, traversal and recall never expand
-//! through a hidden bridge, and a user rel declaring `on_link: archive_target` in the relocated
-//! governed set archives its target while a rel without it is inert.
+//! through a hidden bridge, and a user rel declaring `on_link: archive_target` in the ontology's
+//! rule set archives its target while a rel without it is inert.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // test code: failures are the assertion
 
@@ -285,18 +285,18 @@ fn recall_does_not_expand_through_a_hidden_bridge_unless_archived_and_opted_in()
 /// The shipped files plus `fixtures/ontology/incidents.yaml` resolved as one, as the registry
 /// would hold them after a user load: `incidents:REPLACES{on_link: archive_target}` and
 /// `incidents:MENTIONED_IN` without it.
-fn incidents_set() -> std::sync::Arc<kaban_core::GovernedSet> {
+fn incidents_set() -> std::sync::Arc<kaban_core::RuleSet> {
     let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../kaban-core/fixtures/ontology/incidents.yaml");
     let text = std::fs::read_to_string(&fixture).unwrap();
     let mut files = kaban_core::shipped::files().unwrap();
     files.push(kaban_core::OntologyFile::from_yaml(&text).unwrap());
     let ontology = kaban_core::resolve(&files, &kaban_core::NamespaceSet::new()).unwrap();
-    std::sync::Arc::new(kaban_core::GovernedSet::from_ontology(&ontology))
+    std::sync::Arc::new(kaban_core::RuleSet::from_ontology(&ontology))
 }
 
 /// A store that knows the `incidents` rels (the `schema_type` rows the registry writes through
-/// `schema_extend`), holding the `incidents` governed set (the registry adopts it on load).
+/// `schema_extend`), holding the `incidents` rule set (the registry adopts it on load).
 fn incidents_store() -> SqliteStore {
     use kaban_core::TypeDef;
     let store = SqliteStore::open_memory().unwrap();
@@ -316,7 +316,7 @@ fn incidents_store() -> SqliteStore {
             })
             .unwrap();
     }
-    store.adopt_governed(incidents_set());
+    store.adopt_rules(incidents_set());
     store
 }
 
@@ -344,7 +344,7 @@ fn a_user_rel_with_on_link_archive_target_archives_its_target_and_one_without_do
 
     // the shipped set alone declares no effect for the rel
     let plain = incidents_store();
-    plain.adopt_governed(kaban_core::GovernedSet::shipped());
+    plain.adopt_rules(kaban_core::RuleSet::shipped());
     let a = created(&plain, "Fact", "plain a");
     let b = created(&plain, "Fact", "plain b");
     plain

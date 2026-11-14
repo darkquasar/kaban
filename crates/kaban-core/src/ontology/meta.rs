@@ -4,7 +4,9 @@
 //! then the typed parse. A file-form failure is reported as `schema_invalid:file:<path>` with the
 //! dotted path of the offending key (never a value); a name failing its regex is
 //! `invalid_identifier`. The keys of the removed governance pipeline (`priors`,
-//! `confidence_required`, `min_confidence`) are unknown keys like any other.
+//! `confidence_required`, `min_confidence`, the `governed` mixin with its `acceptance`,
+//! `serialize`, `export` and `governs_paths`, a kind's `acceptance` and a rel's
+//! `governed_semantics`) are unknown keys like any other, refused with their dotted path.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -53,13 +55,6 @@ pub struct KindName(String);
 #[serde(try_from = "String")]
 pub struct RelName(String);
 
-/// A `serialize.dir`: one relative path component under `.kaban/<ontology>/`, the namespace
-/// shape `^[a-z][a-z0-9-]{0,31}$` (E1.7a RE2-3): no separator, never `.`/`..`, never empty, so
-/// a loaded ontology cannot name a directory outside the tree.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize, serde::Serialize)]
-#[serde(try_from = "String")]
-pub struct DirName(String);
-
 /// Is `s` a namespace per the spec regex (`x` excluded)?
 fn is_ns(s: &str) -> bool {
     let mut chars = s.chars();
@@ -68,15 +63,6 @@ fn is_ns(s: &str) -> bool {
         && s.chars()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
         && s != "x"
-}
-
-/// Is `s` one relative directory component of the namespace shape (`x` is not reserved here)?
-fn is_dir_name(s: &str) -> bool {
-    let mut chars = s.chars();
-    matches!(chars.next(), Some(c) if c.is_ascii_lowercase())
-        && s.len() <= 32
-        && s.chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
 /// Is `s` a kind name per the spec regex?
@@ -150,7 +136,6 @@ macro_rules! identifier {
 identifier!(Ns, is_ns);
 identifier!(KindName, is_kind_name);
 identifier!(RelName, is_rel_name);
-identifier!(DirName, is_dir_name);
 
 /// One ontology file (engine-spec §3.1): `ontology`, `version`, `kinds` and `rels` are required
 /// by the meta-schema; every other block is optional. Bodies are plain serde data.
@@ -202,14 +187,9 @@ pub struct KindBody {
     /// EN-F3 subset schema of `props`; default `{type: object, additionalProperties: false}`.
     #[serde(default)]
     pub props_schema: Option<Value>,
-    /// Governance (EN-F4).
+    /// The kind's record rules: display labels and the near-duplicate key (EN-F4).
     #[serde(default)]
-    pub governed: Option<Governed>,
-    /// Who accepts an EN-F5a candidate or EN-F13 `proposed` record of an ungoverned kind
-    /// (OWN-84 (1); core-spec F4): `agent` when absent. Refused beside `governed`, whose
-    /// mixin carries its own `acceptance`.
-    #[serde(default)]
-    pub acceptance: Option<Acceptance>,
+    pub rules: Option<Rules>,
     /// Rank hints (EN-F29).
     #[serde(default)]
     pub rank: Option<RankHints>,
@@ -256,93 +236,6 @@ pub enum Stamp {
     None,
 }
 
-/// Who accepts a record of a governed kind.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, serde::Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Acceptance {
-    /// A human.
-    Human,
-    /// The agent.
-    Agent,
-}
-
-/// Where a governed kind serializes: the literal `none` or a closed `{dir, format}` mapping.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Serialize {
-    /// `none`
-    None(SerializeNone),
-    /// `{dir, format: md-frontmatter}`
-    Dir(SerializeDir),
-}
-
-/// The `{dir, format}` form of [`Serialize`]; closed like every other mapping of the file
-/// (EN-F1 "unknown key at any depth"; E1.3a RE1-3).
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, serde::Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct SerializeDir {
-    /// Directory under `.kaban/<ontology>/`: one validated component.
-    pub dir: DirName,
-    /// File format.
-    pub format: Format,
-}
-
-/// The literal `none`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, serde::Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum SerializeNone {
-    /// `none`
-    None,
-}
-
-// Hand-written rather than `#[serde(untagged)]`: the untagged derive swallows the inner error
-// ("data did not match any variant"), so an unknown or missing key inside the mapping could not
-// be located; this impl forwards the `SerializeDir` error, which names the field and no value.
-impl<'de> Deserialize<'de> for Serialize {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        use serde::de::Error as _;
-        let value = Value::deserialize(deserializer)?;
-        match value {
-            Value::String(s) if s == "none" => Ok(Self::None(SerializeNone::None)),
-            Value::Object(_) => serde_json::from_value::<SerializeDir>(value)
-                .map(Self::Dir)
-                .map_err(|e| D::Error::custom(e.to_string())),
-            _ => Err(D::Error::custom(
-                "expected `none` or a `{dir, format}` mapping",
-            )),
-        }
-    }
-}
-
-impl serde::Serialize for Serialize {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        match self {
-            Self::None(_) => serializer.serialize_str("none"),
-            Self::Dir(dir) => dir.serialize(serializer),
-        }
-    }
-}
-
-/// Record file format.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, serde::Serialize)]
-pub enum Format {
-    /// Markdown with a YAML frontmatter.
-    #[serde(rename = "md-frontmatter")]
-    MdFrontmatter,
-}
-
-/// Export block settings.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, serde::Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct Export {
-    /// Listed in the per-ontology digest.
-    pub digest: bool,
-    /// Rendered in the managed marker block.
-    pub marker: bool,
-    /// Block heading.
-    #[serde(default)]
-    pub heading: Option<String>,
-}
-
 /// Display labels.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
@@ -357,31 +250,28 @@ pub struct Display {
 }
 
 /// Near-duplicate key rule.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, serde::Serialize)]
 pub enum Dedup {
     /// `title+scope`
     #[serde(rename = "title+scope")]
     TitleScope,
-    /// `none`
+    /// `none` (the default)
+    #[default]
     #[serde(rename = "none")]
     None,
 }
 
-/// The governance mixin body (EN-F4, OD-E-2).
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, serde::Serialize)]
+/// The record rules of a kind (EN-F4): how records of the kind are labelled and when two of
+/// them are near-duplicates. Per kind, never inherited through `is_a` (a mixin's block counts
+/// once, OD-E-2); closed like every other mapping of the file.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct Governed {
-    /// Acceptance tier.
-    pub acceptance: Acceptance,
-    /// Serialization target.
-    pub serialize: Serialize,
-    /// Export settings.
-    pub export: Export,
-    /// Display labels.
-    pub display: Display,
-    /// Whether records of the kind govern paths (`why`).
-    pub governs_paths: bool,
-    /// Dedup rule.
+pub struct Rules {
+    /// Display labels, when the kind has them.
+    #[serde(default)]
+    pub display: Option<Display>,
+    /// Near-duplicate key rule (`none` when absent).
+    #[serde(default)]
     pub dedup: Dedup,
 }
 
@@ -437,7 +327,7 @@ pub struct Extract {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OnLink {
-    /// Archive the target when the edge is accepted.
+    /// Archive the target when the edge is written.
     ArchiveTarget,
 }
 
@@ -462,9 +352,6 @@ pub struct RelBody {
     /// Lifecycle side effect.
     #[serde(default)]
     pub on_link: Option<OnLink>,
-    /// Needs a human (EN-S10).
-    #[serde(default)]
-    pub governed_semantics: Option<bool>,
 }
 
 /// One `source_types` entry.
@@ -477,24 +364,6 @@ pub struct SourceType {
     /// Path globs that select the type.
     #[serde(default)]
     pub paths: Vec<String>,
-}
-
-/// The `kinds` of a question template as written: a kind list or the literal `governs_paths`.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(untagged)]
-pub enum QuestionKindsDecl {
-    /// The literal `governs_paths`.
-    GovernsPaths(GovernsPathsLiteral),
-    /// An explicit list of kind references.
-    Kinds(Vec<String>),
-}
-
-/// The literal `governs_paths`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum GovernsPathsLiteral {
-    /// `governs_paths`
-    GovernsPaths,
 }
 
 /// A question's grouping (EN-F47): the closed vocabulary `dup_key | cluster | prop`.
@@ -514,9 +383,9 @@ pub enum GroupBy {
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct QuestionTemplate {
-    /// A kind list or the literal `governs_paths`.
+    /// The target kind list.
     #[serde(default)]
-    pub kinds: Option<QuestionKindsDecl>,
+    pub kinds: Option<Vec<String>>,
     /// Predicate block: a mapping of plain data.
     #[serde(default, rename = "where")]
     pub where_: Option<serde_json::Map<String, Value>>,
@@ -551,8 +420,8 @@ impl OntologyFile {
     ///
     /// # Errors
     /// [`OntologyError::SchemaInvalid`] `file:<path>` for a malformed document, an unknown key
-    /// at any depth (the removed governance keys `priors`, `confidence_required` and
-    /// `min_confidence` included), a wrong type or a missing required key;
+    /// at any depth (the removed governance keys included), a wrong type or a missing required
+    /// key;
     /// [`OntologyError::InvalidIdentifier`] for a namespace, kind or rel name failing its regex.
     pub fn from_yaml(text: &str) -> Result<OntologyFile, OntologyError> {
         let data: Value = yaml_serde::from_str(text).map_err(|_| file_error(""))?;
@@ -628,18 +497,6 @@ fn check_identifiers(data: &Value) -> Result<(), OntologyError> {
             RelName::parse(key).map_err(|e| e.at(format!("rels.{key}")))?;
         }
     }
-    // `governed.serialize.dir` (RE2-3): the typed parse would refuse it too, but under the
-    // file class; here it is the identifier class at the field's path, like every other name
-    for block in ["mixins", "kinds"] {
-        if let Some(map) = data[block].as_object() {
-            for (key, body) in map {
-                if let Some(dir) = body["governed"]["serialize"]["dir"].as_str() {
-                    DirName::parse(dir)
-                        .map_err(|e| e.at(format!("{block}.{key}.governed.serialize.dir")))?;
-                }
-            }
-        }
-    }
     Ok(())
 }
 
@@ -694,8 +551,8 @@ fn deserializes<T: DeserializeOwned>(v: &Value) -> bool {
 
 /// The relative dotted path of the offending key inside `body` (which fails as `T`): the
 /// deepest key anywhere in the tree whose removal alone makes the body deserialize is the
-/// culprit (an unknown key, or an optional block holding the fault; a required mapping such as
-/// `governed.serialize` cannot be removed, so the search descends into it regardless); when
+/// culprit (an unknown key, or an optional block holding the fault; a required mapping cannot
+/// be removed, so the search descends into it regardless); when
 /// the culprit is a mapping with no single removable key inside, or nothing is removable, the
 /// `missing field` / `unknown field` serde names is appended. Never a value.
 fn locate<T: DeserializeOwned>(body: &Value) -> String {

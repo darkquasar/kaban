@@ -25,8 +25,7 @@ extends: [core]
 kinds:
   Runbook:
     description: "An operational runbook; lives outside the repository, never stamped."
-    governed: {acceptance: human, serialize: none, export: {digest: false, marker: false},
-               display: {label: Runbook, plural: Runbooks}, governs_paths: false, dedup: none}
+    rules: {display: {label: Runbook, plural: Runbooks}, dedup: none}
     index: {stamp: none}
   Service:
     description: "A deployed service; default indexing."

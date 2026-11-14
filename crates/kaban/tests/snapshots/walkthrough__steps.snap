@@ -468,7 +468,6 @@ expression: a
       "with": "gliner"
     },
     "hierarchy": {
-      "anchored": [],
       "edges": [
         {
           "confidence": null,
@@ -554,7 +553,6 @@ expression: a
       "workspace": "default"
     },
     "mentions": {
-      "anchored": [],
       "edges": [
         {
           "confidence": 0.6,
@@ -1249,7 +1247,6 @@ expression: a
     },
     "decision": "@14",
     "evidence": {
-      "anchored": [],
       "edges": [
         {
           "confidence": 0.95,
@@ -1363,13 +1360,12 @@ expression: a
       "updated": 0
     },
     "human_relation": {
-      "anchored": [],
       "edges": [
         {
           "confidence": null,
           "from": "@14",
           "id": "@17",
-          "rel": "GOVERNS",
+          "rel": "DEPENDS_ON",
           "to": "01a17a03-5344-7000-8000-000000000005"
         }
       ],
@@ -1932,7 +1928,6 @@ expression: a
       "with": "gliner"
     },
     "mentions": {
-      "anchored": [],
       "edges": [
         {
           "confidence": 0.6,
@@ -2103,7 +2098,6 @@ expression: a
       "tests": []
     },
     "evidence": {
-      "anchored": [],
       "edges": [
         {
           "confidence": 0.95,

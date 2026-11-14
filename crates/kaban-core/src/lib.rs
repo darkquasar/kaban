@@ -42,19 +42,18 @@ pub use canon::canonical_json;
 pub use error::{BackendSource, Result, StoreError, SupersedesClass};
 pub use ids::{InvalidNodeId, NodeId, new_id, now_iso};
 pub use lease::Lease;
-// `GovernedSet` (engine-plan E1.4): the EN-F4 governance membership read from the ontology
-// (the deprecated E1.4 shims over the shipped set were deleted by E1.6)
+// `RuleSet` (engine-plan E1.4): the live EN-F4 ontology rules read from the loaded files
 pub use lifecycle::{
-    Governance, GovernedSet, INGEST_OWNER, InvalidTransition, Lifecycle, ReactivateRefusal,
-    StoreScope, governance_transition, lifecycle_transition,
+    Governance, INGEST_OWNER, InvalidTransition, LIFECYCLE_RELS, Lifecycle, ReactivateRefusal,
+    RuleSet, StoreScope, is_lifecycle_rel, lifecycle_transition, reconciliation_transition,
 };
 pub use model::{
-    AnchoredKind, AnchoredRow, BatchReport, BodyLocation, CodeRef, CodeRefFilter, ConventionProps,
-    DecisionProps, Edge, EdgeDiff, EdgeFilter, EdgeRescanAction, Evidence, FailureProps,
-    ForgetMode, ForgetOutcome, Hit, IndexMeta, LinkReq, Location, NewNode, Node, Op, OpOutcome,
-    OutcomeKind, RecallMode, RecallQuery, RedactedStrings, RememberOutcome, RescanAction,
-    RescanCursor, RescanJudge, RescanReport, TraverseDirection, TraverseQuery, TraverseResult,
-    TypeDeclaration, TypeDef, WorkspaceFilter, WriteBatch,
+    BatchReport, BodyLocation, CodeRef, CodeRefFilter, ConventionProps, DecisionProps, Edge,
+    EdgeDiff, EdgeFilter, EdgeRescanAction, Evidence, FailureProps, ForgetMode, ForgetOutcome, Hit,
+    IndexMeta, LinkReq, Location, NewNode, Node, Op, OpOutcome, OutcomeKind, RecallMode,
+    RecallQuery, RedactedStrings, RememberOutcome, RescanAction, RescanCursor, RescanJudge,
+    RescanReport, TraverseDirection, TraverseQuery, TraverseResult, TypeDeclaration, TypeDef,
+    WorkspaceFilter, WriteBatch,
 };
 pub use validator::{
     Error as PropsError, Keyword, Schema, SchemaError, ValidatorLimits, first_error_text, validate,

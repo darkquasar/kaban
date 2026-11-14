@@ -111,13 +111,12 @@ fn the_shipped_fixtures_reproduce_todays_schema_type_seed_rows_by_ns_kind_name()
         "DEPENDS_ON",
         "CAUSED_BY",
         "FIXED_BY",
-        "GOVERNS",
     ] {
         expected.insert(("adr".to_owned(), "rel", r.to_owned()));
     }
     assert_eq!(rows(&o), expected);
     assert_eq!(expected.iter().filter(|r| r.1 == "label").count(), 14);
-    assert_eq!(expected.iter().filter(|r| r.1 == "rel").count(), 16);
+    assert_eq!(expected.iter().filter(|r| r.1 == "rel").count(), 15);
     // every stored name of the two shipped namespaces is bare
     for q in o.kinds.keys().chain(o.rels.keys()) {
         assert_eq!(stored_name(q), q.name, "{q}");
@@ -158,13 +157,8 @@ fn an_unknown_key_at_any_depth_fails_with_the_field_path_and_never_the_value() {
             "schema_invalid:file:kinds.Thing.rank.boostt",
         ),
         (
-            "neg_unknown_key_governed.yaml",
-            "schema_invalid:file:kinds.Thing.governed.typo",
-        ),
-        // the `serialize` mapping is closed too (E1.3a RE1-3)
-        (
-            "neg_unknown_key_serialize.yaml",
-            "schema_invalid:file:kinds.Thing.governed.serialize.typo",
+            "neg_unknown_key_rules.yaml",
+            "schema_invalid:file:kinds.Thing.rules.typo",
         ),
         ("neg_wrong_type_version.yaml", "schema_invalid:file:version"),
     ];
@@ -186,13 +180,12 @@ fn an_unknown_key_at_any_depth_fails_with_the_field_path_and_never_the_value() {
             .to_string(),
         "schema_invalid:file:rels"
     );
-    // a `serialize` mapping missing its `format` is located as well (the hand-written parse
-    // forwards the inner field name)
+    // a `display` mapping missing its `plural` is located as well
     assert_eq!(
         load_err_text(
-            "ontology: shop\nversion: 1\nkinds: {Thing: {description: t, governed: {acceptance: human, serialize: {dir: things}, export: {digest: false, marker: false}, display: {label: T, plural: Ts}, governs_paths: false, dedup: none}}}\nrels: {}\n"
+            "ontology: shop\nversion: 1\nkinds: {Thing: {description: t, rules: {display: {label: T}}}}\nrels: {}\n"
         ),
-        "schema_invalid:file:kinds.Thing.governed.serialize.format"
+        "schema_invalid:file:kinds.Thing.rules.display.plural"
     );
     // a kind without its description fails at resolution with the same text family
     assert_eq!(
@@ -576,56 +569,6 @@ fn every_error_text_is_in_the_en_f7_list() {
     }
 }
 
-/// E1.7a RE2-3 (Major): `serialize.dir` is one relative path component under
-/// `.kaban/<ontology>/` (`^[a-z][a-z0-9-]{0,31}$`, the namespace shape): an absolute path, a
-/// parent traversal, a nested path, `.`, an empty string and an uppercase name all fail to
-/// load with the fixed class `invalid_identifier` at the field's path; the typed value is a
-/// validated newtype, so a loaded ontology cannot name a directory outside the tree.
-#[test]
-fn a_serialize_dir_that_is_not_one_relative_component_fails_invalid_identifier() {
-    for name in [
-        "neg_dir_absolute.yaml",
-        "neg_dir_parent.yaml",
-        "neg_dir_nested.yaml",
-    ] {
-        let err = load_err(name);
-        assert_eq!(
-            err,
-            OntologyError::InvalidIdentifier {
-                path: "kinds.Thing.governed.serialize.dir".to_owned()
-            },
-            "{name}"
-        );
-        assert!(!format!("{err:?}").contains("tmp"), "{name}: {err:?}");
-    }
-    for dir in [".", "..", "", "Things", "a b", "x\\y"] {
-        let text = format!(
-            "ontology: shop\nversion: 1\nmixins: {{M: {{governed: {{acceptance: agent, serialize: {{dir: {dir:?}, format: md-frontmatter}}, export: {{digest: false, marker: false}}, display: {{label: T, plural: Ts}}, governs_paths: false, dedup: none}}}}}}\nkinds: {{}}\nrels: {{}}\n"
-        );
-        assert_eq!(
-            OntologyFile::from_yaml(&text).map(|_| ()).unwrap_err(),
-            OntologyError::InvalidIdentifier {
-                path: "mixins.M.governed.serialize.dir".to_owned()
-            },
-            "{dir:?}"
-        );
-    }
-    assert!(kaban_core::ontology::DirName::parse("decisions").is_ok());
-    assert!(kaban_core::ontology::DirName::parse("a-b-9").is_ok());
-    assert!(kaban_core::ontology::DirName::parse("a/b").is_err());
-    // the shipped files still load (their dirs are `decisions`, `conventions`, `failures`)
-    let shipped = kaban_core::shipped::resolved().unwrap();
-    let decision = shipped
-        .kinds
-        .values()
-        .find(|k| k.id.name == "Decision")
-        .unwrap();
-    match &decision.governed.as_ref().unwrap().serialize {
-        kaban_core::ontology::meta::Serialize::Dir(d) => assert_eq!(d.dir.as_str(), "decisions"),
-        other @ kaban_core::ontology::meta::Serialize::None(_) => panic!("{other:?}"),
-    }
-}
-
 /// Indexing meta-config (engine-spec §3.1 `index`, OWN-65, AMD-14; engine-plan E2.0 item 5a):
 /// `index: {stamp: none}` resolves, a child inherits it through `is_a`, a mixin applies it, a
 /// kind without the block keeps the default `commit`.
@@ -678,10 +621,10 @@ fn index_with_an_unknown_value_or_key_fails_with_the_field_path() {
 }
 
 /// The shipped set: `Document`, `Section`, `Chunk` and `Tag` are `none` (ingested document rows
-/// carry no commit sha); every other shipped kind, the governed and serializable `Decision`,
-/// `Convention` and `Failure` among them, keeps the default `commit`.
+/// carry no commit sha); every other shipped kind, `Decision`, `Convention` and `Failure` among
+/// them, keeps the default `commit`.
 #[test]
-fn the_shipped_ontologies_leave_document_kinds_unstamped_and_stamp_the_governed_kinds() {
+fn the_shipped_ontologies_leave_document_kinds_unstamped_and_stamp_the_record_kinds() {
     // Arrange: the shipped bytes themselves (the fixture copies are the EN-F1 goldens)
     let o = kaban_core::shipped::resolved().unwrap();
 
@@ -707,14 +650,17 @@ fn the_shipped_ontologies_leave_document_kinds_unstamped_and_stamp_the_governed_
             .map(str::to_owned)
             .collect()
     );
-    for governed in ["Decision", "Convention", "Failure"] {
-        assert!(stamped.contains(governed), "{governed} stamps per commit");
+    for kind in ["Decision", "Convention", "Failure"] {
+        assert!(stamped.contains(kind), "{kind} stamps per commit");
     }
 }
 
 /// The keys of the removed governance pipeline are refused like any other unknown key, with
 /// the field path and never the value: a top-level `priors` block, a rel's
-/// `confidence_required` and a kind's `min_confidence`.
+/// `confidence_required` and `governed_semantics`, a kind's or a mixin's `min_confidence`,
+/// `acceptance`, `auto_accept_when` and `governed` mixin, and the governance keys that did not
+/// move into the `rules` block (`acceptance`, `auto_accept_when`, `serialize`, `export`,
+/// `governs_paths`).
 #[test]
 fn removed_governance_fields_are_refused_with_the_field_path() {
     for (text, path) in [
@@ -730,9 +676,85 @@ fn removed_governance_fields_are_refused_with_the_field_path() {
             "ontology: shop\nversion: 1\nkinds:\n  Thing: {description: t, min_confidence: 0.4242}\nrels: {}\n",
             "schema_invalid:file:kinds.Thing.min_confidence",
         ),
+        (
+            "ontology: shop\nversion: 1\nkinds: {}\nrels:\n  A: {from: [], to: [], directed: true, governed_semantics: true}\n",
+            "schema_invalid:file:rels.A.governed_semantics",
+        ),
+        (
+            "ontology: shop\nversion: 1\nkinds:\n  Thing: {description: t, acceptance: human}\nrels: {}\n",
+            "schema_invalid:file:kinds.Thing.acceptance",
+        ),
+        (
+            "ontology: shop\nversion: 1\nmixins:\n  M: {acceptance: agent}\nkinds: {}\nrels: {}\n",
+            "schema_invalid:file:mixins.M.acceptance",
+        ),
+        (
+            "ontology: shop\nversion: 1\nkinds:\n  Thing: {description: t, auto_accept_when: {confidence: 0.4242}}\nrels: {}\n",
+            "schema_invalid:file:kinds.Thing.auto_accept_when",
+        ),
+        (
+            "ontology: shop\nversion: 1\nkinds:\n  Thing: {description: t, governed: {display: {label: T, plural: Ts}, dedup: none}}\nrels: {}\n",
+            "schema_invalid:file:kinds.Thing.governed",
+        ),
+        (
+            "ontology: shop\nversion: 1\nkinds:\n  Thing: {description: t, rules: {acceptance: human}}\nrels: {}\n",
+            "schema_invalid:file:kinds.Thing.rules.acceptance",
+        ),
+        (
+            "ontology: shop\nversion: 1\nkinds:\n  Thing: {description: t, rules: {auto_accept_when: {confidence: 0.4242}}}\nrels: {}\n",
+            "schema_invalid:file:kinds.Thing.rules.auto_accept_when",
+        ),
+        (
+            "ontology: shop\nversion: 1\nkinds:\n  Thing: {description: t, rules: {serialize: none}}\nrels: {}\n",
+            "schema_invalid:file:kinds.Thing.rules.serialize",
+        ),
+        (
+            "ontology: shop\nversion: 1\nkinds:\n  Thing: {description: t, rules: {export: {digest: false, marker: false}}}\nrels: {}\n",
+            "schema_invalid:file:kinds.Thing.rules.export",
+        ),
+        (
+            "ontology: shop\nversion: 1\nkinds:\n  Thing: {description: t, rules: {governs_paths: true}}\nrels: {}\n",
+            "schema_invalid:file:kinds.Thing.rules.governs_paths",
+        ),
     ] {
         let err = OntologyFile::from_yaml(text).unwrap_err();
         assert_eq!(err.to_string(), path);
         assert!(!format!("{err:?}").contains("0.4242"), "{err:?}");
     }
+}
+
+/// The live record rules load from the `rules` block: display labels and the near-duplicate
+/// key, on a kind or through a mixin, and a rel's `on_link` archive effect beside them.
+#[test]
+fn a_rules_block_loads_with_display_and_dedup() {
+    // Arrange
+    let text = "ontology: shop\nversion: 1\nmixins:\n  Labelled: {rules: {display: {label: Note, plural: Notes}}}\nkinds:\n  Plan: {description: p, rules: {display: {label: Plan, plural: Plans}, dedup: title+scope}}\n  Note: {description: n, mixins: [Labelled]}\n  Bare: {description: b, rules: {}}\nrels:\n  REPLACES: {from: [], to: [], directed: true, on_link: archive_target}\n";
+
+    // Act
+    let o = resolve(
+        &[OntologyFile::from_yaml(text).unwrap()],
+        &NamespaceSet::new(),
+    )
+    .unwrap();
+
+    // Assert
+    let rules = |name: &str| {
+        o.kinds
+            .get(&q("shop", name))
+            .unwrap_or_else(|| panic!("{name} resolved"))
+            .rules
+            .clone()
+    };
+    let plan = rules("Plan").expect("own block");
+    assert_eq!(plan.dedup, kaban_core::ontology::meta::Dedup::TitleScope);
+    assert_eq!(plan.display.map(|d| d.plural), Some("Plans".to_owned()));
+    let note = rules("Note").expect("applied by the mixin");
+    assert_eq!(note.dedup, kaban_core::ontology::meta::Dedup::None);
+    assert_eq!(
+        rules("Bare"),
+        Some(kaban_core::ontology::meta::Rules::default())
+    );
+    let set = kaban_core::RuleSet::from_ontology(&o);
+    assert!(set.dedups("shop:Plan") && !set.dedups("shop:Note"));
+    assert!(set.archives_on_link("shop:REPLACES"));
 }

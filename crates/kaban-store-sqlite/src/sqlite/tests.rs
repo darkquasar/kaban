@@ -169,7 +169,6 @@ fn remember_link_recall_roundtrip() {
             direction: kaban_core::TraverseDirection::Both,
             max_depth: 1,
             node_kinds: vec![],
-            governance: vec![],
             limit: 10,
             workspace_id: None,
             ..Default::default()

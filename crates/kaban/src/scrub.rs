@@ -18,7 +18,14 @@ const UNCLASSIFIED: &str = "invalid request: a typed argument did not parse";
 /// Request keys a release removed (no aliases, spec 11 PC-5 as amended): an `unknown field`
 /// whose name is exactly one of these is answered with the name, so the caller learns which
 /// key went. The name echoed is this constant, never the input.
-const RETIRED_FIELDS: &[&str] = &["layers", "include_superseded", "include_candidates"];
+const RETIRED_FIELDS: &[&str] = &[
+    "layers",
+    "include_superseded",
+    "include_candidates",
+    "follow_anchors",
+    "kind_set",
+    "governance",
+];
 
 /// serde's `, expected ` separator: the expected shape follows the quoted value, so the LAST
 /// occurrence is the one serde wrote, whatever the value contains.

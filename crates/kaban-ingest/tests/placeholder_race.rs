@@ -79,7 +79,6 @@ fn eight_documents_racing_on_four_workers_create_one_placeholder_for_a_shared_mi
             direction: TraverseDirection::Both,
             max_depth: 1,
             node_kinds: Vec::new(),
-            governance: Vec::new(),
             limit: 500,
             workspace_id: None,
             ..Default::default()

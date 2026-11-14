@@ -86,7 +86,6 @@ fn coderefs_about(store: &SqliteStore, id: &str) -> Vec<kaban_core::Node> {
             direction: kaban_core::TraverseDirection::Out,
             max_depth: 1,
             node_kinds: vec!["CodeRef".into()],
-            governance: vec![],
             limit: 100,
             workspace_id: None,
             ..Default::default()
@@ -537,18 +536,15 @@ fn a_runbook_severity_outside_the_enum_is_rejected_with_the_pointer_text() {
     assert_eq!(ok.unwrap().status, RememberStatus::Created);
 }
 
-/// E1.7a RE2-8 (Medium): the `GOVERNS` source rule (engine-spec EN-F4, E1.5) holds in the
-/// common edge-write path, so an inline link of `remember` is judged like `api.link`: a new
-/// Fact -> `CodeRef` `GOVERNS` link is refused with the same fixed class and the enclosing
-/// `remember` is rolled back (no Fact row); the reverse direction (a new `CodeRef` as the target
-/// of a Fact's `GOVERNS`) is refused too; a new `runbooks:Runbook` (governs paths) as the
-/// source is accepted; a source in another workspace stays `NotFound`.
+/// E1.7a RE2-8 (Medium): the declared endpoints hold in the common edge-write path, so an
+/// inline link of `remember` is judged like `api.link`: a new Fact -> `CodeRef` `CAUSED_BY`
+/// link (`from: [Failure]`) is refused with the fixed class and the enclosing `remember` is
+/// rolled back (no Fact row); the reverse direction (a new `CodeRef` as the target of a Fact's
+/// `CAUSED_BY`) is refused too; a new `Failure` as the source is accepted.
 #[test]
-fn an_inline_governs_link_from_a_non_governing_kind_is_refused_and_the_remember_rolled_back() {
+fn an_inline_link_outside_the_declared_endpoints_is_refused_and_the_remember_rolled_back() {
     // Arrange
-    let s = Scratch::new("kaban-remember", "inline-governs");
     let (store, api) = store_api();
-    let api = with_runbooks(&s, api);
     let code = api
         .remember(RememberRequest {
             kind: "CodeRef".into(),
@@ -565,13 +561,12 @@ fn an_inline_governs_link_from_a_non_governing_kind_is_refused_and_the_remember_
         })
         .unwrap()
         .id;
-    let governs_to_code = |kind: &str, text: &str| RememberRequest {
+    let caused_by_code = |kind: &str, text: &str| RememberRequest {
         kind: kind.into(),
         text: text.into(),
         summary: Some(text.into()),
-        path_scope: vec!["ops/**".into()],
         links: vec![kaban_api::LinkSpec {
-            rel: "GOVERNS".into(),
+            rel: "CAUSED_BY".into(),
             to: Some(code.clone()),
             from: None,
             confidence: None,
@@ -598,19 +593,19 @@ fn an_inline_governs_link_from_a_non_governing_kind_is_refused_and_the_remember_
     );
 
     // Act
-    let from_fact = api.remember(governs_to_code("Fact", "a fact that would govern the file"));
+    let from_fact = api.remember(caused_by_code("Fact", "a fact that would govern the file"));
     let to_new_coderef = api.remember(RememberRequest {
         kind: "CodeRef".into(),
         text: "src/other.rs".into(),
         links: vec![kaban_api::LinkSpec {
-            rel: "GOVERNS".into(),
+            rel: "CAUSED_BY".into(),
             to: None,
             from: Some(fact.clone()),
             confidence: None,
         }],
         ..Default::default()
     });
-    let from_runbook = api.remember(governs_to_code("runbooks:Runbook", "Rotate the queue"));
+    let from_failure = api.remember(caused_by_code("Failure", "the queue stalled"));
 
     // Assert
     for (name, result) in [
@@ -621,7 +616,7 @@ fn an_inline_governs_link_from_a_non_governing_kind_is_refused_and_the_remember_
             Err(ApiError::Store(kaban_core::StoreError::EndpointNotAllowed { rel, from, to })) => {
                 assert_eq!(
                     (rel.as_str(), from.as_str(), to.as_str()),
-                    ("GOVERNS", "Fact", "CodeRef"),
+                    ("CAUSED_BY", "Fact", "CodeRef"),
                     "{name}"
                 );
             }
@@ -633,6 +628,6 @@ fn an_inline_governs_link_from_a_non_governing_kind_is_refused_and_the_remember_
         0,
         "the refused remember left no Fact"
     );
-    let runbook = from_runbook.unwrap();
-    assert_eq!(runbook.links_created, 1, "{runbook:?}");
+    let failure = from_failure.unwrap();
+    assert_eq!(failure.links_created, 1, "{failure:?}");
 }

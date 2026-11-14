@@ -126,7 +126,7 @@ impl SqliteStore {
         }
     }
     /// `Op::Reactivate` (DI1.8, RD2-5): the ingestion reconciliation transition. Accepted under
-    /// [`GovernedSet::reconciliation_transition`] only (an ingest-owned Document, Section or
+    /// [`kaban_core::reconciliation_transition`] only (an ingest-owned Document, Section or
     /// Chunk that is `tombstoned`): `active`, `valid_to` cleared, `rev` bumped, a `reactivated`
     /// event (the `ChangeLog` trigger writes the rows). An active node is a no-op counted
     /// `unchanged`; a purged id or another tenant's row is `NotFound` (F5, F17).
@@ -160,9 +160,7 @@ impl SqliteStore {
         }
         let props: serde_json::Value = serde_json::from_str(&props)?;
         let owner = props.get("owner").and_then(serde_json::Value::as_str);
-        tenant
-            .governed
-            .reconciliation_transition(lifecycle, &kind, owner)?;
+        kaban_core::reconciliation_transition(lifecycle, &kind, owner)?;
         conn.execute(
             "UPDATE node SET lifecycle='active', valid_to=NULL, updated_at=?1, rev=rev+1 WHERE rid=?2",
             params![now_iso(), rid],

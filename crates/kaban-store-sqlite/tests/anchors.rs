@@ -1,6 +1,6 @@
 //! `node_anchor` maintained on write (engine-spec EN-F10; engine-plan E2.2; CG-JOIN v1 §5):
-//! a remembered `CodeRef` and a scoped `Decision` produce the rows the 0004 backfill derives,
-//! and a prefix-less glob produces the universal `""` row (E1.7a RE2-2). Invented data.
+//! a remembered `CodeRef` produces the rows the 0004 backfill derives; a `Decision` with a
+//! `path_scope` produces none (path scoping is gone, PC-20). Invented data.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // test code: failures are the assertion
 
@@ -35,7 +35,7 @@ fn created(store: &SqliteStore, n: NewNode) -> String {
 }
 
 #[test]
-fn a_remembered_coderef_and_a_scoped_decision_produce_the_backfill_rows() {
+fn a_remembered_coderef_produces_the_backfill_rows_and_a_scoped_decision_none() {
     let s = Scratch::new("e22-anchors", "rows");
     let store = SqliteStore::open(&s.db(), &s.keys()).unwrap();
     let scope40 = "0123456789ABCDEF0123456789abcdef01234567";
@@ -83,11 +83,8 @@ fn a_remembered_coderef_and_a_scoped_decision_produce_the_backfill_rows() {
     );
     assert_eq!(
         anchors(&s.db(), &decision),
-        vec![
-            ("path".into(), String::new(), Some("repo".into()), None),
-            ("path".into(), "src/api/".into(), Some("repo".into()), None),
-        ],
-        "one prefix row per glob; the universal row for the prefix-less glob"
+        Vec::<Row>::new(),
+        "a path scope anchors nothing"
     );
     // a plain fact anchors nothing
     let fact = created(

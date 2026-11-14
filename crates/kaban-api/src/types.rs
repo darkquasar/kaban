@@ -25,7 +25,7 @@ pub use card::{Card, EdgeCard, Provenance};
 
 pub use recall::{RecallRequest, RecallResponse};
 
-pub use traverse::{AnchoredCard, AnchoredKind, EdgeFilter, TraverseRequest, TraverseResponse};
+pub use traverse::{EdgeFilter, TraverseRequest, TraverseResponse};
 
 pub use schema::{Naming, SchemaExtendRequest, SchemaResponse};
 

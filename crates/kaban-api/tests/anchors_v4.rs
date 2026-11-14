@@ -238,7 +238,6 @@ fn one_ref(store: &SqliteStore, api: &KabanApi, w: CodeRefWire) -> kaban_core::N
             direction: kaban_core::TraverseDirection::Out,
             max_depth: 1,
             node_kinds: vec!["CodeRef".into()],
-            governance: vec![],
             limit: 100,
             workspace_id: None,
             ..Default::default()

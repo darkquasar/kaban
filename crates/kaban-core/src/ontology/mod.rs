@@ -9,7 +9,7 @@ pub mod meta;
 pub mod resolve;
 
 pub use meta::{
-    DirName, IdentifierError, Index, KindBody, KindName, Ns, OntologyFile, RelBody, RelName, Stamp,
+    IdentifierError, Index, KindBody, KindName, Ns, OntologyFile, RelBody, RelName, Rules, Stamp,
 };
 pub use resolve::{NamespaceSet, Ontology, Qualified, resolve, split_stored, stored_name};
 

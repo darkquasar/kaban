@@ -1,7 +1,7 @@
 //! Public-behaviour tests of `traverse` v3 (core-spec F6; core-plan C3.6) through `KabanApi`:
-//! the governance filter keeps active nodes of the requested states only; EN-F46 (engine-plan
-//! E2.8): the ontology filters are validated, the edge filter runs on the stored scoring
-//! columns, `kind_set: governing` resolves to the governing kinds.
+//! EN-F46 (engine-plan E2.8): the ontology filters are validated and the edge filter runs on
+//! the stored scoring columns. The removed `kind_set`, `governance` and `follow_anchors` keys
+//! are refused at the request parse (`crates/kaban/tests/traverse_removed_keys.rs`).
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // test code: failures are the assertion
 
@@ -15,14 +15,7 @@ use kaban_store_sqlite::SqliteStore;
 use serde_json::json;
 use std::sync::Arc;
 
-fn api() -> KabanApi {
-    let policy = Policy::from_file(Policy::parse(b"").unwrap(), "test".into()).unwrap();
-    let store = Arc::new(SqliteStore::open_memory().unwrap());
-    let signer = store.signer();
-    KabanApi::new(store, policy, signer)
-}
-
-// ---- EN-F46 (engine-plan E2.8): ontology filters, validated; the edge filter; `kind_set` ----
+// ---- EN-F46 (engine-plan E2.8): ontology filters, validated; the edge filter ----
 
 /// A request built from its wire JSON, the shape the MCP router hands the service.
 fn traverse_json(
@@ -290,68 +283,4 @@ fn edge_filter_refuses_an_unknown_producer_method_or_score() {
     )
     .expect_err("a score outside 0..1");
     assert!(matches!(&err, ApiError::Invalid(_)), "{err:?}");
-}
-
-/// EN-F46 `kind_set: governing` is `node_kinds: <the governing kinds>` (the union with the
-/// caller's own `node_kinds`); any other set name is `unknown_kind_set`.
-#[test]
-fn kind_set_governing_is_the_governing_kinds_filter() {
-    let api = api();
-    let decision = api
-        .remember(RememberRequest {
-            kind: "Decision".into(),
-            text: "quokka storage is sqlite".into(),
-            props: Some(json!({"rationale": "one file"})),
-            ..Default::default()
-        })
-        .unwrap()
-        .id;
-    let fact = api
-        .remember(RememberRequest {
-            links: vec![kaban_api::LinkSpec {
-                rel: "RELATES_TO".into(),
-                to: Some(decision.clone()),
-                ..Default::default()
-            }],
-            ..fact("a fact beside the decision")
-        })
-        .unwrap()
-        .id;
-    let ids = |r: &kaban_api::TraverseResponse| {
-        let mut v: Vec<String> = r.nodes.iter().map(|n| n.id.clone()).collect();
-        v.sort();
-        v
-    };
-    let all = traverse_json(&api, json!({"start_ids": [fact]})).unwrap();
-    assert_eq!(ids(&all).len(), 2, "{all:?}");
-    let governing = api.registry().governing_kinds();
-    assert!(
-        governing.iter().any(|k| k == "Decision") && !governing.iter().any(|k| k == "Fact"),
-        "{governing:?}"
-    );
-    let by_set =
-        traverse_json(&api, json!({"start_ids": [fact], "kind_set": "governing"})).unwrap();
-    let by_kinds =
-        traverse_json(&api, json!({"start_ids": [fact], "node_kinds": governing})).unwrap();
-    assert_eq!(ids(&by_set), vec![decision.clone()], "{by_set:?}");
-    assert_eq!(
-        serde_json::to_value(&by_set).unwrap(),
-        serde_json::to_value(&by_kinds).unwrap()
-    );
-    // the union with the caller's own kinds
-    let union = traverse_json(
-        &api,
-        json!({"start_ids": [fact], "kind_set": "governing", "node_kinds": ["Fact"]}),
-    )
-    .unwrap();
-    assert_eq!(ids(&union), ids(&all), "{union:?}");
-    let err = traverse_json(
-        &api,
-        json!({"start_ids": [fact], "kind_set": "everything-ZXQV9"}),
-    )
-    .expect_err("an unknown set");
-    assert!(
-        matches!(&err, ApiError::Invalid(m) if m == "unknown_kind_set"),
-        "{err:?}"
-    );
 }

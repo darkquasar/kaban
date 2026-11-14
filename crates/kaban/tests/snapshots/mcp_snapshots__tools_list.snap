@@ -7765,7 +7765,7 @@ expression: tools
         },
         "path_scope": {
           "default": [],
-          "description": "Globs or paths a governing record (Decision, Convention) covers.",
+          "description": "Globs or paths the record is about (part of a near-duplicate key, `dedup: title+scope`).",
           "items": {
             "type": "string"
           },
@@ -8212,7 +8212,7 @@ expression: tools
               "type": "boolean"
             },
             "display": {
-              "description": "The display labels (`governed.display`)."
+              "description": "The display labels (`rules.display`)."
             },
             "extract": {
               "description": "The `extract` block (EN-F25, EN-F36)."
@@ -8224,9 +8224,6 @@ expression: tools
                 "type": "string"
               },
               "type": "array"
-            },
-            "governed": {
-              "description": "The `governed` block (EN-F4)."
             },
             "kind": {
               "description": "`\"label\"` or `\"rel\"`.",
@@ -8250,6 +8247,9 @@ expression: tools
             },
             "rank": {
               "description": "The `rank` block (EN-F29)."
+            },
+            "rules": {
+              "description": "The `rules` block (EN-F4)."
             },
             "to_kinds": {
               "default": [],
@@ -8383,7 +8383,7 @@ expression: tools
           "type": "boolean"
         },
         "display": {
-          "description": "The display labels (`governed.display`)."
+          "description": "The display labels (`rules.display`)."
         },
         "extract": {
           "description": "The `extract` block (EN-F25, EN-F36)."
@@ -8395,9 +8395,6 @@ expression: tools
             "type": "string"
           },
           "type": "array"
-        },
-        "governed": {
-          "description": "The `governed` block (EN-F4)."
         },
         "kind": {
           "description": "`\"label\"` or `\"rel\"`.",
@@ -8421,6 +8418,9 @@ expression: tools
         },
         "rank": {
           "description": "The `rank` block (EN-F29)."
+        },
+        "rules": {
+          "description": "The `rules` block (EN-F4)."
         },
         "to_kinds": {
           "default": [],
@@ -8745,36 +8745,6 @@ expression: tools
           },
           "type": "object"
         },
-        "Governance": {
-          "description": "Governance state of a `Decision`, `Convention` or `Failure`; [`Governance::None`] for every\nother kind.",
-          "oneOf": [
-            {
-              "const": "none",
-              "description": "The kind is not governed.",
-              "type": "string"
-            },
-            {
-              "const": "proposed",
-              "description": "Recorded, not yet accepted (ranked below accepted in `why`).",
-              "type": "string"
-            },
-            {
-              "const": "accepted",
-              "description": "Accepted with reason and path scope (event recorded).",
-              "type": "string"
-            },
-            {
-              "const": "superseded",
-              "description": "Replaced by a newer record (`SUPERSEDES` edge plus event).",
-              "type": "string"
-            },
-            {
-              "const": "invalidated",
-              "description": "Declared no longer valid (event recorded).",
-              "type": "string"
-            }
-          ]
-        },
         "TraverseDirection": {
           "description": "Which edges a traversal follows from a node (MT-5, `rust-bp-review-dispositions.md` RB-4).\nClosed set: an unknown wire value fails deserialization.",
           "oneOf": [
@@ -8797,6 +8767,7 @@ expression: tools
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
       "properties": {
         "direction": {
           "anyOf": [
@@ -8819,26 +8790,6 @@ expression: tools
             }
           ],
           "description": "Follow only the edges that pass every clause: a producer in `producers`, a method in\n`methods`, a score of at least `min_score`. An edge without a value in a filtered column\n(a structural edge carries no method or score) does not pass that clause. Default:\nevery edge."
-        },
-        "follow_anchors": {
-          "default": false,
-          "description": "Expand each reached node that anchors a code symbol or path one step into the current\ncode-graph snapshot (EN-F19): the snapshot rows come back in `anchored` as `symbol` and\n`file` cards, 200 per anchored node and 500 in total; depth and the node limit are\nunchanged. Default false; nothing is added when no snapshot resolves.",
-          "type": "boolean"
-        },
-        "governance": {
-          "default": [],
-          "description": "Keep only nodes in these governance states (`none`, `proposed`, `accepted`,\n`superseded`, `invalidated`); default: any.",
-          "items": {
-            "$ref": "#/$defs/Governance"
-          },
-          "type": "array"
-        },
-        "kind_set": {
-          "description": "Keep only the kinds of this ontology-defined set, in addition to `node_kinds`:\n`governing` (the kinds whose records govern paths) is the one set; any other value is\nrefused (`unknown_kind_set`).",
-          "type": [
-            "string",
-            "null"
-          ]
         },
         "limit": {
           "description": "Max nodes (default 100, max 500).",
@@ -8898,65 +8849,6 @@ expression: tools
     "name": "traverse",
     "outputSchema": {
       "$defs": {
-        "AnchoredCard": {
-          "description": "One code-graph card of `anchored[]` (EN-F19; CG-JOIN v1 §9 order `(path, ref)`).",
-          "properties": {
-            "from": {
-              "description": "The returned node whose anchor reached this card.",
-              "type": "string"
-            },
-            "key": {
-              "description": "The symbol's cross-commit key (absent for a file or a key-less symbol).",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "kind": {
-              "$ref": "#/$defs/AnchoredKind",
-              "description": "`symbol` or `file`."
-            },
-            "name": {
-              "description": "The symbol's name (absent for a file).",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "path": {
-              "description": "The file path: the card itself for a `file`, the defining file for a `symbol`.",
-              "type": "string"
-            },
-            "ref": {
-              "description": "The symbol's stable `ref` (absent for a file).",
-              "type": [
-                "string",
-                "null"
-              ]
-            }
-          },
-          "required": [
-            "from",
-            "kind",
-            "path"
-          ],
-          "type": "object"
-        },
-        "AnchoredKind": {
-          "description": "What kind of snapshot row an [`AnchoredRow`] is (the stage 1 card kinds).",
-          "oneOf": [
-            {
-              "const": "symbol",
-              "description": "A `cg.symbols` row (`kind = 'symbol'`, `external = 0`).",
-              "type": "string"
-            },
-            {
-              "const": "file",
-              "description": "A `cg.files` row.",
-              "type": "string"
-            }
-          ]
-        },
         "Card": {
           "description": "Outgoing projection of a node (re-scanned on read when the policy says so).",
           "properties": {
@@ -9176,14 +9068,6 @@ expression: tools
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
-        "anchored": {
-          "default": [],
-          "description": "Code-graph cards reached through the anchors of the returned nodes\n(`follow_anchors`); empty otherwise.",
-          "items": {
-            "$ref": "#/$defs/AnchoredCard"
-          },
-          "type": "array"
-        },
         "edges": {
           "description": "Edges among the returned nodes.",
           "items": {
@@ -9201,8 +9085,7 @@ expression: tools
       },
       "required": [
         "nodes",
-        "edges",
-        "anchored"
+        "edges"
       ],
       "type": "object"
     }

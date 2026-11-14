@@ -61,9 +61,7 @@ kinds:
   Incident:
     description: "{description}"
     props_schema: {{type: object, additionalProperties: false, properties: {{severity: {{type: string}}}}}}
-    governed: {{acceptance: human, serialize: {{dir: incidents, format: md-frontmatter}},
-               export: {{digest: true, marker: false, heading: Incidents}}, display: {{label: Incident, plural: Incidents}},
-               governs_paths: true, dedup: none}}
+    rules: {{display: {{label: Incident, plural: Incidents}}, dedup: none}}
 rels:
   TRIGGERED: {{from: [incidents:Incident], to: [], directed: true, description: "The incident triggered the target."}}
 "#

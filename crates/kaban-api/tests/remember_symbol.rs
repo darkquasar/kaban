@@ -283,7 +283,6 @@ fn coderefs_about(store: &SqliteStore, id: &str) -> Vec<kaban_core::Node> {
             direction: kaban_core::TraverseDirection::Out,
             max_depth: 1,
             node_kinds: vec!["CodeRef".into()],
-            governance: vec![],
             limit: 100,
             workspace_id: None,
             ..Default::default()

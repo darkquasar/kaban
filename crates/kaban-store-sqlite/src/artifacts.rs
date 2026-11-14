@@ -2,8 +2,8 @@
 
 use crate::sql_error::SqlResultExt;
 use kaban_core::{
-    BuiltinProducer, DerivedArtifact, GazetteerClaimSet, GovernedSet, Lifecycle, NodeId, Op,
-    Producer, Result, SourceRev, StoreError, WorkspaceId, WriteBatch, artifact_key, canonical_json,
+    BuiltinProducer, DerivedArtifact, GazetteerClaimSet, Lifecycle, NodeId, Op, Producer, Result,
+    SourceRev, StoreError, WorkspaceId, WriteBatch, artifact_key, canonical_json,
 };
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
@@ -150,11 +150,7 @@ pub(super) fn set_fresh(conn: &Connection, id: &NodeId, workspace: &WorkspaceId)
 }
 
 /// All optimistic guards run before any batch write.
-pub(super) fn stale_sources(
-    conn: &Connection,
-    batch: &WriteBatch,
-    governed: &GovernedSet,
-) -> Result<u32> {
+pub(super) fn stale_sources(conn: &Connection, batch: &WriteBatch) -> Result<u32> {
     // a Gazetteer set travels with the document ingest batch that refreshes its chunks
     if !batch.gazetteer_claim_sets.is_empty()
         && batch.edge_diff.producer() != Producer::DocumentIngest
@@ -218,7 +214,7 @@ pub(super) fn stale_sources(
                 )
                 .sql()?;
             if lifecycle == "tombstoned" {
-                governed.reconciliation_transition(
+                kaban_core::reconciliation_transition(
                     Lifecycle::Tombstoned,
                     "Document",
                     Some("kaban-ingest"),

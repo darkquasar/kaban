@@ -202,7 +202,6 @@ impl ReadPlan {
                 direction: kaban_core::TraverseDirection::Both,
                 max_depth: 2,
                 node_kinds: vec![],
-                governance: vec![],
                 limit: 100,
                 workspace_id: Some(WORKSPACES[0].0.into()),
                 ..Default::default()

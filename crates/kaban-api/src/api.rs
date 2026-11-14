@@ -22,7 +22,7 @@ use crate::ontology::OntologyRegistry;
 use crate::types::{ReceiptIdentities, WriteReceipt};
 use kaban_codegraph::SnapshotProvider;
 use kaban_core::config::EngineConfig;
-use kaban_core::{Actor, GovernedSet, GraphStore, NodeId, WorkspaceId, WriteCtx};
+use kaban_core::{Actor, GraphStore, NodeId, RuleSet, WorkspaceId, WriteCtx};
 use kaban_policy::{AuditSigner, Policy};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock, RwLockReadGuard};
@@ -62,9 +62,9 @@ pub struct KabanApi {
     pub(crate) git: crate::git::GitRunner,
     /// Enrichers this process offers to `recall.enrich[]` (core-spec F19); none by default.
     pub(crate) enrichers: Vec<Arc<dyn Enricher>>,
-    /// The ontology registry every mixin decision is read from (engine-spec EN-F4; engine-plan
-    /// E1.5): the governed set of every write context, `why`'s governing kinds, `remember`'s
-    /// dedup rule and `props_schema`, `accept`'s tier and `link`'s `GOVERNS` endpoints. The
+    /// The ontology registry every ontology decision is read from (engine-spec EN-F4;
+    /// engine-plan E1.5): the rule set of every write, `remember`'s dedup rule and
+    /// `props_schema`. The
     /// shipped files only until the binary hands over the one it loads at startup
     /// ([`Self::with_registry`]); shared by every clone of the service.
     pub(crate) registry: Arc<OntologyRegistry>,
@@ -169,7 +169,7 @@ impl KabanApi {
     /// a load through it is seen by every clone of the service).
     #[must_use]
     pub fn with_registry(mut self, registry: Arc<OntologyRegistry>) -> Self {
-        self.store.adopt_governed(registry.governed_set());
+        self.store.adopt_rules(registry.rule_set());
         self.registry = registry;
         self
     }
@@ -304,10 +304,10 @@ impl KabanApi {
         &self.registry
     }
 
-    /// The governed set this process decides governance by: the registry's (the shipped set
-    /// until a load adds a governed kind).
-    pub fn governed(&self) -> Arc<GovernedSet> {
-        self.registry.governed_set()
+    /// The rule set this process decides writes by: the registry's (the shipped set until a
+    /// load adds rules).
+    pub fn rules(&self) -> Arc<RuleSet> {
+        self.registry.rule_set()
     }
 
     /// A write context for the given (or bound) workspace.

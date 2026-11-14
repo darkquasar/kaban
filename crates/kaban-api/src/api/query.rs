@@ -5,14 +5,12 @@ use super::KabanApi;
 use crate::control::ControlPath;
 use crate::enrich::{self, EnrichBudget, Enricher, Enrichment};
 use crate::error::ApiError;
-use crate::snapshot::{self, SnapshotOutcome};
 use crate::types::{
-    AnchoredCard, PolicyStats, RecallRequest, RecallResponse, StatsRequest, StatsResponse,
-    TraverseRequest, TraverseResponse,
+    PolicyStats, RecallRequest, RecallResponse, StatsRequest, StatsResponse, TraverseRequest,
+    TraverseResponse,
 };
 use kaban_core::{
-    AnchoredRow, CodeRef, CodeRefFilter, Fixed, Method, NodeId, Producer, RecallQuery, StoreScope,
-    TraverseQuery,
+    CodeRef, CodeRefFilter, Fixed, Method, NodeId, Producer, RecallQuery, StoreScope, TraverseQuery,
 };
 
 const MAX_IDS: usize = 64;
@@ -158,10 +156,9 @@ impl KabanApi {
             start_ids.push(Self::node_id(&gated)?);
         }
         let rels = self.gate_all(t, "rels", &p.rels, &mut red)?;
-        let mut node_kinds = self.gate_all(t, "node_kinds", &p.node_kinds, &mut red)?;
-        // EN-F46: the set name and the filter vocabulary are gated like `rels` (a masked value
-        // then fails the closed-vocabulary match with a fixed word, never an echo)
-        let kind_set = self.gate_opt(t, "kind_set", p.kind_set.as_deref(), &mut red)?;
+        let node_kinds = self.gate_all(t, "node_kinds", &p.node_kinds, &mut red)?;
+        // EN-F46: the filter vocabulary is gated like `rels` (a masked value then fails the
+        // closed-vocabulary match with a fixed word, never an echo)
         let edge_filter = match &p.edge_filter {
             Some(f) => Some((
                 f.min_score,
@@ -171,39 +168,11 @@ impl KabanApi {
             None => None,
         };
         let workspace_id = self.gate_opt(t, "workspace_id", p.workspace_id.as_deref(), &mut red)?;
-        // EN-F46 `kind_set`: resolved here into `node_kinds` (the union with the caller's);
-        // `governing` is the one set the ontology defines in 3.0.0
-        match kind_set.as_deref() {
-            None => {}
-            Some("governing") => {
-                for kind in self.registry().governing_kinds() {
-                    if !node_kinds.contains(&kind) {
-                        node_kinds.push(kind);
-                    }
-                }
-            }
-            Some(_) => return Err(ApiError::Invalid("unknown_kind_set".into())),
-        }
         let edge_filter = match edge_filter {
             Some((min_score, producers, methods)) => {
                 Some(Self::edge_filter(min_score, &producers, &methods)?)
             }
             None => None,
-        };
-        // EN-F19: one resolution per call when the expansion is asked for (as `why(symbol)`
-        // does, cg-join-v1 §4); the lease inside `Resolved` lives until this function returns,
-        // the attachment on the store's read connection persists across requests. The store
-        // expands only under THIS request's admission (S7; the wave-2 review's RW2-2): any
-        // other outcome (no provider, no repository, no snapshot, too new, a refused directory)
-        // leaves `anchored` empty whatever an earlier request left attached, and is never an
-        // error.
-        let outcome = p.follow_anchors.then(|| snapshot::resolve_for_card(self));
-        let admitted = match &outcome {
-            Some(SnapshotOutcome::Resolved(r)) => {
-                self.store.attach_snapshot(&snapshot::attach_from(r))?;
-                true
-            }
-            Some(SnapshotOutcome::Absent | SnapshotOutcome::TooNew) | None => false,
         };
         let q = TraverseQuery {
             start_ids,
@@ -212,16 +181,9 @@ impl KabanApi {
             direction: p.direction.unwrap_or_default(),
             max_depth: p.max_depth.unwrap_or(1),
             node_kinds,
-            // resolved above; the store does not read it (the field stays for E2.9)
-            kind_set,
             edge_filter,
-            // a closed enum: validated by the typed parse
-            governance: p.governance.clone(),
             limit: p.limit.unwrap_or(100),
             workspace_id: self.read_workspace(workspace_id.as_deref()),
-            // the flag the store sees is this request's admission, not the caller's wish
-            follow_anchors: admitted,
-            anchor_repo: self.config.repo.clone(),
         };
         let r = self.store.traverse(&q)?;
         let nodes: Vec<_> = r
@@ -236,18 +198,7 @@ impl KabanApi {
             .filter(|e| ids.contains(e.src.as_str()) && ids.contains(e.dst.as_str()))
             .filter_map(|e| self.project_edge(t, e))
             .collect();
-        // a card whose `from` node was hidden on projection (S4) is hidden with it
-        let anchored: Vec<_> = r
-            .anchored
-            .iter()
-            .filter(|a| ids.contains(a.from.as_str()))
-            .filter_map(|a| self.project_anchored(t, a))
-            .collect();
-        Ok(TraverseResponse {
-            nodes,
-            edges,
-            anchored,
-        })
+        Ok(TraverseResponse { nodes, edges })
     }
 
     /// The wire edge filter as the store takes it (EN-F46): the closed vocabularies by their
@@ -277,49 +228,6 @@ impl KabanApi {
             producers,
             methods,
         })
-    }
-
-    /// Outgoing projection of one `anchored[]` card: the snapshot strings (path, ref, key,
-    /// name) are content and pass the read gate like a `WhyCard`'s (core-spec S4; a redact
-    /// hit masks, a reject hit hides the card); the `from` id is control (validated by shape).
-    fn project_anchored(&self, tool: &'static str, a: &AnchoredRow) -> Option<AnchoredCard> {
-        if !self.scan_on_read() {
-            return Some(AnchoredCard {
-                from: a.from.to_string(),
-                kind: a.kind,
-                path: a.path.clone(),
-                r#ref: a.r#ref.clone(),
-                key: a.key.clone(),
-                name: a.name.clone(),
-            });
-        }
-        let mut red = Vec::new();
-        let read_tool = "read";
-        let opt = |red: &mut Vec<String>,
-                   field,
-                   s: &Option<String>|
-         -> Result<Option<String>, ApiError> {
-            s.as_deref()
-                .map(|s| self.scan_str(read_tool, field, s, red))
-                .transpose()
-        };
-        let gated = (|| -> Result<AnchoredCard, ApiError> {
-            Ok(AnchoredCard {
-                from: self.scan_control(
-                    read_tool,
-                    ControlPath::response(tool, "anchored[].from"),
-                    "anchored.from",
-                    a.from.as_str(),
-                    &mut red,
-                )?,
-                kind: a.kind,
-                path: self.scan_str(read_tool, "anchored.path", &a.path, &mut red)?,
-                r#ref: opt(&mut red, "anchored.ref", &a.r#ref)?,
-                key: opt(&mut red, "anchored.key", &a.key)?,
-                name: opt(&mut red, "anchored.name", &a.name)?,
-            })
-        })();
-        gated.ok()
     }
 
     /// Counts of nodes/edges by kind and relationship inside the bound (or requested)

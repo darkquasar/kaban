@@ -25,7 +25,7 @@ pub struct RememberRequest {
     pub refs: Vec<CodeRefWire>,
     /// Which store the memory lives in: `project` (default). `personal` arrives in M6.
     pub scope: Option<StoreScope>,
-    /// Globs or paths a governing record (Decision, Convention) covers.
+    /// Globs or paths the record is about (part of a near-duplicate key, `dedup: title+scope`).
     #[serde(default)]
     pub path_scope: Vec<String>,
     /// 0..1 how sure you are.

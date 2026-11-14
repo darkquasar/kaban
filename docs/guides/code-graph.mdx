@@ -213,5 +213,5 @@ is older than the writer: upgrade `kaban` or re-index with a matching version.
 fields. Copy real repository/commit/symbol values from your tools; a flat `line`
 field is not the CodeRef wire shape. Positions in CodeRefs are zero-based.
 
-Those anchors connect notes to snapshot symbols and files: MCP `traverse` with
-`follow_anchors: true` can return anchored code cards alongside memory nodes.
+Those CodeRefs link a note to the code it is about; `traverse` follows the `ABOUT`
+edge from the note to its CodeRefs.

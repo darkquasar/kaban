@@ -88,7 +88,7 @@ impl KabanApi {
             api: self,
             ctx: self.write_ctx(None),
             policy_version: self.policy_version(),
-            governed: self.governed(),
+            rules: self.rules(),
             redactions: Vec::new(),
             nodes: std::collections::BTreeSet::new(),
             edges: std::collections::BTreeSet::new(),
@@ -558,8 +558,8 @@ pub struct IngestSubmitGate<'a> {
     ctx: WriteCtx,
     /// The policy version the session gates under.
     policy_version: String,
-    /// The governed set of the ontology the session gates under.
-    governed: std::sync::Arc<kaban_core::GovernedSet>,
+    /// The rule set of the ontology the session gates under.
+    rules: std::sync::Arc<kaban_core::RuleSet>,
     /// Every `field:rule` redaction the session made.
     redactions: Vec<String>,
     nodes: std::collections::BTreeSet<String>,
@@ -617,7 +617,7 @@ impl IngestSubmitGate<'_> {
             .iter()
             .map(|s| self.field("tag", s))
             .collect::<Result<_, _>>()?;
-        node.path_scope = crate::currency::canonical_path_scope(
+        node.path_scope = crate::path_scope::canonical_path_scope(
             &node
                 .path_scope
                 .iter()
@@ -634,37 +634,27 @@ impl IngestSubmitGate<'_> {
         node.store_scope = kaban_core::StoreScope::Project;
         node.repo.clone_from(&self.api.config.repo);
         node.workspace_id = None;
-        node.dup_key = self
-            .api
-            .registry
-            .with_kind(&node.kind, |kind| {
-                kind.governed
-                    .as_ref()
-                    .is_some_and(|g| g.dedup == kaban_core::ontology::meta::Dedup::TitleScope)
-            })
-            .filter(|dedup| *dedup)
-            .map(|_| {
-                crate::coderef::dup_key(node.summary.as_deref(), &node.text, &node.path_scope)
-            });
+        node.dup_key = self.rules.dedups(&node.kind).then(|| {
+            crate::coderef::dup_key(node.summary.as_deref(), &node.text, &node.path_scope)
+        });
         self.nodes.insert(
             serde_json::to_string(&node).map_err(|_| ApiError::Invalid("invalid_body".into()))?,
         );
         Ok(node)
     }
 
-    /// Gate and bind an owned structural edge; governed semantics are never extractor input.
+    /// Gate and bind an owned structural edge. A lifecycle-affecting rel (`SUPERSEDES`,
+    /// `INVALIDATES`, `CONTRADICTS`, or a rel whose `on_link` archives its target) is never
+    /// extractor input: only an authored `link` writes one (the extractor trust rule, PC-20).
     ///
     /// # Errors
-    /// Policy refusal, forbidden governed relation or malformed operation.
+    /// Policy refusal, a lifecycle-affecting relation or malformed operation.
     pub fn edge(&mut self, mut edge: kaban_core::Op) -> Result<kaban_core::Op, ApiError> {
         let kaban_core::Op::UpsertEdge { rel, props, .. } = &mut edge else {
             return Err(ApiError::Invalid("invalid_batch".into()));
         };
         *rel = self.field("rel", rel)?;
-        if matches!(
-            rel.as_str(),
-            "SUPERSEDES" | "INVALIDATES" | "CONTRADICTS" | "GOVERNS"
-        ) {
+        if kaban_core::is_lifecycle_rel(rel) || self.rules.archives_on_link(rel) {
             return Err(ApiError::Invalid("edge_not_allowed".into()));
         }
         *props = props.as_ref().map(|p| self.props(p)).transpose()?;
@@ -687,8 +677,7 @@ impl IngestSubmitGate<'_> {
             &kaban_core::BatchReport,
         ) -> kaban_core::Result<kaban_core::JobSubmitStateUpdate>,
     ) -> Result<kaban_core::JobSubmitReceipt, ApiError> {
-        if self.policy_version != self.api.policy_version() || self.governed != self.api.governed()
-        {
+        if self.policy_version != self.api.policy_version() || self.rules != self.api.rules() {
             return Err(ApiError::Invalid("stale_job_contract".into()));
         }
         for op in &request.batch.ops {
