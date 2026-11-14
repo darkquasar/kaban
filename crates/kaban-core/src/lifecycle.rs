@@ -1,10 +1,10 @@
-//! The two orthogonal state fields of a node (core-spec §4, SR-4): `lifecycle` is storage
-//! visibility for every kind, `governance` is a retired column every new record writes as
-//! `none`. [`RuleSet`] holds the live ontology rules the store and the service decide writes
-//! by, read from a resolved ontology by stored kind name: each kind's `rules:` block (display
-//! labels, the near-duplicate key; engine-spec EN-F4) and the rels whose `on_link` archives the
-//! target. The transition tables are the spec's, exactly; anything else is an
-//! [`InvalidTransition`] that adapters surface as a tool-level error.
+//! The state of a node (core-spec §4, SR-4): `lifecycle` is storage visibility for every kind
+//! (the retired `node.governance` column is written `none` and read by nothing until the v14
+//! format drops it). [`RuleSet`] holds the live ontology rules the store and the service
+//! decide writes by, read from a resolved ontology by stored kind name: each kind's `rules:`
+//! block (display labels, the near-duplicate key; engine-spec EN-F4) and the rels whose
+//! `on_link` archives the target. The transition tables are the spec's, exactly; anything
+//! else is an [`InvalidTransition`] that adapters surface as a tool-level error.
 
 use crate::ontology::meta::{Dedup, Display, OnLink, Rules};
 use crate::ontology::{Ontology, OntologyError, stored_name};
@@ -65,48 +65,6 @@ impl Lifecycle {
             "archived" => Some(Self::Archived),
             "tombstoned" => Some(Self::Tombstoned),
             "purged" => Some(Self::Purged),
-            _ => None,
-        }
-    }
-}
-
-/// Governance state of a `Decision`, `Convention` or `Failure`; [`Governance::None`] for every
-/// other kind.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(rename_all = "lowercase")]
-#[non_exhaustive]
-pub enum Governance {
-    /// The kind is not governed.
-    None,
-    /// Recorded, not yet accepted (ranked below accepted in `why`).
-    Proposed,
-    /// Accepted with reason and path scope (event recorded).
-    Accepted,
-    /// Replaced by a newer record (`SUPERSEDES` edge plus event).
-    Superseded,
-    /// Declared no longer valid (event recorded).
-    Invalidated,
-}
-
-impl Governance {
-    /// Stable lowercase name used in the `node.governance` column.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::None => "none",
-            Self::Proposed => "proposed",
-            Self::Accepted => "accepted",
-            Self::Superseded => "superseded",
-            Self::Invalidated => "invalidated",
-        }
-    }
-    /// Parse a column value.
-    pub fn parse(s: &str) -> Option<Self> {
-        match s {
-            "none" => Some(Self::None),
-            "proposed" => Some(Self::Proposed),
-            "accepted" => Some(Self::Accepted),
-            "superseded" => Some(Self::Superseded),
-            "invalidated" => Some(Self::Invalidated),
             _ => None,
         }
     }
@@ -272,14 +230,6 @@ pub enum InvalidTransition {
         /// Requested state.
         to: Lifecycle,
     },
-    /// `from -> to` is not in the governance table.
-    #[error("governance transition {} -> {} is not allowed", from.as_str(), to.as_str())]
-    Governance {
-        /// Current state.
-        from: Governance,
-        /// Requested state.
-        to: Governance,
-    },
     /// A `Reactivate` outside the ingestion reconciliation table (DI1.8, RD2-5).
     #[error("reactivation of a {kind} refused: {refusal}")]
     Reactivate {
@@ -288,9 +238,6 @@ pub enum InvalidTransition {
         /// The fixed refusal class.
         refusal: ReactivateRefusal,
     },
-    /// Governance can only change on an active record.
-    #[error("the record is {} and its governance can no longer change", .0.as_str())]
-    NotActive(Lifecycle),
 }
 
 /// DI1.8 (RD2-5): the ingestion reconciliation transition, the single narrow exception to

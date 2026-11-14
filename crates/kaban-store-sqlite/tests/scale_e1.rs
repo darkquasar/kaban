@@ -213,8 +213,6 @@ fn one_thousand_records_across_two_ontologies() {
         ));
     }
     let seeding = seeding.elapsed();
-    assert_eq!(runbooks[0].governance, kaban_core::Governance::None);
-    assert_eq!(services[0].governance, kaban_core::Governance::None);
     for (kind, n) in [
         ("ops:Runbook", RECORDS_PER_KIND),
         ("ops:Service", RECORDS_PER_KIND),

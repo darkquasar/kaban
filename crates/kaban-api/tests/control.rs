@@ -410,7 +410,6 @@ fn response_gate_validates_own_ids_but_still_withholds_a_card_whose_text_matches
             "id": created.id,
             "kind": "Fact",
             "lifecycle": "active",
-            "governance": "none",
             "created_at": "2026-10-26T12:22:26Z",
             "text": format!("see {}", created.id),
             "workspace_id": "default",

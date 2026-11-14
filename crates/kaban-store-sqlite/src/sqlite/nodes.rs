@@ -10,14 +10,17 @@ use crate::rows::{NODE_COLS, row_node};
 use crate::sql_error::SqlResultExt;
 use kaban_core::Result;
 use kaban_core::{
-    BatchReport, Governance, InvalidTransition, Lifecycle, LinkReq, Method, NewNode, Node, NodeId,
-    OutcomeKind, RedactedStrings, RememberOutcome, StoreError, WorkspaceId, WriteCtx, new_id,
-    now_iso,
+    BatchReport, Lifecycle, LinkReq, Method, NewNode, Node, NodeId, OutcomeKind, RedactedStrings,
+    RememberOutcome, StoreError, WorkspaceId, WriteCtx, new_id, now_iso,
 };
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::json;
 
 use super::{SqliteStore, Tenant};
+
+/// What every new row writes into the retired `node.governance` column: nothing reads it, and
+/// the v14 format drops it.
+const RETIRED_GOVERNANCE: &str = "none";
 
 /// Dedup identity of a note (F1): sha256 over `workspace \u{1} kind \u{1} trimmed text`. The
 /// migrator recomputes it for rows that predate bound workspaces (MD-8).
@@ -134,12 +137,12 @@ impl SqliteStore {
         let tags = serde_json::to_string(&n.tags)?;
         let props = serde_json::to_string(n.props.as_ref().unwrap_or(&json!({})))?;
         let path_scope = serde_json::to_string(&n.path_scope)?;
-        let governance = Governance::None;
+        let governance = RETIRED_GOVERNANCE;
         let bodies = crate::body_codec::Writer::for_connection(conn)?;
         conn.execute(
             "INSERT INTO node(id,kind,text,summary,tags,confidence,importance,lifecycle,governance,store_scope,path_scope,dup_key,repo,created_at,updated_at,valid_from,session_id,agent_id,workspace_id,props,content_hash,policy_version)
              VALUES (?,?,?,?,?,?,?,'active',?,?,?,?,?,?,?,?,?,?,?,?,?,'')",
-            params![id, stored_kind, bodies.stored(&n.text), n.summary, tags, n.confidence, n.importance, governance.as_str(), n.store_scope.as_str(), path_scope, n.dup_key, n.repo, now, now, n.valid_from, n.session_id, n.agent_id, tenant.ws, props, hash],
+            params![id, stored_kind, bodies.stored(&n.text), n.summary, tags, n.confidence, n.importance, governance, n.store_scope.as_str(), path_scope, n.dup_key, n.repo, now, now, n.valid_from, n.session_id, n.agent_id, tenant.ws, props, hash],
         ).sql()?;
         let rid = conn.last_insert_rowid();
         Self::maintain_anchors(conn, tenant, rid, stored_kind, n)?;
@@ -228,7 +231,7 @@ impl SqliteStore {
         let hash = batch_content_hash(ws, id.as_str(), n, &props);
         let stored: Option<StoredNode> = conn
             .query_row(
-                "SELECT rid, content_hash, kind, lifecycle, workspace_id, dup_key, repo, store_scope, governance FROM node WHERE id=?",
+                "SELECT rid, content_hash, kind, lifecycle, workspace_id, dup_key, repo, store_scope FROM node WHERE id=?",
                 [id.as_str()],
                 |r| {
                     Ok(StoredNode {
@@ -240,7 +243,6 @@ impl SqliteStore {
                         dup_key: r.get(5)?,
                         repo: r.get(6)?,
                         store_scope: r.get(7)?,
-                        governance: r.get(8)?,
                     })
                 },
             )
@@ -279,34 +281,20 @@ impl SqliteStore {
                 rid
             }
             None => {
-                let governance = Governance::None;
+                let governance = RETIRED_GOVERNANCE;
                 let bodies = crate::body_codec::Writer::for_connection(conn)?;
                 // EN-E3: `store_scope`, `path_scope`, `dup_key` and `repo` are persisted on
                 // insert and update (before E2.2 the batch path dropped them)
                 conn.execute(
                     "INSERT INTO node(id,kind,text,summary,tags,confidence,importance,lifecycle,governance,store_scope,path_scope,dup_key,repo,created_at,updated_at,valid_from,session_id,agent_id,workspace_id,props,content_hash,policy_version)
                      VALUES (?,?,?,?,?,?,?,'active',?,?,?,?,?,?,?,?,?,?,?,?,?,'')",
-                    params![id.as_str(), stored_kind, bodies.stored(&n.text), n.summary, tags, n.confidence, n.importance, governance.as_str(), n.store_scope.as_str(), path_scope, n.dup_key, n.repo, now, now, n.valid_from, n.session_id, n.agent_id, ws, props, hash],
+                    params![id.as_str(), stored_kind, bodies.stored(&n.text), n.summary, tags, n.confidence, n.importance, governance, n.store_scope.as_str(), path_scope, n.dup_key, n.repo, now, now, n.valid_from, n.session_id, n.agent_id, ws, props, hash],
                 ).sql()?;
                 let rid = conn.last_insert_rowid();
                 report.record(id, stored_kind, OutcomeKind::Inserted);
                 rid
             }
-            Some(StoredNode {
-                rid, governance, ..
-            }) => {
-                // EN-F35: unchanged retries above remain no-ops. Any persisted terminal
-                // governance protects content even if the current ontology drops the mixin.
-                let governance = Governance::parse(&governance)
-                    .ok_or_else(|| crate::rows::bad_enum(8, &governance))
-                    .sql()?;
-                if governance != Governance::None && governance != Governance::Proposed {
-                    return Err(InvalidTransition::Governance {
-                        from: governance,
-                        to: Governance::Proposed,
-                    }
-                    .into());
-                }
+            Some(StoredNode { rid, .. }) => {
                 let bodies = crate::body_codec::Writer::for_connection(conn)?;
                 conn.execute(
                     "UPDATE node SET text=?1, summary=?2, tags=?3, confidence=?4, importance=?5, valid_from=?6,
@@ -338,7 +326,6 @@ struct StoredNode {
     dup_key: Option<String>,
     repo: Option<String>,
     store_scope: String,
-    governance: String,
 }
 
 /// Content identity of a node written by `apply_batch` (WD-7, D-16): sha256 over a

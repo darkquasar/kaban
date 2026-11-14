@@ -172,7 +172,6 @@ fn step3(s: &Scratch, _root: &Path, mcp: &mut McpClient, arch: &str, adr: &str) 
     let decision = nodes(s, "Decision").into_iter().next().unwrap();
     // REC-08: an extracted record is active at commit, with no proposed state
     assert_eq!(decision.lifecycle, kaban_core::Lifecycle::Active);
-    assert_eq!(decision.governance, kaban_core::Governance::None);
     let before = changes(s);
     let repeat = mcp.call("ingest_submit", &body);
     assert_eq!(repeat["unchanged"], 1, "{repeat}");

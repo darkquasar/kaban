@@ -17,7 +17,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 
-use kaban_core::ontology::meta::{OnLink, Rules, Stamp};
+use kaban_core::ontology::meta::{OnLink, Rules};
 use kaban_core::ontology::resolve::{RelEnd, ResolvedKind, resolve_with};
 use kaban_core::{
     NamespaceSet, Ns, Ontology, OntologyError, OntologyFile, Qualified, RuleSet, TypeDef,
@@ -457,27 +457,6 @@ impl OntologyRegistry {
             .filter_map(|r| r.on_link.map(|on| (stored_name(&r.id), on)))
             .collect()
     }
-
-    /// The stored names of every loaded kind whose effective `index.stamp` is `commit` (the
-    /// default): the set `SyncStore::stamp_commit` updates (engine-spec §3.1 "Indexing
-    /// meta-config", OWN-65; the shipped `Document`, `Section`, `Chunk` and `Tag` are `none`).
-    /// In the resolver's order (by qualified identity).
-    pub fn stamp_kinds(&self) -> Vec<String> {
-        let state = self.read();
-        state
-            .ontology
-            .kinds
-            .values()
-            .filter(|k| k.stamp() == Stamp::Commit)
-            .map(|k| stored_name(&k.id))
-            .collect()
-    }
-
-    /// The effective stamping policy of the kind stored under `stored`; `None` when the loaded
-    /// files do not declare it (a discovered `x:` kind, for one).
-    pub fn index_policy(&self, stored: &str) -> Option<Stamp> {
-        self.with_kind(stored, ResolvedKind::stamp)
-    }
 }
 
 /// Validate a write's `props` against the `props_schema` of `kind` in the registry (engine-spec
@@ -656,7 +635,7 @@ fn write_namespace(api: &KabanApi, ontology: &Ontology, file: &Loaded) -> Result
 mod tests {
     use super::*;
     use crate::ApiConfig;
-    use kaban_core::{Governance, MemoryStore, NewNode, RememberOutcome};
+    use kaban_core::{MemoryStore, NewNode, RememberOutcome};
     use kaban_policy::Policy;
     use kaban_store_sqlite::SqliteStore;
 
@@ -686,7 +665,7 @@ mod tests {
     }
 
     /// E1.4: a load publishes the rule set into the service's registry; before the load the
-    /// service reads the shipped set. A fresh record starts ungoverned whatever its kind.
+    /// service reads the shipped set. A fresh record of a loaded kind is active.
     #[test]
     fn a_load_publishes_the_rule_set_into_the_registry() {
         // Arrange
@@ -733,8 +712,8 @@ mod tests {
         let RememberOutcome::Created(node) = outcome else {
             panic!("fresh store: {outcome:?}");
         };
-        // a fresh record starts ungoverned whatever its kind (REC-08, T3)
-        assert_eq!(node.governance, Governance::None);
+        // a fresh record of a loaded kind is active at commit (REC-08, T3)
+        assert_eq!(node.lifecycle, kaban_core::Lifecycle::Active);
     }
 
     /// E1.5: the registry is the one owner of the loaded ontology: a load through the

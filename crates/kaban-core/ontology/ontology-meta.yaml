@@ -3,14 +3,12 @@
 # map-of-schemas form, so this schema fixes the top-level shape and the scalar blocks; the bodies under `mixins`, `kinds`, `rels`, `source_types` and `questions`
 # (maps keyed by user names) are checked by the typed parse with `deny_unknown_fields` at every
 # level, and identifiers by the Ns/KindName/RelName newtypes. A kind or mixin body may carry
-# `index: {stamp: commit | none}` (engine-spec §3.1 "Indexing meta-config", OWN-65, AMD-14):
-# how the store indexes records of the kind, inherited through `is_a` and mixins; `stamp` is a
-# closed set (default `commit`), the block is closed (`deny_unknown_fields`) like every other.
-# A kind or mixin body may carry `rules: {display, dedup}` (EN-F4): the kind's display labels and
-# its near-duplicate key. The removed governance keys (top-level `priors`, a rel's
-# `confidence_required` and `governed_semantics`, a kind's `min_confidence`, `acceptance` and
-# `governed` mixin, the `serialize`, `export` and `governs_paths` settings) and the removed
-# `discovered` block (PC-14) are not listed: a file carrying one is refused like any unknown key.
+# `rules: {display, dedup}` (EN-F4): the kind's display labels and its near-duplicate key. The
+# removed governance keys (top-level `priors`, a rel's `confidence_required` and
+# `governed_semantics`, a kind's `min_confidence`, `acceptance` and `governed` mixin, the
+# `serialize`, `export` and `governs_paths` settings), the removed `index` block with its commit
+# `stamp` knob and the removed `discovered` block (PC-14) are not listed: a file carrying one is
+# refused like any unknown key.
 type: object
 additionalProperties: false
 required: [ontology, version, kinds, rels]

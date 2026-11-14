@@ -2,7 +2,7 @@
 //! [`Edge`] conversions shared by the store's selects. The body (`text`) is decoded here
 //! (`body_codec::read_column`, spec 05 SS-17): plain or encoded, the caller sees the original.
 
-use kaban_core::{Edge, Governance, Lifecycle, Node, StoreScope, TypeDef};
+use kaban_core::{Edge, Lifecycle, Node, StoreScope, TypeDef};
 use serde_json::Value;
 
 /// Columns read into a [`Node`], in [`row_node`] order. `status` and `source_session` are frozen
@@ -44,7 +44,6 @@ pub(crate) fn row_node(r: &rusqlite::Row<'_>) -> rusqlite::Result<Node> {
 pub(crate) fn row_node_at(r: &rusqlite::Row<'_>, at: usize) -> rusqlite::Result<Node> {
     let tags: String = r.get(at + 4)?;
     let lifecycle: String = r.get(at + 7)?;
-    let governance: String = r.get(at + 8)?;
     let store_scope: String = r.get(at + 9)?;
     let path_scope: String = r.get(at + 10)?;
     let props: String = r.get(at + 24)?;
@@ -57,7 +56,7 @@ pub(crate) fn row_node_at(r: &rusqlite::Row<'_>, at: usize) -> rusqlite::Result<
         confidence: r.get(at + 5)?,
         importance: r.get(at + 6)?,
         lifecycle: Lifecycle::parse(&lifecycle).ok_or_else(|| bad_enum(at + 7, &lifecycle))?,
-        governance: Governance::parse(&governance).ok_or_else(|| bad_enum(at + 8, &governance))?,
+        // column `at + 8` is the retired `governance` column: written `none`, read by nothing
         store_scope: StoreScope::parse(&store_scope)
             .ok_or_else(|| bad_enum(at + 9, &store_scope))?,
         path_scope: decode_json_strings(at + 10, &path_scope)?,

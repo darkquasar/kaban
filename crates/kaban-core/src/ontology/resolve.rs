@@ -11,8 +11,8 @@ use serde_json::Value;
 
 use super::OntologyError;
 use super::meta::{
-    ColumnWeights, Extract, GroupBy, Index, KindBody, Ns, OnLink, OntologyFile, QuestionTemplate,
-    RankHints, RelBody, Rules, Stamp, check_ranges,
+    ColumnWeights, Extract, GroupBy, KindBody, Ns, OnLink, OntologyFile, QuestionTemplate,
+    RankHints, RelBody, Rules, check_ranges,
 };
 use crate::validator::{Schema, ValidatorLimits};
 
@@ -140,17 +140,6 @@ pub struct ResolvedKind {
     pub column_weights: Option<ColumnWeights>,
     /// Extraction hints (inherited, overridden).
     pub extract: Option<Extract>,
-    /// Indexing meta-config (inherited, overridden; engine-spec §3.1 `index`, OWN-65).
-    pub index: Option<Index>,
-}
-
-impl ResolvedKind {
-    /// The effective stamping policy: the kind's `index.stamp`, `commit` when no block is set
-    /// anywhere along `is_a` and the mixins (engine-spec §3.1 "Default when the block is
-    /// absent: `commit`").
-    pub fn stamp(&self) -> Stamp {
-        self.index.map_or(Stamp::Commit, |index| index.stamp)
-    }
 }
 
 /// A relationship type after resolution.
@@ -642,7 +631,6 @@ fn resolve_kind(
         ident_fields: Vec::new(),
         column_weights: None,
         extract: None,
-        index: None,
     };
     // is_a: the parent's merged schema and hints
     if let Some(parent_name) = &body.is_a {
@@ -662,7 +650,6 @@ fn resolve_kind(
         resolved.ident_fields.clone_from(&parent.ident_fields);
         resolved.column_weights.clone_from(&parent.column_weights);
         resolved.extract.clone_from(&parent.extract);
-        resolved.index = parent.index;
     }
     // mixins in list order; a key declared by two mixins is a conflict, whatever the values
     // (an explicit empty list and `description` are declarations too: E1.3a RE1-5)
@@ -716,10 +703,6 @@ fn resolve_kind(
             claim("extract")?;
             resolved.extract = Some(extract.clone());
         }
-        if let Some(index) = mixin.index {
-            claim("index")?;
-            resolved.index = Some(index);
-        }
         resolved.mixins.push(mixin_id);
     }
     // the kind's own keys win over mixins and inheritance; its properties may add, never retype
@@ -746,9 +729,6 @@ fn resolve_kind(
     }
     if let Some(extract) = &body.extract {
         resolved.extract = Some(extract.clone());
-    }
-    if let Some(index) = body.index {
-        resolved.index = Some(index);
     }
     resolved.props_schema = Schema::parse(&merged.into_value(), &decl.limits)?;
     visiting.remove(q);

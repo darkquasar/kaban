@@ -48,7 +48,6 @@ impl KabanApi {
             confidence: _,
             importance: _,
             lifecycle: _,
-            governance: _,
             store_scope: _,
             path_scope,
             rev: _,

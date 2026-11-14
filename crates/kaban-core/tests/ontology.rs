@@ -7,7 +7,6 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
 
-use kaban_core::ontology::{Index, Stamp};
 use kaban_core::{
     NamespaceSet, Ns, ONTOLOGY_ERROR_TEXTS, Ontology, OntologyError, OntologyFile, Qualified,
     resolve, split_stored, stored_name,
@@ -569,98 +568,12 @@ fn every_error_text_is_in_the_en_f7_list() {
     }
 }
 
-/// Indexing meta-config (engine-spec §3.1 `index`, OWN-65, AMD-14; engine-plan E2.0 item 5a):
-/// `index: {stamp: none}` resolves, a child inherits it through `is_a`, a mixin applies it, a
-/// kind without the block keeps the default `commit`.
-#[test]
-fn index_stamp_none_resolves_and_is_inherited_through_is_a_and_mixins() {
-    // Arrange
-    let o = load(&["index_stamp.yaml"]).unwrap();
-    let kind = |name: &str| {
-        o.kinds
-            .get(&Qualified {
-                ns: ns("shop"),
-                name: name.to_owned(),
-            })
-            .unwrap_or_else(|| panic!("{name} resolved"))
-    };
-
-    // Act
-    let catalogue = kind("Catalogue").stamp();
-    let leaflet = kind("Leaflet").stamp();
-    let flyer = kind("Flyer").stamp();
-    let receipt = kind("Receipt").stamp();
-
-    // Assert
-    assert_eq!(catalogue, Stamp::None, "the kind's own block");
-    assert_eq!(leaflet, Stamp::None, "inherited through is_a");
-    assert_eq!(flyer, Stamp::None, "applied by the mixin");
-    assert_eq!(receipt, Stamp::Commit, "default when the block is absent");
-    assert_eq!(kind("Receipt").index, None);
-    assert_eq!(kind("Leaflet").index, Some(Index { stamp: Stamp::None }));
-}
-
-/// `stamp` is a closed set and the block is closed like every other key: a value outside
-/// `commit | none` and an unknown key both fail with the file-form class and the field's
-/// path, never the value (the other closed sets of `meta.rs` fail the same way; the spec's
-/// `invalid_value` wording is recorded as text drift in the E2.0 report).
-#[test]
-fn index_with_an_unknown_value_or_key_fails_with_the_field_path() {
-    // Arrange
-    let weekly = "ontology: shop\nversion: 1\nkinds: {Thing: {description: t, index: {stamp: weekly}}}\nrels: {}\n";
-    let typo = "ontology: shop\nversion: 1\nkinds: {Thing: {description: t, index: {stmp: none}}}\nrels: {}\n";
-
-    // Act
-    let weekly_err = load_err_text(weekly);
-    let typo_err = load_err_text(typo);
-
-    // Assert
-    assert_eq!(weekly_err, "schema_invalid:file:kinds.Thing.index.stamp");
-    assert!(!weekly_err.contains("weekly"), "{weekly_err}");
-    assert_eq!(typo_err, "schema_invalid:file:kinds.Thing.index.stmp");
-}
-
-/// The shipped set: `Document`, `Section`, `Chunk` and `Tag` are `none` (ingested document rows
-/// carry no commit sha); every other shipped kind, `Decision`, `Convention` and `Failure` among
-/// them, keeps the default `commit`.
-#[test]
-fn the_shipped_ontologies_leave_document_kinds_unstamped_and_stamp_the_record_kinds() {
-    // Arrange: the shipped bytes themselves (the fixture copies are the EN-F1 goldens)
-    let o = kaban_core::shipped::resolved().unwrap();
-
-    // Act
-    let unstamped: BTreeSet<String> = o
-        .kinds
-        .values()
-        .filter(|k| k.stamp() == Stamp::None)
-        .map(|k| k.id.name.clone())
-        .collect();
-    let stamped: BTreeSet<String> = o
-        .kinds
-        .values()
-        .filter(|k| k.stamp() == Stamp::Commit)
-        .map(|k| k.id.name.clone())
-        .collect();
-
-    // Assert
-    assert_eq!(
-        unstamped,
-        ["Chunk", "Document", "Section", "Tag"]
-            .into_iter()
-            .map(str::to_owned)
-            .collect()
-    );
-    for kind in ["Decision", "Convention", "Failure"] {
-        assert!(stamped.contains(kind), "{kind} stamps per commit");
-    }
-}
-
 /// The keys of the removed governance pipeline are refused like any other unknown key, with
 /// the field path and never the value: a top-level `priors` block, a rel's
 /// `confidence_required` and `governed_semantics`, a kind's or a mixin's `min_confidence`,
 /// `acceptance`, `auto_accept_when` and `governed` mixin, and the governance keys that did not
 /// move into the `rules` block (`acceptance`, `auto_accept_when`, `serialize`, `export`,
-/// `governs_paths`).
+/// `governs_paths`), and the `index` block with its `stamp` knob.
 #[test]
 fn removed_governance_fields_are_refused_with_the_field_path() {
     for (text, path) in [
@@ -715,6 +628,15 @@ fn removed_governance_fields_are_refused_with_the_field_path() {
         (
             "ontology: shop\nversion: 1\nkinds:\n  Thing: {description: t, rules: {governs_paths: true}}\nrels: {}\n",
             "schema_invalid:file:kinds.Thing.rules.governs_paths",
+        ),
+        // the commit stamping knob went with the stamping it configured
+        (
+            "ontology: shop\nversion: 1\nkinds:\n  Thing: {description: t, index: {stamp: none}}\nrels: {}\n",
+            "schema_invalid:file:kinds.Thing.index",
+        ),
+        (
+            "ontology: shop\nversion: 1\nmixins:\n  M: {index: {stamp: commit}}\nkinds: {}\nrels: {}\n",
+            "schema_invalid:file:mixins.M.index",
         ),
     ] {
         let err = OntologyFile::from_yaml(text).unwrap_err();

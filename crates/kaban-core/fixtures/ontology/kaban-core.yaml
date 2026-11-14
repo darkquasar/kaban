@@ -7,15 +7,12 @@ kinds:
   Document:
     description: "An ingested document (docs-ingest)."
     props_schema: {type: object}
-    index: {stamp: none}
   Section:
     description: "A section of an ingested document."
     props_schema: {type: object}
-    index: {stamp: none}
   Chunk:
     description: "A retrievable chunk of a section."
     props_schema: {type: object}
-    index: {stamp: none}
   Entity:
     description: "A named thing: project, file, symbol, service, person."
     props_schema: {type: object}
@@ -25,7 +22,6 @@ kinds:
   Tag:
     description: "A tag node for TAGGED edges."
     props_schema: {type: object}
-    index: {stamp: none}
 rels:
   MENTIONS: {from: [], to: [], directed: true, description: "Mentions an entity."}
   ABOUT: {from: [], to: [], directed: true, description: "Memory is about an Entity."}

@@ -6,7 +6,8 @@
 //! `invalid_identifier`. The keys of the removed governance pipeline (`priors`,
 //! `confidence_required`, `min_confidence`, the `governed` mixin with its `acceptance`,
 //! `serialize`, `export` and `governs_paths`, a kind's `acceptance` and a rel's
-//! `governed_semantics`) are unknown keys like any other, refused with their dotted path.
+//! `governed_semantics`, and the `index` block with its commit `stamp` knob) are unknown keys
+//! like any other, refused with their dotted path.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -206,34 +207,6 @@ pub struct KindBody {
     /// Extraction hints (EN-F25, EN-F36).
     #[serde(default)]
     pub extract: Option<Extract>,
-    /// Indexing meta-config (engine-spec §3.1 `index`; OWN-65, AMD-14).
-    #[serde(default)]
-    pub index: Option<Index>,
-}
-
-/// The indexing meta-config of a kind (engine-spec §3.1 `index`; OWN-65, AMD-14): how the store
-/// indexes records of the kind. User-tweakable in any ontology file, inherited through `is_a`
-/// and mixins like every other kind key, closed like every other mapping of the file. The
-/// first knob is `stamp`; further indexing knobs land here.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, serde::Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct Index {
-    /// Per-commit stamping: `commit` (the default, today's behaviour, core-spec F13) or
-    /// `none` (the kind is never stamped). An `index: {}` block keeps the default.
-    #[serde(default)]
-    pub stamp: Stamp,
-}
-
-/// Whether `post-commit` writes the commit sha onto rows of a kind that have none (core-spec
-/// F13). A closed set: any other value fails the file-form check like the other closed sets.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, serde::Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Stamp {
-    /// The `post-commit` hook stamps rows of this kind (`stamp_commit`).
-    #[default]
-    Commit,
-    /// Rows of this kind carry no commit sha.
-    None,
 }
 
 /// Display labels.

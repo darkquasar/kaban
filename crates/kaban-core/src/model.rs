@@ -2,7 +2,7 @@
 
 use crate::audit::WorkspaceId;
 use crate::ids::NodeId;
-use crate::lifecycle::{Governance, Lifecycle, StoreScope};
+use crate::lifecycle::{Lifecycle, StoreScope};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -245,8 +245,6 @@ pub struct Node {
     pub importance: Option<f64>,
     /// Storage visibility (core-spec §4).
     pub lifecycle: Lifecycle,
-    /// Governance state; `None` for every kind but Decision, Convention and Failure.
-    pub governance: Governance,
     /// Which database the record lives in.
     pub store_scope: StoreScope,
     /// Globs/paths a governing record covers (distinct from `store_scope`).

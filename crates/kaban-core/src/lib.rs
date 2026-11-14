@@ -44,8 +44,8 @@ pub use ids::{InvalidNodeId, NodeId, new_id, now_iso};
 pub use lease::Lease;
 // `RuleSet` (engine-plan E1.4): the live EN-F4 ontology rules read from the loaded files
 pub use lifecycle::{
-    Governance, INGEST_OWNER, InvalidTransition, LIFECYCLE_RELS, Lifecycle, ReactivateRefusal,
-    RuleSet, StoreScope, is_lifecycle_rel, lifecycle_transition, reconciliation_transition,
+    INGEST_OWNER, InvalidTransition, LIFECYCLE_RELS, Lifecycle, ReactivateRefusal, RuleSet,
+    StoreScope, is_lifecycle_rel, lifecycle_transition, reconciliation_transition,
 };
 pub use model::{
     BatchReport, BodyLocation, CodeRef, CodeRefFilter, ConventionProps, DecisionProps, Edge,
