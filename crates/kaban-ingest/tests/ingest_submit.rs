@@ -305,3 +305,77 @@ async fn submitted_records_and_edges_are_active_for_a_second_process() {
     expected.sort_unstable();
     assert_eq!(pairs, expected, "{expanded:?}");
 }
+
+/// Submission edges carry the producer score of their record (the source record's
+/// confidence, `1.0` when it names none), stored as given with no prior: a traverse at
+/// `min_score: 0` finds every edge and the threshold splits them at the record confidence.
+#[tokio::test]
+async fn submitted_edges_score_their_record_confidence_for_score_filtered_traversal() {
+    let rig = common::real::rig_on_disk("kaban-e39-submit", "scores", kaban_policy::Policy::empty());
+    std::fs::write(rig.root.join("a.md"), "# Source\n\nThree harmless facts.\n").unwrap();
+    let api = api(&rig);
+    let prepared = brief(&api, &rig.root, "a.md", &IngestOpts::default())
+        .await
+        .unwrap();
+    let report = submit(
+        &api,
+        &rig.root,
+        json!({"job":prepared.job,"records":[
+            {"local_id":"one","kind":"Fact","text":"Alpha scored fact","confidence":0.8},
+            {"local_id":"two","kind":"Fact","text":"Beta scored fact"},
+            {"local_id":"three","kind":"Fact","text":"Gamma scored fact"}
+        ],"edges":[
+            {"from_local_id":"one","rel":"RELATES_TO","to_local_id":"two"},
+            {"from_local_id":"two","rel":"RELATES_TO","to_local_id":"three"}
+        ]}),
+    )
+    .await
+    .unwrap();
+    let ids: Vec<NodeId> = report["records"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| NodeId::parse(r["id"].as_str().unwrap()).unwrap())
+        .collect();
+    assert_eq!(ids.len(), 3, "{report}");
+    let walk = |rels: &[&str], min_score: u32| {
+        let r = rig
+            .store
+            .traverse(&kaban_core::TraverseQuery {
+                start_ids: vec![ids[0].clone()],
+                rels: rels.iter().map(|r| (*r).to_owned()).collect(),
+                direction: kaban_core::TraverseDirection::Out,
+                max_depth: 2,
+                limit: 50,
+                edge_filter: Some(kaban_core::EdgeFilter {
+                    min_score: Some(kaban_core::Fixed::new(min_score).unwrap()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })
+            .unwrap();
+        let mut scored: Vec<(String, String, Option<f64>)> = r
+            .edges
+            .into_iter()
+            .map(|e| (e.src, e.dst, e.confidence))
+            .collect();
+        scored.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+        scored
+    };
+    let (one, two, three) = (ids[0].to_string(), ids[1].to_string(), ids[2].to_string());
+    let mut both = vec![
+        (one.clone(), two.clone(), Some(0.8)),
+        (two.clone(), three.clone(), Some(1.0)),
+    ];
+    both.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+    assert_eq!(walk(&["RELATES_TO"], 0), both, "min_score 0 keeps every edge");
+    assert_eq!(walk(&["RELATES_TO"], 8000), both, "the 0.8 edge meets 0.8");
+    assert!(
+        walk(&["RELATES_TO"], 8001).is_empty(),
+        "above 0.8 the first hop is cut, so the walk stops"
+    );
+    // the provenance edge scores its source record too
+    let derived = walk(&["DERIVED_FROM"], 0);
+    assert_eq!(derived.len(), 1, "{derived:?}");
+    assert_eq!(derived[0].2, Some(0.8), "{derived:?}");
+}

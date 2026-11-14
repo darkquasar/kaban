@@ -1252,7 +1252,7 @@ expression: a
       "anchored": [],
       "edges": [
         {
-          "confidence": null,
+          "confidence": 0.95,
           "from": "@12",
           "id": "@15",
           "rel": "EVIDENCE_FOR",
@@ -2134,7 +2134,7 @@ expression: a
       "anchored": [],
       "edges": [
         {
-          "confidence": null,
+          "confidence": 0.95,
           "from": "@12",
           "id": "@15",
           "rel": "EVIDENCE_FOR",

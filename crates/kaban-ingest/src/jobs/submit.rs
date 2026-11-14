@@ -3,7 +3,7 @@
 use super::types::{JobEnvelope, JobError, StructuredReturn};
 use kaban_api::KabanApi;
 use kaban_core::{
-    BatchReport, IngestJob, JobId, JobStatus, JobSubmitContract, JobSubmitRequest,
+    BatchReport, Fixed, IngestJob, JobId, JobStatus, JobSubmitContract, JobSubmitRequest,
     JobSubmitStateUpdate, Lifecycle, NewNode, NodeId, Op, OutcomeKind, SourceRev, WriteBatch,
 };
 use serde::{Deserialize, Serialize};
@@ -37,6 +37,9 @@ struct Placed {
     local_id: String,
     id: NodeId,
     kind: String,
+    /// The record's confidence, `1.0` when the submission named none: the raw score of the
+    /// edges it sources or, for evidence citations, receives.
+    confidence: f64,
 }
 
 fn invalid() -> JobError {
@@ -232,6 +235,7 @@ pub async fn submit(api: &KabanApi, root: &Path, raw: Value) -> Result<Value, Jo
                 continue;
             }
         }
+        let confidence = node.confidence.unwrap_or(1.0);
         ops.push(Op::UpsertNode {
             id: id.clone(),
             node,
@@ -260,6 +264,7 @@ pub async fn submit(api: &KabanApi, root: &Path, raw: Value) -> Result<Value, Jo
                 local_id: local,
                 id,
                 kind,
+                confidence,
             },
         );
     }
@@ -349,8 +354,11 @@ pub async fn submit(api: &KabanApi, root: &Path, raw: Value) -> Result<Value, Jo
     for _ in &ret.pair_judgements {
         skip(&mut skipped, "", "not_requested", None);
     }
-    // every edge of the submission names its producer layer (by dialect) and method, which the
-    // store moves to the `layer` and `method` columns (EN-F22)
+    // every edge of the submission names its producer layer (by dialect), method and score,
+    // which the store moves to the `layer`, `method` and `score` columns (EN-F22). Outgoing
+    // record and provenance edges score their source record's confidence, evidence citations
+    // their destination record's; a document `ABOUT` has no record and scores one. No prior
+    // or reconciliation applies: the score is stored as given.
     let layer = match row.dialect.as_str() {
         "llm" => "llm",
         "gliner" => "gliner",
@@ -359,11 +367,20 @@ pub async fn submit(api: &KabanApi, root: &Path, raw: Value) -> Result<Value, Jo
     let mut named_edges = BTreeSet::new();
     for mut edge in pending_edges {
         if let Op::UpsertEdge {
+            src,
+            dst,
             props: Some(Value::Object(map)),
             ..
         } = &mut edge
         {
+            let confidence = placed
+                .values()
+                .find(|record| record.id == *src)
+                .or_else(|| placed.values().find(|record| record.id == *dst))
+                .map_or(1.0, |record| record.confidence);
+            let score = Fixed::from_f64(confidence).map_err(|_| invalid())?;
             map.insert("layer".into(), json!(layer));
+            map.insert("score".into(), json!(u32::from(score)));
             map.insert("method".into(), json!("ingest_submit"));
             map.insert("source_id".into(), json!(row.source_id));
         }
