@@ -205,9 +205,9 @@ pub(crate) fn coderefs_by_symbol(
     // `node_anchor_key(anchor_kind, key, workspace_id)` (0004:111) and reaches each `node` row
     // by rowid. A plain `JOIN` on a store without `sqlite_stat1` (the store never runs
     // `ANALYZE`) was planned from `node_kind` and read every active `CodeRef` (G1-F10, the
-    // CG5.3 stop; E2.6c). Same rows, same order. `tests/anchors_v4.rs` `RECALL_REF_SHAPE`
+    // CG5.3 stop; E2.6c). Same rows, same order. `tests/attach.rs` `CODEREFS_BY_SYMBOL_SHAPE`
     // mirrors this statement after the `SELECT` list (the `commit: None`, `Only(ws)` case: no
-    // scope clause) for `recall_ref_uses_index`; a change here changes both.
+    // scope clause) for `coderefs_by_symbol_uses_the_anchor_index`; a change here changes both.
     let sql = format!(
         "SELECT {cols} FROM node_anchor a CROSS JOIN node c ON c.rid = a.rid \
          WHERE a.anchor_kind = 'symbol' AND a.key = ? AND a.repo = ?{scope}{workspace} \
