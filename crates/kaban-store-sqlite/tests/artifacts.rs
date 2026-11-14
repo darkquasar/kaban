@@ -910,6 +910,45 @@ fn complete_set_rejects_foreign_document_producer_source_and_rolls_back() {
     );
 }
 
+/// Only a Gazetteer set retires Gazetteer mentions: an ingest batch that carries no set (a
+/// structured job's L0 refresh) re-upserts the chunk without naming its mentions and keeps them.
+#[test]
+fn set_less_ingest_batch_keeps_the_chunk_gazetteer_mentions() {
+    let scratch = Scratch::new("artifacts", "set-less");
+    let store = SqliteStore::open(&scratch.db(), &scratch.keys()).unwrap();
+    let (document, chunk, target) = (NodeId::new(), NodeId::new(), NodeId::new());
+    let document_op = node(
+        &document,
+        "Document",
+        "Fixture document",
+        json!({"owner":"kaban-ingest","source_id":"doc-fixture","chunk_ids":[chunk]}),
+    );
+    let chunk_op = node(
+        &chunk,
+        "Chunk",
+        "Architecture",
+        json!({"owner":"kaban-ingest"}),
+    );
+    let mut on = complete(&store, &document, vec![claim(&chunk, &target)], true);
+    on.ops.extend([
+        document_op.clone(),
+        chunk_op.clone(),
+        node(&target, "Fact", "Architecture", json!({})),
+    ]);
+    store.apply_batch(on, &ctx()).unwrap();
+    assert_eq!(hits(&store, &chunk), 1);
+    let mut refresh = WriteBatch::new(WorkspaceId::default(), vec![document_op, chunk_op]);
+    refresh.edge_diff = EdgeDiff::Owned {
+        owner: Owner::KabanIngest,
+    };
+    store.apply_batch(refresh, &ctx()).unwrap();
+    assert_eq!(
+        hits(&store, &chunk),
+        1,
+        "a batch without a Gazetteer set must not retire Gazetteer mentions"
+    );
+}
+
 #[test]
 fn empty_set_preserves_human_other_layer_and_foreign_lineage() {
     let scratch = Scratch::new("artifacts", "preservation");

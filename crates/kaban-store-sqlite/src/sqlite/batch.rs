@@ -413,13 +413,15 @@ impl SqliteStore {
         // and `Owned { owner }` delete only the rows whose `props.owner` is the batch's named
         // producer (OWN-83 (4); E2.5e, RW2-3: a human's row is never a batch's to delete
         // whatever its `layer`, so `producer: human` deletes nothing, and an untagged legacy
-        // row is no producer's); `None` nothing.
+        // row is no producer's); `None` nothing. Gazetteer mentions are their set's lineage:
+        // only `record_sets` retires them, so a set-less ingest batch (a structured job's L0
+        // refresh of the same chunks) keeps them.
         upserted.sort_unstable();
         upserted.dedup();
         for rid in upserted {
             let outgoing: Vec<(i64, i64, String, String)> = {
                 let mut st = tx
-                    .prepare_cached("SELECT src, dst, rel, props FROM edge WHERE src=?")
+                    .prepare_cached("SELECT src, dst, rel, props FROM edge WHERE src=? AND layer IS NOT 'gazetteer'")
                     .sql()?;
                 let rows = st
                     .query_map([rid], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))

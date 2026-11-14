@@ -539,13 +539,13 @@ expression: a
         "memory_usage": 6360,
         "outcome": "ok"
       },
-      "outbox_rows": 17,
+      "outbox_rows": 11,
       "partial": 0,
       "receipt": {
         "instance_id": "@7",
         "outcome": "committed",
         "pack_lineage_id": "@8",
-        "seq": 38
+        "seq": 32
       },
       "sections_tombstoned": 0,
       "skipped": 0,
@@ -557,21 +557,21 @@ expression: a
       "anchored": [],
       "edges": [
         {
-          "confidence": 0.36,
+          "confidence": 0.6,
           "from": "@1",
           "id": "@9",
           "rel": "MENTIONS",
           "to": "01a17a03-5344-7000-8000-000000000005"
         },
         {
-          "confidence": 0.36,
+          "confidence": 0.6,
           "from": "@1",
           "id": "@10",
           "rel": "MENTIONS",
           "to": "01a17a03-5344-7000-8000-000000000008"
         },
         {
-          "confidence": 0.64,
+          "confidence": 0.8,
           "from": "@1",
           "id": "@11",
           "rel": "MENTIONS",
@@ -1252,14 +1252,14 @@ expression: a
       "anchored": [],
       "edges": [
         {
-          "confidence": 0.7125,
+          "confidence": null,
           "from": "@12",
           "id": "@15",
           "rel": "EVIDENCE_FOR",
           "to": "@14"
         },
         {
-          "confidence": 1.0,
+          "confidence": null,
           "from": "@1",
           "id": "@16",
           "rel": "EVIDENCE_FOR",
@@ -1305,10 +1305,9 @@ expression: a
       ]
     },
     "finish": {
-      "assertions": 3,
       "changes": {
-        "first_seq": 41,
-        "last_seq": 49
+        "first_seq": 35,
+        "last_seq": 37
       },
       "created": 1,
       "deleted_edges": 0,
@@ -1316,17 +1315,15 @@ expression: a
       "evidence_dropped": {},
       "job": "0b884f8559317a5be0c51730253116fc0ceddf8e76a2eed08fd24f03d30f146d",
       "orphans": [],
-      "predecessor_terminal": 0,
       "receipt": {
         "instance_id": "@7",
         "outcome": "committed",
         "pack_lineage_id": "@8",
-        "seq": 49
+        "seq": 37
       },
       "reconcile": "complete",
       "redactions": 0,
       "retired_assertions": 0,
-      "revision_candidates": 0,
       "skipped": {
         "edge_not_allowed": 2
       },
@@ -1336,7 +1333,6 @@ expression: a
       "updated": 0
     },
     "forbidden": {
-      "assertions": 0,
       "changes": {
         "first_seq": null,
         "last_seq": null
@@ -1346,7 +1342,6 @@ expression: a
       "edges": 2,
       "evidence_dropped": [],
       "job": "0b884f8559317a5be0c51730253116fc0ceddf8e76a2eed08fd24f03d30f146d",
-      "predecessor_terminal": 0,
       "records": [
         {
           "id": "@14",
@@ -1355,7 +1350,6 @@ expression: a
         }
       ],
       "redactions": 0,
-      "revision_candidates": [],
       "skipped": [
         {
           "local_id": "discounts",
@@ -1374,7 +1368,7 @@ expression: a
       "anchored": [],
       "edges": [
         {
-          "confidence": 1.0,
+          "confidence": null,
           "from": "@14",
           "id": "@17",
           "rel": "GOVERNS",
@@ -1432,7 +1426,6 @@ expression: a
       }
     },
     "replay": {
-      "assertions": 0,
       "changes": {
         "first_seq": null,
         "last_seq": null
@@ -1442,7 +1435,6 @@ expression: a
       "edges": 2,
       "evidence_dropped": [],
       "job": "0b884f8559317a5be0c51730253116fc0ceddf8e76a2eed08fd24f03d30f146d",
-      "predecessor_terminal": 0,
       "records": [
         {
           "id": "@14",
@@ -1451,24 +1443,21 @@ expression: a
         }
       ],
       "redactions": 0,
-      "revision_candidates": [],
       "skipped": [],
       "status": "open",
       "unchanged": 1,
       "updated": 0
     },
     "submit": {
-      "assertions": 3,
       "changes": {
-        "first_seq": 41,
-        "last_seq": 49
+        "first_seq": 35,
+        "last_seq": 37
       },
       "chunk": null,
       "created": 1,
       "edges": 2,
       "evidence_dropped": [],
       "job": "0b884f8559317a5be0c51730253116fc0ceddf8e76a2eed08fd24f03d30f146d",
-      "predecessor_terminal": 0,
       "records": [
         {
           "id": "@14",
@@ -1477,7 +1466,6 @@ expression: a
         }
       ],
       "redactions": 0,
-      "revision_candidates": [],
       "skipped": [],
       "status": "open",
       "unchanged": 0,
@@ -1960,21 +1948,21 @@ expression: a
       "anchored": [],
       "edges": [
         {
-          "confidence": 0.36,
+          "confidence": 0.6,
           "from": "@1",
           "id": "@9",
           "rel": "MENTIONS",
           "to": "01a17a03-5344-7000-8000-000000000005"
         },
         {
-          "confidence": 0.36,
+          "confidence": 0.6,
           "from": "@1",
           "id": "@10",
           "rel": "MENTIONS",
           "to": "01a17a03-5344-7000-8000-000000000008"
         },
         {
-          "confidence": 0.64,
+          "confidence": 0.8,
           "from": "@1",
           "id": "@11",
           "rel": "MENTIONS",
@@ -2050,10 +2038,9 @@ expression: a
       "next": null
     },
     "store": {
-      "assertions_inserted": 1,
       "inserted": 1,
-      "outbox_first_seq": 66,
-      "outbox_last_seq": 68,
+      "outbox_first_seq": 43,
+      "outbox_last_seq": 43,
       "outcomes": [
         {
           "id": "01a17a03-5344-7000-8000-000000000064",
@@ -2063,23 +2050,18 @@ expression: a
       ],
       "tombstoned": 0,
       "unchanged": 0,
-      "updated": 0,
-      "verdicts": {
-        "candidate": 1
-      }
+      "updated": 0
     },
     "submit": {
-      "assertions": 2,
       "changes": {
-        "first_seq": 60,
-        "last_seq": 65
+        "first_seq": 41,
+        "last_seq": 42
       },
       "chunk": null,
       "created": 1,
       "edges": 1,
       "evidence_dropped": [],
       "job": "9dc4b5dd27dec64cd4324ba9c6f73d70f8a8c0ab0d1d721c174b1ce3b50e009e",
-      "predecessor_terminal": 0,
       "records": [
         {
           "id": "@18",
@@ -2088,7 +2070,6 @@ expression: a
         }
       ],
       "redactions": 0,
-      "revision_candidates": [],
       "skipped": [
         {
           "local_id": "org",
@@ -2153,14 +2134,14 @@ expression: a
       "anchored": [],
       "edges": [
         {
-          "confidence": 0.7125,
+          "confidence": null,
           "from": "@12",
           "id": "@15",
           "rel": "EVIDENCE_FOR",
           "to": "@14"
         },
         {
-          "confidence": 1.0,
+          "confidence": null,
           "from": "@1",
           "id": "@16",
           "rel": "EVIDENCE_FOR",
@@ -2371,7 +2352,7 @@ expression: a
           "ok": true
         },
         {
-          "detail": "68",
+          "detail": "43",
           "name": "text_index_watermark",
           "ok": true
         },
@@ -2462,10 +2443,9 @@ expression: a
       "tests": []
     },
     "revision_finish": {
-      "assertions": 3,
       "changes": {
-        "first_seq": 74,
-        "last_seq": 82
+        "first_seq": 49,
+        "last_seq": 50
       },
       "created": 0,
       "deleted_edges": 0,
@@ -2473,17 +2453,15 @@ expression: a
       "evidence_dropped": {},
       "job": "ab9820ef3c82062552290711d3fd8b37f85a55d00e2a33716718cf193f31e8f2",
       "orphans": [],
-      "predecessor_terminal": 0,
       "receipt": {
         "instance_id": "@7",
         "outcome": "committed",
         "pack_lineage_id": "@8",
-        "seq": 82
+        "seq": 50
       },
       "reconcile": "complete",
       "redactions": 0,
       "retired_assertions": 0,
-      "revision_candidates": 0,
       "skipped": {},
       "status": "finished",
       "submits": 1,
@@ -2491,17 +2469,15 @@ expression: a
       "updated": 1
     },
     "revision_submit": {
-      "assertions": 3,
       "changes": {
-        "first_seq": 74,
-        "last_seq": 82
+        "first_seq": 49,
+        "last_seq": 50
       },
       "chunk": null,
       "created": 0,
       "edges": 2,
       "evidence_dropped": [],
       "job": "ab9820ef3c82062552290711d3fd8b37f85a55d00e2a33716718cf193f31e8f2",
-      "predecessor_terminal": 0,
       "records": [
         {
           "id": "@14",
@@ -2510,7 +2486,6 @@ expression: a
         }
       ],
       "redactions": 0,
-      "revision_candidates": [],
       "skipped": [],
       "status": "open",
       "unchanged": 0,
