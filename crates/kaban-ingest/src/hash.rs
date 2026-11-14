@@ -11,7 +11,7 @@ use crate::graph::ingest_batch;
 use crate::ids::{blocked_document_id, document_id};
 use crate::model::{DocStatus, IngestError, PreparedGraph, SourceId};
 use crate::walk::{Skip, WalkConfig};
-use kaban_core::{AuditEntry, AuditOp, MemoryStore, NewNode, NodeId, Op, WorkspaceId, WriteBatch};
+use kaban_core::{MemoryStore, NewNode, NodeId, Op, WorkspaceId, WriteBatch};
 use kaban_policy::{AuditSigner, Policy};
 use serde::Serialize;
 use serde_json::Value;
@@ -293,16 +293,13 @@ fn skip_by_node(store: &dyn MemoryStore, id: &NodeId, key: &SkipKey) -> Result<b
 
 /// The `Document{status: blocked}` write for a path the denylist rejected: one node op under
 /// `blocked_document_id` whose props carry the keyed id, the skip key and the rule counts but
-/// no path, plus the audit row (`reject`, tool `ingest`, field `path`, `input_hmac` = the keyed
-/// id, rule ids) to append in the same transaction (core-spec S3; D-17).
+/// no path (core-spec S3; D-17).
 #[derive(Debug, Clone)]
 pub struct BlockedDocument {
     /// `blocked_document_id(keyed_path_id)`.
     pub id: NodeId,
     /// The single-op batch for `apply_batch`.
     pub batch: WriteBatch,
-    /// The audit row for `WriteCtx::audit`.
-    pub audit: AuditEntry,
 }
 
 /// Build the blocked Document write for a `PathRejected` candidate (see [`BlockedDocument`]).
@@ -311,7 +308,6 @@ pub fn blocked_path_document(
     keyed_path_id: &str,
     rule_ids: &[String],
     key: &SkipKey,
-    policy_version: &str,
 ) -> BlockedDocument {
     let id = blocked_document_id(keyed_path_id);
     let mut counts: BTreeMap<&str, u32> = BTreeMap::new();
@@ -340,15 +336,5 @@ pub fn blocked_path_document(
             node,
         }],
     );
-    let audit = AuditEntry {
-        op: AuditOp::Reject,
-        tool: "ingest".into(),
-        field: "path".into(),
-        workspace_id: workspace.clone(),
-        policy_version: policy_version.to_owned(),
-        input_hmac: keyed_path_id.to_owned(),
-        rules: rule_ids.to_vec(),
-        node_id: Some(id.as_str().to_owned()),
-    };
-    BlockedDocument { id, batch, audit }
+    BlockedDocument { id, batch }
 }

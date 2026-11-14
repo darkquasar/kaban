@@ -29,11 +29,11 @@ use crate::graph::{
 use crate::hash::{
     GatedPath, Identity, SkipKey, content_hash, keyed_id, position_fingerprint, should_skip,
 };
-use crate::ids::{PIPELINE_VERSION, document_id};
+use crate::ids::PIPELINE_VERSION;
 use crate::ingestor::{IngestConfig, PrepareInput, Preparer};
 use crate::model::{DocStatus, DocumentProps, Format, IngestError, PreparedGraph, SourceId};
 use kaban_api::KabanApi;
-use kaban_core::{AuditEntry, AuditOp, GraphStore, NodeId, WorkspaceId, WriteBatch};
+use kaban_core::{GraphStore, NodeId, WriteBatch};
 use kaban_policy::{AuditSigner, Policy};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -63,20 +63,16 @@ pub struct PrepareRequest<'a> {
 /// Outcome of one document's pipeline.
 #[derive(Debug, Clone)]
 pub enum PreparedDocument {
-    /// The document passed the gate: nodes with ids, gated links and tags, audit rows.
+    /// The document passed the gate: nodes with ids, gated links and tags.
     Ready {
         /// The graph to build the batch from.
         graph: Box<PreparedGraph>,
-        /// Audit rows for the same transaction.
-        audit: Vec<AuditEntry>,
     },
     /// The gate skipped the file: `Document{status: blocked}` with `blocked_hmac`, no title, empty
     /// frontmatter, no `content_hash`, zero chunks.
     Blocked {
         /// The blocked node's props.
         props: DocumentProps,
-        /// Audit rows for the same transaction.
-        audit: Vec<AuditEntry>,
     },
     /// No extractor for the format, or the parser rejected the bytes (D8): `Document{status:
     /// failed, error}`; the next run retries.
@@ -116,31 +112,17 @@ fn base_props(req: &PrepareRequest<'_>, extractor: &str, status: DocStatus) -> D
 }
 
 fn blocked(
-    policy: &Policy,
     signer: &dyn AuditSigner,
-    workspace: &WorkspaceId,
     req: &PrepareRequest<'_>,
     extractor: &str,
     rule_ids: Vec<String>,
-    mut audit: Vec<AuditEntry>,
 ) -> PreparedDocument {
     let mut props = base_props(req, extractor, DocStatus::Blocked);
-    let keyed = keyed_id(signer, "bytes", req.bytes);
     for r in &rule_ids {
         *props.rule_ids.entry(r.clone()).or_default() += 1;
     }
-    audit.push(AuditEntry {
-        op: AuditOp::Reject,
-        tool: "ingest".into(),
-        field: "document".into(),
-        workspace_id: workspace.clone(),
-        policy_version: policy.effective_hash().to_owned(),
-        input_hmac: keyed.clone(),
-        rules: rule_ids,
-        node_id: Some(document_id(req.source).as_str().to_owned()),
-    });
-    props.blocked_hmac = Some(keyed);
-    PreparedDocument::Blocked { props, audit }
+    props.blocked_hmac = Some(keyed_id(signer, "bytes", req.bytes));
+    PreparedDocument::Blocked { props }
 }
 
 /// Run the pipeline for one document (see the module doc). `ctx.check()` is honoured by the
@@ -152,7 +134,6 @@ pub fn prepare_document(
     policy: &Policy,
     signer: &dyn AuditSigner,
     ctx: &ExtractCtx,
-    workspace: &WorkspaceId,
     req: &PrepareRequest<'_>,
     cfg: &ChunkConfig,
 ) -> Result<PreparedDocument, IngestError> {
@@ -184,15 +165,7 @@ pub fn prepare_document(
         None => None,
         Some(Admission::Admitted(a)) => Some(a),
         Some(Admission::SkipFile { rule_ids }) => {
-            return Ok(blocked(
-                policy,
-                signer,
-                workspace,
-                req,
-                extractor.id(),
-                rule_ids,
-                Vec::new(),
-            ));
+            return Ok(blocked(signer, req, extractor.id(), rule_ids));
         }
     };
     if let Some(a) = &admitted {
@@ -202,23 +175,13 @@ pub fn prepare_document(
     // (1b) metadata before any hash
     let meta = match gate_metadata(
         policy,
-        signer,
-        workspace,
         extracted.title.as_deref(),
         &extracted.frontmatter,
         admitted.as_ref(),
     ) {
         MetaDecision::Proceed(meta) => meta,
         MetaDecision::SkipFile { rule_ids } => {
-            return Ok(blocked(
-                policy,
-                signer,
-                workspace,
-                req,
-                extractor.id(),
-                rule_ids,
-                Vec::new(),
-            ));
+            return Ok(blocked(signer, req, extractor.id(), rule_ids));
         }
     };
 
@@ -229,20 +192,10 @@ pub fn prepare_document(
         .iter()
         .flat_map(|(_, c)| c.iter().cloned())
         .collect();
-    let gated = match gate_document(
-        policy, signer, ctx, workspace, meta, &stream, drafts, None, cfg,
-    )? {
+    let gated = match gate_document(policy, signer, ctx, meta, &stream, drafts, None, cfg)? {
         GateDecision::Proceed(g) => g,
-        GateDecision::SkipFile { rule_ids, audit } => {
-            return Ok(blocked(
-                policy,
-                signer,
-                workspace,
-                req,
-                extractor.id(),
-                rule_ids,
-                audit,
-            ));
+        GateDecision::SkipFile { rule_ids } => {
+            return Ok(blocked(signer, req, extractor.id(), rule_ids));
         }
     };
 
@@ -277,18 +230,14 @@ pub fn prepare_document(
 
     let Assembled {
         mut graph,
-        mut audit,
         redacted_sections,
     } = assemble(
         policy,
-        signer,
-        workspace,
         AssembleInput {
             source: req.source,
             props,
             sections: &sections,
             chunks: gated.chunks,
-            audit: gated.audit,
             pipeline_version: PIPELINE_VERSION,
             slice_bytes: cfg.slice_bytes,
         },
@@ -298,8 +247,6 @@ pub fn prepare_document(
     let (source, _) = decode(req.bytes);
     let (links, tags) = gate_links_and_tags(
         policy,
-        signer,
-        workspace,
         &extracted.links,
         &extracted.tags,
         Some(DerivedContext {
@@ -309,7 +256,6 @@ pub fn prepare_document(
             redacted_sections: &redacted_sections,
         }),
         &mut graph.document.props.rule_ids,
-        &mut audit,
     );
     graph.links = links;
     graph.tags = tags;
@@ -320,13 +266,12 @@ pub fn prepare_document(
     graph.document.props.position_fingerprint = Some(position_fingerprint(signer, &graph));
     Ok(PreparedDocument::Ready {
         graph: Box::new(graph),
-        audit,
     })
 }
 
 /// The `Preparer` of the real pipeline (docs-ingest-plan.md DI1.5): one per `Ingestor`,
 /// sharing the API's policy handle (D-3), the store (skip lookups, `ExistingDocument`, link
-/// targets) and the audit signer. Runs on the pool's blocking threads.
+/// targets) and the keyed-hash signer. Runs on the pool's blocking threads.
 pub struct DocumentPreparer {
     api: KabanApi,
     dictionary: RwLock<Option<Arc<crate::Dictionary>>>,
@@ -461,7 +406,6 @@ impl DocumentPreparer {
         input: &PrepareInput,
         status: DocStatus,
         batch: WriteBatch,
-        audit: Vec<AuditEntry>,
     ) -> Prepared {
         Prepared {
             seq: input.seq,
@@ -470,7 +414,6 @@ impl DocumentPreparer {
             status,
             graph: None,
             batch,
-            audit,
             skip: None,
         }
     }
@@ -481,7 +424,6 @@ impl DocumentPreparer {
             input,
             DocStatus::Ok,
             ingest_batch(&input.workspace, Vec::new()),
-            Vec::new(),
         );
         p.skip = Some(why);
         p
@@ -518,7 +460,6 @@ impl DocumentPreparer {
         &self,
         input: &PrepareInput,
         graph: &PreparedGraph,
-        audit: Vec<AuditEntry>,
     ) -> Result<Prepared, IngestError> {
         let props = &graph.document.props;
         if let Some(hash) = &props.content_hash {
@@ -536,7 +477,7 @@ impl DocumentPreparer {
             return Ok(Self::skipped(input, SkipReason::Forgotten));
         }
         // Capture the producer's pre-batch source and generation. The store checks both
-        // again in the document transaction before accepting any graph or audit writes.
+        // again in the document transaction before accepting any graph writes.
         let source_rev = self
             .store
             .get(&input.document_id, true)?
@@ -598,14 +539,13 @@ impl DocumentPreparer {
                 }
             }
         }
-        Ok(Self::prepared(input, props.status, batch, audit))
+        Ok(Self::prepared(input, props.status, batch))
     }
 
     fn without_children(
         &self,
         input: &PrepareInput,
         props: &DocumentProps,
-        audit: Vec<AuditEntry>,
     ) -> Result<Prepared, IngestError> {
         if let Some(keyed) = &props.blocked_hmac {
             let key = Self::skip_key(Identity::Keyed(keyed.clone()), props, input);
@@ -620,7 +560,7 @@ impl DocumentPreparer {
             previous.as_ref(),
             &input.workspace,
         );
-        Ok(Self::prepared(input, props.status, batch, audit))
+        Ok(Self::prepared(input, props.status, batch))
     }
 
     fn run(&self, input: &PrepareInput, ctx: &ExtractCtx) -> Result<Prepared, IngestError> {
@@ -657,7 +597,6 @@ impl DocumentPreparer {
                 &policy,
                 self.signer.as_ref(),
                 ctx,
-                &input.workspace,
                 &req,
                 &self.chunk,
             )?
@@ -669,18 +608,17 @@ impl DocumentPreparer {
         drop(bytes);
         ctx.check()?;
         match prepared {
-            PreparedDocument::Ready { graph, audit } => {
+            PreparedDocument::Ready { graph } => {
                 // The policy guard above is gone. Capture conveys preparation only, including
                 // unchanged/dry-run graphs; source/generation publication checks stay in ready.
                 if let (Some(capture), Some(bytes_hmac)) = (&self.capture, &bytes_hmac) {
                     capture(&graph, bytes_hmac);
                 }
-                self.ready(input, &graph, audit)
+                self.ready(input, &graph)
             }
-            PreparedDocument::Blocked { props, audit } => {
-                self.without_children(input, &props, audit)
+            PreparedDocument::Blocked { props } | PreparedDocument::Failed { props } => {
+                self.without_children(input, &props)
             }
-            PreparedDocument::Failed { props } => self.without_children(input, &props, Vec::new()),
         }
     }
 }

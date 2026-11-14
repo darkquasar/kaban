@@ -132,13 +132,7 @@ fn ingest_blocked(tree: &Tree) -> Vec<NodeId> {
                 if should_skip_blocked(&tree.store, &keyed, &key).unwrap() {
                     continue;
                 }
-                let blocked = blocked_path_document(
-                    &ws,
-                    &keyed,
-                    &rule_ids,
-                    &key,
-                    tree.policy.effective_hash(),
-                );
+                let blocked = blocked_path_document(&ws, &keyed, &rule_ids, &key);
                 let ctx = WriteCtx::new(ws.clone(), Actor::Agent);
                 tree.store.apply_batch(blocked.batch, &ctx).unwrap();
                 written.push(blocked.id);

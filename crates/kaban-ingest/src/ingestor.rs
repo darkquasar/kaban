@@ -322,10 +322,7 @@ impl Ingestor {
             gauge: Arc::clone(&gauge),
         };
         let ws = self.api.workspace().clone();
-        let (policy_version, config_digest) = {
-            let p = self.policy();
-            (p.effective_hash().to_owned(), config_hash(cfg, &p))
-        };
+        let config_digest = config_hash(cfg, &self.policy());
         let walk_cfg = cfg.clone();
         let items =
             tokio::task::spawn_blocking(move || walk(&walk_cfg).map(Iterator::collect::<Vec<_>>))
@@ -436,7 +433,7 @@ impl Ingestor {
                         break;
                     };
                     let blocked =
-                        blocked_path_document(&ws, &keyed, &rule_ids, &key, &policy_version);
+                        blocked_path_document(&ws, &keyed, &rule_ids, &key);
                     let seq = next_seq;
                     next_seq += 1;
                     let prepared = Prepared {
@@ -446,7 +443,6 @@ impl Ingestor {
                         status: crate::model::DocStatus::Blocked,
                         graph: None,
                         batch: blocked.batch,
-                        audit: vec![blocked.audit],
                         skip: None,
                     };
                     if send(&shared, prepared, slot).await.is_err() {

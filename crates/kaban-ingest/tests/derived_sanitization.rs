@@ -9,7 +9,7 @@
 mod common;
 
 use common::real::{Rig, doc_id, rig_on_disk};
-use kaban_core::{AuditEntry, MemoryStore, RecallQuery, WorkspaceId};
+use kaban_core::{MemoryStore, RecallQuery, WorkspaceId};
 use kaban_ingest::{
     ChunkConfig, ExtractCtx, Extractor as _, Format, MarkdownExtractor, PrepareRequest,
     PreparedDocument, SourceId, gate_path, prepare_document, tag_id,
@@ -57,10 +57,10 @@ fn document_blob(rig: &Rig, rel: &str) -> String {
     blob
 }
 
-/// The audit rows the pipeline attaches to `path`'s bytes under `policy` (the store exposes no
-/// audit read, so the receipts are observed at the `prepare_document` seam with the rig's
-/// signer), filtered to `field` and `rule`.
-fn receipts(rig: &Rig, policy: &Policy, rel: &str, field: &str, rule: &str) -> Vec<AuditEntry> {
+/// How often the pipeline counted `rule` on the Document it prepares from `path`'s bytes under
+/// `policy` (observed at the `prepare_document` seam with the rig's signer): the sanitisation
+/// happened, by rule id and count only.
+fn rule_count(rig: &Rig, policy: &Policy, rel: &str, rule: &str) -> u32 {
     let bytes = fs::read(rig.root.join(rel)).unwrap();
     let gated = gate_path(policy, rel).unwrap();
     let ws = WorkspaceId::default();
@@ -69,7 +69,6 @@ fn receipts(rig: &Rig, policy: &Policy, rel: &str, field: &str, rule: &str) -> V
         policy,
         rig.store.signer().as_ref(),
         &ctx(),
-        &ws,
         &PrepareRequest {
             source: &source,
             path: &gated,
@@ -82,14 +81,11 @@ fn receipts(rig: &Rig, policy: &Policy, rel: &str, field: &str, rule: &str) -> V
         &ChunkConfig::default(),
     )
     .unwrap();
-    let audit = match prepared {
-        PreparedDocument::Ready { audit, .. } | PreparedDocument::Blocked { audit, .. } => audit,
-        PreparedDocument::Failed { .. } => Vec::new(),
+    let counts = match prepared {
+        PreparedDocument::Ready { graph } => graph.document.props.rule_ids,
+        PreparedDocument::Blocked { props } | PreparedDocument::Failed { props } => props.rule_ids,
     };
-    audit
-        .into_iter()
-        .filter(|a| a.field == field && a.rules.iter().any(|r| r == rule))
-        .collect()
+    counts.get(rule).copied().unwrap_or_default()
 }
 
 fn ctx() -> ExtractCtx {
@@ -105,10 +101,9 @@ fn ctx() -> ExtractCtx {
 
 /// RD2-1: a redact rule that matches only the YAML source line (`customer: alice-7781`; neither
 /// the bare value nor the `customer=alice-7781` view matches) is applied, not discarded: the
-/// value is in no Document prop, in no db/wal byte and in no audit text, the rule is counted and
-/// one keyed `frontmatter` receipt exists.
+/// value is in no Document prop and in no db/wal byte, and the rule is counted.
 #[test]
-fn a_source_only_frontmatter_redact_hit_leaves_no_value_in_props_db_wal_or_audit() {
+fn a_source_only_frontmatter_redact_hit_leaves_no_value_in_props_db_or_wal() {
     let policy = || {
         policy_with("  - id: fm-source\n    regex: 'customer: alice-7781'\n    action: redact\n")
     };
@@ -128,11 +123,7 @@ fn a_source_only_frontmatter_redact_hit_leaves_no_value_in_props_db_wal_or_audit
     let blob = document_blob(&rig, "a.md");
     assert!(!blob.contains("alice-7781"), "{blob}");
     assert!(!contains_bytes(&rig.disk_bytes(), "alice-7781"));
-    let rows = receipts(&rig, &policy(), "a.md", "frontmatter", "fm-source");
-    assert_eq!(rows.len(), 1, "{rows:?}");
-    assert_eq!(rows[0].input_hmac.len(), 64);
-    let audit = serde_json::to_string(&rows).unwrap();
-    assert!(!audit.contains("alice-7781"), "{audit}");
+    assert_ne!(rule_count(&rig, &policy(), "a.md", "fm-source"), 0);
 }
 
 /// RD2-1 (the mapping): a source hit whose matched text lies inside one scalar's value (a rule
@@ -161,10 +152,7 @@ fn a_source_hit_inside_one_scalar_masks_that_scalar_and_keeps_the_rest() {
     assert_eq!(fm["keep"], "yes", "{fm}");
     assert_eq!(fm["note"], "fine", "{fm}");
     assert!(!contains_bytes(&rig.disk_bytes(), "abc12345"));
-    assert_eq!(
-        receipts(&rig, &policy(), "a.md", "frontmatter", "ctx-secret").len(),
-        1
-    );
+    assert_ne!(rule_count(&rig, &policy(), "a.md", "ctx-secret"), 0);
 }
 
 /// RD2-1 (the boundary): the extractor interprets no frontmatter on its own. A malformed block
@@ -260,9 +248,9 @@ fn trimmed_and_merged_counterexample_is_masked(compressed: bool) {
 
 /// RD2-3: for `private: #alice-7781` under the contextual redact rule `private:\s+#alice-7781`
 /// the chunk is masked and the tag (which alone matches nothing) is removed with it: no Tag
-/// node, no `TAGGED` edge, no `tag_id` row, nothing in db/wal or `recall`, one keyed `tag`
-/// receipt; the sibling `#public` tag stays. A wikilink under the same context is removed
-/// too: no `LINKS_TO` edge, no placeholder, no `unresolved_links` entry, one `link` receipt.
+/// node, no `TAGGED` edge, no `tag_id` row, nothing in db/wal or `recall`, the rule counted;
+/// the sibling `#public` tag stays. A wikilink under the same context is removed too: no
+/// `LINKS_TO` edge, no placeholder, no `unresolved_links` entry, the rule counted.
 #[test]
 fn a_contextual_redact_hit_removes_the_tag_and_link_it_covers_everywhere() {
     let policy = || {
@@ -315,12 +303,6 @@ fn a_contextual_redact_hit_removes_the_tag_and_link_it_covers_everywhere() {
     assert!(!contains_bytes(&rig.disk_bytes(), "alice-7781"));
     assert!(!contains_bytes(&rig.disk_bytes(), "Alice-7781"));
     assert!(recall_is_empty(&rig, "alice-7781"));
-    assert_eq!(
-        receipts(&rig, &policy(), "a.md", "tag", "private-tag").len(),
-        1
-    );
-    assert_eq!(
-        receipts(&rig, &policy(), "a.md", "link", "private-link").len(),
-        1
-    );
+    assert_ne!(rule_count(&rig, &policy(), "a.md", "private-tag"), 0);
+    assert_ne!(rule_count(&rig, &policy(), "a.md", "private-link"), 0);
 }

@@ -479,7 +479,6 @@ pub(crate) async fn reopen_source(
             &policy,
             api.signer().as_ref(),
             &context,
-            api.workspace(),
             &request,
             &ChunkConfig::default(),
         )

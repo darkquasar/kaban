@@ -191,7 +191,6 @@ impl Fake {
                     },
                 ],
             ),
-            audit: Vec::new(),
             skip: None,
         })
     }

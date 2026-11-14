@@ -32,9 +32,9 @@ use crate::model::{
     PreparedGraph, SectionNode, SectionProps, SourceId, TOKEN_ESTIMATOR,
 };
 use kaban_core::{
-    AuditEntry, EdgeDiff, INGEST_OWNER, NewNode, Node, NodeId, Op, Owner, WorkspaceId, WriteBatch,
+    EdgeDiff, INGEST_OWNER, NewNode, Node, NodeId, Op, Owner, WorkspaceId, WriteBatch,
 };
-use kaban_policy::{AuditSigner, Policy};
+use kaban_policy::Policy;
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
@@ -169,8 +169,7 @@ impl ExistingDocument {
 }
 
 /// What one document contributes to [`assemble`]: sanitized document props, the chunker's
-/// sections with their gated chunks in the same order, the gated links and tags, and the audit
-/// rows collected so far.
+/// sections with their gated chunks in the same order, and the gated links and tags.
 #[derive(Debug)]
 pub struct AssembleInput<'a> {
     /// The source identity.
@@ -182,23 +181,19 @@ pub struct AssembleInput<'a> {
     pub sections: &'a [(SectionDraft, Vec<ChunkDraft>)],
     /// Gated chunks, flattened in document order (one per draft in `sections`).
     pub chunks: Vec<GatedChunk>,
-    /// Audit rows collected before assembly.
-    pub audit: Vec<AuditEntry>,
     /// [`crate::PIPELINE_VERSION`] (an id input).
     pub pipeline_version: u32,
     /// Delivery slice size for `ChunkProps::slices` (spec D4 [A-2]).
     pub slice_bytes: u32,
 }
 
-/// The assembled graph and the audit rows (heading redactions appended). Links and tags are
+/// The assembled graph and the redacted heading ranges. Links and tags are
 /// gated after assembly ([`crate::gate::gate_links_and_tags`] needs the heading verdicts,
 /// RD2-3) and set on the graph by the caller.
 #[derive(Debug)]
 pub struct Assembled {
     /// Nodes with ids assigned, chunks in reading order; `links` and `tags` empty.
     pub graph: PreparedGraph,
-    /// Audit rows for the same transaction.
-    pub audit: Vec<AuditEntry>,
     /// Source ranges of the sections whose heading path carried a hit (RD2-3).
     pub redacted_sections: Vec<std::ops::Range<u64>>,
 }
@@ -208,8 +203,6 @@ pub struct Assembled {
 /// `NEXT`). Heading texts are persisted and are id inputs, so they are gated here first (S1).
 pub fn assemble(
     policy: &Policy,
-    signer: &dyn AuditSigner,
-    workspace: &WorkspaceId,
     input: AssembleInput<'_>,
 ) -> Assembled {
     let AssembleInput {
@@ -217,7 +210,6 @@ pub fn assemble(
         mut props,
         sections,
         chunks,
-        mut audit,
         pipeline_version,
         slice_bytes,
     } = input;
@@ -229,8 +221,7 @@ pub fn assemble(
     let mut section_nodes = Vec::with_capacity(sections.len());
     let mut order = 0u32;
     for (i, (draft, drafts)) in sections.iter().enumerate() {
-        let (heading_path, ids) =
-            gate_heading_path(policy, signer, workspace, &draft.heading_path, &mut audit);
+        let (heading_path, ids) = gate_heading_path(policy, &draft.heading_path);
         if !ids.is_empty() {
             redacted_sections.push(draft.byte_start..draft.byte_end);
         }
@@ -304,7 +295,6 @@ pub fn assemble(
             links: Vec::new(),
             tags: Vec::new(),
         },
-        audit,
         redacted_sections,
     }
 }

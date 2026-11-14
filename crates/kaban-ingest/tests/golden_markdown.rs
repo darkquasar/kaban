@@ -95,7 +95,6 @@ fn golden(name: &str, bytes: &[u8]) -> Golden {
         &policy,
         signer.as_ref(),
         &ctx,
-        &ws,
         &PrepareRequest {
             source: &source,
             path: &gated,

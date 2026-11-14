@@ -1,6 +1,6 @@
 //! Denylist gating before identity (docs-ingest-plan.md DI1.4; docs-ingest-spec D6; core-spec
 //! S1; PR-2): the canary `Sup3rS3cretValue!` never reaches a hash, a node id, the database, the
-//! WAL, the audit chain or the logs; redactions mask, rejections stub, `skip_file` rules block
+//! WAL or the logs; redactions mask, rejections stub, `skip_file` rules block
 //! the whole document, and all of it happens before `content_hash` or any id is computed.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // test code: failures are the assertion
@@ -59,8 +59,6 @@ fn a_redact_hit_visible_only_in_the_key_value_view_masks_the_value_and_is_counte
     let fm = serde_json::json!({ "customer": "alice-7781", "note": "fine" });
     match gate_metadata(
         &policy,
-        signer().as_ref(),
-        &WorkspaceId::default(),
         Some("Doc"),
         &fm,
         None,
@@ -90,12 +88,8 @@ fn gate_metadata_masks_redact_hits_and_skips_the_file_on_reject_hits() {
     use kaban_ingest::{MetaDecision, gate_metadata};
     let policy = redact_policy();
     let fm = serde_json::json!({ "author": "someone", "host": "db1.corp.acme.internal", "n": 3 });
-    let signer = signer();
-    let ws = WorkspaceId::default();
     match gate_metadata(
         &policy,
-        signer.as_ref(),
-        &ws,
         Some("Notes on hunter2 and db1.corp.acme.internal"),
         &fm,
         None,
@@ -117,7 +111,7 @@ fn gate_metadata_masks_redact_hits_and_skips_the_file_on_reject_hits() {
     }
 
     let fm = serde_json::json!({ "token": "ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789" });
-    match gate_metadata(&policy, signer.as_ref(), &ws, Some("clean"), &fm, None) {
+    match gate_metadata(&policy, Some("clean"), &fm, None) {
         MetaDecision::SkipFile { rule_ids } => {
             assert!(rule_ids.iter().any(|r| r == "github-token"), "{rule_ids:?}");
             let joined = rule_ids.join(" ");
@@ -128,13 +122,11 @@ fn gate_metadata_masks_redact_hits_and_skips_the_file_on_reject_hits() {
 
     let fm = serde_json::json!({ "db_password": CANARY });
     assert!(matches!(
-        gate_metadata(&policy, signer.as_ref(), &ws, None, &fm, None),
+        gate_metadata(&policy, None, &fm, None),
         MetaDecision::SkipFile { .. }
     ));
     match gate_metadata(
         &policy,
-        signer.as_ref(),
-        &ws,
         Some("clean title"),
         &serde_json::json!({"a": ["x", "y"]}),
         None,
@@ -190,14 +182,13 @@ fn clean_meta() -> SanitizedMeta {
         title: Some("Doc".into()),
         frontmatter: serde_json::Value::Null,
         redactions: Vec::new(),
-        audit: Vec::new(),
     }
 }
 
 /// Plan stage (2), the first canary slice: `password = Sup3r` ends chunk 1 and `S3cretValue!`
 /// starts chunk 2, so neither chunk alone matches; the overlapping-window scan of the whole
 /// stream catches the assignment, whose rule carries `on_document: skip_file`, and the document
-/// is skipped with the rule id and one `reject` audit row that carries only a keyed hash.
+/// is skipped with the rule id, which never carries the value.
 #[test]
 fn a_secret_split_across_two_chunks_is_caught_by_the_window_scan_and_skips_the_file() {
     let policy = redact_policy();
@@ -218,7 +209,6 @@ fn a_secret_split_across_two_chunks_is_caught_by_the_window_scan_and_skips_the_f
         &policy,
         signer().as_ref(),
         &ctx(),
-        &WorkspaceId::default(),
         clean_meta(),
         &full,
         chunks,
@@ -227,17 +217,15 @@ fn a_secret_split_across_two_chunks_is_caught_by_the_window_scan_and_skips_the_f
     )
     .unwrap();
     match decision {
-        GateDecision::SkipFile { rule_ids, audit } => {
+        GateDecision::SkipFile { rule_ids } => {
             assert!(
                 rule_ids
                     .iter()
                     .any(|r| r == "generic-credential-assignment"),
                 "{rule_ids:?}"
             );
-            assert_eq!(audit.len(), 1);
-            let row = serde_json::to_string(&audit[0]).unwrap();
-            assert!(!row.contains("Sup3r") && !row.contains("S3cret"), "{row}");
-            assert_eq!(audit[0].input_hmac.len(), 64, "keyed hash, not text");
+            let joined = rule_ids.join(" ");
+            assert!(!joined.contains("Sup3r") && !joined.contains("S3cret"), "{joined}");
         }
         GateDecision::Proceed(g) => panic!("must skip: {g:?}"),
     }
@@ -254,7 +242,6 @@ fn proceed(
         policy,
         signer,
         &ctx(),
-        &WorkspaceId::default(),
         clean_meta(),
         &full,
         chunks,
@@ -272,7 +259,7 @@ fn proceed(
 /// untouched; a reject-class hit without `skip_file` (an AWS key id) in chunk 3 turns that chunk
 /// into a `Stub` with empty text and `stub_hmac = HMAC(audit_key, original)` while chunks 1, 2
 /// and 4 keep their positions (the `NEXT` chain stays whole); a redact hit in a `context_prefix`
-/// masks the prefix; counts and audit rows name rules and keyed hashes only.
+/// masks the prefix; the counts name rules only and no gated output carries a secret.
 #[test]
 fn redact_hits_mask_in_place_and_reject_hits_stub_the_chunk_keeping_the_chain() {
     let policy = redact_policy();
@@ -307,12 +294,11 @@ fn redact_hits_mask_in_place_and_reject_hits_stub_the_chunk_keeping_the_chain() 
     assert_eq!(g.rule_ids.get("internal-hostname"), Some(&1));
     assert_eq!(g.rule_ids.get("aws-access-key-id"), Some(&1));
     assert_eq!(g.rule_ids.get("old-password"), Some(&1));
-    let audit = serde_json::to_string(&g.audit).unwrap();
+    let gated = format!("{:?}", (&g.chunks, &g.rule_ids));
     assert!(
-        !audit.contains(aws) && !audit.contains("db1.corp") && !audit.contains("hunter2"),
-        "{audit}"
+        !gated.contains(aws) && !gated.contains("db1.corp") && !gated.contains("hunter2"),
+        "{gated}"
     );
-    assert_eq!(g.audit.len(), 3, "redact, reject, redact: {audit}");
 }
 
 /// RD1-6: one oversized code chunk of 20,000 matched characters is scanned in overlapping
@@ -353,7 +339,6 @@ fn overlapping_window_redactions_are_unioned_so_no_matched_character_survives() 
             chunk.draft.text
         );
     }
-    assert_eq!(g.audit.len(), 2, "one redact row per chunk");
 }
 
 /// Extractor error strings are content (S1): one with a redact hit is stored masked, one with a
@@ -408,7 +393,6 @@ fn prepare(
         policy,
         signer,
         &ctx(),
-        &ws,
         &PrepareRequest {
             source: &source,
             path: &gated,
@@ -511,7 +495,7 @@ fn clean_frontmatter_preserves_yaml_types_and_malformed_blocks_are_partial() {
 
 /// RD1-2: the fence-info token is a persisted string (`ChunkKind::Code { lang }`, S1) and is
 /// gated like every other one: a reject-class token (an AWS key id) is dropped from the
-/// prepared graph, counted and audited under `lang`; a redact-class token is masked; the body
+/// prepared graph and counted; a redact-class token is masked; the body
 /// of the fence is untouched in both cases.
 #[test]
 fn the_fence_info_language_is_gated_before_it_reaches_the_prepared_graph() {
@@ -522,10 +506,10 @@ fn the_fence_info_language_is_gated_before_it_reaches_the_prepared_graph() {
         "# Fence\n\n```{aws}\nlet x = 1;\n```\n\n```db1.corp.acme.internal\nlet y = 2;\n```\n"
     );
     match prepare(&policy, signer.as_ref(), "fence.md", src.as_bytes()) {
-        PreparedDocument::Ready { graph, audit } => {
+        PreparedDocument::Ready { graph } => {
             let chunks: Vec<_> = graph.sections.iter().flat_map(|s| &s.chunks).collect();
             let props: Vec<_> = chunks.iter().map(|c| &c.props).collect();
-            let blob = serde_json::to_string(&(&graph.document.props, &props, &audit)).unwrap();
+            let blob = serde_json::to_string(&(&graph.document.props, &props)).unwrap();
             assert!(!blob.contains(aws) && !blob.contains("db1.corp"), "{blob}");
             assert_eq!(chunks.len(), 2);
             assert_eq!(chunks[0].props.kind, ChunkKind::Code { lang: None });
@@ -544,58 +528,50 @@ fn the_fence_info_language_is_gated_before_it_reaches_the_prepared_graph() {
                 graph.document.props.rule_ids.get("internal-hostname"),
                 Some(&1)
             );
-            assert!(
-                audit
-                    .iter()
-                    .any(|a| a.field == "lang" && a.rules.iter().any(|r| r == "aws-access-key-id")),
-                "{audit:?}"
-            );
         }
         other => panic!("{other:?}"),
     }
 }
 
-/// RD1-10: every sanitisation stage leaves a keyed audit receipt with the document write. A
-/// frontmatter-only redaction yields exactly one `redact` row under `frontmatter`; a redaction
-/// visible only in a standard link's destination yields one row under `link`; a redact-only
-/// extractor error yields one row under `error`. Every row carries the rule id and a 64-hex
-/// keyed hash, never the text.
+/// RD1-10: every sanitisation stage masks and counts with the document write. A
+/// frontmatter-only redaction, a redaction visible only in a standard link's destination and a
+/// redact-only extractor error each mask the value and count the rule once; no output carries
+/// the text.
 #[test]
-fn metadata_only_link_target_only_and_error_only_redactions_leave_keyed_audit_receipts() {
-    use kaban_core::AuditOp;
+fn metadata_only_link_target_only_and_error_only_redactions_are_masked_and_counted() {
     let policy = redact_policy();
     let signer = signer();
     let host = "db1.corp.acme.internal";
-    let check = |audit: &[kaban_core::AuditEntry], field: &str| {
-        assert_eq!(audit.len(), 1, "{field}: {audit:?}");
-        let row = &audit[0];
-        assert_eq!(row.op, AuditOp::Redact);
-        assert_eq!(row.field, field);
-        assert_eq!(row.rules, vec!["internal-hostname".to_owned()]);
-        assert_eq!(row.input_hmac.len(), 64);
-        assert_eq!(row.tool, "ingest");
-        assert!(!serde_json::to_string(row).unwrap().contains(host));
+    let counted = |rule_ids: &std::collections::BTreeMap<String, u32>, blob: String| {
+        assert_eq!(rule_ids.get("internal-hostname"), Some(&1), "{rule_ids:?}");
+        assert!(!blob.contains(host), "{blob}");
     };
     let meta_only = format!("---\nhost: {host}\n---\n\n# Doc\n\nclean body\n");
     match prepare(&policy, signer.as_ref(), "meta.md", meta_only.as_bytes()) {
-        PreparedDocument::Ready { graph, audit } => {
+        PreparedDocument::Ready { graph } => {
             assert_eq!(
                 graph.document.props.frontmatter["host"],
                 "[REDACTED:internal-hostname]"
             );
-            check(&audit, "frontmatter");
+            counted(
+                &graph.document.props.rule_ids,
+                serde_json::to_string(&graph.document.props).unwrap(),
+            );
         }
         other => panic!("{other:?}"),
     }
     let link_only = format!("# Doc\n\nsee [the db](https://{host}/status) tonight\n");
     match prepare(&policy, signer.as_ref(), "link.md", link_only.as_bytes()) {
-        PreparedDocument::Ready { graph, audit } => {
+        PreparedDocument::Ready { graph } => {
             assert_eq!(graph.links.len(), 1);
             assert_eq!(
                 graph.links[0].raw_target,
                 "https://[REDACTED:internal-hostname]/status"
             );
-            check(&audit, "link");
+            counted(
+                &graph.document.props.rule_ids,
+                serde_json::to_string(&(&graph.document.props, &graph.links)).unwrap(),
+            );
         }
         other => panic!("{other:?}"),
     }
@@ -605,7 +581,11 @@ fn metadata_only_link_target_only_and_error_only_redactions_leave_keyed_audit_re
         vec![draft("clean", "Doc")],
         Some(&format!("cannot parse frontmatter near {host}")),
     );
-    check(&g.audit, "error");
+    assert_eq!(
+        g.error.as_deref(),
+        Some("cannot parse frontmatter near [REDACTED:internal-hostname]")
+    );
+    counted(&g.rule_ids, format!("{:?}", (&g.chunks, &g.error)));
 }
 
 /// RD1-5: the whitespace-dependent case. Paragraph 1 ends in `Bearer`, paragraph 2 starts with
@@ -699,7 +679,7 @@ fn content_hash_is_computed_over_the_sanitized_representation_not_the_raw_bytes(
 /// Plan slices: a `.env`-style assignment (`DB_PASSWORD=<canary>`) in a text file and a PEM
 /// block inside a Markdown file are `blocked` documents with zero chunks, no `content_hash`
 /// and a `blocked_hmac` (the keyed identity of the bytes); the canary and the PEM header appear
-/// in no prop and no audit row.
+/// in no prop.
 #[test]
 fn env_assignments_and_pem_blocks_block_the_whole_document_before_any_hash() {
     let policy = redact_policy();
@@ -711,7 +691,7 @@ fn env_assignments_and_pem_blocks_block_the_whole_document_before_any_hash() {
         "config/settings.txt",
         env.as_bytes(),
     ) {
-        PreparedDocument::Blocked { props, audit } => {
+        PreparedDocument::Blocked { props } => {
             assert_eq!(props.status, DocStatus::Blocked);
             assert!(props.content_hash.is_none(), "{props:?}");
             assert_eq!(
@@ -725,18 +705,17 @@ fn env_assignments_and_pem_blocks_block_the_whole_document_before_any_hash() {
                 "{:?}",
                 props.rule_ids
             );
-            let bytes = serde_json::to_string(&(&props, &audit)).unwrap();
+            let bytes = serde_json::to_string(&props).unwrap();
             assert!(!bytes.contains(CANARY), "{bytes}");
-            assert_ne!(audit.len(), 0);
         }
         other => panic!("{other:?}"),
     }
     let pem = "# Keys\n\nSome prose.\n\n```\n-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA\n-----END RSA PRIVATE KEY-----\n```\n";
     match prepare(&policy, signer.as_ref(), "docs/keys.md", pem.as_bytes()) {
-        PreparedDocument::Blocked { props, audit } => {
+        PreparedDocument::Blocked { props } => {
             assert!(props.rule_ids.contains_key("private-key-block"));
             assert!(props.content_hash.is_none());
-            let bytes = serde_json::to_string(&(&props, &audit)).unwrap();
+            let bytes = serde_json::to_string(&props).unwrap();
             assert!(!bytes.contains("BEGIN RSA") && !bytes.contains("MIIEpAIBAAKCAQEA"));
         }
         other => panic!("{other:?}"),
@@ -757,7 +736,7 @@ fn masked_titles_and_chunks_get_ids_from_the_masked_text_and_rerun_is_identical(
     let src = "# Runbook for db1.corp.acme.internal\n\nFirst paragraph is clean.\n\nConnect to db1.corp.acme.internal on port 5432.\n\nLast paragraph is clean too.\n";
     let first = prepare(&policy, signer.as_ref(), "ops/runbook.md", src.as_bytes());
     let second = prepare(&policy, signer.as_ref(), "ops/runbook.md", src.as_bytes());
-    let PreparedDocument::Ready { graph, audit } = first else {
+    let PreparedDocument::Ready { graph } = first else {
         panic!("{first:?}")
     };
     let PreparedDocument::Ready { graph: again, .. } = second else {
@@ -819,7 +798,7 @@ fn masked_titles_and_chunks_get_ids_from_the_masked_text_and_rerun_is_identical(
     );
     assert_eq!(c.props.bytes, u32::try_from(c.props.text.len()).unwrap());
     assert_eq!(c.props.slices, 1);
-    let all = serde_json::to_string(&(&doc.props, &section.props, &c.props, &audit)).unwrap();
+    let all = serde_json::to_string(&(&doc.props, &section.props, &c.props)).unwrap();
     assert!(!all.contains("db1.corp"), "{all}");
     assert_eq!(
         doc.props.rule_ids.get("internal-hostname").copied(),
@@ -848,7 +827,7 @@ fn masked_titles_and_chunks_get_ids_from_the_masked_text_and_rerun_is_identical(
 mod common;
 
 /// Write a prepared document through `apply_batch` the way the committer will (one transaction:
-/// Document, Section and Chunk nodes with `PART_OF` edges, the audit rows), so the on-disk
+/// Document, Section and Chunk nodes with `PART_OF` edges), so the on-disk
 /// bytes can be inspected. Returns the node ids written.
 fn commit(
     store: &SqliteStore,
@@ -935,10 +914,10 @@ fn commit(
 /// key id in a paragraph (that chunk stubbed, siblings stored) and one with a redactable
 /// hostname in title and body (masked), are prepared under a `trace` capture and written
 /// through `apply_batch` to a file-backed store. The canary, the key and the hostname are absent
-/// from the database, WAL and SHM bytes, the audit chain, every stored node's text and props, a
+/// from the database, WAL and SHM bytes, every stored node's text and props, a
 /// `recall` over the index and the trace log; the stubbed chunk's `PART_OF` edge exists.
 #[test]
-fn canaries_are_absent_from_db_wal_shm_audit_recall_and_logs() {
+fn canaries_are_absent_from_db_wal_shm_recall_and_logs() {
     use kaban_core::{MemoryStore, RecallQuery};
     let root = common::Scratch::new("kaban-ingest-canary", "blackbox");
     let db = root.join("kaban.db");
@@ -1020,7 +999,7 @@ fn canaries_are_absent_from_db_wal_shm_audit_recall_and_logs() {
         "Hosts [REDACTED:internal-hostname]"
     );
 
-    // bytes: db/wal/shm, audit chain, node texts and props, recall, logs
+    // bytes: db/wal/shm, node texts and props, recall, logs
     let mut disk = std::fs::read(&db).unwrap();
     for suffix in ["-wal", "-shm"] {
         let side = std::path::PathBuf::from(format!("{}{suffix}", db.display()));
@@ -1095,7 +1074,7 @@ mod properties {
         #![proptest_config(ProptestConfig { cases: 64, ..ProptestConfig::default() })]
 
         /// Property (plan DI1.4 preamble): whatever surrounds a planted hit, no gated chunk text,
-        /// no prefix, no stub hash, no audit row and no id or `text_hash` contains the hit, and
+        /// no prefix, no stub hash and no id or `text_hash` contains the hit, and
         /// a masked chunk's `text_hash` differs from the hash of the raw text (the id preimage
         /// never saw the secret).
         #[test]
@@ -1112,13 +1091,13 @@ mod properties {
             // the secret's distinctive token: the hostname, the key, or the canary
             let needle = secret.rsplit(' ').next().unwrap().to_owned();
             match prepared {
-                PreparedDocument::Blocked { props, audit } => {
-                    let blob = serde_json::to_string(&(&props, &audit)).unwrap();
+                PreparedDocument::Blocked { props } => {
+                    let blob = serde_json::to_string(&props).unwrap();
                     prop_assert!(!blob.contains(&needle), "{blob}");
                     prop_assert!(props.content_hash.is_none());
                 }
-                PreparedDocument::Ready { graph, audit } => {
-                    let blob = serde_json::to_string(&(&graph.document.props, &audit)).unwrap();
+                PreparedDocument::Ready { graph } => {
+                    let blob = serde_json::to_string(&graph.document.props).unwrap();
                     prop_assert!(!blob.contains(&needle), "{blob}");
                     // the hashes the ungated chunker would have produced for the chunks that
                     // carry the hit: no stored chunk may carry one of them
@@ -1186,7 +1165,6 @@ fn corpus_document_cases_skip_the_file_or_stub_the_chunk_as_declared() {
             &policy,
             signer.as_ref(),
             &ctx(),
-            &WorkspaceId::default(),
             clean_meta(),
             &full,
             chunks,
@@ -1306,12 +1284,11 @@ fn contains_bytes(hay: &[u8], needle: &str) -> bool {
 
 /// DI1.7 (plan DI1.4 families, consolidated): for every rule family the gate covers, the
 /// document is prepared under its policy and written through `apply_batch` to a file-backed
-/// store; the secret is absent from the prepared graph (props, chunks, links, audit rows), from
-/// the db/wal/shm bytes and from `recall`, the document takes the declared shape (blocked or
-/// ready with the rule counted), and the keyed audit receipt (the rule id, a 64-hex HMAC, never
-/// the text) is present and chains.
+/// store; the secret is absent from the prepared graph (props, chunks, links), from the
+/// db/wal/shm bytes and from `recall`, and the document takes the declared shape (blocked or
+/// ready with the rule counted).
 #[test]
-fn every_rule_family_leaves_the_secret_out_of_graph_bytes_and_audit_with_a_keyed_receipt() {
+fn every_rule_family_leaves_the_secret_out_of_graph_and_bytes_and_counts_the_rule() {
     use kaban_core::{MemoryStore, RecallQuery};
     for fam in families() {
         // Arrange
@@ -1328,9 +1305,9 @@ fn every_rule_family_leaves_the_secret_out_of_graph_bytes_and_audit_with_a_keyed
         // Act
         let prepared = prepare(&policy, signer.as_ref(), fam.path, fam.source.as_bytes());
 
-        // Assert: the prepared shape and its audit receipt
-        let (blob, audit, rule_ids) = match &prepared {
-            PreparedDocument::Ready { graph, audit } => (
+        // Assert: the prepared shape and its counted rule
+        let (blob, rule_ids) = match &prepared {
+            PreparedDocument::Ready { graph } => (
                 serde_json::to_string(&(
                     &graph.document.props,
                     graph
@@ -1341,15 +1318,12 @@ fn every_rule_family_leaves_the_secret_out_of_graph_bytes_and_audit_with_a_keyed
                         .collect::<Vec<_>>(),
                     &graph.links,
                     &graph.tags,
-                    audit,
                 ))
                 .unwrap(),
-                audit.clone(),
                 graph.document.props.rule_ids.clone(),
             ),
-            PreparedDocument::Blocked { props, audit } => (
-                serde_json::to_string(&(props, audit)).unwrap(),
-                audit.clone(),
+            PreparedDocument::Blocked { props } => (
+                serde_json::to_string(props).unwrap(),
                 props.rule_ids.clone(),
             ),
             PreparedDocument::Failed { props } => panic!("{name}: failed: {props:?}"),
@@ -1366,21 +1340,11 @@ fn every_rule_family_leaves_the_secret_out_of_graph_bytes_and_audit_with_a_keyed
                 "{name}: {needle} in the prepared graph"
             );
         }
-        let receipt = audit
-            .iter()
-            .find(|a| a.rules.iter().any(|r| r == fam.rule))
-            .unwrap_or_else(|| panic!("{name}: no receipt for {}: {audit:?}", fam.rule));
-        assert_eq!(receipt.tool, "ingest", "{name}");
-        assert_eq!(receipt.input_hmac.len(), 64, "{name}: {receipt:?}");
-        assert!(
-            receipt.input_hmac.bytes().all(|b| b.is_ascii_hexdigit()),
-            "{name}"
-        );
 
         // Act: through `apply_batch` to disk
         let ids = commit(&store, &policy, prepared);
 
-        // Assert: bytes, stored rows, recall, chain
+        // Assert: bytes, stored rows, recall
         let mut disk = std::fs::read(&db).unwrap();
         for suffix in ["-wal", "-shm"] {
             let side = std::path::PathBuf::from(format!("{}{suffix}", db.display()));
@@ -1424,10 +1388,9 @@ fn every_rule_family_leaves_the_secret_out_of_graph_bytes_and_audit_with_a_keyed
 /// sanitized frontmatter is rendered as JSON and rescanned. A redact rule that matches only in
 /// the rendered form (`x","b":"y` spans two leaves: the YAML source reads `a: x` / `b: y` and
 /// the leaf views `a=x` / `b=y` never contain it) withholds the whole frontmatter as an empty
-/// object, counts the rule and leaves one keyed receipt under `frontmatter`; the body is
-/// untouched.
+/// object and counts the rule; the body is untouched.
 #[test]
-fn a_hit_visible_only_in_the_rendered_frontmatter_withholds_the_whole_block_with_a_receipt() {
+fn a_hit_visible_only_in_the_rendered_frontmatter_withholds_the_whole_block_and_counts_it() {
     let policy =
         policy_with("  - id: rendered-only\n    regex: 'x\",\"b\":\"y'\n    action: redact\n");
     let src = "---\na: x\nb: y\n---\n\n# Doc\n\nclean body\n";
@@ -1437,19 +1400,13 @@ fn a_hit_visible_only_in_the_rendered_frontmatter_withholds_the_whole_block_with
     );
     assert!(policy.scan("a=x").hits.is_empty() && policy.scan("b=y").hits.is_empty());
     match prepare(&policy, signer().as_ref(), "rendered.md", src.as_bytes()) {
-        PreparedDocument::Ready { graph, audit } => {
+        PreparedDocument::Ready { graph } => {
             let fm = &graph.document.props.frontmatter;
             assert!(
                 fm.as_object().is_some_and(serde_json::Map::is_empty),
                 "{fm}"
             );
             assert_eq!(graph.document.props.rule_ids.get("rendered-only"), Some(&1));
-            let receipts: Vec<_> = audit
-                .iter()
-                .filter(|a| a.field == "frontmatter" && a.rules == ["rendered-only"])
-                .collect();
-            assert_eq!(receipts.len(), 1, "{audit:?}");
-            assert_eq!(receipts[0].input_hmac.len(), 64);
             let chunks: Vec<_> = graph.sections.iter().flat_map(|s| &s.chunks).collect();
             assert_eq!(chunks.len(), 1);
             assert_eq!(chunks[0].props.text, "clean body");

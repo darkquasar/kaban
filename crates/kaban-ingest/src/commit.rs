@@ -8,7 +8,7 @@ use crate::graph::{ExistingDocument, ingest_batch, reconcile_failed_batch};
 use crate::ids::PIPELINE_VERSION;
 use crate::model::{DocStatus, IngestError, SourceId};
 use kaban_core::{
-    Actor, AuditEntry, BatchReport, GraphStore, NewNode, NodeId, Op, OutcomeKind, WorkspaceId,
+    Actor, BatchReport, GraphStore, NewNode, NodeId, Op, OutcomeKind, WorkspaceId,
     WriteBatch, WriteCtx,
 };
 use std::collections::BTreeMap;
@@ -34,8 +34,6 @@ pub struct Prepared<G = ()> {
     /// The ops to apply in one transaction. Empty ops mean "unchanged, skip": the committer
     /// writes nothing and counts the document as skipped.
     pub batch: WriteBatch,
-    /// Audit rows to append in the same transaction.
-    pub audit: Vec<AuditEntry>,
     /// Why the preparer wrote nothing, when it did not (`batch.ops` is then empty).
     pub skip: Option<SkipReason>,
 }
@@ -86,7 +84,6 @@ impl Prepared {
                     node,
                 }],
             ),
-            audit: Vec::new(),
             skip: None,
         }
     }

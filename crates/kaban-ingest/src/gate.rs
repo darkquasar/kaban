@@ -19,17 +19,16 @@
 //!                           |  windows: any hit of an `on_document: skip_file` rule => SkipFile
 //!                           |  stream hit over a chunk's map: reject => stub, redact => masked
 //!                           +- chunk: redact => masked text; reject => Stub + HMAC(audit_key, text)
-//!   links/tags + coverage ==> gate_links_and_tags ==> kept (masked) | removed with a receipt
+//!   links/tags + coverage ==> gate_links_and_tags ==> kept (masked) | removed
 //! ```
 //!
-//! Nothing here logs document content: audit rows carry rule ids and keyed hashes only
+//! Nothing here logs document content: the outputs carry rule ids, counts and keyed hashes only
 //! (`obs-no-sensitive-data`).
 
 use crate::cancel::ExtractCtx;
 use crate::chunk::{ChunkConfig, ChunkDraft, ChunkMap, Stream};
 use crate::extract::{LinkDraft, TagDraft};
 use crate::model::{ChunkKind, IngestError};
-use kaban_core::{AuditEntry, AuditOp, WorkspaceId};
 use kaban_policy::{Action, AuditSigner, Hit, OnDocument, Policy, Verdict};
 use serde_json::Value;
 use std::borrow::Cow;
@@ -45,8 +44,6 @@ pub struct SanitizedMeta {
     pub frontmatter: Value,
     /// Rule ids of the redactions applied (one entry per hit; counts only, never text).
     pub redactions: Vec<String>,
-    /// Keyed audit receipts of the redactions (`title`, `frontmatter`; RD1-10).
-    pub audit: Vec<AuditEntry>,
 }
 
 /// Outcome of the metadata gate.
@@ -174,7 +171,6 @@ fn gate_leaf<'a>(
 /// first rejecting leaf. `path` is the dotted key path used as the `key` of the kv view.
 fn gate_value(
     policy: &Policy,
-    auditor: &Auditor<'_>,
     path: &str,
     value: &Value,
     meta: &mut SanitizedMeta,
@@ -182,13 +178,13 @@ fn gate_value(
     match value {
         Value::String(s) => {
             let (masked, ids) = gate_leaf(policy, path, s)?;
-            meta.redacted(auditor, "frontmatter", s, ids);
+            meta.redacted(ids);
             Ok(Value::String(masked.into_owned()))
         }
         Value::Array(items) => items
             .iter()
             .enumerate()
-            .map(|(i, v)| gate_value(policy, auditor, &format!("{path}.{i}"), v, meta))
+            .map(|(i, v)| gate_value(policy, &format!("{path}.{i}"), v, meta))
             .collect::<Result<Vec<_>, _>>()
             .map(Value::Array),
         Value::Object(map) => {
@@ -196,7 +192,7 @@ fn gate_value(
             for (k, v) in map {
                 // the key itself is content too (S1 props leaves)
                 let (key, ids) = gate_text(policy, k)?;
-                meta.redacted(auditor, "frontmatter", k, ids);
+                meta.redacted(ids);
                 let child = if path.is_empty() {
                     k.clone()
                 } else {
@@ -204,7 +200,7 @@ fn gate_value(
                 };
                 out.insert(
                     key.into_owned(),
-                    gate_value(policy, auditor, &child, v, meta)?,
+                    gate_value(policy, &child, v, meta)?,
                 );
             }
             Ok(Value::Object(out))
@@ -217,7 +213,7 @@ fn gate_value(
             match masked {
                 Cow::Borrowed(_) => Ok(other.clone()),
                 Cow::Owned(masked) => {
-                    meta.redacted(auditor, "frontmatter", &rendered, ids);
+                    meta.redacted(ids);
                     Ok(Value::String(masked))
                 }
             }
@@ -226,14 +222,9 @@ fn gate_value(
 }
 
 impl SanitizedMeta {
-    /// Record one field's redaction: the rule ids counted and one keyed receipt (no text).
-    fn redacted(&mut self, auditor: &Auditor<'_>, field: &str, original: &str, ids: Vec<String>) {
-        if ids.is_empty() {
-            return;
-        }
-        self.redactions.extend(ids.iter().cloned());
-        self.audit
-            .push(auditor.entry(AuditOp::Redact, field, original, ids));
+    /// Record one field's redaction: the rule ids counted (no text).
+    fn redacted(&mut self, ids: Vec<String>) {
+        self.redactions.extend(ids);
     }
 }
 
@@ -362,29 +353,21 @@ fn mask_leaves(value: &mut Value, matched: &str, label: &str) -> Option<bool> {
 /// hit that survived leaf masking withholds the whole frontmatter.
 pub fn gate_metadata(
     policy: &Policy,
-    signer: &dyn AuditSigner,
-    workspace: &WorkspaceId,
     title: Option<&str>,
     frontmatter: &Value,
     admitted: Option<&AdmittedFrontmatter<'_>>,
 ) -> MetaDecision {
-    let auditor = Auditor {
-        signer,
-        workspace,
-        policy_version: policy.effective_hash(),
-    };
     let mut meta = SanitizedMeta {
         title: None,
         frontmatter: Value::Null,
         redactions: Vec::new(),
-        audit: Vec::new(),
     };
     // (1b.1) the source redact hits, mapped or withholding
     let mut title = title.map(Cow::Borrowed);
     let mapped: Cow<'_, Value> = match admitted {
         Some(a) if !a.redact_hits.is_empty() => {
             let ids: Vec<String> = a.redact_hits.iter().map(|h| h.rule.clone()).collect();
-            meta.redacted(&auditor, "frontmatter", a.source, ids);
+            meta.redacted(ids);
             let sanitized = apply_source_hits(frontmatter, a, &policy.file.defaults.mask)
                 .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
             // a title that came from the block follows the block (`None` when withheld)
@@ -406,11 +389,11 @@ pub fn gate_metadata(
         None => None,
         Some(Err(rule_ids)) => return MetaDecision::SkipFile { rule_ids },
         Some(Ok((masked, ids))) => {
-            meta.redacted(&auditor, "title", title.as_deref().unwrap_or_default(), ids);
+            meta.redacted(ids);
             Some(masked.into_owned())
         }
     };
-    meta.frontmatter = match gate_value(policy, &auditor, "", &mapped, &mut meta) {
+    meta.frontmatter = match gate_value(policy, "", &mapped, &mut meta) {
         Ok(v) => v,
         Err(rule_ids) => return MetaDecision::SkipFile { rule_ids },
     };
@@ -424,14 +407,14 @@ pub fn gate_metadata(
         }
         if !v.hits.is_empty() {
             let ids = v.hits.iter().map(|h| h.rule.clone()).collect();
-            meta.redacted(&auditor, "frontmatter", &rendered, ids);
+            meta.redacted(ids);
             meta.frontmatter = Value::Object(serde_json::Map::new());
         }
     }
     MetaDecision::Proceed(meta)
 }
 
-/// A document after stage (2): sanitized metadata and chunks, counts and audit rows.
+/// A document after stage (2): sanitized metadata and chunks, and the rule counts.
 #[derive(Debug, Clone)]
 pub struct Gated {
     /// Stage (1) output, passed through.
@@ -442,8 +425,6 @@ pub struct Gated {
     pub blocked_chunks: u32,
     /// Rule id -> hits across the document (stream and chunk scans; counts only).
     pub rule_ids: BTreeMap<String, u32>,
-    /// Audit rows (`reject`/`redact`, tool `ingest`, keyed hashes, rule ids; never text).
-    pub audit: Vec<AuditEntry>,
     /// The extractor error, gated (masked, or replaced when it rejects).
     pub error: Option<String>,
     /// Every stream range a hit covered (stream hits, chunk hits mapped back, stubbed chunks
@@ -495,8 +476,6 @@ pub enum GateDecision {
     SkipFile {
         /// Rule ids that fired.
         rule_ids: Vec<String>,
-        /// The audit rows to append with the blocked write.
-        audit: Vec<AuditEntry>,
     },
 }
 
@@ -570,28 +549,6 @@ fn scan_windows_checked(
     })
 }
 
-/// Everything the gate needs to write an audit row.
-struct Auditor<'a> {
-    signer: &'a dyn AuditSigner,
-    workspace: &'a WorkspaceId,
-    policy_version: &'a str,
-}
-
-impl Auditor<'_> {
-    fn entry(&self, op: AuditOp, field: &str, original: &str, rules: Vec<String>) -> AuditEntry {
-        AuditEntry {
-            op,
-            tool: "ingest".into(),
-            field: field.into(),
-            workspace_id: self.workspace.clone(),
-            policy_version: self.policy_version.to_owned(),
-            input_hmac: self.signer.hmac_hex(original.as_bytes()),
-            rules,
-            node_id: None,
-        }
-    }
-}
-
 fn count(rule_ids: &mut BTreeMap<String, u32>, ids: &[String]) {
     for r in ids {
         *rule_ids.entry(r.clone()).or_default() += 1;
@@ -601,17 +558,15 @@ fn count(rule_ids: &mut BTreeMap<String, u32>, ids: &[String]) {
 /// Stage (2): the pre-chunk stream with overlapping windows, then every chunk (fence language,
 /// text and `context_prefix`), then the extractor error string. `stream` carries one span per
 /// chunk (the chunker's [`crate::chunk::Chunked::stream`], or [`stream_text`] over hand-cut
-/// chunks) so stream hits map back onto chunks; `workspace` stamps the audit rows (additive to
-/// the plan's signature: `AuditEntry` requires it).
+/// chunks) so stream hits map back onto chunks; `signer` keys the stub hashes.
 ///
 /// # Errors
 /// `Cancelled`/`DeadlineExceeded` from `ctx` between windows (as `IngestError::Extract`).
-#[allow(clippy::too_many_arguments)] // the plan's signature plus the workspace
+#[allow(clippy::too_many_arguments)] // the plan's signature
 pub fn gate_document(
     policy: &Policy,
     signer: &dyn AuditSigner,
     ctx: &ExtractCtx,
-    workspace: &WorkspaceId,
     meta: SanitizedMeta,
     stream: &Stream,
     chunks: Vec<ChunkDraft>,
@@ -621,14 +576,7 @@ pub fn gate_document(
     debug_assert_eq!(stream.maps.len(), chunks.len(), "one map per chunk");
     let full_text = stream.text.as_str();
     let mut coverage = StreamCoverage::default();
-    let auditor = Auditor {
-        signer,
-        workspace,
-        policy_version: policy.effective_hash(),
-    };
     let mut rule_ids: BTreeMap<String, u32> = BTreeMap::new();
-    let mut meta = meta;
-    let mut audit = std::mem::take(&mut meta.audit);
     for r in &meta.redactions {
         *rule_ids.entry(r.clone()).or_default() += 1;
     }
@@ -638,11 +586,8 @@ pub fn gate_document(
     // is stubbed rather than stored
     let whole = scan_windows_checked(policy, full_text, window_chars(cfg), ctx)?;
     if skips_file(policy, &whole) {
-        let ids = rule_ids_of(&whole);
-        audit.push(auditor.entry(AuditOp::Reject, "stream", full_text, ids.clone()));
         return Ok(GateDecision::SkipFile {
-            rule_ids: ids,
-            audit,
+            rule_ids: rule_ids_of(&whole),
         });
     }
     for h in &whole.hits {
@@ -665,20 +610,14 @@ pub fn gate_document(
                 FieldVerdict::Clean => {}
                 FieldVerdict::Masked(masked, ids) => {
                     count(&mut rule_ids, &ids);
-                    audit.push(auditor.entry(AuditOp::Redact, "lang", lang, ids));
                     draft.kind = ChunkKind::Code { lang: Some(masked) };
                 }
                 FieldVerdict::Rejected(ids) => {
                     count(&mut rule_ids, &ids);
-                    audit.push(auditor.entry(AuditOp::Reject, "lang", lang, ids));
                     draft.kind = ChunkKind::Code { lang: None };
                 }
                 FieldVerdict::SkipsFile(ids) => {
-                    audit.push(auditor.entry(AuditOp::Reject, "lang", lang, ids.clone()));
-                    return Ok(GateDecision::SkipFile {
-                        rule_ids: ids,
-                        audit,
-                    });
+                    return Ok(GateDecision::SkipFile { rule_ids: ids });
                 }
             }
         }
@@ -725,7 +664,6 @@ pub fn gate_document(
             coverage.add(hull);
             let original = std::mem::take(&mut draft.text);
             let stub_hmac = signer.hmac_hex(original.as_bytes());
-            audit.push(auditor.entry(AuditOp::Reject, "chunk", &original, ids));
             draft.kind = ChunkKind::Stub;
             if prefix_verdict.rejected {
                 draft.context_prefix = String::new();
@@ -749,12 +687,10 @@ pub fn gate_document(
                 hits.dedup_by(|a, b| a.start == b.start && a.end == b.end && a.rule == b.rule);
                 mask_spans(&draft.text, &hits, &policy.file.defaults.mask)
             };
-            let original = std::mem::replace(&mut draft.text, masked);
-            audit.push(auditor.entry(AuditOp::Redact, "chunk", &original, ids.clone()));
+            draft.text = masked;
         }
         if !prefix_verdict.hits.is_empty() {
-            let original = std::mem::replace(&mut draft.context_prefix, prefix_verdict.redacted);
-            audit.push(auditor.entry(AuditOp::Redact, "context_prefix", &original, ids));
+            draft.context_prefix = prefix_verdict.redacted;
         }
         out.push(GatedChunk {
             draft,
@@ -765,15 +701,11 @@ pub fn gate_document(
     // extractor error strings are content too (S1): masked, or withheld when they reject
     let error = extractor_error.map(|e| match gate_text(policy, e) {
         Ok((masked, ids)) => {
-            if !ids.is_empty() {
-                count(&mut rule_ids, &ids);
-                audit.push(auditor.entry(AuditOp::Redact, "error", e, ids));
-            }
+            count(&mut rule_ids, &ids);
             masked.into_owned()
         }
         Err(ids) => {
             count(&mut rule_ids, &ids);
-            audit.push(auditor.entry(AuditOp::Reject, "error", e, ids));
             "extractor error withheld by the denylist".to_owned()
         }
     });
@@ -783,7 +715,6 @@ pub fn gate_document(
         chunks: out,
         blocked_chunks,
         rule_ids,
-        audit,
         error,
         coverage,
     }))
@@ -848,73 +779,45 @@ impl DerivedContext<'_> {
     }
 }
 
-/// Gate link targets, aliases and tag names (S1: persisted strings; RD1-10 receipts): a
-/// rejecting one is dropped and counted, a redactable one is masked; every hit leaves a keyed
-/// audit row under `link`, `link_alias` or `tag`. With a [`DerivedContext`], a link or tag
-/// whose source span the document gate covered is removed first and audited under `link` or
-/// `tag` with the covering rules' ids, counted once already by the chunk hit (RD2-3: the chunk
-/// hit decided against that text, so no edge, Tag node or `tag_id` preimage may restore it).
-/// Appends to `rule_ids` and `audit`.
-#[allow(clippy::too_many_arguments)] // the DI1.4 signature plus the RD2-3 context
+/// Gate link targets, aliases and tag names (S1: persisted strings): a rejecting one is
+/// dropped and counted, a redactable one is masked and counted. With a [`DerivedContext`], a
+/// link or tag whose source span the document gate covered is removed first, counted once
+/// already by the chunk hit (RD2-3: the chunk hit decided against that text, so no edge, Tag
+/// node or `tag_id` preimage may restore it). Appends to `rule_ids`.
 pub fn gate_links_and_tags(
     policy: &Policy,
-    signer: &dyn AuditSigner,
-    workspace: &WorkspaceId,
     links: &[LinkDraft],
     tags: &[TagDraft],
     context: Option<DerivedContext<'_>>,
     rule_ids: &mut BTreeMap<String, u32>,
-    audit: &mut Vec<AuditEntry>,
 ) -> (Vec<LinkDraft>, Vec<TagDraft>) {
-    let auditor = Auditor {
-        signer,
-        workspace,
-        policy_version: policy.effective_hash(),
-    };
-    // RD2-3: a covered span is removed with a receipt before the field-level gate
-    let removed =
-        |name: &str, text: &str, span: &Range<u64>, audit: &mut Vec<AuditEntry>| -> bool {
-            let Some(ctx) = context else { return false };
-            if !ctx.covers(span) {
-                return false;
-            }
-            // the covering hit was counted when it masked or stubbed the chunk: receipt only
-            let ids = covering_rules(policy, ctx, span, text);
-            audit.push(auditor.entry(AuditOp::Reject, name, text, ids));
-            true
-        };
-    // one string: `Some(masked)` to keep (receipt written when it was masked), `None` to drop
-    let field = |name: &str,
-                 text: &str,
-                 rule_ids: &mut BTreeMap<String, u32>,
-                 audit: &mut Vec<AuditEntry>|
-     -> Option<String> {
+    // RD2-3: a covered span is removed before the field-level gate; the covering hit was
+    // counted when it masked or stubbed the chunk
+    let removed = |span: &Range<u64>| context.is_some_and(|ctx| ctx.covers(span));
+    // one string: `Some(masked)` to keep, `None` to drop
+    let field = |text: &str, rule_ids: &mut BTreeMap<String, u32>| -> Option<String> {
         match gate_text(policy, text) {
             Ok((masked, ids)) => {
-                if !ids.is_empty() {
-                    count(rule_ids, &ids);
-                    audit.push(auditor.entry(AuditOp::Redact, name, text, ids));
-                }
+                count(rule_ids, &ids);
                 Some(masked.into_owned())
             }
             Err(ids) => {
                 count(rule_ids, &ids);
-                audit.push(auditor.entry(AuditOp::Reject, name, text, ids));
                 None
             }
         }
     };
     let mut out_links = Vec::with_capacity(links.len());
     for l in links {
-        if removed("link", &l.raw_target, &l.span(), audit) {
+        if removed(&l.span()) {
             continue;
         }
-        let Some(raw_target) = field("link", &l.raw_target, rule_ids, audit) else {
+        let Some(raw_target) = field(&l.raw_target, rule_ids) else {
             continue;
         };
         let alias = match l.alias.as_deref() {
             None => None,
-            Some(a) => match field("link_alias", a, rule_ids, audit) {
+            Some(a) => match field(a, rule_ids) {
                 Some(a) => Some(a),
                 None => continue,
             },
@@ -927,10 +830,10 @@ pub fn gate_links_and_tags(
     }
     let mut out_tags = Vec::with_capacity(tags.len());
     for t in tags {
-        if removed("tag", &t.tag, &t.span(), audit) {
+        if removed(&t.span()) {
             continue;
         }
-        if let Some(tag) = field("tag", &t.tag, rule_ids, audit) {
+        if let Some(tag) = field(&t.tag, rule_ids) {
             out_tags.push(TagDraft {
                 tag,
                 byte_offset: t.byte_offset,
@@ -941,68 +844,20 @@ pub fn gate_links_and_tags(
     (out_links, out_tags)
 }
 
-/// The rule ids to put on a removal receipt: the rules whose stream hits cover the span's
-/// block (re-derived from a scan of that block's text, counts only), else `derived` when no
-/// stream text is at hand (a heading hit).
-fn covering_rules(
-    policy: &Policy,
-    ctx: DerivedContext<'_>,
-    span: &Range<u64>,
-    text: &str,
-) -> Vec<String> {
-    let block = ctx
-        .stream
-        .blocks
-        .iter()
-        .find(|b| b.source.start <= span.start && span.end <= b.source.end);
-    let mut ids: Vec<String> = match block {
-        Some(b) => policy
-            .scan(&ctx.stream.text[b.stream.clone()])
-            .hits
-            .into_iter()
-            .map(|h| h.rule)
-            .collect(),
-        None => Vec::new(),
-    };
-    ids.extend(policy.scan(text).hits.into_iter().map(|h| h.rule));
-    ids.sort();
-    ids.dedup();
-    if ids.is_empty() {
-        ids.push("derived".to_owned());
-    }
-    ids
-}
-
 /// Gate one section's heading path (S1: heading texts are persisted and are inputs of
 /// `section_id`/`chunk_id`): redact hits are masked; a rejecting heading is replaced by the
 /// policy mask carrying the rule id (a heading is structure, so it is kept as a placeholder
-/// rather than dropped) and audited with its keyed hash. Returns the sanitized path and the rule
-/// ids that fired.
-pub fn gate_heading_path(
-    policy: &Policy,
-    signer: &dyn AuditSigner,
-    workspace: &WorkspaceId,
-    heading_path: &[String],
-    audit: &mut Vec<AuditEntry>,
-) -> (Vec<String>, Vec<String>) {
-    let auditor = Auditor {
-        signer,
-        workspace,
-        policy_version: policy.effective_hash(),
-    };
+/// rather than dropped). Returns the sanitized path and the rule ids that fired.
+pub fn gate_heading_path(policy: &Policy, heading_path: &[String]) -> (Vec<String>, Vec<String>) {
     let mut ids_all = Vec::new();
     let path = heading_path
         .iter()
         .map(|h| match gate_text(policy, h) {
             Ok((masked, ids)) => {
-                if !ids.is_empty() {
-                    audit.push(auditor.entry(AuditOp::Redact, "heading", h, ids.clone()));
-                }
                 ids_all.extend(ids);
                 masked.into_owned()
             }
             Err(ids) => {
-                audit.push(auditor.entry(AuditOp::Reject, "heading", h, ids.clone()));
                 let rule = ids.first().cloned().unwrap_or_default();
                 ids_all.extend(ids);
                 policy.file.defaults.mask.replace("{rule}", &rule)
