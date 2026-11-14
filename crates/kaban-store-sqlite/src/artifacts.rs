@@ -541,9 +541,7 @@ pub(super) fn record_sets(
 
 /// The stored props of an ingest Document (empty when it is not one).
 fn props_of(conn: &Connection, document: &NodeId, workspace: &WorkspaceId) -> Result<Value> {
-    Ok(self::document(conn, document, workspace, false)?
-        .map(|(_, props)| props)
-        .unwrap_or(Value::Null))
+    Ok(self::document(conn, document, workspace, false)?.map_or(Value::Null, |(_, props)| props))
 }
 
 /// Whether `chunk` is one of the Document `props`' `chunk_ids`.

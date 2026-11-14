@@ -910,22 +910,7 @@ fn commit(
                 }
             }
         }
-        PreparedDocument::Blocked { props, .. } => {
-            let id = kaban_ingest::document_id(&SourceId::new(
-                &ws,
-                &gate_path(policy, &props.path).unwrap(),
-            ));
-            ops.push(Op::UpsertNode {
-                id: id.clone(),
-                node: node(
-                    "Document",
-                    String::new(),
-                    serde_json::to_value(&props).unwrap(),
-                ),
-            });
-            ids.push(id);
-        }
-        PreparedDocument::Failed { props } => {
+        PreparedDocument::Blocked { props, .. } | PreparedDocument::Failed { props } => {
             let id = kaban_ingest::document_id(&SourceId::new(
                 &ws,
                 &gate_path(policy, &props.path).unwrap(),

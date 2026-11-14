@@ -509,6 +509,39 @@ fn fuse(
     Ok(out)
 }
 
+/// The most chunks of one path a `<path>:<offset>` lookup examines
+/// (`MemoryStore::chunk_covering`, RW2-6): the path's chunks in id order up to this many are
+/// the candidates, so one document's size bounds the cost and the other documents never
+/// enter it. A document split into more chunks than this answers from its first
+/// `MAX_SPAN_SCAN` only.
+pub(crate) const MAX_SPAN_SCAN: usize = 4096;
+
+/// The active chunk of `ws` from `path` covering byte `offset`
+/// (`MemoryStore::chunk_covering`): the path's first `MAX_SPAN_SCAN` chunks by id are the
+/// candidates (the inner select), the covering one with the lowest id is decoded; no other
+/// row is read into a `Node`.
+pub(crate) fn chunk_covering(
+    conn: &Connection,
+    ws: &str,
+    path: &str,
+    offset: u64,
+) -> Result<Option<kaban_core::Node>> {
+    let offset = i64::try_from(offset).unwrap_or(i64::MAX);
+    let bound = i64::try_from(MAX_SPAN_SCAN).unwrap_or(i64::MAX);
+    let mut st = conn
+        .prepare_cached(&format!(
+            "SELECT {NODE_COLS} FROM (
+               SELECT n.* FROM node n WHERE n.kind = 'Chunk' AND {WS_COL} = ?1 AND n.lifecycle = 'active'
+                 AND json_extract(n.props, '$.path') = ?2 ORDER BY n.id LIMIT ?4) n
+             WHERE json_extract(n.props, '$.byte_start') <= ?3 AND json_extract(n.props, '$.byte_end') > ?3
+             ORDER BY n.id LIMIT 1"
+        ))
+        .sql()?;
+    st.query_row(params![ws, path, offset, bound], row_node)
+        .optional()
+        .sql()
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // test code: failures are the assertion
 mod tests {
@@ -726,37 +759,4 @@ mod tests {
         );
         assert!(hits.unwrap().is_empty());
     }
-}
-
-/// The most chunks of one path a `<path>:<offset>` lookup examines
-/// (`MemoryStore::chunk_covering`, RW2-6): the path's chunks in id order up to this many are
-/// the candidates, so one document's size bounds the cost and the other documents never
-/// enter it. A document split into more chunks than this answers from its first
-/// `MAX_SPAN_SCAN` only.
-pub(crate) const MAX_SPAN_SCAN: usize = 4096;
-
-/// The active chunk of `ws` from `path` covering byte `offset`
-/// (`MemoryStore::chunk_covering`): the path's first `MAX_SPAN_SCAN` chunks by id are the
-/// candidates (the inner select), the covering one with the lowest id is decoded; no other
-/// row is read into a `Node`.
-pub(crate) fn chunk_covering(
-    conn: &Connection,
-    ws: &str,
-    path: &str,
-    offset: u64,
-) -> Result<Option<kaban_core::Node>> {
-    let offset = i64::try_from(offset).unwrap_or(i64::MAX);
-    let bound = i64::try_from(MAX_SPAN_SCAN).unwrap_or(i64::MAX);
-    let mut st = conn
-        .prepare_cached(&format!(
-            "SELECT {NODE_COLS} FROM (
-               SELECT n.* FROM node n WHERE n.kind = 'Chunk' AND {WS_COL} = ?1 AND n.lifecycle = 'active'
-                 AND json_extract(n.props, '$.path') = ?2 ORDER BY n.id LIMIT ?4) n
-             WHERE json_extract(n.props, '$.byte_start') <= ?3 AND json_extract(n.props, '$.byte_end') > ?3
-             ORDER BY n.id LIMIT 1"
-        ))
-        .sql()?;
-    st.query_row(params![ws, path, offset, bound], row_node)
-        .optional()
-        .sql()
 }

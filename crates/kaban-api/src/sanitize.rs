@@ -176,7 +176,7 @@ impl KabanApi {
                 Value::String(if verdict.hits.is_empty() && !verdict.rejected {
                     s.clone()
                 } else {
-                    self.apply_verdict(tool, field, verdict, redactions)?
+                    Self::apply_verdict(tool, field, verdict, redactions)?
                 })
             }
             Value::String(s) => Value::String(self.scan_str(tool, field, s, redactions)?),
@@ -339,8 +339,7 @@ impl KabanApi {
         if !v.rejected {
             return Ok(());
         }
-        self.apply_verdict(tool, field, v, &mut Vec::new())
-            .map(|_| ())
+        Self::apply_verdict(tool, field, v, &mut Vec::new()).map(|_| ())
     }
 
     /// Gate a JSON value (see [`KabanApi::scan_json`]).
@@ -366,13 +365,12 @@ impl KabanApi {
         if v.hits.is_empty() && !v.rejected {
             return Ok(s.to_string());
         }
-        self.apply_verdict(tool, field, v, redactions)
+        Self::apply_verdict(tool, field, v, redactions)
     }
 
     /// Turn a verdict into the redacted string or a rejection; a redaction is listed in
     /// `redactions` as `field:rule` per hit.
     fn apply_verdict(
-        &self,
         tool: &str,
         field: &str,
         v: Verdict,
@@ -419,7 +417,7 @@ impl KabanApi {
         if !v.rejected && v.hits.iter().all(|h| h.end <= prefix.len()) {
             return Ok(leaf.clone());
         }
-        let redacted = self.apply_verdict(tool, field, v, redactions)?;
+        let redacted = Self::apply_verdict(tool, field, v, redactions)?;
         Ok(match redacted.strip_prefix(&prefix) {
             Some(value) => Value::String(value.to_string()),
             // the key side was masked too, so the value cannot be cut out of the joined view;

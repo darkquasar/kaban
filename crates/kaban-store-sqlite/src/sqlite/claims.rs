@@ -40,7 +40,6 @@ impl SqliteStore {
     /// node update trigger skips purged rows; the one explicit `op='purge'` row and one
     /// `delete` row per removed edge are the `ChangeLog` record. Returns the row's new `rev`.
     pub(crate) fn purge_in_place(
-        &self,
         tx: &Connection,
         rid: i64,
         id: &str,
@@ -222,7 +221,7 @@ impl SqliteStore {
             // update trigger skips purged rows; the one explicit `op='purge'` row and one
             // `delete` row per removed edge are the `ChangeLog` record (MD-24).
             ForgetMode::Purge => {
-                self.purge_in_place(&tx, rid, id, &st.workspace_id, &now, None)?;
+                Self::purge_in_place(&tx, rid, id, &st.workspace_id, &now, None)?;
             }
         }
         let lifecycle: String = tx

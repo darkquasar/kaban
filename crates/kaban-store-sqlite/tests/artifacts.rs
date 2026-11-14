@@ -33,7 +33,9 @@ fn claim(chunk: &NodeId, target: &NodeId) -> Op {
     mention(chunk, target, json!({}))
 }
 
-/// [`claim`] with `extra` merged into its props (another layer, source or score).
+/// A gazetteer MENTIONS edge with `extra` merged into its props (another layer, source or
+/// score).
+#[allow(clippy::needless_pass_by_value)] // call sites pass a fresh `json!` literal
 fn mention(chunk: &NodeId, target: &NodeId, extra: serde_json::Value) -> Op {
     let mut props = json!({"layer": "gazetteer", "method": "exact", "offset": 0, "len": 10,
         "score": 9000, "source_id": "doc-fixture"});
