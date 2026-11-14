@@ -91,11 +91,11 @@ fully indexed. If older stored content is withheld on output, review the
    equivalent to searchable accepted content.
 3. Start with words actually present in the text. Embedding similarity is
    unavailable; a text query is not a semantic search request.
-4. Check optional layer state in `stats`/`doctor`. Gazetteer linking is not on by
-   default. A reset layer has no regenerated links until explicit ingestion.
+4. Check optional producer state in `stats`/`doctor`. Gazetteer linking is not on by
+   default.
 5. If diagnostics identify a derived-index problem, use
    [full-text maintenance](maintenance.mdx#full-text-maintenance) or
-   [layer reset and re-ingestion](maintenance.mdx#layer-reset-and-re-ingestion)
+   [re-ingestion](maintenance.mdx#re-ingestion)
    as appropriate. Neither recreates missing source content.
 
 Do not broaden reads to all workspaces merely to hide a configuration error.
@@ -111,8 +111,7 @@ the other kaban processes and retry (spec 05 OWN-M: the migration runs once, exc
 
 Use `doctor` to distinguish a text index problem from a stale code snapshot or a record
 conflict. `reindex text` rebuilds the Tantivy text index from the database; it does not run
-`kaban-index`. `reindex layer gazetteer` resets generated links; it does not fetch
-or re-ingest documents automatically.
+`kaban-index`, and it does not fetch or re-ingest documents.
 
 For an equal-revision record conflict, inspect both representations and follow
 [conflict resolution](maintenance.mdx#resolve-conflicts-deliberately).

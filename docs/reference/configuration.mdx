@@ -45,8 +45,8 @@ sections you want to override:
 ```yaml
 link:
   default: none
-budget:
-  l0_rss_mb: 64
+text:
+  build_rss_mb: 64
 ```
 
 Unknown keys, wrong types, and zero resource budgets are configuration errors
@@ -54,7 +54,7 @@ Unknown keys, wrong types, and zero resource budgets are configuration errors
 `recall.column_weights`, specify every column weight you want to retain. Kaban
 does not merge this file with a second project-local engine configuration.
 
-The default layer setup is intentionally small: lexical full-text search is on
+The default producer setup is intentionally small: lexical full-text search is on
 (the store's Tantivy text index, fuzzy matching included),
 automatic gazetteer linking is off, and extraction requires an explicit selection.
 Reading configuration or reporting budgets does not build an optional index.
@@ -66,14 +66,15 @@ Reading configuration or reporting budgets does not build an optional index.
   an explicit ingestion `--link` selection takes precedence.
 - `ingest.default_with` is reserved: missing or empty is accepted; nonempty
   values return `not_available_in_this_release`.
-- `embed.model` is reserved: missing, null, or an empty map is accepted; nonempty
-  values are refused. Embeddings are not enabled by setting a model here.
+- The `embed` section, `l3` (now `extractors`) and `budget.l0_rss_mb` (now
+  `text.build_rss_mb`) are gone: a file that still names them is refused naming the
+  key, with no alias.
 
 ## Memory and other budgets
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
-| `budget.l0_rss_mb` | 64 MiB | L0 whole-process peak allowance used by layer measurements |
+| `text.build_rss_mb` | 64 MiB | Text index build whole-process peak allowance |
 | `gazetteer.max_automaton_mb` | 25 MiB | Gazetteer automaton build/retained-memory budget |
 | `ingest.lru_mib` | 8 MiB | Reserved cache capacity; cache implementation deferred |
 | `index.deadline_secs` | 600 seconds | End-to-end indexer deadline |

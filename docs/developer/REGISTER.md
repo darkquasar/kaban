@@ -79,11 +79,9 @@ is not a substitute for protecting client and host logs.
 `kaban reindex text` rebuilds the Tantivy text index
 from the database; `kaban doctor --optimize` explicitly merges its segments once. Ordinary writes and ordinary doctor checks never request optimization.
 CLI request/result content gates still apply; repository/document paths are not exempt.
-`kaban reindex layer <name>` is a DB-only reset, not a completed rebuild: generated links
-remain absent until the next explicit ingestion with that layer enabled. No automatic jobs
-are scheduled. `forget --layer <name> [--document <path>]` deletes the layer's existing
-generated links and derived artifacts. Both internal gated verbs (`reindex_layer`,
-`forget_layer`) are CLI-only and absent from the MCP catalog; human/other-layer state is kept.
+There is no per-producer reset or delete verb: `reindex layer` and `forget --layer` are
+removed with no alias. A producer's links change only when that producer runs again, and a
+rerun deletes only the rows it wrote; the first producer to write an edge keeps it.
 
 The `reconcile` consumer identity and lease, with versioned cursor `reconcile:1`, are reserved.
 No asynchronous reconcile loop is registered or scheduled; reconciliation stays synchronous.

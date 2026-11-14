@@ -17,12 +17,12 @@ kaban stats
 
 Ordinary `doctor` diagnoses the database as it exists: it does not create,
 migrate, seed, tighten file modes, or automatically optimize it. Checks include
-database integrity, schema, file modes, audit, the text index's position, conflicts, and layer state.
+database integrity, schema, file modes, the text index's position, and producer state.
 It returns `0` when all checks pass and `5` for a failed check or open failure;
 content gates can withhold its report. Policy-gate auditing can still record a
 rejection, so this is not a forensic promise of zero writes to the file.
 
-`stats` reports counters, policy information, budgets, and the layer matrix. It
+`stats` reports counters, policy information, and the producers with their budgets. It
 uses the normal service open path, so do not substitute it for diagnostic opening
 when investigating an absent or older database.
 
@@ -45,24 +45,19 @@ re-ingestion.
 Schedule it with enough free disk and a backup; do not treat it as a guaranteed
 secure erase of storage media or external copies.
 
-## Layer reset and re-ingestion
+## Re-ingestion
 
-**Reset removes derived state.** `reindex layer` is a DB-only reset, not a
-completed rebuild. For example, after deciding to regenerate gazetteer links:
+There is no per-producer reset: `reindex layer` and `forget --layer` are removed,
+with no alias. Generated links change when their producer runs again, for example:
 
 ```bash
-kaban reindex layer gazetteer
 kaban ingest docs/ --link gazetteer
 ```
 
-Replace `docs/` with the intended source paths. Generated links remain absent
-between the reset and successful explicit ingestion with that layer enabled. No
-background rebuild is scheduled. Human and other-layer state is retained.
-Inspect the ingestion report for blocked, failed, or skipped work.
-
-`forget --layer` is different: it deletes the layer's existing generated links and
-derived artifacts, keeping human and other-layer state. It is not the repair command
-for a derived index you want rebuilt.
+Replace `docs/` with the intended source paths. A producer rerun deletes only the
+links it wrote; links another producer or an author wrote first are kept. No
+background rebuild is scheduled. Inspect the ingestion report for blocked, failed,
+or skipped work.
 
 ## Policy changes
 
@@ -104,7 +99,7 @@ that when you need to preserve its original state.
 
 ## Destructive operations
 
-**Do not use purge, layer forgetting, or file deletion as generic troubleshooting.**
+**Do not use purge or file deletion as generic troubleshooting.**
 
 `kaban forget RECORD_ID --mode purge` removes the record's content, index entries,
 and edges while retaining a purged identity. A later sync writes a tombstone that

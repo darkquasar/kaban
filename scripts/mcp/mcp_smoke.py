@@ -674,12 +674,12 @@ rels:
         rc3, v3, bad3 = e3_cli("ingest", "job", "finish", job, "--fence", fence)
         check((rc, rc2, rc3) == (0, 0, 0) and job and (v2 or {}).get("created") == 1 and (v3 or {}).get("status") == "finished" and bad + bad2 + bad3 == [], f"e3: a fenced ingest_claim submit and finish under strace stay inside the envelope (exits {rc}/{rc2}/{rc3}; {bad + bad2 + bad3})")
         rc0, _, _ = e3_cli("reindex", "trigram")  # retired with FTS5 (spec 05 SS-16): refused, exit 4
-        rc, v, bad = e3_cli("recall", "quokka", "--layers", "fts,fuzzy", "--fuzzy")
-        check(rc0 == 4 and rc == 0 and (v or {}).get("count", 0) >= 1 and bad == [], f"e3: the retired trigram rebuild is refused and recall with every retained layer flag (fts, fuzzy) under strace stays inside the envelope (exits {rc0}/{rc}; {bad})")
+        rc, v, bad = e3_cli("recall", "quokka", "--modes", "lexical,fuzzy", "--fuzzy")
+        check(rc0 == 4 and rc == 0 and (v or {}).get("count", 0) >= 1 and bad == [], f"e3: the retired trigram rebuild is refused and recall with every match mode (lexical, fuzzy) under strace stays inside the envelope (exits {rc0}/{rc}; {bad})")
         rc, v, bad = e3_cli("stats")
         check(rc == 0 and v is not None and bad == [], f"e3: stats under strace stays inside the envelope (exit {rc}; {bad})")
         q = subprocess.Popen(e3_cmd + [e3_bin, "--db", e3_db, "--policy", e3_policy, "serve"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, env=env, cwd=e3_repo)
-        for n, (method, params) in enumerate((("initialize", {"protocolVersion": "2025-11-25", "capabilities": {}, "clientInfo": {"name": "smoke-e3", "version": "0"}}), ("notifications/initialized", None), ("tools/call", {"name": "recall", "arguments": {"query": "quokka", "layers": ["fts", "fuzzy"], "fuzzy": True}}))):
+        for n, (method, params) in enumerate((("initialize", {"protocolVersion": "2025-11-25", "capabilities": {}, "clientInfo": {"name": "smoke-e3", "version": "0"}}), ("notifications/initialized", None), ("tools/call", {"name": "recall", "arguments": {"query": "quokka", "modes": ["lexical", "fuzzy"], "fuzzy": True}}))):
             msg = {"jsonrpc": "2.0", "method": method, **({"params": params} if params is not None else {}), **({"id": n} if params is not None else {})}
             q.stdin.write(json.dumps(msg) + "\n"); q.stdin.flush()
             if params is not None:
@@ -688,9 +688,9 @@ rels:
         bad, seen = e3_envelope()
         e3_res = e3_reply.get("result", {})
         check(seen and q.returncode == 0 and not e3_res.get("isError") and (e3_res.get("structuredContent") or {}).get("count", 0) >= 1 and bad == [], f"e3: serve over stdio with one recall tool call under strace stays inside the envelope (exit {q.returncode}; {bad})")
-        for args, what in ((("recall", "quokka", "--layers", "sim"), "similarity recall"), (("ingest", "a.md", "--link", "embed"), "embed linking"), (("reindex", "layer", "embed"), "the embed layer reset")):
+        for args, what in ((("recall", "quokka", "--modes", "sim"), "similarity recall"), (("recall", "quokka", "--layers", "fts"), "the removed --layers flag"), (("ingest", "a.md", "--link", "embed"), "embed linking"), (("reindex", "layer", "gazetteer"), "the removed layer reset"), (("forget", "--layer", "gazetteer"), "the removed layer forget")):
             r = subprocess.run([e3_bin, "--db", e3_db, "--policy", e3_policy, "--json", *args], capture_output=True, text=True, env=env, cwd=e3_repo)
-            check(r.returncode == 4 and r.stdout == "", f"e3: the deferred selection ({what}) refuses with exit 4 and no result (exit {r.returncode}; {r.stderr.strip()[:80]!r})")
+            check(r.returncode == 4 and r.stdout == "", f"e3: the removed or unavailable selection ({what}) refuses with exit 4 and no result (exit {r.returncode}; {r.stderr.strip()[:80]!r})")
         r = subprocess.run([e3_bin, "--db", e3_db, "serve", "--http"], stdin=subprocess.DEVNULL, capture_output=True, text=True, env=env, cwd=e3_repo)
         check(r.returncode == 4 and r.stdout == "", f"e3: serve --http is refused, absent in 3.0.0 (exit {r.returncode})")
     # ---- end E3 ----

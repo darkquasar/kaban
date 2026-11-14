@@ -7,13 +7,11 @@ value. Maps replace the whole default map: specify every entry you want to retai
 
 The default is thin: lexical full-text search is on (served by the store's Tantivy text index, the one
 text index since spec 05 OWN-M; fuzzy matching is built into it), automatic gazetteer linking is off,
-embedding is unavailable in this release (OWN-94), and extractors require explicit selection. Configuration
+and extractors require explicit selection. `recall` chooses its match modes per request
+(`modes: ["lexical", "fuzzy"]`); there is no configuration key for them. Configuration
 reporting does not create optional indexes, tables or artifacts. `ingest.default_with`
 is reserved: missing/empty is accepted, every nonempty value is refused with
 `not_available_in_this_release`. A qualification report does not enable enrollment.
-`embed.model` is also reserved: missing, null or an empty map is accepted; any
-nonempty map is refused with the same fixed category. A manually constructed model
-does not enable L2.
 
 ## Resource budgets
 
@@ -22,20 +20,20 @@ Every budget is overridable with a positive integer. `doctor` reports `default`,
 An explicit value equal to its default is reported as `default`: provenance compares
 effective values, not the presence of YAML syntax. Byte quotas retain their full
 unsigned 64-bit value. The other RSS/automaton limits use their documented MB units;
-`budget.l0_rss_mb` and `ingest.lru_mib` use MiB.
+`text.build_rss_mb` and `ingest.lru_mib` use MiB. `stats.producers` lists each budget under
+the producer it bounds; `text.build_rss_mb` bounds the text index.
 
 | Key | Default | Measurement that justifies an override |
 | --- | ---: | --- |
-| `budget.l0_rss_mb` | 64 | L0 peak memory in MiB on representative input |
+| `text.build_rss_mb` | 64 | Text index build peak memory in MiB on representative input |
 | `gazetteer.max_automaton_mb` | 25 | Dictionary automaton allocation and linking coverage |
-| `embed.max_scan_rss_mb` | 32 | Embedding scan working-set peak |
 | `ingest.lru_mib` | 8 | Reserved cache capacity; cache implementation deferred |
 | `index.deadline_secs` | 600 | End-to-end indexer elapsed time |
 | `index.quota.file_bytes` | 1073741824 | Largest admitted indexer output file |
 | `index.quota.run_dir_bytes` | 4294967296 | Combined indexer run-directory bytes |
 | `index.quota.tmp_bytes` | 536870912 | Peak temporary-directory bytes |
 
-The 64 MiB L0 allowance (OWN-119) reflects the prior observed 56 MiB whole-process
+The 64 MiB text index build allowance (OWN-119) reflects the prior observed 56 MiB whole-process
 VmHWM, including in-process corpus build. The overall 100 MiB promise at 100k notes
 is unchanged; this default correction is not a fresh 100k qualification.
 
@@ -46,14 +44,16 @@ Doctor itself has no symbols override and uses default run flags.
 
 OWN-54 guidance permits larger process budgets (roughly 1.6–2 GB when useful); that is
 operator guidance, not a validated ceiling or a promise that every configuration fits
-the host. Measure before raising a cap. Disabled/failed optional layers remain visible
-and do not remove usable sibling-layer statistics.
+the host. Measure before raising a cap. Disabled or failed optional producers remain visible
+and do not remove usable sibling statistics.
 
 ## Remaining defaults register
 
 These are configuration defaults, not claims that every reserved capability ships.
-The sections of removed features, `reconcile`, `er`, `why`, `briefing` and `discovered`, are
-removed: a file that still spells one is refused like any unknown key, naming the section.
+The sections of removed features, `reconcile`, `er`, `why`, `briefing`, `discovered` and `embed`,
+are removed, and so are the renamed `l3` (now `extractors`) and `budget` (its `l0_rss_mb` is now
+`text.build_rss_mb`): a file that still spells one is refused like any unknown key, naming the
+section. There are no aliases.
 Use quality/latency measurements from your own workload before changing a knob.
 
 | Key | Default | Measurement or trigger |
@@ -66,14 +66,8 @@ Use quality/latency measurements from your own workload before changing a knob.
 | `gazetteer.max_targets` | 5 | Ambiguity fan-out |
 | `gazetteer.max_chunk_ms` | 1 | Chunk matching elapsed time |
 | `gazetteer.v4_symbols` | true | Explicit symbol inclusion and dictionary size |
-| `embed.model` | unset | Reserved; nonempty maps unavailable (OWN-94) |
-| `embed.dtype` | int8 | Reserved quantization setting |
-| `embed.knn_k` | 5 | Reserved neighbor count |
-| `embed.tau.default` | 0.80 | Reserved similarity threshold |
-| `embed.scan_window_rows` | 4096 | Reserved scan window |
-| `embed.min_topk_overlap` | 0.9 | Reserved quantization qualification threshold |
-| `l3.holdout_min_f1` | 0.50 | Reserved qualification threshold; default enrollment deferred |
-| `l3.holdout_min_spans` | 200 | Reserved qualification sample floor |
+| `extractors.holdout_min_f1` | 0.50 | Reserved qualification threshold; default enrollment deferred |
+| `extractors.holdout_min_spans` | 200 | Reserved qualification sample floor |
 | `recall.fusion` | rrf(60) | Reserved alternative-fusion choice; qualification deferred |
 | `recall.rrf_k` | 60 | Judged ranked recall quality |
 | `recall.judged_min_queries` | 100 | Judged query sample size |
