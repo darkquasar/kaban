@@ -1678,3 +1678,60 @@ fn a_complete_producer_batch_deletes_only_its_own_unnamed_rows() {
     );
     assert_eq!(after.len(), 2, "{after:?}");
 }
+
+/// A human `link` is the human's whatever owner its caller put in `props`: the link path
+/// forces `owner = human`, so neither a producer batch that omits the triple nor one that
+/// upserts the same triple can delete or overwrite it (OWN-83 (4)).
+#[test]
+fn a_human_link_with_a_conflicting_owner_prop_stays_human_against_producer_batches() {
+    let store = SqliteStore::open_memory().unwrap();
+    let (chunk, target) = (NodeId::new(), NodeId::new());
+    let owner = "kaban-ingest";
+    store
+        .apply_batch(
+            owned_batch(
+                vec![
+                    upsert(&chunk, "Chunk", "chunk"),
+                    upsert(&target, "Fact", "target"),
+                ],
+                owner,
+            ),
+            &ctx(),
+        )
+        .unwrap();
+    let linked = store
+        .link(
+            &chunk,
+            &target,
+            "RELATES_TO",
+            None,
+            Some(serde_json::json!({ "owner": owner, "note": "the human's" })),
+            &ctx(),
+        )
+        .unwrap();
+    assert_eq!(linked.props["owner"], "human", "{linked:?}");
+    let stored = out_edges(&store, &chunk);
+
+    // a producer batch re-names the chunk without the triple, then upserts the same triple
+    store
+        .apply_batch(
+            owned_batch(vec![upsert(&chunk, "Chunk", "chunk")], owner),
+            &ctx(),
+        )
+        .unwrap();
+    let mut producer = owned_edge(&chunk, &target, "RELATES_TO", owner);
+    if let Op::UpsertEdge { props, .. } = &mut producer {
+        *props = Some(serde_json::json!({ "owner": owner, "note": "the producer's" }));
+    }
+    store
+        .apply_batch(
+            owned_batch(vec![upsert(&chunk, "Chunk", "chunk"), producer], owner),
+            &ctx(),
+        )
+        .unwrap();
+
+    assert_eq!(out_edges(&store, &chunk), stored, "the human link is unchanged");
+    assert_eq!(stored.len(), 1, "{stored:?}");
+    assert_eq!(stored[0].1["owner"], "human", "{stored:?}");
+    assert_eq!(stored[0].1["note"], "the human's", "{stored:?}");
+}
