@@ -25,7 +25,8 @@ pub(crate) struct Flags {
     /// never reappears)
     #[arg(long)]
     mode: Option<String>,
-    /// Reject this machine layer's claims and clear its DB projections, preserving history
+    /// Delete this machine layer's generated edges and derived artifacts, keeping human and
+    /// other-layer state
     #[arg(long,conflicts_with_all=["id","mode"])]
     layer: Option<String>,
     /// Tombstone the ingested document at this workspace-relative path, with its sections

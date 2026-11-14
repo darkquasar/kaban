@@ -9,7 +9,7 @@ authors.workspace = true
 
 [features]
 # Process-level bootstrap of the virtual-table module. Inert scaffold until T12 owns the startup
-# implementation; the CLI forwards its own `process-bootstrap` feature here.
+# implementation; the CLI always enables it.
 process-bootstrap = []
 
 [dependencies]

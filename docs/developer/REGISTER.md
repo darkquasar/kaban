@@ -81,8 +81,8 @@ from the database; `kaban doctor --optimize` explicitly merges its segments once
 CLI request/result content gates still apply; repository/document paths are not exempt.
 `kaban reindex layer <name>` is a DB-only reset, not a completed rebuild: generated links
 remain absent until the next explicit ingestion with that layer enabled. No automatic jobs
-are scheduled. `forget --layer <name> [--document <path>]` permanently rejects existing
-machine claims while keeping their history. Both internal gated verbs (`reindex_layer`,
+are scheduled. `forget --layer <name> [--document <path>]` deletes the layer's existing
+generated links and derived artifacts. Both internal gated verbs (`reindex_layer`,
 `forget_layer`) are CLI-only and absent from the MCP catalog; human/other-layer state is kept.
 
 The `reconcile` consumer identity and lease, with versioned cursor `reconcile:1`, are reserved.

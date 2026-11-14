@@ -60,8 +60,9 @@ between the reset and successful explicit ingestion with that layer enabled. No
 background rebuild is scheduled. Human and other-layer state is retained.
 Inspect the ingestion report for blocked, failed, or skipped work.
 
-`forget --layer` is different: it rejects existing machine claims while keeping
-their history. It is not the repair command for a derived index you want rebuilt.
+`forget --layer` is different: it deletes the layer's existing generated links and
+derived artifacts, keeping human and other-layer state. It is not the repair command
+for a derived index you want rebuilt.
 
 ## Policy changes
 
