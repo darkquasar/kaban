@@ -561,6 +561,8 @@ pub(crate) fn record_submit(
 
 /// Scope follows owned derivation, not merely an extractor's record list. Chunk paths
 /// include earlier retained jobs and historical `PART_OF` links, even after chunk replacement.
+/// The population adds the document's own `ABOUT` edges (submission writes them from the
+/// Document, which is neither a record nor a chunk).
 const FINISH_SCOPE: &str = "WITH records(rid) AS (
  SELECT e.src FROM edge e JOIN node d ON d.rid=e.dst
  WHERE d.id=?1 AND d.workspace_id=?2 AND e.workspace_id=?2 AND e.rel='DERIVED_FROM'
@@ -612,7 +614,8 @@ pub(crate) fn finish_population(
         WHERE e.workspace_id=?2 AND s.workspace_id=?2 AND d.workspace_id=?2
         AND e.layer=?5
         AND (e.source_id IS NULL OR e.source_id=?3)
-        AND (e.src IN records OR (e.rel='EVIDENCE_FOR' AND e.src IN chunks))
+        AND (e.src IN records OR (e.rel='EVIDENCE_FOR' AND e.src IN chunks)
+         OR (e.rel='ABOUT' AND s.id=?1))
         ORDER BY s.id,d.id,e.rel LIMIT ?4")).sql()?.query_map(params![
         request.document.as_str(),
         job.workspace.as_str(),

@@ -462,3 +462,67 @@ fn a_finish_never_deletes_another_extractor_producers_rows() {
         assert!(!last.contains_key(&their_keys[4]));
     }
 }
+
+/// A producer rerun that omits a document `ABOUT` it wrote before deletes it, counted with the
+/// rest of its omitted rows; an authored `ABOUT` and another producer's `ABOUT` from the same
+/// document stay byte for byte. A failing report callback restores the deleted `ABOUT`.
+#[test]
+fn a_rerun_without_about_deletes_its_own_document_about_edge_only() {
+    let f = fixture();
+    let mut batch = WriteBatch::new(
+        f.ctx.workspace_id.clone(),
+        vec![
+            submitted_edge("llm", &f.document, &f.target, "ABOUT"),
+            edge(
+                &f.document,
+                &f.orphan,
+                "ABOUT",
+                json!({"producer":"authored"}),
+            ),
+            submitted_edge("gliner", &f.document, &f.record, "ABOUT"),
+        ],
+    );
+    batch.edge_diff = EdgeDiff::None;
+    f.store.apply_batch(batch, &f.ctx).unwrap();
+    let before = all_edges(&f);
+    let mine = key(&f.document, &f.target, "ABOUT");
+    assert!(before.contains_key(&mine));
+
+    let result = f
+        .store
+        .job_finish(request(&f, 100), &f.ctx, &mut |_, outcome| {
+            assert_eq!(outcome.deleted_edges, 4, "the ABOUT is in the population");
+            Err(StoreError::InvalidName("test".into(), "injected_failure"))
+        });
+    assert!(result.is_err());
+    assert_eq!(all_edges(&f), before, "rollback restores the ABOUT");
+
+    let report = finish(&f, 100);
+    assert_eq!(report["deleted"], 4, "{report}");
+    let after = all_edges(&f);
+    assert!(!after.contains_key(&mine), "the omitted ABOUT is gone");
+    for k in [
+        key(&f.document, &f.orphan, "ABOUT"),
+        key(&f.document, &f.record, "ABOUT"),
+    ] {
+        assert_eq!(after.get(&k), before.get(&k), "{k:?} stays byte for byte");
+    }
+}
+
+/// The document `ABOUT` rows count against the finish cap: a cap the population fits without
+/// them skips every delete with them.
+#[test]
+fn document_about_edges_count_against_the_finish_cap() {
+    let f = fixture();
+    // without ABOUT: 4 named-or-owned edges plus 2 records fit a cap of 6
+    let mut batch = WriteBatch::new(
+        f.ctx.workspace_id.clone(),
+        vec![submitted_edge("llm", &f.document, &f.target, "ABOUT")],
+    );
+    batch.edge_diff = EdgeDiff::None;
+    f.store.apply_batch(batch, &f.ctx).unwrap();
+    let before = all_edges(&f);
+    let report = finish(&f, 6);
+    assert_eq!(report["skipped_cap"], true, "{report}");
+    assert_eq!(all_edges(&f), before);
+}
