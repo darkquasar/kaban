@@ -127,12 +127,7 @@ pub(crate) fn store_exit_code(e: &StoreError) -> u8 {
         | StoreError::Builtin(_)
         | StoreError::InvalidTransition(_)
         | StoreError::InvalidId(_)
-        // engine-plan E1.8 (EN-F5, EN-F7): request-shaped like the kind errors above; the
-        // E1.9a promotion refusals (RE3-3, RE3-4) are fixed classes of the same shape
-        | StoreError::KindNotAllowed
-        | StoreError::HumanOnly(_)
-        | StoreError::PromoteConflict
-        | StoreError::PromoteTargetIncompatible
+        // EN-F7: an ontology error at the record seam is request-shaped like the kind errors
         | StoreError::Ontology(_)
         // OWN-86 (3): a refused `supersedes` is request-shaped, a fixed class
         | StoreError::SupersedesInvalid(_)

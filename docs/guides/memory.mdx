@@ -72,10 +72,10 @@ Ordinary reads use that bound workspace. An explicit `workspace_id: "*"` on supp
 read requests widens to all workspaces in the same database; it is not a second
 personal/global store. Choose names deliberately when repositories share a database.
 
-Ordinary recall hides tombstones, invalidated records and candidates under review.
-Archived/superseded records do not seed normal search; explicit inclusion flags allow
-them through graph expansion. MCP `include_candidates: true` can include candidates
-in recall/traverse; their presence is not acceptance. Traversal follows active records by default.
+Ordinary recall hides tombstones and invalidated records. Archived/superseded records
+do not seed normal search; explicit inclusion flags allow them through graph expansion.
+A record's kind must be declared by a loaded ontology: an undeclared kind is refused as
+`unknown_kind`. Traversal follows active records by default.
 
 Treat IDs as opaque values: copy the exact ID from a response and keep it in the
 matching field. An ID or workspace name is not an authorization token. Content,

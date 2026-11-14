@@ -106,23 +106,6 @@ fn an_absent_file_and_a_file_spelling_every_register_default_both_equal_default(
     // the §15.1 register, key by key (the table the plan asks for)
     let d = EngineConfig::default();
     let table: Vec<(&str, String)> = vec![
-        ("discovered.cap", d.discovered.cap.to_string()),
-        (
-            "discovered.prune_after_days",
-            d.discovered.prune_after_days.to_string(),
-        ),
-        (
-            "discovered.promote_when.min_count",
-            d.discovered.promote_when.min_count.to_string(),
-        ),
-        (
-            "discovered.promote_when.min_sources",
-            d.discovered.promote_when.min_sources.to_string(),
-        ),
-        (
-            "discovered.promote_when.min_mean_score",
-            d.discovered.promote_when.min_mean_score.to_string(),
-        ),
         (
             "ontology.pattern_size_limit_kib",
             d.ontology.pattern_size_limit_kib.to_string(),
@@ -226,11 +209,6 @@ fn an_absent_file_and_a_file_spelling_every_register_default_both_equal_default(
         ),
     ];
     let expected = [
-        ("discovered.cap", "500"),
-        ("discovered.prune_after_days", "90"),
-        ("discovered.promote_when.min_count", "20"),
-        ("discovered.promote_when.min_sources", "3"),
-        ("discovered.promote_when.min_mean_score", "0.7"),
         ("ontology.pattern_size_limit_kib", "1024"),
         ("ontology.golden_strict", "false"),
         ("gazetteer.min_pattern_len", "3"),
@@ -284,7 +262,7 @@ fn an_absent_file_and_a_file_spelling_every_register_default_both_equal_default(
 fn an_unknown_key_at_any_depth_fails_parse_with_the_field_path_and_never_the_value() {
     let cases = [
         ("unknown_key.yaml", "ontology.pattern_size_limit_kb"),
-        ("unknown_key_depth3.yaml", "discovered.promote_when.min_cnt"),
+        ("unknown_key_depth3.yaml", "index.quota.file_bytez"),
         ("unknown_section.yaml", "ontologies"),
         ("wrong_type.yaml", "embed.tau.Decision"),
         ("not_a_mapping.yaml", ""),
@@ -489,7 +467,7 @@ fn index_keys_load_strictly_with_the_plan_defaults_and_show_as_overrides() {
 /// refused like any other unknown key: the error names the section, never a value.
 #[test]
 fn a_removed_feature_section_is_refused_naming_the_section() {
-    for section in ["reconcile", "er", "why", "briefing"] {
+    for section in ["reconcile", "er", "why", "briefing", "discovered"] {
         let path = std::env::temp_dir().join(format!(
             "kaban-config-removed-{}-{section}.yaml",
             std::process::id()

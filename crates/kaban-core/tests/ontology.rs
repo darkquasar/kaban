@@ -535,9 +535,8 @@ fn every_error_text_is_in_the_en_f7_list() {
             path: "questions.q.exclude_via".to_owned(),
         },
         OntologyError::BuiltinImmutable(q("adr", "Decision")),
-        OntologyError::DiscoveredCapReached,
     ];
-    assert_eq!(ONTOLOGY_ERROR_TEXTS.len(), 10);
+    assert_eq!(ONTOLOGY_ERROR_TEXTS.len(), 9);
     let mut covered = BTreeSet::new();
     for err in &samples {
         let text = err.to_string();

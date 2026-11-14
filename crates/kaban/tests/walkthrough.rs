@@ -265,13 +265,12 @@ fn step4(s: &Scratch, mcp: &mut McpClient, arch: &str) -> Value {
             },
         }],
     );
-    let report = store(s).apply_batch(batch, &ctx()).unwrap();
-    let stats = store(s).kind_stats(&WorkspaceId::default()).unwrap();
-    let stat = stats
-        .iter()
-        .find(|row| row.ns == "x" && row.kind == "Org")
-        .unwrap();
-    assert_eq!(stat.n_nodes, 1);
+    // an undeclared kind is refused, not placed as a discovered kind (PC-14)
+    let refused = store(s).apply_batch(batch, &ctx()).unwrap_err();
+    assert!(
+        matches!(refused, kaban_core::StoreError::UnknownKind(_)),
+        "{refused:?}"
+    );
     let traversal = mentions(mcp, arch);
     assert!(
         !traversal["edges"]
@@ -280,8 +279,7 @@ fn step4(s: &Scratch, mcp: &mut McpClient, arch: &str) -> Value {
             .iter()
             .any(|e| e["to"] == org.as_str())
     );
-    json!({"brief":brief,"page":page,"submit":submitted,"store":report,"kind_stats":stats,
-        "mentions":traversal})
+    json!({"brief":brief,"page":page,"submit":submitted,"mentions":traversal})
 }
 
 fn step5(mcp: &mut McpClient, decision: &str, arch: &str, adr: &str) -> Value {

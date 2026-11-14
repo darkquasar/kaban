@@ -189,15 +189,6 @@ pub enum StoreError {
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
     },
-    /// An undeclared label the discovered-labels policy refuses (engine-spec EN-F5: policy
-    /// `deny`, or a label that would shadow a governed kind under any policy). The record is
-    /// skipped; the text is the fixed class and nothing else: the label is caller data and
-    /// reaches neither `Display` nor `Debug` (core S3, E1.9a RE3-8).
-    #[error("kind_not_allowed")]
-    KindNotAllowed,
-    /// An operation reserved to a human actor (EN-F5 `promote`), called by an agent.
-    #[error("human_only:{0}")]
-    HumanOnly(&'static str),
     /// The database retired its in-database FTS5 index (spec 05 SS-16) and this store has no
     /// text index attached (a build without the Tantivy adapter, or a library open): recall,
     /// the text index rebuild and its diagnostics have nothing to work on, so they are refused
@@ -211,19 +202,7 @@ pub enum StoreError {
     /// reason given (another session holds the database). Nothing was opened.
     #[error("the text index must be rebuilt and cannot be at this open: {0}")]
     TextIndexRebuildRefused(&'static str),
-    /// `promote_kind` would give a renamed record the dedup identity (workspace, kind, text)
-    /// of an existing active record of the target kind (E1.9a RE3-3). The whole promotion is
-    /// refused; nothing is renamed.
-    #[error("promote_conflict")]
-    PromoteConflict,
-    /// The promotion target cannot take the records as they are (E1.9a RE3-4): a governed
-    /// kind (its lifecycle starts `proposed`, its `dedup` key is derived at write time), or a
-    /// kind whose `props_schema` some record of the group does not satisfy. Decided by the
-    /// service from the loaded ontology before any mutation.
-    #[error("promote_target_incompatible")]
-    PromoteTargetIncompatible,
-    /// An ontology error raised at the record seam (EN-F7 texts: `discovered_cap_reached`,
-    /// `invalid_identifier` for a discovered label, `unknown_kind` for a promotion target).
+    /// An ontology error raised at the record seam (EN-F7 texts).
     #[error(transparent)]
     Ontology(#[from] crate::ontology::OntologyError),
     /// A producer's edge set or derived artifact does not match its owner, layer, workspace
@@ -346,14 +325,10 @@ impl std::fmt::Debug for StoreError {
                 .field("to", to)
                 .field("source", source)
                 .finish(),
-            Self::KindNotAllowed => f.write_str("KindNotAllowed"),
-            Self::HumanOnly(what) => f.debug_tuple("HumanOnly").field(what).finish(),
             Self::TextIndexUnavailable => f.write_str("TextIndexUnavailable"),
             Self::TextIndexRebuildRefused(why) => {
                 f.debug_tuple("TextIndexRebuildRefused").field(why).finish()
             }
-            Self::PromoteConflict => f.write_str("PromoteConflict"),
-            Self::PromoteTargetIncompatible => f.write_str("PromoteTargetIncompatible"),
             Self::Ontology(e) => f.debug_tuple("Ontology").field(e).finish(),
             Self::EdgeSetRefused => f.write_str("EdgeSetRefused"),
             Self::AssertionSubjectNotFound(id) => {

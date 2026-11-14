@@ -11,8 +11,8 @@ use crate::types::{
     TraverseRequest, TraverseResponse,
 };
 use kaban_core::{
-    AnchoredRow, CodeRef, CodeRefFilter, Fixed, Layer, Method, NodeId, ReadFilters, RecallQuery,
-    StoreScope, TraverseQuery,
+    AnchoredRow, CodeRef, CodeRefFilter, Fixed, Layer, Method, NodeId, RecallQuery, StoreScope,
+    TraverseQuery,
 };
 
 const MAX_IDS: usize = 64;
@@ -53,10 +53,6 @@ impl KabanApi {
         let q = RecallQuery {
             layers: p.layers,
             fuzzy: p.fuzzy,
-            // EN-F49: candidates are absent unless the request asks for them
-            filters: ReadFilters {
-                include_candidates: p.include_candidates,
-            },
             query,
             kinds,
             tags,
@@ -211,10 +207,6 @@ impl KabanApi {
             Some(SnapshotOutcome::Absent | SnapshotOutcome::TooNew) | None => false,
         };
         let q = TraverseQuery {
-            // EN-F49: candidates are absent unless the request asks for them
-            filters: ReadFilters {
-                include_candidates: p.include_candidates,
-            },
             start_ids,
             rels,
             // a closed enum (MT-5): validated by the typed parse, registered as control

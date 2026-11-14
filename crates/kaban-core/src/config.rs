@@ -23,50 +23,6 @@ use serde_json::Value;
 use crate::canon::canonical_json;
 use crate::validator::ValidatorLimits;
 
-/// `[discovered] promote_when.*` (EN-F5).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields, default)]
-pub struct PromoteWhen {
-    /// Minimum occurrences of a candidate kind.
-    pub min_count: u32,
-    /// Minimum distinct sources.
-    pub min_sources: u32,
-    /// Minimum mean extractor score.
-    pub min_mean_score: f64,
-}
-
-impl Default for PromoteWhen {
-    fn default() -> Self {
-        Self {
-            min_count: 20,
-            min_sources: 3,
-            min_mean_score: 0.7,
-        }
-    }
-}
-
-/// `[discovered]` (EN-F5).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields, default)]
-pub struct Discovered {
-    /// Candidate kinds per workspace.
-    pub cap: u32,
-    /// Days before an unpromoted candidate is pruned.
-    pub prune_after_days: u32,
-    /// Promotion suggestion thresholds.
-    pub promote_when: PromoteWhen,
-}
-
-impl Default for Discovered {
-    fn default() -> Self {
-        Self {
-            cap: 500,
-            prune_after_days: 90,
-            promote_when: PromoteWhen::default(),
-        }
-    }
-}
-
 /// `[ontology]` (EN-F3a).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -469,8 +425,6 @@ impl Default for Bench {
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct EngineConfig {
-    /// `[discovered]`
-    pub discovered: Discovered,
     /// `[ontology]`
     pub ontology: OntologyCfg,
     /// `[gazetteer]`

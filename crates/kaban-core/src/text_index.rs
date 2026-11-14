@@ -20,7 +20,7 @@
 //! ([`Canonical`]). Record bodies cross here only on their way into the index.
 
 use crate::changelog::Change;
-use crate::{CodeRefFilter, ReadFilters, RecallQuery, Result};
+use crate::{CodeRefFilter, RecallQuery, Result};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -58,8 +58,6 @@ pub struct SeedFilter<'a> {
     pub workspace_id: Option<&'a str>,
     /// Only notes linked `ABOUT` / `EVIDENCE_FOR` to a matching `CodeRef`.
     pub code_ref: Option<&'a CodeRefFilter>,
-    /// Candidate visibility (EN-F49).
-    pub read: ReadFilters,
 }
 
 impl<'a> SeedFilter<'a> {
@@ -71,7 +69,6 @@ impl<'a> SeedFilter<'a> {
             tags: &q.tags,
             workspace_id: q.workspace_id.as_deref(),
             code_ref: q.r#ref.as_ref(),
-            read: q.filters,
         }
     }
 }

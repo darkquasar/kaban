@@ -221,7 +221,6 @@ impl ReadPlan {
                     let q = RecallQuery {
                         layers: req.layers.clone(),
                         fuzzy: req.fuzzy,
-                        filters: kaban_core::ReadFilters::default(),
                         query: req.query.clone(),
                         kinds: req.kinds.clone(),
                         tags: req.tags.clone(),

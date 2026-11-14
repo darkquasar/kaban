@@ -11,9 +11,8 @@ use serde_json::Value;
 
 use super::OntologyError;
 use super::meta::{
-    Acceptance, ColumnWeights, DiscoveredPolicy, Extract, Governed, GroupBy, Index, KindBody, Ns,
-    OnLink, OntologyFile, QuestionKindsDecl, QuestionTemplate, RankHints, RelBody, Stamp,
-    check_ranges,
+    Acceptance, ColumnWeights, Extract, Governed, GroupBy, Index, KindBody, Ns, OnLink,
+    OntologyFile, QuestionKindsDecl, QuestionTemplate, RankHints, RelBody, Stamp, check_ranges,
 };
 use crate::validator::{Schema, ValidatorLimits};
 
@@ -226,8 +225,6 @@ pub struct Ontology {
     pub rels: BTreeMap<Qualified, ResolvedRel>,
     /// Mixin bodies by identity (as declared).
     pub mixins: BTreeMap<Qualified, KindBody>,
-    /// `discovered` block per namespace.
-    pub discovered: BTreeMap<Ns, DiscoveredPolicy>,
     /// `source_types` per namespace.
     pub source_types: BTreeMap<Ns, BTreeMap<String, ResolvedSourceType>>,
     /// `default_kind` per namespace.
@@ -437,7 +434,7 @@ impl MergedSchema {
 /// that exist elsewhere, under the default [`ValidatorLimits`].
 ///
 /// # Errors
-/// Every [`OntologyError`] except `BuiltinImmutable` and `DiscoveredCapReached` (later seams).
+/// Every [`OntologyError`] except `BuiltinImmutable` (a later seam).
 pub fn resolve(files: &[OntologyFile], loaded: &NamespaceSet) -> Result<Ontology, OntologyError> {
     resolve_with(files, loaded, &ValidatorLimits::default())
 }
@@ -518,16 +515,6 @@ pub fn resolve_with(
     // the per-namespace blocks
     for file in files {
         let ns = &file.ontology;
-        if let Some(policy) = &file.discovered {
-            match ontology.discovered.get(ns) {
-                Some(existing) if existing != policy => {
-                    return Err(conflict(&qualified(ns, "discovered"), "duplicate"));
-                }
-                _ => {
-                    ontology.discovered.insert(ns.clone(), policy.clone());
-                }
-            }
-        }
         for (name, source) in &file.source_types {
             let kinds = source
                 .kinds

@@ -5,40 +5,19 @@ use crate::error::ApiError;
 use crate::types::{Naming, SchemaExtendRequest, SchemaResponse};
 use kaban_core::TypeDef;
 use kaban_core::ontology::resolve::normalise_stored;
-use std::collections::BTreeSet;
-
-/// The namespace of discovered kinds (engine-spec §3.1: reserved, never a parseable `Ns`);
-/// their `schema_type` rows are shared by every workspace and scoped through `kind_stats`.
-const DISCOVERED_NS: &str = "x";
 
 impl KabanApi {
-    /// Describe the current graph schema: the declared kinds and rels database-wide, the
-    /// discovered (`x:`) kinds of the bound workspace only (EN-F5, EN-F6, EN-S3), each with
-    /// its namespace, plus the bound workspace's `kind_stats`.
+    /// Describe the current graph schema: the declared kinds and rels database-wide, each
+    /// with its namespace.
     ///
     /// # Errors
     /// Store errors.
     pub fn schema_describe(&self) -> Result<SchemaResponse, ApiError> {
         let defs = self.store.schema()?;
-        // EN-F6, EN-S3: the counters of the bound workspace only; an `x:` definition is shown
-        // where the workspace counts it (E1.9a RE3-6: discovered vocabulary never crosses the
-        // workspace boundary, declared vocabulary is database-wide)
-        let kind_stats = self.store.kind_stats(&self.config.workspace)?;
-        let discovered_here: BTreeSet<&str> = kind_stats
-            .iter()
-            .filter(|s| s.ns == DISCOVERED_NS)
-            .map(|s| s.kind.as_str())
-            .collect();
         // every definition passes the read gate (review R1-4): masked or hidden; `ns` is the
         // persisted column (0004) and is derived from the stored name for a legacy row only
         let (labels, relationships): (Vec<TypeDef>, Vec<TypeDef>) = defs
             .into_iter()
-            .filter(|d| {
-                d.ns.as_deref() != Some(DISCOVERED_NS)
-                    || d.name
-                        .strip_prefix("x:")
-                        .is_some_and(|local| discovered_here.contains(local))
-            })
             .map(|mut d| {
                 if d.ns.is_none() {
                     d.ns = crate::ontology::namespace_of(&d.kind, &d.name, d.builtin);
@@ -54,7 +33,6 @@ impl KabanApi {
                 label: "PascalCase".into(),
                 rel: "UPPER_SNAKE_CASE".into(),
             },
-            kind_stats,
         })
     }
 

@@ -69,9 +69,6 @@ async fn finish_preserves_union_across_chunks_and_returns_exact_retained_bytes()
         .traverse(&kaban_core::TraverseQuery {
             start_ids: vec![ids[0].clone()],
             rels: vec!["EVIDENCE_FOR".into(), "DERIVED_FROM".into()],
-            filters: kaban_core::ReadFilters {
-                include_candidates: true,
-            },
             ..Default::default()
         })
         .unwrap()

@@ -1,15 +1,11 @@
 //! [`IngestStore`]: the bulk and maintenance write role trait, with the types only it uses.
 
-use crate::audit::{Actor, WorkspaceId, WriteCtx};
-use crate::config::PromoteWhen;
+use crate::audit::{WorkspaceId, WriteCtx};
 use crate::error::Result;
 use crate::ids::NodeId;
 use crate::model::{
-    BatchReport, IndexMeta, KindStat, Node, PromoteReport, PruneReport, RescanCursor, RescanJudge,
-    RescanReport, WriteBatch,
+    BatchReport, IndexMeta, Node, RescanCursor, RescanJudge, RescanReport, WriteBatch,
 };
-use crate::ontology::Qualified;
-use std::time::Duration;
 
 /// One `failed` document of a [`DocumentIndexSummary`]: the gated path and the recorded error.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -387,47 +383,6 @@ pub trait IngestStore: Send + Sync {
     /// Backend errors other than a busy or corrupt index; `TextIndexUnavailable` when the
     /// database retired FTS5 and no index is attached.
     fn optimize_fts(&self) -> Result<MaintenanceOutcome>;
-
-    // engine-plan E1.8: discovered labels (EN-F5, EN-F6). The placement itself happens inside
-    // `apply_batch` and `remember` under the store's discovered rules; these are its bookkeeping.
-
-    /// The `kind_stats` rows of `workspace` (EN-F6, EN-S3: another workspace's rows never
-    /// appear), ordered by `(ns, kind)`.
-    ///
-    /// # Errors
-    /// Backend errors.
-    fn kind_stats(&self, workspace: &WorkspaceId) -> Result<Vec<KindStat>>;
-    /// Promote the discovered kind `from` (`x:Vendor`) of `workspace` to the declared kind
-    /// `to` (EN-F5, human-only): in one write transaction every node's `kind` is renamed, the
-    /// `kind_stats` row moves under `to`, the `node_candidate` rows of reason
-    /// `discovered_kind` are deleted (EN-F5a), the `x:` `schema_type` row goes when no
-    /// workspace counts it any more and one `events` row (`kind_promoted`) is written.
-    ///
-    /// # Errors
-    /// `HumanOnly` for an agent actor; `Ontology(unknown_kind)` when `to` is not declared or
-    /// `from` has no `kind_stats` row in `workspace`; backend errors.
-    fn promote_kind(
-        &self,
-        workspace: &WorkspaceId,
-        from: &str,
-        to: &Qualified,
-        actor: &Actor,
-    ) -> Result<PromoteReport>;
-    /// List, and unless `dry_run` remove, the `x:` kinds of `workspace` with `n_nodes <
-    /// below.min_count` whose `last_seen` is older than `older_than` (EN-F5): their
-    /// candidate nodes are tombstoned, their `node_candidate` and `kind_stats` rows deleted
-    /// (the cap count drops), the `x:` `schema_type` row when no workspace counts it any more.
-    /// A dry run writes nothing.
-    ///
-    /// # Errors
-    /// Backend errors.
-    fn prune_kinds(
-        &self,
-        workspace: &WorkspaceId,
-        below: &PromoteWhen,
-        older_than: Duration,
-        dry_run: bool,
-    ) -> Result<PruneReport>;
 }
 
 /// Outcome of one maintenance check or operation of `doctor` (core-spec §7; M4-19): a check

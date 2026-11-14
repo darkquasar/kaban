@@ -1931,17 +1931,6 @@ expression: a
       "uncertain_pairs": [],
       "with": "gliner"
     },
-    "kind_stats": [
-      {
-        "first_seen": "<observed>",
-        "kind": "Org",
-        "last_seen": "<observed>",
-        "n_nodes": 1,
-        "n_sources": 1,
-        "ns": "x",
-        "workspace_id": "default"
-      }
-    ],
     "mentions": {
       "anchored": [],
       "edges": [
@@ -2034,21 +2023,6 @@ expression: a
       },
       "job": "9dc4b5dd27dec64cd4324ba9c6f73d70f8a8c0ab0d1d721c174b1ce3b50e009e",
       "next": null
-    },
-    "store": {
-      "inserted": 1,
-      "outbox_first_seq": 43,
-      "outbox_last_seq": 43,
-      "outcomes": [
-        {
-          "id": "01a17a03-5344-7000-8000-000000000064",
-          "node_kind": "x:Org",
-          "outcome": "inserted"
-        }
-      ],
-      "tombstoned": 0,
-      "unchanged": 0,
-      "updated": 0
     },
     "submit": {
       "changes": {
@@ -2350,7 +2324,7 @@ expression: a
           "ok": true
         },
         {
-          "detail": "43",
+          "detail": "42",
           "name": "text_index_watermark",
           "ok": true
         },
@@ -2442,8 +2416,8 @@ expression: a
     },
     "revision_finish": {
       "changes": {
-        "first_seq": 49,
-        "last_seq": 50
+        "first_seq": 48,
+        "last_seq": 49
       },
       "created": 0,
       "deleted_edges": 0,
@@ -2454,7 +2428,7 @@ expression: a
         "instance_id": "@7",
         "outcome": "committed",
         "pack_lineage_id": "@8",
-        "seq": 50
+        "seq": 49
       },
       "reconcile": "complete",
       "redactions": 0,
@@ -2466,8 +2440,8 @@ expression: a
     },
     "revision_submit": {
       "changes": {
-        "first_seq": 49,
-        "last_seq": 50
+        "first_seq": 48,
+        "last_seq": 49
       },
       "chunk": null,
       "created": 0,

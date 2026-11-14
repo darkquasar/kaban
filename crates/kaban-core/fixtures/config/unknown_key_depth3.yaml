@@ -1,5 +1,5 @@
-discovered:
-  cap: 500
-  promote_when:
-    min_count: 20
-    min_cnt: 7
+index:
+  deadline_secs: 600
+  quota:
+    file_bytes: 1073741824
+    file_bytez: 7

@@ -7026,11 +7026,6 @@ expression: tools
           "description": "Also return archived records of any governance reached through graph expansion.",
           "type": "boolean"
         },
-        "include_candidates": {
-          "default": false,
-          "description": "Also return candidate records (an `x:` record of an undeclared label); default false: a\ncandidate neither seeds the result nor joins it through graph expansion.",
-          "type": "boolean"
-        },
         "include_superseded": {
           "default": false,
           "description": "Also return superseded (archived) records reached through graph expansion. Invalidated\nand tombstoned records never return.",
@@ -8187,63 +8182,6 @@ expression: tools
     "name": "schema_describe",
     "outputSchema": {
       "$defs": {
-        "KindStat": {
-          "description": "One `kind_stats` row (EN-F6): the per-workspace counters of a discovered (or promoted)\nkind. `mean_score` stays `NULL` until E2 scores claims.",
-          "properties": {
-            "first_seen": {
-              "description": "Unix seconds of the first node.",
-              "format": "int64",
-              "type": "integer"
-            },
-            "kind": {
-              "description": "Bare kind name.",
-              "type": "string"
-            },
-            "last_seen": {
-              "description": "Unix seconds of the latest node.",
-              "format": "int64",
-              "type": "integer"
-            },
-            "mean_score": {
-              "description": "Mean extractor score (E2; `None` until then).",
-              "format": "double",
-              "type": [
-                "number",
-                "null"
-              ]
-            },
-            "n_nodes": {
-              "description": "Active nodes of the kind in the workspace.",
-              "format": "uint64",
-              "minimum": 0,
-              "type": "integer"
-            },
-            "n_sources": {
-              "description": "Distinct sources (session or agent identity) that wrote them.",
-              "format": "uint64",
-              "minimum": 0,
-              "type": "integer"
-            },
-            "ns": {
-              "description": "Namespace (`x` for a discovered kind).",
-              "type": "string"
-            },
-            "workspace_id": {
-              "description": "Workspace the counters belong to.",
-              "type": "string"
-            }
-          },
-          "required": [
-            "workspace_id",
-            "ns",
-            "kind",
-            "n_nodes",
-            "n_sources",
-            "first_seen",
-            "last_seen"
-          ],
-          "type": "object"
-        },
         "Naming": {
           "description": "Naming conventions echoed by `schema_describe`.",
           "properties": {
@@ -8347,13 +8285,6 @@ expression: tools
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
-        "kind_stats": {
-          "description": "The discovered-kind counters of the request's workspace (engine-spec EN-F6; engine-plan\nE1.8), empty when no label was ever discovered there.",
-          "items": {
-            "$ref": "#/$defs/KindStat"
-          },
-          "type": "array"
-        },
         "labels": {
           "description": "Node kinds.",
           "items": {
@@ -8928,11 +8859,6 @@ expression: tools
             "$ref": "#/$defs/Governance"
           },
           "type": "array"
-        },
-        "include_candidates": {
-          "default": false,
-          "description": "Also return candidate records (an `x:` record of an undeclared label); default false:\ncandidates are absent from the nodes, the edges and the start ids alike.",
-          "type": "boolean"
         },
         "kind_set": {
           "description": "Keep only the kinds of this ontology-defined set, in addition to `node_kinds`:\n`governing` (the kinds whose records govern paths) is the one set; any other value is\nrefused (`unknown_kind_set`).",

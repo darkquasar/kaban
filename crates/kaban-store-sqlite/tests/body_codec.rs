@@ -13,11 +13,10 @@
 mod common;
 
 use common::{Scratch, created, ctx, nid};
-use kaban_core::ontology::{Ns, Qualified};
 use kaban_core::text_index::{Canonical, Rows};
 use kaban_core::{
     ChangeLogStore, ForgetMode, IngestStore, MemoryStore, NewNode, NodeId, Op, RedactedStrings,
-    RememberOutcome, RescanAction, SchemaStore, WorkspaceId, WriteBatch,
+    RememberOutcome, RescanAction, WorkspaceId, WriteBatch,
 };
 use kaban_store_sqlite::index_rows::IndexRows;
 use kaban_store_sqlite::{LATEST_SCHEMA_VERSION, SqliteStore};
@@ -499,55 +498,6 @@ fn a_rescan_redaction_rewrites_the_body_encoded_and_reads_back_masked() {
     assert_eq!(
         store.get(&nid(&clean.id), false).unwrap().unwrap().text,
         clean.text
-    );
-}
-
-/// `promote_kind` recomputes every content hash of the group from its body: over encoded
-/// bodies the new hash is the hash of the decoded text under the new kind.
-#[test]
-fn promote_recomputes_content_hashes_from_decoded_bodies() {
-    let s = Scratch::new("ss17-body", "promote");
-    let store = compressed(&s);
-    let text = body("quokka supplies the widgets", 2000);
-    let vendor = created(&store, "Vendor", &text);
-    assert!(is_encoded(&stored(&s, &vendor.id)));
-    store
-        .schema_extend(kaban_core::TypeDef {
-            kind: "label".into(),
-            name: "infra:Vendor".into(),
-            ns: None,
-            description: "a supplier".into(),
-            from_kinds: vec![],
-            to_kinds: vec![],
-            directed: true,
-            props_schema: None,
-            builtin: false,
-            declaration: kaban_core::TypeDeclaration::default(),
-        })
-        .unwrap();
-
-    let report = store
-        .promote_kind(
-            &WorkspaceId::default(),
-            &vendor.kind,
-            &Qualified {
-                ns: Ns::parse("infra").unwrap(),
-                name: "Vendor".into(),
-            },
-            &kaban_core::Actor::HumanCli,
-        )
-        .unwrap();
-
-    assert_eq!(report.to, "infra:Vendor");
-    let promoted = store.get(&nid(&vendor.id), false).unwrap().unwrap();
-    assert_eq!(promoted.kind, "infra:Vendor");
-    assert_eq!(promoted.text, text);
-    // `nodes.rs`: sha256 over `workspace \u{1} kind \u{1} trimmed text`
-    assert_eq!(
-        promoted.content_hash,
-        kaban_policy::sha256_hex(
-            format!("default\u{1}infra:Vendor\u{1}{}", text.trim()).as_bytes()
-        )
     );
 }
 

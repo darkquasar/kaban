@@ -9,7 +9,6 @@
 //! brings the parent `Section` (`PART_OF`) and the Decisions linked `EVIDENCE_FOR` is the
 //! ordinary hop 1 over every relationship; `kinds: ["Chunk"]` keeps chunks only.
 
-use crate::candidates;
 use crate::rows::{NODE_COLS, row_node};
 use crate::sql_error::SqlResultExt;
 use crate::sqlite::{WS_COL, in_workspace};
@@ -42,19 +41,16 @@ impl Access<'_> {
 const CODEREF_MATCH: &str = "json_extract(c.props, '$.relative_path') = ? AND (? IS NULL OR json_extract(c.props, '$.name_path') = ?) AND (? IS NULL OR json_extract(c.props, '$.repo') = ?)";
 
 /// The revalidation predicates of a [`SeedFilter`] (spec 05 SS-11): what the index may have
-/// matched is re-checked against the current row under them, with the candidate exclusion of
-/// EN-F49, inside the statement so `LIMIT` never starves a filtered recall.
+/// matched is re-checked against the current row under them, inside the statement so `LIMIT` never starves a filtered recall.
 struct Predicates {
     sql: String,
     binds: Vec<Box<dyn rusqlite::ToSql>>,
 }
 
 impl Predicates {
-    fn of(conn: &Connection, f: &SeedFilter<'_>) -> Result<Self> {
+    fn of(f: &SeedFilter<'_>) -> Self {
         // the index holds active rows only, the predicate guards against a stale index
         let mut sql = String::from("n.lifecycle = 'active'");
-        // EN-F49: candidates (`node_candidate` rows) never seed or join a recall unless asked
-        sql.push_str(&candidates::exclusion_sql(conn, "n", f.read)?);
         let mut binds: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
         if !f.kinds.is_empty() {
             sql.push_str(" AND n.kind IN (");
@@ -92,7 +88,7 @@ impl Predicates {
                 binds.push(Box::new(opt.clone()));
             }
         }
-        Ok(Self { sql, binds })
+        Self { sql, binds }
     }
 }
 
@@ -123,19 +119,13 @@ struct Seeds {
 }
 
 impl Seeds {
-    fn new(
-        conn: &Connection,
-        q: &RecallQuery,
-        mode: MatchMode,
-        page: usize,
-        in_play: bool,
-    ) -> Result<Self> {
-        let predicates = Predicates::of(conn, &SeedFilter::of(q))?;
+    fn new(q: &RecallQuery, mode: MatchMode, page: usize, in_play: bool) -> Self {
+        let predicates = Predicates::of(&SeedFilter::of(q));
         let sql = format!(
             "SELECT n.rid, n.rev FROM node n WHERE n.rid IN (SELECT value FROM json_each(?1)) AND {}",
             predicates.sql
         );
-        Ok(Self {
+        Self {
             sql,
             predicates,
             mode,
@@ -143,7 +133,7 @@ impl Seeds {
             kept: Vec::new(),
             skip: 0,
             exhausted: !in_play,
-        })
+        }
     }
 
     /// Retrieve until `target` eligible seeds are kept or the candidates are exhausted. Each
@@ -292,25 +282,18 @@ pub(crate) fn recall_with(
     // one pinned generation for every page of this recall (SS-11), taken with no connection
     // held; the filters travel with every seed search so LIMIT never starves a filtered recall
     let view = index.pin()?;
-    let (mut lexical, mut fuzzy) = {
-        let conn = access.conn();
-        (
-            Seeds::new(
-                &conn,
-                q,
-                MatchMode::Lexical,
-                seed_k,
-                permits(kaban_core::RecallLayer::Fts),
-            )?,
-            Seeds::new(
-                &conn,
-                q,
-                MatchMode::Fuzzy,
-                seed_k,
-                permits(kaban_core::RecallLayer::Fuzzy),
-            )?,
-        )
-    };
+    let mut lexical = Seeds::new(
+        q,
+        MatchMode::Lexical,
+        seed_k,
+        permits(kaban_core::RecallLayer::Fts),
+    );
+    let mut fuzzy = Seeds::new(
+        q,
+        MatchMode::Fuzzy,
+        seed_k,
+        permits(kaban_core::RecallLayer::Fuzzy),
+    );
     let mut target = seed_k;
     loop {
         // 1) lexical candidates, revalidated and refilled (an unavailable index seeds nothing)
@@ -374,8 +357,6 @@ fn fuse(
         entry.1.push(format!("tri:{}", rank + 1));
     }
     let hops = q.hops.min(2);
-    // EN-F49 as one predicate for the frontier and for a resolved canonical (E2.10b BR-5)
-    let exclude = candidates::exclusion_sql(conn, "n", q.filters)?;
     // archived rows (superseded records, archived notes) join the frontier and the result only
     // on request; invalidated records are tombstoned (F5) and never return (M3-12)
     let archived_ok = q.include_superseded || q.include_archived;
@@ -403,7 +384,7 @@ fn fuse(
                     format!(" AND x.rel IN ({})", rels.into_iter().map(sql_literal).collect::<Vec<_>>().join(","))
                 };
                 format!(
-            "SELECT x.nb, x.rel FROM (SELECT e.dst AS nb, e.rel FROM edge e WHERE e.src=?1 UNION ALL SELECT e.src, e.rel FROM edge e WHERE e.dst=?1) x JOIN node n ON n.rid = x.nb WHERE (?2 IS NULL OR {WS_COL} = ?2) AND (n.lifecycle = 'active' OR (?3 AND n.lifecycle = 'archived')){exclude}{rel_filter} ORDER BY x.nb LIMIT 200"
+            "SELECT x.nb, x.rel FROM (SELECT e.dst AS nb, e.rel FROM edge e WHERE e.src=?1 UNION ALL SELECT e.src, e.rel FROM edge e WHERE e.dst=?1) x JOIN node n ON n.rid = x.nb WHERE (?2 IS NULL OR {WS_COL} = ?2) AND (n.lifecycle = 'active' OR (?3 AND n.lifecycle = 'archived')){rel_filter} ORDER BY x.nb LIMIT 200"
                 )
             })
         }).collect();

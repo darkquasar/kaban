@@ -87,9 +87,6 @@ pub enum OntologyError {
     /// A user file redefining a builtin (raised by the E1.3 seam).
     #[error("ontology_builtin_immutable")]
     BuiltinImmutable(Qualified),
-    /// The discovered-labels cap is reached (raised by E1.8).
-    #[error("discovered_cap_reached")]
-    DiscoveredCapReached,
 }
 
 /// The EN-F7 texts, exit 4 each; `<kw>` and `<rule>` are templates. A test iterates every
@@ -104,7 +101,6 @@ pub const ONTOLOGY_ERROR_TEXTS: &[&str] = &[
     "unknown_rel",
     "unknown_namespace",
     "ambiguous_kind",
-    "discovered_cap_reached",
 ];
 
 impl From<SchemaError> for OntologyError {

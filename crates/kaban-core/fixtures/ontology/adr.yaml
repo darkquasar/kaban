@@ -56,7 +56,6 @@ rels:
   CAUSED_BY: {from: [Failure], to: [], directed: true, description: "Failure was caused by the target."}
   FIXED_BY: {from: [Failure], to: [], directed: true, description: "Failure was fixed by the target."}
   GOVERNS: {from: [Decision, Convention], to: [CodeRef, path], directed: true, description: "A Decision or Convention governs the target (CodeRef or path).", governed_semantics: true}
-discovered: {policy: review, cap: 500, prune_after_days: 90, promote_when: {min_count: 20, min_sources: 3, min_mean_score: 0.7}}
 source_types: {adr: {kinds: [Decision, Fact], paths: ["docs/adr/**"]}, postmortem: {kinds: [Failure, Improvement]}}
 default_kind: Fact
 questions:

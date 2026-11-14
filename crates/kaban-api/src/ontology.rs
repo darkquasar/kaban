@@ -17,11 +17,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 
-use kaban_core::DiscoveredRules;
-use kaban_core::config::{EngineConfig, PromoteWhen};
-use kaban_core::ontology::meta::{
-    DiscoveredPolicyName, Format, Governed, OnLink, Serialize as SerializeTarget, Stamp,
-};
+use kaban_core::ontology::meta::{Format, Governed, OnLink, Serialize as SerializeTarget, Stamp};
 use kaban_core::ontology::resolve::{RelEnd, ResolvedKind, resolve_with};
 use kaban_core::{
     GovernedSet, NamespaceSet, Ns, Ontology, OntologyError, OntologyFile, Qualified, TypeDef,
@@ -56,22 +52,6 @@ pub const FILE_REDACTED: &str =
 
 /// The tool name the content gate audits ontology loads under.
 const TOOL: &str = "ontology_load";
-
-/// Rows per page when a promotion's group is checked against the target's schema (the
-/// store clamps `list_nodes` to 500).
-const PROMOTE_PAGE: usize = 500;
-
-/// The discovered-labels knobs the service applies (EN-F5; engine-plan E1.8): the rules a
-/// write carries and the prune/promotion thresholds of `ontology prune` and `doctor`.
-#[derive(Debug, Clone, PartialEq)]
-pub struct DiscoveredKnobs {
-    /// Policy and cap (on every [`kaban_core::WriteCtx`]).
-    pub rules: DiscoveredRules,
-    /// Days before an unpromoted candidate kind is prunable.
-    pub prune_after_days: u32,
-    /// Promotion eligibility thresholds.
-    pub promote_when: PromoteWhen,
-}
 
 /// What one load did (the `kaban ontology load` document).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -539,127 +519,6 @@ impl OntologyRegistry {
     /// context).
     pub fn governed_set(&self) -> Arc<GovernedSet> {
         Arc::clone(&self.read().governed)
-    }
-
-    /// The discovered-labels knobs of the loaded set (engine-spec EN-F5; engine-plan E1.8):
-    /// the policy of the last loaded namespace declaring a `discovered` block (`review` when
-    /// none does; the shipped `adr.yaml` declares `review`), and that block's `cap`,
-    /// `prune_after_days` and `promote_when` (the `[discovered]` register of `engine` when no
-    /// block is loaded: the register is the default, not the only source). Two loaded
-    /// namespaces declaring different policies are reported once per call by a `warn` with
-    /// the two namespace names (no user bytes); the later one wins.
-    pub fn discovered(&self, engine: &EngineConfig) -> DiscoveredKnobs {
-        let state = self.read();
-        let mut declared: Option<(&Ns, &kaban_core::ontology::meta::DiscoveredPolicy)> = None;
-        for ns in &state.ontology.namespaces {
-            if let Some(block) = state.ontology.discovered.get(ns) {
-                if let Some((earlier, before)) = declared
-                    && before.policy != block.policy
-                {
-                    tracing::warn!(earlier = %earlier, later = %ns, "two loaded namespaces declare different discovered policies; the later one applies");
-                }
-                declared = Some((ns, block));
-            }
-        }
-        match declared {
-            Some((_, block)) => DiscoveredKnobs {
-                rules: DiscoveredRules {
-                    policy: block.policy,
-                    cap: block.cap,
-                },
-                prune_after_days: block.prune_after_days,
-                promote_when: PromoteWhen {
-                    min_count: block.promote_when.min_count,
-                    min_sources: block.promote_when.min_sources,
-                    min_mean_score: block.promote_when.min_mean_score,
-                },
-            },
-            None => DiscoveredKnobs {
-                rules: DiscoveredRules {
-                    policy: DiscoveredPolicyName::Review,
-                    cap: engine.discovered.cap,
-                },
-                prune_after_days: engine.discovered.prune_after_days,
-                promote_when: engine.discovered.promote_when.clone(),
-            },
-        }
-    }
-
-    /// `kaban ontology promote <from> <to>` (EN-F5, human-only): `to` is resolved against the
-    /// loaded set (a bare name in the bare-namespace order, else qualified) and must be a
-    /// declared kind (`unknown_kind` otherwise) the group can take (E1.9a RE3-4: not governed,
-    /// since a governed record starts `proposed` and derives its `dedup` key at write time,
-    /// and every active record of the group satisfies its `props_schema`); the decision is
-    /// this orchestrator's, from the registry, before the store renames in one transaction.
-    ///
-    /// # Errors
-    /// `Invalid("unknown_kind")` when `to` is not a loaded kind; `Store(PromoteTargetIncompatible)`
-    /// when the target is governed or some record of the group fails its schema; store errors
-    /// (`HumanOnly` for an agent actor, `unknown_kind` when `from` is not a counted `x:` kind,
-    /// `PromoteConflict` on a dedup identity collision).
-    pub fn promote(
-        &self,
-        api: &KabanApi,
-        from: &str,
-        to: &str,
-        actor: &kaban_core::Actor,
-    ) -> Result<kaban_core::PromoteReport, ApiError> {
-        let (target, governed, schema) = {
-            let state = self.read();
-            state
-                .ontology
-                .kinds
-                .values()
-                .find(|k| stored_name(&k.id) == to || k.id.to_string() == to)
-                .map(|k| (k.id.clone(), k.governed.is_some(), k.props_schema.clone()))
-        }
-        .ok_or_else(|| {
-            invalid(&OntologyError::UnknownKind {
-                path: "promote.to".to_owned(),
-            })
-        })?;
-        if governed {
-            return Err(kaban_core::StoreError::PromoteTargetIncompatible.into());
-        }
-        // every active record of the group against the target's schema, page by page, before
-        // anything moves (the store lists active rows only: a retired record of the group is
-        // renamed without this check and stays retired)
-        let ws = api.workspace().as_str();
-        let mut offset = 0;
-        loop {
-            let page = api.store.list_nodes(from, ws, offset, PROMOTE_PAGE)?;
-            if page
-                .iter()
-                .any(|node| first_error_text(&validate(&schema, &node.props)).is_some())
-            {
-                return Err(kaban_core::StoreError::PromoteTargetIncompatible.into());
-            }
-            if page.len() < PROMOTE_PAGE {
-                break;
-            }
-            offset += page.len();
-        }
-        Ok(api
-            .store
-            .promote_kind(api.workspace(), from, &target, actor)?)
-    }
-
-    /// `kaban ontology prune [--dry-run]` (EN-F5): the loaded knobs decide the thresholds.
-    ///
-    /// # Errors
-    /// Store errors.
-    pub fn prune(
-        &self,
-        api: &KabanApi,
-        dry_run: bool,
-    ) -> Result<kaban_core::PruneReport, ApiError> {
-        let knobs = self.discovered(api.engine());
-        Ok(api.store.prune_kinds(
-            api.workspace(),
-            &knobs.promote_when,
-            std::time::Duration::from_secs(u64::from(knobs.prune_after_days) * 86_400),
-            dry_run,
-        )?)
     }
 
     /// Every rel with an `on_link` side effect, by stored name.

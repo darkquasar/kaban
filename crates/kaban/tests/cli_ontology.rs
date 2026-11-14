@@ -464,26 +464,35 @@ fn a_bad_config_key_exits_4_with_the_field_path_and_never_the_value() {
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
 }
 
-/// EN-F5, EN-F7 (engine-plan E1.8): the discovered-labels verbs end to end. A `remember` of an
-/// undeclared label is stored as an `x:` candidate; `kaban ontology prune --dry-run` lists it
-/// and writes nothing; `promote` to an undeclared name exits 4 with the fixed text
-/// `unknown_kind`; `promote x:Vendor infra:Vendor` (declared by a loaded file) renames it and
-/// the record is recalled afterwards; `kaban doctor` carries the `discovered` line. The
-/// startup-loaded `infra.yaml` declares `discovered: {policy: review, cap: 1, ...}`: the
-/// ontology's block overrides the `[discovered]` register (knob precedence), so the second
-/// distinct label exits 4 with `discovered_cap_reached` (EN-F7 text and exit code) and
-/// `doctor` reports `n_rejected: 1`.
+/// PC-14 (spec 11 T3 Step 2b): discovered kinds are gone with their workflow verbs. `kaban
+/// ontology --help` lists `load` and `list` only, `promote` is an unrecognized subcommand
+/// (the CLI's usage error, exit 4), an undeclared label is an unknown kind rather than an `x:` candidate, and an
+/// ontology file still carrying a `discovered:` block is refused with an error naming it
+/// (PC-5 amended 2026-11-14).
 #[test]
-fn promote_prune_and_the_cap_render_the_fixed_texts_and_exit_codes() {
+fn the_discovered_kind_verbs_are_gone_and_a_discovered_block_is_refused() {
     let s = Scratch::new("kaban-cli-ont", "discovered");
     let root = repo(&s);
-    write(
-        &root,
-        ".kaban/ontology/infra.yaml",
-        "ontology: infra\nversion: 1\nkinds:\n  Vendor:\n    description: \"A vendor.\"\nrels: {}\n\
-         discovered: {policy: review, cap: 1, prune_after_days: 90, promote_when: {min_count: 20, min_sources: 3, min_mean_score: 0.7}}\n",
+    let out = run(&s, &root, &["ontology", "--help"]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let help = stdout(&out);
+    assert!(help.contains("load") && help.contains("list"), "{help}");
+    assert!(
+        !help.contains("promote") && !help.contains("prune"),
+        "{help}"
     );
-    // a discovered label (candidate, hidden) under cap 1; the second label is refused
+    let out = run(
+        &s,
+        &root,
+        &["ontology", "promote", "x:Vendor", "infra:Vendor"],
+    );
+    assert_eq!(out.status.code(), Some(4), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("the subcommand is not recognized"),
+        "{}",
+        stderr(&out)
+    );
+    // an undeclared label is not placed as a candidate any more
     let out = run(
         &s,
         &root,
@@ -494,141 +503,23 @@ fn promote_prune_and_the_cap_render_the_fixed_texts_and_exit_codes() {
             "acme supplies quokka widgets",
         ],
     );
-    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
-    assert_eq!(json(&out)["kind"], "x:Vendor", "{}", stdout(&out));
+    assert_eq!(out.status.code(), Some(4), "{}", stderr(&out));
+    assert_eq!(stderr(&out).lines().next(), Some("error: unknown_kind"));
+
+    let file = write(
+        &root,
+        "infra.yaml",
+        "ontology: infra\nversion: 1\nkinds:\n  Vendor:\n    description: \"A vendor.\"\nrels: {}\n\
+         discovered: {policy: review, cap: 1}\n",
+    );
     let out = run(
         &s,
         &root,
-        &["--json", "remember", "Supplier", "another quokka label"],
+        &["--json", "ontology", "load", file.to_str().unwrap()],
     );
     assert_eq!(out.status.code(), Some(4), "{}", stderr(&out));
-    // the error line first; a refused write then prints its `rejected` receipt (SS-10)
     assert_eq!(
-        stderr(&out).lines().next(),
-        Some("error: discovered_cap_reached")
-    );
-    let out = run(&s, &root, &["--json", "recall", "quokka"]);
-    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
-    assert_eq!(
-        json(&out)["count"],
-        0,
-        "a candidate is hidden: {}",
-        stdout(&out)
-    );
-
-    // prune --dry-run lists (the kind has one node, below min_count 20; age 0 days is set by
-    // the shipped 90 days, so nothing is listed yet) and writes nothing
-    let out = run(&s, &root, &["--json", "ontology", "prune", "--dry-run"]);
-    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
-    let prune = json(&out);
-    assert_eq!(prune["dry_run"], true, "{prune}");
-    assert_eq!(prune["n_rejected"], 1, "{prune}");
-    assert_eq!(prune["nodes_tombstoned"], 0, "{prune}");
-
-    // doctor: the discovered line
-    let out = run(&s, &root, &["--json", "doctor"]);
-    let doctor = json(&out);
-    let line = doctor["checks"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|c| c["name"] == "discovered")
-        .unwrap_or_else(|| panic!("{doctor}"));
-    assert!(
-        line["detail"].as_str().unwrap().contains("n_rejected: 1"),
-        "{line}"
-    );
-
-    // promote: an undeclared target is unknown_kind (exit 4), nothing moves
-    let out = run(
-        &s,
-        &root,
-        &[
-            "--json",
-            "ontology",
-            "promote",
-            "x:Vendor",
-            "infra:Supplier",
-        ],
-    );
-    assert_eq!(out.status.code(), Some(4), "{}", stderr(&out));
-    assert_eq!(stderr(&out).trim_end(), "error: unknown_kind");
-    let out = run(
-        &s,
-        &root,
-        &["--json", "ontology", "promote", "x:Vendor", "infra:Vendor"],
-    );
-    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
-    let report = json(&out);
-    assert_eq!(report["to"], "infra:Vendor", "{report}");
-    assert_eq!(report["nodes"], 1, "{report}");
-    assert_eq!(report["candidates_released"], 1, "{report}");
-    let out = run(&s, &root, &["--json", "recall", "quokka"]);
-    assert_eq!(
-        json(&out)["count"],
-        1,
-        "promoted, visible: {}",
-        stdout(&out)
-    );
-    assert_eq!(json(&out)["results"][0]["kind"], "infra:Vendor");
-    // the cap is released: a new label is accepted
-    let out = run(
-        &s,
-        &root,
-        &["--json", "remember", "Supplier", "another quokka label"],
-    );
-    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
-    // schema_describe (the `kaban://schema` body) carries the workspace's kind_stats
-    let out = run(&s, &root, &["--json", "schema"]);
-    if out.status.code() == Some(0) {
-        let stats = json(&out)["kind_stats"]
-            .as_array()
-            .cloned()
-            .unwrap_or_default();
-        assert!(
-            stats
-                .iter()
-                .any(|k| k["ns"] == "infra" && k["kind"] == "Vendor"),
-            "{}",
-            stdout(&out)
-        );
-    }
-}
-
-// ---- E1.9a: the E1-end correction (astra review RE3-1, RE3-6, RE3-8) through the binary ----
-
-/// RE3-8 (EN-F7, core S3): a promotion whose source is not a discovered kind exits 4 with the
-/// fixed text `unknown_kind`, whatever the source looks like; a credential-shaped source is
-/// never echoed on either stream.
-#[test]
-fn an_invalid_promotion_source_is_the_fixed_text_and_a_canary_source_is_never_echoed() {
-    let s = Scratch::new("kaban-cli-ont", "promote-source");
-    let root = repo(&s);
-    let out = run(
-        &s,
-        &root,
-        &["--json", "ontology", "promote", "Vendor", "Fact"],
-    );
-    assert_eq!(out.status.code(), Some(4), "{}", stderr(&out));
-    assert_eq!(stderr(&out).trim_end(), "error: unknown_kind");
-    assert_eq!(stdout(&out), "");
-    let out = run(
-        &s,
-        &root,
-        &["--json", "ontology", "promote", SECRET_CANARY, "Fact"],
-    );
-    // the seam judges the raw request first: a reject-class hit is exit 2 with rule ids only
-    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
-    assert!(
-        !stdout(&out).contains(SECRET_CANARY) && !stderr(&out).contains(SECRET_CANARY),
-        "echoed: {} {}",
-        stdout(&out),
-        stderr(&out)
-    );
-    assert!(
-        !stdout(&out).contains("AKIA") && !stderr(&out).contains("AKIA"),
-        "a fragment echoed: {} {}",
-        stdout(&out),
-        stderr(&out)
+        stderr(&out).trim_end(),
+        "error: schema_invalid:file:discovered"
     );
 }

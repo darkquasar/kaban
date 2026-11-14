@@ -103,16 +103,11 @@ fn remember_link_recall_roundtrip() {
         hits.iter().any(|h| h.node.id == fix.id),
         "graph expansion should pull in the fix: {hits:?}"
     );
-    // an undeclared kind is refused under the `deny` discovered policy (EN-F5; under the
-    // default `review` it would be placed as an `x:Rumour` candidate, `tests/discovered.rs`);
-    // an unknown rel is rejected until registered
-    let s = s.with_discovered(kaban_core::DiscoveredRules {
-        policy: kaban_core::ontology::meta::DiscoveredPolicyName::Deny,
-        cap: 500,
-    });
+    // an undeclared kind is refused (PC-14: no discovered kinds); an unknown rel is rejected
+    // until registered
     assert!(matches!(
         s.remember(mk("Rumour", "x"), &[], &ctx()),
-        Err(StoreError::KindNotAllowed)
+        Err(StoreError::UnknownKind(_))
     ));
     assert!(matches!(
         s.schema_extend(TypeDef {

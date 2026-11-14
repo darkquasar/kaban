@@ -7,7 +7,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 /// `recall` input.
-#[allow(clippy::struct_excessive_bools)] // four independent wire switches; EN-F49 adds `include_candidates`
+#[allow(clippy::struct_excessive_bools)] // independent wire switches
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 pub struct RecallRequest {
     /// Retrieval sources (fts, fuzzy, reserved sim); absent uses enabled defaults.
@@ -43,10 +43,6 @@ pub struct RecallRequest {
     /// Also return archived records of any governance reached through graph expansion.
     #[serde(default)]
     pub include_archived: bool,
-    /// Also return candidate records (an `x:` record of an undeclared label); default false: a
-    /// candidate neither seeds the result nor joins it through graph expansion.
-    #[serde(default)]
-    pub include_candidates: bool,
     /// Return full text instead of summaries.
     #[serde(default)]
     pub full_text: bool,

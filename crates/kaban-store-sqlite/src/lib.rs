@@ -11,7 +11,6 @@
 
 mod anchors;
 mod body_codec;
-mod candidates;
 mod changelog;
 mod connection;
 mod doctor;

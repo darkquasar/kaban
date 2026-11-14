@@ -89,9 +89,6 @@ pub(crate) fn row_typedef(r: &rusqlite::Row<'_>) -> rusqlite::Result<TypeDef> {
     let ns: Option<String> = r.get(8)?;
     let name: String = r.get(1)?;
     let name = match &ns {
-        // the discovered namespace is reserved (never a parseable `Ns`, engine-spec §3.1) and
-        // always stores qualified (engine-plan E1.8)
-        Some(ns) if ns == "x" => format!("x:{name}"),
         Some(ns) => {
             let ns = kaban_core::Ns::parse(ns).map_err(|e| {
                 rusqlite::Error::FromSqlConversionFailure(

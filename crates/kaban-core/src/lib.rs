@@ -57,8 +57,6 @@ pub use model::{
     RescanCursor, RescanJudge, RescanReport, TraverseDirection, TraverseQuery, TraverseResult,
     TypeDeclaration, TypeDef, WorkspaceFilter, WriteBatch,
 };
-// discovered labels, candidates and `kind_stats` (engine-plan E1.8)
-pub use model::{DiscoveredRules, KindStat, PromoteReport, PruneReport, ReadFilters};
 pub use validator::{
     Error as PropsError, Keyword, Schema, SchemaError, ValidatorLimits, first_error_text, validate,
 };

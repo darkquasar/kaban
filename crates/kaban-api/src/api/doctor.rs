@@ -39,7 +39,7 @@ pub struct DoctorCheck {
     /// `consumer_lag` (spec 05 SS-21: the retention lag of each registered consumer),
     /// `text_index` (SS-21: `in-database FTS5`, or `tantivy` followed by
     /// `text_index_watermark`, the payload watermark, and `text_index_lag`, the canonical
-    /// head minus it), `ident_terms_version`, `key_file`, `audit`, `discovered`, `unstamped` (OWN-65: `unstamped` events per reason),
+    /// head minus it), `ident_terms_version`, `key_file`, `audit`, `unstamped` (OWN-65: `unstamped` events per reason),
     /// `unresolved` (EN-F12b: the groups only a human action resolves), `stale_anchors`
     /// (E3.11: `CodeRef`s whose symbol the current snapshot lacks), `priors` (EN-F16, under
     /// `--priors`), `vacuum`.

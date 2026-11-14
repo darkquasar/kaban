@@ -661,7 +661,7 @@ fn node_text_round_trips_exactly_and_invalid_utf8_is_refused_not_replaced() {
     let text = "na\u{ef}ve caf\u{e9}: \u{6587}\u{5b57}, \u{1f980}, e\u{301} (NFD kept)";
     let ctx = WriteCtx::new(WorkspaceId::default(), Actor::Agent);
     let new = NewNode {
-        kind: "Note".into(),
+        kind: "Fact".into(),
         text: text.into(),
         ..Default::default()
     };

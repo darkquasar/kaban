@@ -18,7 +18,6 @@ mod nodes;
 mod rescan;
 
 use crate::anchors;
-use crate::candidates;
 use crate::changelog;
 use crate::connection::{CgRead, LiveGuard, NoFileBacking, prepare_database_files};
 use crate::connection::{database_file_modes, open_existing_as_is};
@@ -35,12 +34,12 @@ use crate::tantivy::{self, Attach, Attached, SharedConnection};
 use crate::traverse;
 use kaban_core::Result;
 use kaban_core::{
-    ActorId, BatchReport, Change, ChangeLogStore, DiscoveredRules, Edge, FailurePatch, ForgetMode,
-    ForgetOutcome, GovernedSet, Hit, IndexMeta, IngestStore, Lease, LeaseStore, Lifecycle, LinkReq,
-    MemoryStore, Method, NewNode, Node, NodeId, Ontology, PendingFailuresQuery, RecallQuery,
-    RememberOutcome, RescanCursor, RescanJudge, RescanReport, SchemaStore, SessionEdit,
-    SessionEditKind, SessionStore, StoreError, TraverseQuery, TraverseResult, TypeDef, WorkspaceId,
-    WriteBatch, WriteCtx, new_id, now_iso,
+    ActorId, BatchReport, Change, ChangeLogStore, Edge, FailurePatch, ForgetMode, ForgetOutcome,
+    GovernedSet, Hit, IndexMeta, IngestStore, Lease, LeaseStore, Lifecycle, LinkReq, MemoryStore,
+    Method, NewNode, Node, NodeId, Ontology, PendingFailuresQuery, RecallQuery, RememberOutcome,
+    RescanCursor, RescanJudge, RescanReport, SchemaStore, SessionEdit, SessionEditKind,
+    SessionStore, StoreError, TraverseQuery, TraverseResult, TypeDef, WorkspaceId, WriteBatch,
+    WriteCtx, new_id, now_iso,
 };
 use kaban_core::{AnchorPredicates, SnapshotAttach, SnapshotSymbol, SymbolPage};
 use kaban_core::{
@@ -53,8 +52,6 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex, RwLock};
-
-pub(crate) use nodes::content_hash;
 
 /// The shipped ontology, resolved once per process (the store crate holds no loaded user
 /// ontology; the service passes one through `SqliteStore::with_ontology`).
@@ -140,9 +137,6 @@ pub struct SqliteStore {
     /// path-governing kinds by: the shipped set, or the service's loaded set once it published
     /// one ([`SchemaStore::adopt_governed`]).
     governed: RwLock<Arc<GovernedSet>>,
-    /// The discovered-labels rules undeclared labels are placed by (the shipped `review`
-    /// policy and the register cap until [`Self::with_discovered`]).
-    discovered: DiscoveredRules,
     /// The recall configuration this store ranks under.
     recall: kaban_core::config::Recall,
     /// The dedicated read connection the code-graph snapshot is attached on (CG-JOIN v1 §2
@@ -359,13 +353,6 @@ impl SqliteStore {
     /// What the schema step did when this store was opened (the version found and served).
     pub fn migration(&self) -> &MigrationReport {
         &self.migration
-    }
-
-    /// The same store placing undeclared labels by `discovered`.
-    #[must_use]
-    pub fn with_discovered(mut self, discovered: DiscoveredRules) -> Self {
-        self.discovered = discovered;
-        self
     }
 
     /// The same store ranking and projecting under `ontology` (the service's loaded ontology)
@@ -669,7 +656,6 @@ impl SqliteStore {
             migration,
             ontology: shipped_ontology(),
             governed: RwLock::new(GovernedSet::shipped()),
-            discovered: DiscoveredRules::default(),
             recall: kaban_core::config::Recall::default(),
             cg_read: Mutex::new(None),
             projector: None,
@@ -855,14 +841,13 @@ impl SqliteStore {
     fn state_of(conn: &Connection, id: &str) -> Result<NodeState> {
         let st = conn
             .query_row(
-                "SELECT rid, kind, lifecycle, workspace_id FROM node WHERE id=? AND lifecycle <> 'purged'",
+                "SELECT rid, lifecycle, workspace_id FROM node WHERE id=? AND lifecycle <> 'purged'",
                 [id],
                 |r| {
                     Ok((
                         r.get::<_, i64>(0)?,
                         r.get::<_, String>(1)?,
                         r.get::<_, String>(2)?,
-                        r.get::<_, String>(3)?,
                     ))
                 },
             )
@@ -870,11 +855,10 @@ impl SqliteStore {
             .ok_or_else(|| StoreError::NotFound(id.to_string()))?;
         Ok(NodeState {
             rid: st.0,
-            kind: st.1,
-            lifecycle: Lifecycle::parse(&st.2)
-                .ok_or_else(|| bad_enum(2, &st.2))
+            lifecycle: Lifecycle::parse(&st.1)
+                .ok_or_else(|| bad_enum(1, &st.1))
                 .sql()?,
-            workspace_id: st.3,
+            workspace_id: st.2,
         })
     }
     /// The `on_link` side effect of a `rel` edge on its target (MD-7 as decided in wave A Q1 =
@@ -892,7 +876,6 @@ impl SqliteStore {
             params![lifecycle.as_str(), now, st.rid],
         )
         .sql()?;
-        candidates::recount_stats(conn, &st.workspace_id, &st.kind)?;
         Ok(())
     }
     /// Row id and kind of a non-purged node (a purged id names nothing any more, D3).
@@ -929,7 +912,6 @@ impl SqliteStore {
 /// The state of a stored node that transitions read before writing.
 struct NodeState {
     rid: i64,
-    kind: String,
     lifecycle: Lifecycle,
     workspace_id: String,
 }
@@ -952,8 +934,6 @@ struct Tenant<'a> {
     ws: &'a str,
     /// The governed kinds and `on_link` rels this write decides by (EN-F4).
     governed: Arc<GovernedSet>,
-    /// The discovered-labels policy and cap the store places undeclared labels by (EN-F5).
-    discovered: &'a DiscoveredRules,
 }
 
 impl SqliteStore {
@@ -962,7 +942,6 @@ impl SqliteStore {
         Tenant {
             ws,
             governed: self.governed(),
-            discovered: &self.discovered,
         }
     }
 
@@ -1753,51 +1732,6 @@ impl IngestStore for SqliteStore {
             return Err(StoreError::TextIndexUnavailable);
         }
         doctor::optimize_fts(&self.lock())
-    }
-    fn kind_stats(&self, workspace: &WorkspaceId) -> Result<Vec<kaban_core::KindStat>> {
-        let conn = self.lock();
-        candidates::kind_stats(&conn, workspace.as_str())
-    }
-    fn promote_kind(
-        &self,
-        workspace: &WorkspaceId,
-        from: &str,
-        to: &kaban_core::Qualified,
-        actor: &kaban_core::Actor,
-    ) -> Result<kaban_core::PromoteReport> {
-        // human-only (EN-F5): judged before the transaction opens
-        if *actor != kaban_core::Actor::HumanCli {
-            return Err(StoreError::HumanOnly("promote"));
-        }
-        let mut conn = self.write();
-        let tx = conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .sql()?;
-        let report = candidates::promote(&tx, workspace.as_str(), from, to, &now_iso())?;
-        tx.commit().sql()?;
-        Ok(report)
-    }
-    fn prune_kinds(
-        &self,
-        workspace: &WorkspaceId,
-        below: &kaban_core::config::PromoteWhen,
-        older_than: std::time::Duration,
-        dry_run: bool,
-    ) -> Result<kaban_core::PruneReport> {
-        let mut conn = self.write();
-        let tx = conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .sql()?;
-        let report = candidates::prune(
-            &tx,
-            workspace.as_str(),
-            below,
-            older_than,
-            dry_run,
-            &now_iso(),
-        )?;
-        tx.commit().sql()?;
-        Ok(report)
     }
 }
 

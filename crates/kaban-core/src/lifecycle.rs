@@ -6,7 +6,7 @@
 //! the spec's, exactly; anything else is an [`InvalidTransition`] that adapters surface as a
 //! tool-level error.
 
-use crate::ontology::meta::{Acceptance, Display, Governed, OnLink, PromoteWhen};
+use crate::ontology::meta::{Acceptance, Display, Governed, OnLink};
 use crate::ontology::{Ontology, OntologyError, stored_name};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -151,26 +151,11 @@ impl StoreScope {
 /// every write through `WriteCtx::governed`; [`GovernedSet::shipped`] is the embedded `adr`
 /// contract. There is no empty default on purpose: a write context without a set would turn a
 /// `Decision` into an ungoverned record.
-///
-/// The set also carries the acceptance tier of the kinds it does not govern (OWN-84 (1),
-/// core-spec F4, E2.5g): a declared kind's top-level `acceptance` key and the loaded
-/// `discovered.acceptance`, read by [`GovernedSet::tier`] for the EN-F5a candidate and the
-/// EN-F13 `proposed` record an agent asks to accept. [`GovernedSet::kinds`],
-/// [`GovernedSet::contains`] and [`GovernedSet::acceptance`] keep their meaning: governed only.
-/// `auto_accept` is the loaded `discovered.auto_accept_when` (OWN-84 (2)), read by placement.
 #[derive(Debug, Clone, PartialEq)]
 pub struct GovernedSet {
     kinds: BTreeMap<String, Governed>,
     archive_on_link: BTreeSet<String>,
     governing: BTreeSet<String>,
-    /// The declared ungoverned kinds carrying a top-level `acceptance`, by stored name.
-    tiers: BTreeMap<String, Acceptance>,
-    /// The `acceptance` of the last loaded `discovered` block (`Agent` when no block declares
-    /// one): the tier of an undeclared `x:` label and of a declared kind without its own key.
-    discovered_tier: Acceptance,
-    /// The `auto_accept_when` of the last loaded `discovered` block (`None`: nothing is
-    /// accepted without a queue item).
-    auto_accept: Option<PromoteWhen>,
 }
 
 impl GovernedSet {
@@ -194,32 +179,10 @@ impl GovernedSet {
             .filter(|r| matches!(r.on_link, Some(OnLink::ArchiveTarget)))
             .map(|r| stored_name(&r.id))
             .collect();
-        // OWN-84 (1): the tier of the kinds the set does not govern. A kind's own key (the
-        // resolver refuses it beside the `governed` mixin); the `discovered` tier is the last
-        // loaded namespace's block, the order `OntologyRegistry::discovered` applies to the
-        // policy, so the two knobs of one block never come from two files.
-        let tiers = ontology
-            .kinds
-            .values()
-            .filter(|k| k.governed.is_none())
-            .filter_map(|k| Some((stored_name(&k.id), k.acceptance?)))
-            .collect();
-        let block = ontology
-            .namespaces
-            .iter()
-            .filter_map(|ns| ontology.discovered.get(ns))
-            .next_back();
-        let discovered_tier = block
-            .and_then(|block| block.acceptance)
-            .unwrap_or(Acceptance::Agent);
-        let auto_accept = block.and_then(|block| block.auto_accept_when.clone());
         Self {
             kinds,
             archive_on_link,
             governing,
-            tiers,
-            discovered_tier,
-            auto_accept,
         }
     }
 
@@ -263,27 +226,6 @@ impl GovernedSet {
     #[must_use]
     pub fn acceptance(&self, stored_kind: &str) -> Option<Acceptance> {
         self.kinds.get(stored_kind).map(|g| g.acceptance)
-    }
-
-    /// The acceptance tier of any `stored_kind` (OWN-84 (1); core-spec F4 on every acceptance
-    /// surface): the mixin's when governed, the kind's top-level `acceptance` when declared,
-    /// else the loaded `discovered.acceptance`, else `Agent`. Read for the EN-F5a candidate and
-    /// the EN-F13 `proposed` record: at `Human` an agent is refused `human_only`, never offered
-    /// a token (the handshake stays the governed kinds', OWN-84 (3)).
-    #[must_use]
-    pub fn tier(&self, stored_kind: &str) -> Acceptance {
-        self.acceptance(stored_kind)
-            .or_else(|| self.tiers.get(stored_kind).copied())
-            .unwrap_or(self.discovered_tier)
-    }
-
-    /// The loaded `discovered.auto_accept_when` (OWN-84 (2)): the thresholds above which
-    /// placement writes no queue item (`candidates::record_discovered`) and the reconciler's
-    /// `proposed` record is written `accepted` (`materialise::proposed_record`); `None` when
-    /// no loaded block declares them.
-    #[must_use]
-    pub fn auto_accept(&self) -> Option<&PromoteWhen> {
-        self.auto_accept.as_ref()
     }
 
     /// Whether records of `stored_kind` govern paths (`why`, the briefing).
@@ -652,48 +594,5 @@ mod tests {
             set.governance_transition("infra:Incident", Governance::Proposed, Governance::Accepted)
                 .is_ok()
         );
-    }
-
-    /// OWN-84 (1): `tier` answers every kind: the mixin's for a governed kind, a declared
-    /// kind's own `acceptance`, else the last loaded `discovered` block's, else `agent`; the
-    /// governed-only readers do not widen; a kind declaring both keys is a resolver conflict.
-    #[test]
-    fn tier_is_the_mixin_the_kinds_own_key_the_discovered_block_or_agent() {
-        // Arrange: `Rack` declares `human`, `Vendor` nothing, the block `human`
-        let file = crate::OntologyFile::from_yaml(
-            "ontology: infra\nversion: 1\nkinds:\n  Rack:\n    description: r\n    acceptance: human\n  Vendor:\n    description: v\n  Incident:\n    description: i\n    governed: {acceptance: agent, serialize: none, export: {digest: false, marker: false}, display: {label: Incident, plural: Incidents}, governs_paths: false, dedup: none}\nrels: {}\ndiscovered: {policy: review, cap: 10, prune_after_days: 1, promote_when: {min_count: 1, min_sources: 1, min_mean_score: 0.5}, acceptance: human}\n",
-        )
-        .expect("fixture parses");
-        let ontology = crate::resolve(&[file], &crate::NamespaceSet::new()).expect("resolves");
-
-        // Act
-        let set = GovernedSet::from_ontology(&ontology);
-
-        // Assert
-        assert_eq!(set.tier("infra:Incident"), Acceptance::Agent, "the mixin's");
-        assert_eq!(
-            set.tier("infra:Rack"),
-            Acceptance::Human,
-            "the kind's own key"
-        );
-        assert_eq!(set.tier("infra:Vendor"), Acceptance::Human, "the block's");
-        assert_eq!(set.tier("x:Widget"), Acceptance::Human, "the block's");
-        assert_eq!(set.acceptance("infra:Rack"), None, "governed only");
-        assert!(!set.contains("infra:Rack"));
-        assert_eq!(set.kinds().collect::<Vec<_>>(), ["infra:Incident"]);
-        // the shipped set: no block declares a tier, every ungoverned kind is `agent`
-        let shipped = GovernedSet::shipped();
-        assert_eq!(shipped.tier("Decision"), Acceptance::Human);
-        assert_eq!(shipped.tier("Fact"), Acceptance::Agent);
-        assert_eq!(shipped.tier("x:Widget"), Acceptance::Agent);
-        // both keys on one kind: refused by the resolver
-        let both = crate::OntologyFile::from_yaml(
-            "ontology: infra\nversion: 1\nkinds:\n  Incident:\n    description: i\n    acceptance: human\n    governed: {acceptance: agent, serialize: none, export: {digest: false, marker: false}, display: {label: Incident, plural: Incidents}, governs_paths: false, dedup: none}\nrels: {}\n",
-        )
-        .expect("fixture parses");
-        assert!(matches!(
-            crate::resolve(&[both], &crate::NamespaceSet::new()),
-            Err(OntologyError::Conflict { detail, .. }) if detail == "acceptance_governed"
-        ));
     }
 }

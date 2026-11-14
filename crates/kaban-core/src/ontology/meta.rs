@@ -174,9 +174,6 @@ pub struct OntologyFile {
     pub kinds: BTreeMap<KindName, KindBody>,
     /// The relationship types this file declares.
     pub rels: BTreeMap<RelName, RelBody>,
-    /// Discovered-labels policy (EN-F5).
-    #[serde(default)]
-    pub discovered: Option<DiscoveredPolicy>,
     /// Source-type to kinds mapping (EN-F36, EN-F45).
     #[serde(default)]
     pub source_types: BTreeMap<String, SourceType>,
@@ -470,55 +467,6 @@ pub struct RelBody {
     pub governed_semantics: Option<bool>,
 }
 
-/// Discovered-labels policy name.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum DiscoveredPolicyName {
-    /// Drop undeclared labels.
-    Deny,
-    /// Keep as candidates for human promotion.
-    Review,
-    /// Store as kinds.
-    Allow,
-}
-
-/// Promotion suggestion thresholds.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PromoteWhen {
-    /// Minimum occurrences.
-    pub min_count: u32,
-    /// Minimum distinct sources.
-    pub min_sources: u32,
-    /// Minimum mean score.
-    pub min_mean_score: f64,
-}
-
-/// The `discovered` block (EN-F5).
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct DiscoveredPolicy {
-    /// Policy.
-    pub policy: DiscoveredPolicyName,
-    /// Candidate cap per workspace.
-    pub cap: u32,
-    /// Prune age in days.
-    pub prune_after_days: u32,
-    /// Promotion thresholds.
-    pub promote_when: PromoteWhen,
-    /// Who accepts an undeclared (`x:`) label's candidate node, and a declared ungoverned
-    /// kind's without its own key (OWN-84 (1); E2.5g): `agent` when absent.
-    #[serde(default)]
-    pub acceptance: Option<Acceptance>,
-    /// OWN-84 (2): the thresholds (the `promote_when` shape) above which placement accepts
-    /// the obvious cases without a queue item: an undeclared label whose `kind_stats` row
-    /// passes all three writes no `node_candidate` row; the reconciler's `proposed` record
-    /// of a kind whose row passes, with a verdict at or above `min_mean_score`, is written
-    /// `accepted` with a `system` event. Absent: nothing is auto-accepted.
-    #[serde(default)]
-    pub auto_accept_when: Option<PromoteWhen>,
-}
-
 /// One `source_types` entry.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -599,7 +547,7 @@ fn file_error(path: &str) -> OntologyError {
 
 impl OntologyFile {
     /// Load one ontology file from its YAML text: the E1.1 validator against the meta-schema
-    /// first (top-level shape and `discovered`), identifiers next, then the typed parse.
+    /// first (top-level shape), identifiers next, then the typed parse.
     ///
     /// # Errors
     /// [`OntologyError::SchemaInvalid`] `file:<path>` for a malformed document, an unknown key
@@ -710,13 +658,6 @@ fn locate_in_file(data: &Value) -> String {
             "rels" => first_failing::<RelBody>(block, bodies),
             "source_types" => first_failing::<SourceType>(block, bodies),
             "questions" => first_failing::<QuestionTemplate>(block, bodies),
-            "discovered" => {
-                if deserializes::<DiscoveredPolicy>(child) {
-                    None
-                } else {
-                    Some(format!("{block}.{}", locate::<DiscoveredPolicy>(child)))
-                }
-            }
             "prefixes" => bodies
                 .iter()
                 .find(|(_, v)| !v.is_string())

@@ -1,18 +1,15 @@
 //! The E1-end correction through `KabanApi` (E1.9a; astra review RE3-1, RE3-2, RE3-4, RE3-6
 //! as dispositioned in `../specs/kaban/03-engine-v5/archive/reviews/e1-end-astra-review-dispositions.md`): the
-//! gated kind is canonicalised before every registry lookup, a promotion target is judged against the
-//! registry before anything moves, and `schema_describe` projects `x:` labels through the
-//! bound workspace's `kind_stats` with their persisted namespace.
+//! gated kind is canonicalised before every registry lookup. The promotion and discovered-label
+//! tests went with discovered kinds (PC-14).
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // test code: failures are the assertion
 
 mod common;
 
 use common::Scratch;
-use kaban_api::{
-    ApiConfig, KabanApi, OntologyRegistry, RecallRequest, RememberRequest, RememberStatus,
-};
-use kaban_core::{Actor, IngestStore, WorkspaceId};
+use kaban_api::{ApiConfig, KabanApi, OntologyRegistry, RememberRequest};
+use kaban_core::WorkspaceId;
 use kaban_policy::Policy;
 use kaban_store_sqlite::SqliteStore;
 use std::sync::Arc;
@@ -60,44 +57,6 @@ impl Repo {
         self.registry.load_file(api, &path).unwrap();
     }
 }
-
-fn remember(api: &KabanApi, kind: &str, text: &str, props: Option<serde_json::Value>) -> String {
-    let r = api
-        .remember(RememberRequest {
-            kind: kind.into(),
-            text: text.into(),
-            props,
-            ..Default::default()
-        })
-        .unwrap();
-    assert_eq!(r.status, RememberStatus::Created, "{r:?}");
-    r.id
-}
-
-fn recall_kinds(api: &KabanApi, query: &str) -> Vec<String> {
-    api.recall(RecallRequest {
-        query: query.into(),
-        hops: Some(0),
-        ..Default::default()
-    })
-    .unwrap()
-    .results
-    .into_iter()
-    .map(|c| c.kind)
-    .collect()
-}
-
-/// A plain `infra` ontology: `Vendor` requires `site`, `Supplier` has an open schema.
-const INFRA_YAML: &str = r#"ontology: infra
-version: 1
-kinds:
-  Vendor:
-    description: "A vendor with a site."
-    props_schema: {type: object, additionalProperties: false, properties: {site: {type: string}}, required: [site]}
-  Supplier:
-    description: "A supplier."
-rels: {}
-"#;
 
 /// RE3-2 (EN-F3, EN-F4): the gated kind is canonicalised before the registry lookups of
 /// `remember`, so `adr:Decision` meets Decision's `props_schema` (`rationale` required) and
@@ -157,142 +116,5 @@ fn qualified_spellings_of_bare_namespaces_meet_the_registry_rules_through_the_ap
             .collect::<Vec<_>>(),
         vec![first.id.as_str()],
         "the title+scope duplicate is detected like `Widget`: {second:?}"
-    );
-}
-
-/// RE3-4 (EN-F4, EN-F5): a promotion target is judged against the registry before any
-/// mutation: a governed kind (`Decision`) and a kind whose `props_schema` some renamed node
-/// does not satisfy are refused with the fixed class `promote_target_incompatible` and nothing
-/// moves; a plain user kind whose schema every node satisfies is promoted.
-#[test]
-fn promotion_targets_are_checked_against_the_registry_before_anything_moves() {
-    let repo = Repo::new("promote-target");
-    let api = repo.api("ws-a");
-    let ws = WorkspaceId::new("ws-a");
-    remember(
-        &api,
-        "Vendor",
-        "quokka vendor with a site",
-        Some(serde_json::json!({"site": "perth"})),
-    );
-    remember(&api, "Vendor", "quokka vendor without a site", None);
-    let x_vendors = || {
-        repo.store
-            .list_nodes("x:Vendor", ws.as_str(), 0, 10)
-            .unwrap()
-            .len()
-    };
-
-    let governed = api
-        .registry()
-        .promote(&api, "x:Vendor", "Decision", &Actor::HumanCli)
-        .unwrap_err();
-    assert_eq!(governed.to_string(), "promote_target_incompatible");
-    assert_eq!(x_vendors(), 2, "nothing moved");
-    assert_eq!(recall_kinds(&api, "quokka vendor"), Vec::<String>::new());
-
-    repo.load(&api, "infra.yaml", INFRA_YAML);
-    let unsatisfied = api
-        .registry()
-        .promote(&api, "x:Vendor", "infra:Vendor", &Actor::HumanCli)
-        .unwrap_err();
-    assert_eq!(unsatisfied.to_string(), "promote_target_incompatible");
-    assert_eq!(x_vendors(), 2, "whole group refused");
-    assert_eq!(
-        repo.store
-            .list_nodes("infra:Vendor", ws.as_str(), 0, 10)
-            .unwrap()
-            .len(),
-        0
-    );
-
-    // a group that satisfies the target's schema is promoted
-    remember(
-        &api,
-        "Part",
-        "a quokka part with a site",
-        Some(serde_json::json!({"site": "perth"})),
-    );
-    let report = api
-        .registry()
-        .promote(&api, "x:Part", "infra:Vendor", &Actor::HumanCli)
-        .unwrap();
-    assert_eq!((report.nodes, report.candidates_released), (1, 1));
-    assert_eq!(
-        recall_kinds(&api, "quokka part"),
-        vec!["infra:Vendor".to_owned()]
-    );
-}
-
-/// RE3-6 (EN-F6, EN-S3; E1.7 R4): `schema_describe` keeps the persisted namespace (`x`) and
-/// shows an `x:` label only to the workspace whose `kind_stats` count it; declared kinds stay
-/// database-wide. Before and after a promotion and a prune.
-#[test]
-fn discovered_labels_are_described_per_workspace_with_their_namespace() {
-    let repo = Repo::new("describe");
-    let api_a = repo.api("ws-a");
-    let api_b = repo.api("ws-b");
-    remember(&api_a, "Vendor", "quokka vendor in a", None);
-    remember(&api_b, "Gadget", "numbat gadget in b", None);
-    let labels = |api: &KabanApi| -> Vec<(String, Option<String>)> {
-        api.schema_describe()
-            .unwrap()
-            .labels
-            .into_iter()
-            .filter(|d| !d.builtin)
-            .map(|d| (d.name, d.ns))
-            .collect()
-    };
-
-    assert_eq!(
-        labels(&api_a),
-        vec![("x:Vendor".to_owned(), Some("x".to_owned()))]
-    );
-    assert_eq!(
-        labels(&api_b),
-        vec![("x:Gadget".to_owned(), Some("x".to_owned()))]
-    );
-
-    // promotion in A: the declared kind is database-wide, the `x:` label is gone everywhere
-    repo.load(&api_a, "infra.yaml", INFRA_YAML);
-    api_a
-        .registry()
-        .promote(&api_a, "x:Vendor", "infra:Supplier", &Actor::HumanCli)
-        .unwrap();
-    let declared = |ns: &str, name: &str| (format!("{ns}:{name}"), Some(ns.to_owned()));
-    assert_eq!(
-        labels(&api_a),
-        vec![declared("infra", "Supplier"), declared("infra", "Vendor")]
-    );
-    assert_eq!(
-        labels(&api_b),
-        vec![
-            declared("infra", "Supplier"),
-            declared("infra", "Vendor"),
-            ("x:Gadget".to_owned(), Some("x".to_owned()))
-        ]
-    );
-
-    // prune in B (the store operation; the thresholds are the caller's): the label is gone
-    let pruned = repo
-        .store
-        .prune_kinds(
-            &WorkspaceId::new("ws-b"),
-            &kaban_core::config::PromoteWhen {
-                min_count: 2,
-                ..kaban_core::config::PromoteWhen::default()
-            },
-            std::time::Duration::ZERO,
-            false,
-        )
-        .unwrap();
-    assert_eq!(pruned.kinds, vec!["x:Gadget".to_owned()]);
-    assert_eq!(
-        labels(&api_b),
-        vec![declared("infra", "Supplier"), declared("infra", "Vendor")]
-    );
-    assert_eq!(
-        labels(&api_a),
-        vec![declared("infra", "Supplier"), declared("infra", "Vendor")]
     );
 }

@@ -64,9 +64,6 @@ async fn links_resolve_only_active_same_workspace_nodes() {
         .traverse(&kaban_core::TraverseQuery {
             start_ids: vec![id],
             rels: vec!["RELATES_TO".into()],
-            filters: kaban_core::ReadFilters {
-                include_candidates: true,
-            },
             ..Default::default()
         })
         .unwrap()

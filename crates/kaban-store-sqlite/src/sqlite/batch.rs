@@ -295,9 +295,7 @@ impl SqliteStore {
         for op in &batch.ops {
             match op {
                 Op::UpsertNode { id, node } => {
-                    if let Some(rid) = Self::upsert_node(tx, &tenant, id, node, &mut report)? {
-                        upserted.push(rid);
-                    }
+                    upserted.push(Self::upsert_node(tx, &tenant, id, node, &mut report)?);
                 }
                 // the `ForgetMode::Tombstone` path: lifecycle only, no event, edges kept;
                 // already tombstoned or purged is a no-op (WD-3), unknown is `NotFound`; a

@@ -1,12 +1,5 @@
 # Every engine-spec §15.1 key spelled at its register default (engine-plan E1.1 config slice):
 # loading this file equals `EngineConfig::default()` and `effective_overrides()` is empty.
-discovered:
-  cap: 500
-  prune_after_days: 90
-  promote_when:
-    min_count: 20
-    min_sources: 3
-    min_mean_score: 0.7
 ontology:
   pattern_size_limit_kib: 1024
   golden_strict: false

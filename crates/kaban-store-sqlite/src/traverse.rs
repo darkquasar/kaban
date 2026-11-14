@@ -6,7 +6,6 @@
 //! the walk (an undeclared name is `UnknownRel`/`UnknownKind`, never a silent empty result) and
 //! the edge filter runs inside every neighbour query, before the hub cut.
 
-use crate::candidates;
 use crate::connection::CgRead;
 use crate::ontology;
 use crate::rows::{NODE_COLS, row_edge, row_node};
@@ -110,8 +109,7 @@ pub(crate) fn traverse(
         // not traversal starts either, R2-4) is as good as absent
         let visible: bool = conn.query_row(
             &format!(
-                "SELECT (?1 IS NULL OR {WS_COL} = ?1) AND n.lifecycle = 'active'{} FROM node n WHERE n.rid=?2",
-                candidates::exclusion_sql(conn, "n", q.filters)?
+                "SELECT (?1 IS NULL OR {WS_COL} = ?1) AND n.lifecycle = 'active' FROM node n WHERE n.rid=?2"
             ),
             params![q.workspace_id, rid],
             |r| r.get(0),
@@ -128,20 +126,13 @@ pub(crate) fn traverse(
     // before it joins the frontier, so a hidden node never bridges two visible ones; a node
     // contributes at most `HUB_LIMIT` edges per direction, chosen by edge id so the cut is
     // deterministic (hub protection, core-plan C3.6; N5)
-    // EN-F49: a candidate far endpoint never joins the frontier unless asked
     let sql_out = with_rels_and_hub_cut(
-        &format!(
-            "SELECT e.id, s.id, d.id, e.rel, e.confidence, e.created_at, e.props, e.dst FROM edge e JOIN node s ON s.rid=e.src JOIN node d ON d.rid=e.dst WHERE e.src=?1 AND (?2 IS NULL OR d.workspace_id = ?2) AND d.lifecycle = 'active'{}",
-            candidates::exclusion_sql(conn, "d", q.filters)?
-        ),
+        "SELECT e.id, s.id, d.id, e.rel, e.confidence, e.created_at, e.props, e.dst FROM edge e JOIN node s ON s.rid=e.src JOIN node d ON d.rid=e.dst WHERE e.src=?1 AND (?2 IS NULL OR d.workspace_id = ?2) AND d.lifecycle = 'active'",
         q.rels.len(),
         q.edge_filter.as_ref(),
     );
     let sql_in = with_rels_and_hub_cut(
-        &format!(
-            "SELECT e.id, s.id, d.id, e.rel, e.confidence, e.created_at, e.props, e.src FROM edge e JOIN node s ON s.rid=e.src JOIN node d ON d.rid=e.dst WHERE e.dst=?1 AND (?2 IS NULL OR s.workspace_id = ?2) AND s.lifecycle = 'active'{}",
-            candidates::exclusion_sql(conn, "s", q.filters)?
-        ),
+        "SELECT e.id, s.id, d.id, e.rel, e.confidence, e.created_at, e.props, e.src FROM edge e JOIN node s ON s.rid=e.src JOIN node d ON d.rid=e.dst WHERE e.dst=?1 AND (?2 IS NULL OR s.workspace_id = ?2) AND s.lifecycle = 'active'",
         q.rels.len(),
         q.edge_filter.as_ref(),
     );

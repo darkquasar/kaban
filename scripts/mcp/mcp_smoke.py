@@ -215,12 +215,9 @@ e, t = call("schema_extend", {"kind": "rel", "name": "BLOCKED_BY", "description"
 check(e, "schema_extend with redactable value refused (C1)")
 e, t = call("remember", {"kind": "Fact", "text": f"staging db host is {REDACT_CANARY} and old pw hunter2"})
 check(not e and sorted(json.loads(t)["redactions"]) == ["text:internal-hostname", "text:old-password"], "redact rules applied on remember"); redid = json.loads(t)["id"]
-# engine E1.8 (EN-F5, EN-F49): an undeclared label is placed as an `x:` candidate under the shipped `review`
-# policy and stays hidden from recall until promoted; an unknown rel keeps today's rejection
+# PC-14: an undeclared label is an unknown kind (no discovered kinds); an unknown rel keeps today's rejection
 e, t = call("remember", {"kind": "Rumour", "text": "an undeclared label about the zebrafish ledger"})
-check(not e and json.loads(t)["kind"] == "x:Rumour", "undeclared label placed as the x:Rumour candidate (E1.8)")
-e, t = call("recall", {"query": "zebrafish ledger"})
-check(not e and json.loads(t)["count"] == 0, "the candidate is hidden from recall by default (EN-F49)")
+check(e and "unknown_kind" in t, "an undeclared label is refused as unknown_kind (PC-14)")
 e, t = call("link", {"from": fid, "to": fixid, "rel": "RUMOURED_BY"})
 check(e and "unknown_rel" in t and "RUMOURED_BY" not in t, "unknown rel rejected as its fixed class, the name not echoed (RW3-6; the schema_extend hint went with the payload)")
 e, t = call("schema_extend", {"kind": "rel", "name": "BLOCKED_BY", "description": "work blocked by", "from_kinds": ["Failure"]})
@@ -481,7 +478,6 @@ kinds:
     description: "A deployed service."
 rels:
   OPERATES: {from: [ops:Service], to: [ops:Runbook], directed: true, description: "The service is operated by the runbook."}
-discovered: {policy: review, cap: 500, prune_after_days: 90, promote_when: {min_count: 20, min_sources: 3, min_mean_score: 0.7}}
 """
     def ont_file(name, text):
         path = os.path.join(tmp, name)
@@ -492,7 +488,7 @@ discovered: {policy: review, cap: 500, prune_after_days: 90, promote_when: {min_
     ont_file("ops.yaml", ONT_YAML)
     r = in_tmp("ontology", "load", "ops.yaml")
     v = one_json(r) or {}
-    check(r.returncode == 0 and (v.get("ns"), v.get("version"), v.get("kinds"), v.get("rels"), v.get("changed")) == ("ops", 1, 2, 1, True) and len(v.get("hash", "")) == 64, f"e1: ontology load of a user file (one governed kind, one plain kind, one rel, discovered review) writes the namespace: {v}")
+    check(r.returncode == 0 and (v.get("ns"), v.get("version"), v.get("kinds"), v.get("rels"), v.get("changed")) == ("ops", 1, 2, 1, True) and len(v.get("hash", "")) == 64, f"e1: ontology load of a user file (one governed kind, one plain kind, one rel) writes the namespace: {v}")
     # the same bytes under `.kaban/ontology/` so every later process in the repository starts with the namespace (EN-F2)
     os.makedirs(os.path.join(kdir, "ontology"), exist_ok=True)
     shutil.copyfile(os.path.join(tmp, "ops.yaml"), os.path.join(kdir, "ontology", "ops.yaml"))
@@ -514,18 +510,6 @@ discovered: {policy: review, cap: 500, prune_after_days: 90, promote_when: {min_
     ont_file("conflict.yaml", "ontology: ops\nversion: 1\nkinds:\n  Runbook:\n    description: \"Another body.\"\nrels: {}\n")
     r = in_tmp("ontology", "load", "conflict.yaml")
     check(fixed_error(r, "ontology_conflict"), f"e1: a second file declaring ops:Runbook differently is ontology_conflict, exit 4 (exit {r.returncode}; stderr {r.stderr.strip()!r})")
-    r = in_tmp("ontology", "promote", "x:Rumour", "ops:Gossip")
-    check(fixed_error(r, "unknown_kind"), f"e1: promote to an undeclared kind is unknown_kind, exit 4 (exit {r.returncode}; stderr {r.stderr.strip()!r})")
-    # EN-F5: prune --dry-run lists nothing yet (the candidate is younger than prune_after_days) and writes nothing
-    r = in_tmp("ontology", "prune", "--dry-run")
-    v = one_json(r) or {}
-    check(r.returncode == 0 and v.get("dry_run") is True and v.get("kinds") == [] and v.get("nodes_tombstoned") == 0 and v.get("n_rejected") == 0, f"e1: ontology prune --dry-run reports the figures and tombstones nothing: {v}")
-    # EN-F5: promote the MCP section's hidden candidate to the loaded plain kind; the record becomes visible
-    r = in_tmp("ontology", "promote", "x:Rumour", "ops:Service")
-    v = one_json(r) or {}
-    rr = cli("recall", "zebrafish ledger", "--hops", "0")
-    hits = (one_json(rr) or {"results": []})["results"]
-    check(r.returncode == 0 and (v.get("from"), v.get("to"), v.get("nodes"), v.get("candidates_released")) == ("x:Rumour", "ops:Service", 1, 1) and len(hits) == 1 and hits[0]["kind"] == "ops:Service", f"e1: ontology promote x:Rumour ops:Service renames the record and releases it into recall: {v}")
     # the `schema_describe` body (the `kaban://schema` resource) through a second server on the same database
     def mcp_once(name, args):
         q = subprocess.Popen(cmd + ["--db", db, "--policy", policy], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
@@ -551,8 +535,6 @@ discovered: {policy: review, cap: 500, prune_after_days: 90, promote_when: {min_
     check(not e and runbook.get("ns") == "ops" and runbook.get("builtin") is False and runbook.get("governed", {}).get("acceptance") == "human" and runbook.get("governed", {}).get("serialize") == {"dir": "runbooks", "format": "md-frontmatter"} and runbook.get("display", {}).get("label") == "Runbook" and service.get("ns") == "ops" and "governed" not in service, f"e1: schema_describe lists the loaded kinds with ns and the declaration columns (E1.8 R2): {runbook.get('ns')}, {sorted(runbook.get('governed', {}))}")
     check(rels.get("ops:OPERATES", {}).get("ns") == "ops" and rels.get("ops:OPERATES", {}).get("from_kinds") == ["ops:Service"] and rels.get("ops:OPERATES", {}).get("to_kinds") == ["ops:Runbook"], "e1: schema_describe lists the loaded rel with its endpoints")
     check(not any(n.startswith("canary:") for n in labels) and "Secret" not in labels, "e1: schema_type is unchanged by the refused canary file")
-    ks = [k for k in sd.get("kind_stats", []) if k.get("ns") == "ops" and k.get("kind") == "Service"]
-    check(len(ks) == 1 and ks[0].get("n_nodes") == 1 and ks[0].get("workspace_id") == ws and not any(k.get("ns") == "x" and k.get("kind") == "Rumour" for k in sd.get("kind_stats", [])), f"e1: schema_describe carries kind_stats for the bound workspace, the counter moved to the promoted kind: {sd.get('kind_stats')}")
     # docs-ingest DI2.2: the PDF ingested in the CLI docs section above, seen through `index_status`
     # on the same database (the one surface that lists failed documents with their fixed reason)
     e, t = mcp_once("index_status", {})

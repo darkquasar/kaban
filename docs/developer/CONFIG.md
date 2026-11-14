@@ -52,17 +52,12 @@ and do not remove usable sibling-layer statistics.
 ## Remaining defaults register
 
 These are configuration defaults, not claims that every reserved capability ships.
-The sections of removed features, `reconcile`, `er`, `why` and `briefing`, are removed: a file
-that still spells one is refused like any unknown key, naming the section.
+The sections of removed features, `reconcile`, `er`, `why`, `briefing` and `discovered`, are
+removed: a file that still spells one is refused like any unknown key, naming the section.
 Use quality/latency measurements from your own workload before changing a knob.
 
 | Key | Default | Measurement or trigger |
 | --- | --- | --- |
-| `discovered.cap` | 500 | Review backlog and memory |
-| `discovered.prune_after_days` | 90 | Age of unused discoveries |
-| `discovered.promote_when.min_count` | 20 | Repeated evidence count |
-| `discovered.promote_when.min_sources` | 3 | Independent-source coverage |
-| `discovered.promote_when.min_mean_score` | 0.7 | Judged promotion quality |
 | `ontology.pattern_size_limit_kib` | 1024 | Pattern compiler allocation |
 | `ontology.golden_strict` | false | Explicit strict ontology qualification |
 | `gazetteer.min_pattern_len` | 3 | Short-pattern false positives |

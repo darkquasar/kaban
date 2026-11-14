@@ -473,9 +473,6 @@ pub struct RecallQuery {
     /// Restrict the lexical seeds to notes linked `ABOUT` or `EVIDENCE_FOR` to a `CodeRef`
     /// matching this filter (core-spec F3 "about this `CodeRef`"; `None` = no restriction).
     pub r#ref: Option<CodeRefFilter>,
-    /// Candidate visibility (EN-F49; engine-plan E1.8): excluded unless `include_candidates`.
-    #[serde(default)]
-    pub filters: ReadFilters,
 }
 
 /// "About this `CodeRef`" filter of a recall (core-spec F3; M3-12): exact match on the stored
@@ -691,9 +688,6 @@ pub struct TraverseQuery {
     /// neighbours outside it are not returned (core-spec S6).
     #[serde(default)]
     pub workspace_id: Option<String>,
-    /// Candidate visibility (EN-F49; engine-plan E1.8): excluded unless `include_candidates`.
-    #[serde(default)]
-    pub filters: ReadFilters,
     /// EN-F19 (engine-plan E2.7): expand each reached node with a `symbol` or `path` anchor one
     /// step into the attached code-graph snapshot; the snapshot rows come back as
     /// [`TraverseResult::anchored`] cards (200 per anchored node, 500 in total). Off, the
@@ -723,7 +717,6 @@ impl Default for TraverseQuery {
             governance: Vec::new(),
             limit: 0,
             workspace_id: None,
-            filters: ReadFilters::default(),
             follow_anchors: false,
             anchor_repo: None,
         }
@@ -1072,12 +1065,6 @@ pub enum OutcomeKind {
     AlreadyHidden,
     /// `tombstoned -> active` through `Op::Reactivate`.
     Reactivated,
-    /// The record was skipped: its undeclared label is refused by the discovered-labels policy
-    /// (engine-spec EN-F5 `kind_not_allowed`; engine-plan E1.8). Nothing written.
-    KindNotAllowed,
-    /// The record was skipped: the workspace's discovered-kinds cap is reached (EN-F5
-    /// `discovered_cap_reached`); only `discovered_overflow.n_rejected` moved.
-    CapReached,
 }
 
 /// What a [`WriteBatch`] did.
@@ -1097,9 +1084,6 @@ pub struct BatchReport {
     /// Nodes moved `tombstoned -> active` by `Op::Reactivate` (DI1.8).
     #[serde(default, skip_serializing_if = "is_zero")]
     pub reactivated: u32,
-    /// Nodes skipped by the discovered-labels policy or cap (EN-F5; engine-plan E1.8).
-    #[serde(default, skip_serializing_if = "is_zero")]
-    pub skipped: u32,
     /// Per node op, in batch order, what the store did (DI1.8, RD2-8).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub outcomes: Vec<OpOutcome>,
@@ -1123,7 +1107,6 @@ impl BatchReport {
             OutcomeKind::Unchanged => self.unchanged += 1,
             OutcomeKind::Tombstoned => self.tombstoned += 1,
             OutcomeKind::Reactivated => self.reactivated += 1,
-            OutcomeKind::KindNotAllowed | OutcomeKind::CapReached => self.skipped += 1,
             OutcomeKind::AlreadyHidden => {}
         }
         self.outcomes.push(OpOutcome {
@@ -1310,107 +1293,6 @@ impl IndexMeta {
     pub fn get(&self, key: &str) -> Option<&str> {
         self.entries.get(key).map(String::as_str)
     }
-}
-
-// ---- discovered labels, candidates and `kind_stats` (engine-spec EN-F5, EN-F5a, EN-F6, EN-F49;
-// engine-plan E1.8) ----
-
-/// The discovered-labels rules a write decides by (EN-F5): the policy of the loaded
-/// ontologies and the per-workspace cap. Carried on [`WriteCtx`] like the governed set; the
-/// default is the shipped `review` policy with the `[discovered] cap` register default, so a
-/// context built without a registry behaves as the shipped ontology says.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DiscoveredRules {
-    /// What happens to an undeclared label.
-    pub policy: crate::ontology::meta::DiscoveredPolicyName,
-    /// At most this many distinct `x:` kinds per workspace.
-    pub cap: u32,
-}
-
-impl Default for DiscoveredRules {
-    fn default() -> Self {
-        Self {
-            policy: crate::ontology::meta::DiscoveredPolicyName::Review,
-            cap: crate::config::Discovered::default().cap,
-        }
-    }
-}
-
-/// Read-path filters every read surface threads to the store (EN-F49): candidates
-/// (`node_candidate` rows, EN-F5a) are excluded unless `include_candidates`. The API, CLI and
-/// MCP flag is E2.8's; the store parameter lands here.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ReadFilters {
-    /// Also return candidate nodes.
-    #[serde(default)]
-    pub include_candidates: bool,
-}
-
-/// One `kind_stats` row (EN-F6): the per-workspace counters of a discovered (or promoted)
-/// kind. `mean_score` stays `NULL` until E2 scores claims.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct KindStat {
-    /// Workspace the counters belong to.
-    pub workspace_id: String,
-    /// Namespace (`x` for a discovered kind).
-    pub ns: String,
-    /// Bare kind name.
-    pub kind: String,
-    /// Active nodes of the kind in the workspace.
-    pub n_nodes: u64,
-    /// Distinct sources (session or agent identity) that wrote them.
-    pub n_sources: u64,
-    /// Mean extractor score (E2; `None` until then).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mean_score: Option<f64>,
-    /// Unix seconds of the first node.
-    pub first_seen: i64,
-    /// Unix seconds of the latest node.
-    pub last_seen: i64,
-}
-
-impl KindStat {
-    /// The stored name of the kind (`x:Vendor`, `infra:Vendor`, `Vendor` for a bare namespace).
-    #[must_use]
-    pub fn stored(&self) -> String {
-        match crate::ontology::Ns::parse(&self.ns) {
-            Ok(ns) => crate::ontology::stored_name(&crate::ontology::Qualified {
-                ns,
-                name: self.kind.clone(),
-            }),
-            Err(_) => format!("{}:{}", self.ns, self.kind),
-        }
-    }
-}
-
-/// What `promote_kind` did (EN-F5): one transaction, one `events` row.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct PromoteReport {
-    /// The discovered kind that was renamed (`x:Vendor`).
-    pub from: String,
-    /// The declared kind it became (stored name).
-    pub to: String,
-    /// Nodes whose `kind` changed.
-    pub nodes: u64,
-    /// `node_candidate` rows of reason `discovered_kind` deleted.
-    pub candidates_released: u64,
-    /// `seq` of the `events` row.
-    pub event_seq: u64,
-}
-
-/// What `prune_kinds` listed or did (EN-F5): `x:` kinds below `promote_when.min_count` whose
-/// `last_seen` is older than `prune_after_days`; `dry_run` lists and writes nothing.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct PruneReport {
-    /// Whether anything was written.
-    pub dry_run: bool,
-    /// The prunable kinds (stored names), listed in both modes.
-    pub kinds: Vec<String>,
-    /// Candidate nodes tombstoned (0 on a dry run).
-    pub nodes_tombstoned: u64,
-    /// Labels refused at the cap so far in the workspace (`discovered_overflow.n_rejected`;
-    /// reported, never reset).
-    pub n_rejected: u64,
 }
 
 // Producer vocabulary moved out of the deleted reconciliation module (T3, PC-16). Slice B

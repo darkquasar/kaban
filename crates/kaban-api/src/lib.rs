@@ -43,9 +43,7 @@ pub use error::ApiError;
 pub use git::{GitError, GitRunner};
 pub use hooks::{HookEvent, HookHost, HookOutcome};
 pub use layers::{BudgetSource, BudgetView, RunFlags, budgets};
-pub use ontology::{
-    DiscoveredKnobs, LoadReport, OntologyRegistry, OntologySummary, validate_kind_props,
-};
+pub use ontology::{LoadReport, OntologyRegistry, OntologySummary, validate_kind_props};
 pub use rescan::RESCAN_BATCH;
 
 pub use types::*;
