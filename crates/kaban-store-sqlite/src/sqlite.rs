@@ -36,7 +36,7 @@ use kaban_core::Result;
 use kaban_core::{
     ActorId, BatchReport, Change, ChangeLogStore, DiscoveredRules, Edge, FailurePatch, ForgetMode,
     ForgetOutcome, GovernedSet, Hit, IndexMeta, IngestStore, Lease, LeaseStore, Lifecycle, LinkReq,
-    MemoryStore, Method, NewNode, Node, NodeId, Ontology, Owner, PendingFailuresQuery, RecallQuery,
+    MemoryStore, Method, NewNode, Node, NodeId, Ontology, PendingFailuresQuery, RecallQuery,
     RememberOutcome, RescanAction, RescanReport, SchemaStore, SessionEdit, SessionEditKind,
     SessionStore, StoreError, TraverseQuery, TraverseResult, TypeDef, WorkspaceId, WriteBatch,
     WriteCtx, new_id, now_iso,
@@ -780,7 +780,7 @@ impl SqliteStore {
                 |r| r.get(0),
             )
             .sql()?;
-        let props = edge_write::owned_props(Some(&props), Owner::Human);
+        let props = edge_write::human_props(Some(&props));
         let scoring = edge_write::scoring_columns(conn)?;
         edge_write::write_edge(
             conn,

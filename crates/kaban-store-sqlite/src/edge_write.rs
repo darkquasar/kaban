@@ -166,20 +166,31 @@ pub(crate) fn stored_owner(
         .flatten())
 }
 
-/// The `props.owner` tag of an edge a write stores (EN-E4). A human write (`link`, a human
-/// batch) is always `human`, whatever owner its caller put in `props`: the overwrite guard
-/// and the MD-23 diff trust this tag, so only the producer boundary may name another owner.
-/// A producer batch keeps the producer's value when it set one, else the batch's owner.
+/// The `props.owner` tag of an edge a batch writes (EN-E4): the producer's value when it
+/// set one, else the batch's owner. A batch is the trusted producer boundary, so only it may
+/// name an owner through `props`.
 pub(crate) fn owned_props(props: Option<&Value>, owner: Owner) -> Value {
-    let mut map = match props {
+    let mut map = object(props);
+    map.entry("owner")
+        .or_insert_with(|| Value::String(owner.as_str().to_owned()));
+    Value::Object(map)
+}
+
+/// The props of a human `link`: always `owner = human`, whatever owner the caller put in
+/// `props`. The overwrite guard and the MD-23 diff trust this tag, so a caller-supplied
+/// producer owner would hand the human's edge to that producer.
+pub(crate) fn human_props(props: Option<&Value>) -> Value {
+    let mut map = object(props);
+    map.insert(
+        "owner".to_owned(),
+        Value::String(Owner::Human.as_str().to_owned()),
+    );
+    Value::Object(map)
+}
+
+fn object(props: Option<&Value>) -> Map<String, Value> {
+    match props {
         Some(Value::Object(m)) => m.clone(),
         _ => Map::new(),
-    };
-    let tag = Value::String(owner.as_str().to_owned());
-    if owner == Owner::Human {
-        map.insert("owner".to_owned(), tag);
-    } else {
-        map.entry("owner").or_insert(tag);
     }
-    Value::Object(map)
 }
