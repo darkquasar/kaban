@@ -754,9 +754,8 @@ fn removed_governance_fields_load_with_one_warning_each() {
             .to_vec(),
         "one warning per field, not per occurrence"
     );
-    let (_, none) = OntologyFile::from_yaml_reporting(
-        "ontology: shop\nversion: 1\nkinds: {}\nrels: {}\n",
-    )
-    .unwrap();
-    assert!(none.is_empty());
+    let (_, none) =
+        OntologyFile::from_yaml_reporting("ontology: shop\nversion: 1\nkinds: {}\nrels: {}\n")
+            .unwrap();
+    assert_eq!(none, Vec::<OntologyWarning>::new());
 }

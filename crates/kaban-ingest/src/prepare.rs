@@ -115,10 +115,10 @@ fn blocked(
     signer: &dyn AuditSigner,
     req: &PrepareRequest<'_>,
     extractor: &str,
-    rule_ids: Vec<String>,
+    rule_ids: &[String],
 ) -> PreparedDocument {
     let mut props = base_props(req, extractor, DocStatus::Blocked);
-    for r in &rule_ids {
+    for r in rule_ids {
         *props.rule_ids.entry(r.clone()).or_default() += 1;
     }
     props.blocked_hmac = Some(keyed_id(signer, "bytes", req.bytes));
@@ -165,7 +165,7 @@ pub fn prepare_document(
         None => None,
         Some(Admission::Admitted(a)) => Some(a),
         Some(Admission::SkipFile { rule_ids }) => {
-            return Ok(blocked(signer, req, extractor.id(), rule_ids));
+            return Ok(blocked(signer, req, extractor.id(), &rule_ids));
         }
     };
     if let Some(a) = &admitted {
@@ -181,7 +181,7 @@ pub fn prepare_document(
     ) {
         MetaDecision::Proceed(meta) => meta,
         MetaDecision::SkipFile { rule_ids } => {
-            return Ok(blocked(signer, req, extractor.id(), rule_ids));
+            return Ok(blocked(signer, req, extractor.id(), &rule_ids));
         }
     };
 
@@ -195,7 +195,7 @@ pub fn prepare_document(
     let gated = match gate_document(policy, signer, ctx, meta, &stream, drafts, None, cfg)? {
         GateDecision::Proceed(g) => g,
         GateDecision::SkipFile { rule_ids } => {
-            return Ok(blocked(signer, req, extractor.id(), rule_ids));
+            return Ok(blocked(signer, req, extractor.id(), &rule_ids));
         }
     };
 
@@ -402,11 +402,7 @@ impl DocumentPreparer {
         Ok(bytes)
     }
 
-    fn prepared(
-        input: &PrepareInput,
-        status: DocStatus,
-        batch: WriteBatch,
-    ) -> Prepared {
+    fn prepared(input: &PrepareInput, status: DocStatus, batch: WriteBatch) -> Prepared {
         Prepared {
             seq: input.seq,
             source: Some(input.source.clone()),
@@ -456,11 +452,7 @@ impl DocumentPreparer {
         }
     }
 
-    fn ready(
-        &self,
-        input: &PrepareInput,
-        graph: &PreparedGraph,
-    ) -> Result<Prepared, IngestError> {
+    fn ready(&self, input: &PrepareInput, graph: &PreparedGraph) -> Result<Prepared, IngestError> {
         let props = &graph.document.props;
         if let Some(hash) = &props.content_hash {
             let key = Self::skip_key(Identity::ContentHash(hash.clone()), props, input);
@@ -593,13 +585,7 @@ impl DocumentPreparer {
         };
         let prepared = {
             let policy = self.policy();
-            prepare_document(
-                &policy,
-                self.signer.as_ref(),
-                ctx,
-                &req,
-                &self.chunk,
-            )?
+            prepare_document(&policy, self.signer.as_ref(), ctx, &req, &self.chunk)?
         };
         let bytes_hmac = self
             .capture

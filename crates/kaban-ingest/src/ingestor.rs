@@ -432,8 +432,7 @@ impl Ingestor {
                         report.cancelled = true;
                         break;
                     };
-                    let blocked =
-                        blocked_path_document(&ws, &keyed, &rule_ids, &key);
+                    let blocked = blocked_path_document(&ws, &keyed, &rule_ids, &key);
                     let seq = next_seq;
                     next_seq += 1;
                     let prepared = Prepared {

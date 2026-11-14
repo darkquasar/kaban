@@ -8,8 +8,8 @@ use crate::graph::{ExistingDocument, ingest_batch, reconcile_failed_batch};
 use crate::ids::PIPELINE_VERSION;
 use crate::model::{DocStatus, IngestError, SourceId};
 use kaban_core::{
-    Actor, BatchReport, GraphStore, NewNode, NodeId, Op, OutcomeKind, WorkspaceId,
-    WriteBatch, WriteCtx,
+    Actor, BatchReport, GraphStore, NewNode, NodeId, Op, OutcomeKind, WorkspaceId, WriteBatch,
+    WriteCtx,
 };
 use std::collections::BTreeMap;
 use std::sync::Arc;

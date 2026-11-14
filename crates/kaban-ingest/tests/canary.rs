@@ -57,12 +57,7 @@ fn a_redact_hit_visible_only_in_the_key_value_view_masks_the_value_and_is_counte
         "the bare value is clean"
     );
     let fm = serde_json::json!({ "customer": "alice-7781", "note": "fine" });
-    match gate_metadata(
-        &policy,
-        Some("Doc"),
-        &fm,
-        None,
-    ) {
+    match gate_metadata(&policy, Some("Doc"), &fm, None) {
         MetaDecision::Proceed(meta) => {
             assert_eq!(meta.frontmatter["customer"], "[REDACTED:customer-view]");
             assert_eq!(meta.frontmatter["note"], "fine");
@@ -225,7 +220,10 @@ fn a_secret_split_across_two_chunks_is_caught_by_the_window_scan_and_skips_the_f
                 "{rule_ids:?}"
             );
             let joined = rule_ids.join(" ");
-            assert!(!joined.contains("Sup3r") && !joined.contains("S3cret"), "{joined}");
+            assert!(
+                !joined.contains("Sup3r") && !joined.contains("S3cret"),
+                "{joined}"
+            );
         }
         GateDecision::Proceed(g) => panic!("must skip: {g:?}"),
     }

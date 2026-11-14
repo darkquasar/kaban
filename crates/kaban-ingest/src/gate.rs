@@ -198,10 +198,7 @@ fn gate_value(
                 } else {
                     format!("{path}.{k}")
                 };
-                out.insert(
-                    key.into_owned(),
-                    gate_value(policy, &child, v, meta)?,
-                );
+                out.insert(key.into_owned(), gate_value(policy, &child, v, meta)?);
             }
             Ok(Value::Object(out))
         }

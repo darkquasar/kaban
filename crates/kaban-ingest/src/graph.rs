@@ -201,10 +201,7 @@ pub struct Assembled {
 /// Assign `section_id`/`chunk_id` (DI1.1) over the sanitized heading paths and chunk texts and
 /// fix the reading order (`order` on sections and chunks, which `build_batch` turns into
 /// `NEXT`). Heading texts are persisted and are id inputs, so they are gated here first (S1).
-pub fn assemble(
-    policy: &Policy,
-    input: AssembleInput<'_>,
-) -> Assembled {
+pub fn assemble(policy: &Policy, input: AssembleInput<'_>) -> Assembled {
     let AssembleInput {
         source,
         mut props,
