@@ -11,13 +11,7 @@ use serde_json::json;
 #[tokio::test]
 async fn links_resolve_only_active_same_workspace_nodes() {
     let mut rig = common::real::rig("kaban-e39-targets", "isolation");
-    let mut ontology = kaban_core::shipped::resolved().unwrap();
-    ontology
-        .priors
-        .insert("script.ingest_submit.edge".into(), 1.0);
-    ontology
-        .priors
-        .insert("script.ingest_submit.kind_of_record".into(), 1.0);
+    let ontology = kaban_core::shipped::resolved().unwrap();
     rig.store = std::sync::Arc::new(
         kaban_store_sqlite::SqliteStore::open_memory()
             .unwrap()

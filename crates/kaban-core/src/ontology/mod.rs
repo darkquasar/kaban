@@ -9,7 +9,8 @@ pub mod meta;
 pub mod resolve;
 
 pub use meta::{
-    DirName, IdentifierError, Index, KindBody, KindName, Ns, OntologyFile, RelBody, RelName, Stamp,
+    DirName, IGNORED_FIELDS, IdentifierError, Index, KindBody, KindName, Ns, OntologyFile,
+    OntologyWarning, RelBody, RelName, Stamp,
 };
 pub use resolve::{NamespaceSet, Ontology, Qualified, resolve, split_stored, stored_name};
 
@@ -52,8 +53,8 @@ pub enum OntologyError {
         rule: String,
     },
     /// A value outside its engine-spec §3.1 admission range (`version >= 1`,
-    /// `rank.expand_depth <= 4`, question `depth <= 3`, `priors`, `min_confidence` and
-    /// `confidence_required` in `[0, 1]`): `schema_invalid:range:<dotted path>`.
+    /// `rank.expand_depth <= 4`, question `depth <= 3`, `min_confidence` in `[0, 1]`):
+    /// `schema_invalid:range:<dotted path>`.
     #[error("schema_invalid:range:{path}")]
     OutOfRange {
         /// The dotted path of the field (never its value).

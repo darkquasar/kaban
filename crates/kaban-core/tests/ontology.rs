@@ -264,7 +264,7 @@ fn names_failing_a_regex_fail_invalid_identifier() {
 }
 
 /// Engine-spec §3.1 admission ranges (E1.3a RE1-4): `version >= 1`, `rank.expand_depth <= 4`,
-/// question `depth <= 3`, `priors`, `min_confidence` and `confidence_required` in `[0, 1]` fail
+/// question `depth <= 3` and `min_confidence` in `[0, 1]` fail
 /// `schema_invalid:range:<path>` at resolution; `group_by` is a closed vocabulary and `where`
 /// a mapping, refused by the file form with the field path. No text carries the value.
 #[test]
@@ -280,16 +280,8 @@ fn values_outside_the_admission_ranges_fail_with_the_field_path_and_never_the_va
             "schema_invalid:range:questions.recent.depth",
         ),
         (
-            "neg_range_prior.yaml",
-            "schema_invalid:range:priors.gazetteer.id.exact",
-        ),
-        (
             "neg_range_min_confidence.yaml",
             "schema_invalid:range:kinds.Thing.min_confidence",
-        ),
-        (
-            "neg_range_confidence_required.yaml",
-            "schema_invalid:range:rels.R.confidence_required",
         ),
         (
             "neg_question_group_by.yaml",
@@ -312,7 +304,7 @@ fn values_outside_the_admission_ranges_fail_with_the_field_path_and_never_the_va
     // shapes
     let o = resolve(
         &[OntologyFile::from_yaml(
-            "ontology: shop\nversion: 1\nkinds:\n  Thing: {description: t, rank: {expand_depth: 4}, min_confidence: 1}\nrels: {}\npriors: {a.b.c: 0}\nquestions:\n  recent: {kinds: [Thing], where: {}, order: [currency], depth: 3, group_by: dup_key}\n",
+            "ontology: shop\nversion: 1\nkinds:\n  Thing: {description: t, rank: {expand_depth: 4}, min_confidence: 1}\nrels: {}\nquestions:\n  recent: {kinds: [Thing], where: {}, order: [currency], depth: 3, group_by: dup_key}\n",
         )
         .unwrap()],
         &NamespaceSet::new(),
@@ -723,4 +715,48 @@ fn the_shipped_ontologies_leave_document_kinds_unstamped_and_stamp_the_governed_
     for governed in ["Decision", "Convention", "Failure"] {
         assert!(stamped.contains(governed), "{governed} stamps per commit");
     }
+}
+
+/// The removed governance keys load and are ignored with one warning each (the PC-5 rule for
+/// config sections): a top-level `priors` block and a rel's `confidence_required`, here with
+/// values the old admission range refused, so nothing reads them any more.
+#[test]
+fn removed_governance_fields_load_with_one_warning_each() {
+    use kaban_core::ontology::{IGNORED_FIELDS, OntologyWarning};
+    for (name, field) in [
+        ("ignored_priors.yaml", "priors"),
+        (
+            "ignored_confidence_required.yaml",
+            "rels.*.confidence_required",
+        ),
+    ] {
+        let (file, warnings) = OntologyFile::from_yaml_reporting(&fixture_text(name)).unwrap();
+        assert_eq!(
+            warnings,
+            vec![OntologyWarning::IgnoredField { field }],
+            "{name}"
+        );
+        assert!(IGNORED_FIELDS.contains(&field));
+        assert_eq!(
+            warnings[0].to_string(),
+            format!("ontology field {field} is no longer used and is ignored")
+        );
+        resolve(&[file], &NamespaceSet::new()).unwrap();
+    }
+    let (_, both) = OntologyFile::from_yaml_reporting(
+        "ontology: shop\nversion: 1\nkinds: {}\nrels:\n  A: {confidence_required: 0.9}\n  B: {confidence_required: 0.5}\npriors: {a.b.c: 2}\n",
+    )
+    .unwrap();
+    assert_eq!(
+        both,
+        IGNORED_FIELDS
+            .map(|field| OntologyWarning::IgnoredField { field })
+            .to_vec(),
+        "one warning per field, not per occurrence"
+    );
+    let (_, none) = OntologyFile::from_yaml_reporting(
+        "ontology: shop\nversion: 1\nkinds: {}\nrels: {}\n",
+    )
+    .unwrap();
+    assert!(none.is_empty());
 }

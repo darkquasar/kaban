@@ -26,13 +26,7 @@ fn api(rig: &common::real::Rig, cap: u32) -> KabanApi {
 }
 fn rig(name: &str) -> common::real::Rig {
     let mut rig = common::real::rig("kaban-e310-finish", name);
-    let mut ontology = kaban_core::shipped::resolved().unwrap();
-    ontology
-        .priors
-        .insert("script.ingest_submit.edge".into(), 1.0);
-    ontology
-        .priors
-        .insert("script.ingest_submit.kind_of_record".into(), 1.0);
+    let ontology = kaban_core::shipped::resolved().unwrap();
     rig.store = std::sync::Arc::new(
         kaban_store_sqlite::SqliteStore::open_memory()
             .unwrap()

@@ -10,7 +10,9 @@
 # A kind body may also carry a top-level `acceptance: agent | human` (OWN-84 (1), core-spec F4;
 # E2.5g): who accepts an EN-F5a candidate or EN-F13 `proposed` record of that ungoverned kind
 # (`agent` when absent; refused beside the `governed` mixin, whose own `acceptance` is the
-# tier). The same key under `discovered` is the tier of undeclared (`x:`) labels.
+# tier). The same key under `discovered` is the tier of undeclared (`x:`) labels. The removed
+# governance keys (top-level `priors`, a rel's `confidence_required`) are dropped with one warning
+# each before this schema runs, so they are not listed here.
 type: object
 additionalProperties: false
 required: [ontology, version, kinds, rels]
@@ -49,5 +51,4 @@ properties:
           min_mean_score: {type: number}
   source_types: {type: object}
   default_kind: {type: string}
-  priors: {type: object}
   questions: {type: object}

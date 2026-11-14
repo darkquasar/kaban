@@ -175,8 +175,6 @@ pub struct ResolvedRel {
     pub description: Option<String>,
     /// Lifecycle side effect.
     pub on_link: Option<OnLink>,
-    /// Minimum confidence for an auto edge.
-    pub confidence_required: Option<f64>,
     /// Needs a human (EN-S10).
     pub governed_semantics: bool,
 }
@@ -236,8 +234,6 @@ pub struct Ontology {
     pub source_types: BTreeMap<Ns, BTreeMap<String, ResolvedSourceType>>,
     /// `default_kind` per namespace.
     pub default_kind: BTreeMap<Ns, Qualified>,
-    /// Priors merged across files (one value per key).
-    pub priors: BTreeMap<String, f64>,
     /// Questions by `(ns, name)`.
     pub questions: BTreeMap<Qualified, ResolvedQuestion>,
 }
@@ -517,7 +513,6 @@ pub fn resolve_with(
                 directed,
                 description: body.description.clone(),
                 on_link: body.on_link,
-                confidence_required: body.confidence_required,
                 governed_semantics: body.governed_semantics.unwrap_or(false),
             },
         );
@@ -565,16 +560,6 @@ pub fn resolve_with(
                 }
                 _ => {
                     ontology.default_kind.insert(ns.clone(), q);
-                }
-            }
-        }
-        for (key, value) in &file.priors {
-            match ontology.priors.get(key) {
-                Some(existing) if existing.to_bits() != value.to_bits() => {
-                    return Err(conflict(&qualified(ns, key), "duplicate_prior"));
-                }
-                _ => {
-                    ontology.priors.insert(key.clone(), *value);
                 }
             }
         }
