@@ -311,7 +311,8 @@ async fn submitted_records_and_edges_are_active_for_a_second_process() {
 /// `min_score: 0` finds every edge and the threshold splits them at the record confidence.
 #[tokio::test]
 async fn submitted_edges_score_their_record_confidence_for_score_filtered_traversal() {
-    let rig = common::real::rig_on_disk("kaban-e39-submit", "scores", kaban_policy::Policy::empty());
+    let rig =
+        common::real::rig_on_disk("kaban-e39-submit", "scores", kaban_policy::Policy::empty());
     std::fs::write(rig.root.join("a.md"), "# Source\n\nThree harmless facts.\n").unwrap();
     let api = api(&rig);
     let prepared = brief(&api, &rig.root, "a.md", &IngestOpts::default())
@@ -368,7 +369,11 @@ async fn submitted_edges_score_their_record_confidence_for_score_filtered_traver
         (two.clone(), three.clone(), Some(1.0)),
     ];
     both.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
-    assert_eq!(walk(&["RELATES_TO"], 0), both, "min_score 0 keeps every edge");
+    assert_eq!(
+        walk(&["RELATES_TO"], 0),
+        both,
+        "min_score 0 keeps every edge"
+    );
     assert_eq!(walk(&["RELATES_TO"], 8000), both, "the 0.8 edge meets 0.8");
     assert!(
         walk(&["RELATES_TO"], 8001).is_empty(),

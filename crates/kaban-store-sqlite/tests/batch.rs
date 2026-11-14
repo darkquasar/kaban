@@ -1730,7 +1730,11 @@ fn a_human_link_with_a_conflicting_owner_prop_stays_human_against_producer_batch
         )
         .unwrap();
 
-    assert_eq!(out_edges(&store, &chunk), stored, "the human link is unchanged");
+    assert_eq!(
+        out_edges(&store, &chunk),
+        stored,
+        "the human link is unchanged"
+    );
     assert_eq!(stored.len(), 1, "{stored:?}");
     assert_eq!(stored[0].1["owner"], "human", "{stored:?}");
     assert_eq!(stored[0].1["note"], "the human's", "{stored:?}");
