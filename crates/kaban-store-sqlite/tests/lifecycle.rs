@@ -1,7 +1,9 @@
 //! Lifecycle semantics in the store (core-spec §4, F5, F6; DEL-08 survivors of the claim-era
 //! file): purge keeps a ghost row with one purge changes row, traversal and recall never expand
 //! through a hidden bridge, and a user rel declaring `on_link: archive_target` in the ontology's
-//! rule set archives its target while a rel without it is inert.
+//! rule set archives its target while a rel without it is inert. The text index holds active
+//! rows only, an archived record cannot be archived again but can be tombstoned, and tombstone
+//! is the default `forget` mode, hiding the record from every default read.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // test code: failures are the assertion
 
@@ -9,8 +11,8 @@ mod common;
 
 use common::{Scratch, created, ctx, nid};
 use kaban_core::{
-    ForgetMode, Lifecycle, MemoryStore, NodeId, RecallQuery, SchemaStore, TraverseQuery,
-    TraverseResult,
+    ForgetMode, InvalidTransition, Lifecycle, MemoryStore, NodeId, RecallQuery, SchemaStore,
+    TraverseQuery, TraverseResult,
 };
 use kaban_store_sqlite::SqliteStore;
 
@@ -41,6 +43,139 @@ fn traverse_from(store: &SqliteStore, id: &str) -> kaban_core::Result<TraverseRe
         workspace_id: None,
         ..Default::default()
     })
+}
+
+#[test]
+fn fts_holds_active_rows_only_after_tombstone_and_archive() {
+    let store = SqliteStore::open_memory().unwrap();
+    let fact = created(&store, "Fact", "quokkas live on rottnest island");
+    let decision = created(&store, "Decision", "we deploy quokka builds on fridays");
+    assert_eq!(fact.lifecycle, Lifecycle::Active);
+    assert_eq!(decision.lifecycle, Lifecycle::Active, "every write is active (REC-08)");
+    assert_eq!(fact.workspace_id, "default");
+    assert!(found(&store, "quokkas rottnest", &fact.id));
+    assert!(found(&store, "quokka fridays", &decision.id));
+
+    store
+        .forget(&node_id(&fact.id), ForgetMode::Invalidate, &ctx())
+        .unwrap();
+    let gone = store.get(&node_id(&fact.id), true).unwrap().unwrap();
+    assert_eq!(gone.lifecycle, Lifecycle::Tombstoned, "OD-4 default");
+    assert!(gone.valid_to.is_some());
+    assert!(
+        !found(&store, "quokkas rottnest", &fact.id),
+        "tombstoned rows leave the index"
+    );
+
+    store
+        .forget(&node_id(&decision.id), ForgetMode::Archive, &ctx())
+        .unwrap();
+    let archived = store.get(&node_id(&decision.id), false).unwrap().unwrap();
+    assert_eq!(archived.lifecycle, Lifecycle::Archived);
+    assert!(
+        !found(&store, "quokka fridays", &decision.id),
+        "archived rows leave the index"
+    );
+    // a new identical note after a tombstone is `created` (OD-16)
+    let again = created(&store, "Fact", "quokkas live on rottnest island");
+    assert_ne!(again.id, fact.id);
+    assert!(found(&store, "quokkas rottnest", &again.id));
+}
+
+/// Archive is not idempotent: a second archive is `InvalidTransition`; a tombstone of an
+/// archived record is allowed.
+#[test]
+fn an_archived_record_cannot_be_archived_again_but_can_be_tombstoned() {
+    let store = SqliteStore::open_memory().unwrap();
+    let fact = created(&store, "Fact", "bilbies have long ears");
+    let first = store
+        .forget(&node_id(&fact.id), ForgetMode::Archive, &ctx())
+        .unwrap();
+    assert_eq!(first.lifecycle, Lifecycle::Archived);
+    assert!(
+        store.get(&node_id(&fact.id), false).unwrap().is_some(),
+        "archived stays visible by id"
+    );
+    assert!(matches!(
+        store.forget(&node_id(&fact.id), ForgetMode::Archive, &ctx()),
+        Err(kaban_core::StoreError::InvalidTransition(
+            InvalidTransition::Lifecycle {
+                from: Lifecycle::Archived,
+                to: Lifecycle::Archived
+            }
+        ))
+    ));
+    let second = store
+        .forget(&node_id(&fact.id), ForgetMode::Tombstone, &ctx())
+        .unwrap();
+    assert_eq!(second.lifecycle, Lifecycle::Tombstoned);
+    assert!(second.outbox_seq > first.outbox_seq);
+}
+
+/// C2.3 slice 1 (core-spec F5, OD-16): `tombstone` is the default mode and the row disappears
+/// from every default read, while a new identical note is `created`, never answered with the
+/// tombstone as `existing`.
+#[test]
+fn tombstone_is_the_default_and_hides_the_node_from_every_default_read() {
+    let store = SqliteStore::open_memory().unwrap();
+    let rule = created(&store, "Convention", "wombat builds run on tuesdays");
+    let fact = created(&store, "Fact", "wombats dig square burrows");
+    store
+        .link(
+            &node_id(&fact.id),
+            &node_id(&rule.id),
+            "RELATES_TO",
+            None,
+            None,
+            &ctx(),
+        )
+        .unwrap();
+
+    let outcome = store
+        .forget(&node_id(&rule.id), ForgetMode::default(), &ctx())
+        .unwrap();
+    assert_eq!(outcome.lifecycle, Lifecycle::Tombstoned);
+    assert!(outcome.outbox_seq > 0, "the write produced a changes row");
+
+    assert!(
+        store.get(&node_id(&rule.id), false).unwrap().is_none(),
+        "hidden from get by default"
+    );
+    let hidden = store.get(&node_id(&rule.id), true).unwrap().unwrap();
+    assert_eq!((hidden.lifecycle, hidden.rev), (Lifecycle::Tombstoned, 2));
+    assert!(!found(&store, "wombat tuesdays", &rule.id), "not in recall");
+    // graph expansion from its neighbour must not resurface it either
+    let via_graph = store
+        .recall(&RecallQuery {
+            query: "wombats burrows".into(),
+            hops: 1,
+            limit: 5,
+            ..Default::default()
+        })
+        .unwrap();
+    assert!(
+        via_graph.iter().all(|h| h.node.id != rule.id),
+        "{via_graph:?}"
+    );
+    let t = traverse_from(&store, &fact.id).unwrap();
+    assert!(t.nodes.iter().all(|n| n.id != rule.id), "{t:?}");
+    assert!(t.edges.is_empty(), "edges to hidden nodes are not returned");
+    assert!(
+        matches!(
+            traverse_from(&store, &rule.id),
+            Err(kaban_core::StoreError::NotFound(_))
+        ),
+        "a tombstoned start id is as good as absent"
+    );
+    // OD-16: a new identical note is created, the tombstone is never `existing`
+    let again = created(&store, "Convention", "wombat builds run on tuesdays");
+    assert_ne!(again.id, rule.id);
+    assert!(found(&store, "wombat tuesdays", &again.id));
+    // tombstoned is terminal except for purge
+    assert!(matches!(
+        store.forget(&node_id(&rule.id), ForgetMode::Archive, &ctx()),
+        Err(kaban_core::StoreError::InvalidTransition(_))
+    ));
 }
 
 /// `(entity, op, id)` of every changes row with `seq > after`, in order.
