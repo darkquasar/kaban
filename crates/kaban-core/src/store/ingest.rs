@@ -5,8 +5,8 @@ use crate::config::PromoteWhen;
 use crate::error::Result;
 use crate::ids::NodeId;
 use crate::model::{
-    BatchReport, IndexMeta, KindStat, Node, PromoteReport, PruneReport, RescanAction, RescanReport,
-    WriteBatch,
+    BatchReport, IndexMeta, KindStat, Node, PromoteReport, PruneReport, RescanCursor, RescanJudge,
+    RescanReport, WriteBatch,
 };
 use crate::ontology::Qualified;
 use std::time::Duration;
@@ -238,26 +238,41 @@ pub trait IngestStore: Send + Sync {
     /// `NotFound` (unknown, purged or other-workspace id), `KindMismatch`, `InvalidTransition`
     /// or a backend error.
     fn apply_batch(&self, batch: WriteBatch, ctx: &WriteCtx) -> Result<BatchReport>;
-    /// Re-judge one batch of at most `batch` non-purged nodes after position `after` (the
-    /// previous batch's [`RescanReport::cursor`], `0` to start), oldest row first, in one
-    /// write transaction (core-spec S4; core-plan C2.7): `f` decides per node and the store
-    /// applies the [`RescanAction`] (nothing; rewrite every rewritable string column in place
-    /// with a new `rev` and a new `content_hash` over the id and the masked strings; or
-    /// tombstone with a `policy-reject` event). Nodes carry no policy stamp (REC-08), so the
-    /// caller walks the table by cursor until `scanned == 0`; a cancelled or crashed run
-    /// leaves the earlier batches committed and the walk restarts on the next run (idempotent).
-    /// An empty batch records `index_meta.policy_hash = policy_version` in the same
-    /// transaction, the marker a later run compares the loaded policy with. `f` must not call
-    /// back into the store.
+    /// Re-judge one batch of stored rows against `policy_version` in one write transaction
+    /// (core-spec S4; core-plan C2.7), resuming at `at` (the previous batch's
+    /// [`RescanReport::cursor`], [`RescanCursor::Start`] to begin a run); the caller loops
+    /// until the cursor is [`RescanCursor::Done`]. `judge` decides per row and the store
+    /// applies the action: for a node nothing, a rewrite of every rewritable string column
+    /// in place (new `rev`, new `content_hash` over the id and the masked strings) or a
+    /// tombstone; for an edge nothing, masked `props` in place or a delete. Rows carry no
+    /// policy stamp (REC-08); freshness is the change log instead:
+    ///
+    /// - From `Start`, when `index_meta.policy_hash` differs from `policy_version` (or the
+    ///   change log was pruned past the watermark), the run is a full walk: the watermark
+    ///   [`IndexMeta::POLICY_SCAN_SEQ`] is reset to the change-log head, every non-purged
+    ///   node is walked by row id, then every edge; the empty edge read records
+    ///   `policy_hash = policy_version` in the same transaction.
+    /// - Every batch first judges the rows the change log names after the watermark (at most
+    ///   `batch` entries), so a row another writer changed behind the walk's cursor is judged
+    ///   again; rows ahead of the cursor are left to the walk. The watermark then moves past
+    ///   the entries read and, when the log is caught up, past the batch's own writes (with
+    ///   more than `batch` entries pending, the own writes are judged again later: the
+    ///   actions are idempotent, a row may count twice in a run's report).
+    /// - From `Start` with a matching marker the run judges only the change log, so a row
+    ///   written after a completed walk (by a process under an older policy, say) is judged
+    ///   by the next run.
+    ///
+    /// A cancelled or crashed walk leaves the earlier batches committed and restarts on the
+    /// next run (idempotent). `judge` must not call back into the store.
     ///
     /// # Errors
     /// Backend errors; the batch is rolled back.
     fn rescan(
         &self,
         policy_version: &str,
-        after: u64,
+        at: RescanCursor,
         batch: usize,
-        f: &mut dyn FnMut(&Node) -> RescanAction,
+        judge: &mut dyn RescanJudge,
     ) -> Result<RescanReport>;
     /// Every `index_meta` entry (DB-scoped bookkeeping: schema version, `db_id`, policy hash).
     ///

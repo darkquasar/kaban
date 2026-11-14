@@ -460,27 +460,32 @@ fn a_rescan_redaction_rewrites_the_body_encoded_and_reads_back_masked() {
     let clean = created(&store, "Fact", &body("quokka", 3000));
 
     let report = store
-        .rescan("v2", 0, 100, &mut |n| {
-            if n.text.contains("hunter2") {
-                RescanAction::Redact {
-                    strings: Box::new(RedactedStrings {
-                        text: n.text.replace("hunter2", "[redacted]"),
-                        summary: n.summary.clone(),
-                        tags: n.tags.clone(),
-                        props: n.props.clone(),
-                        path_scope: n.path_scope.clone(),
-                        session_id: n.session_id.clone(),
-                        agent_id: n.agent_id.clone(),
-                        repo: n.repo.clone(),
-                        commit_sha: n.commit_sha.clone(),
-                        accepted_commit: n.accepted_commit.clone(),
-                        dup_key: n.dup_key.clone(),
-                    }),
+        .rescan(
+            "v2",
+            kaban_core::RescanCursor::Start,
+            100,
+            &mut |n: &kaban_core::Node| {
+                if n.text.contains("hunter2") {
+                    RescanAction::Redact {
+                        strings: Box::new(RedactedStrings {
+                            text: n.text.replace("hunter2", "[redacted]"),
+                            summary: n.summary.clone(),
+                            tags: n.tags.clone(),
+                            props: n.props.clone(),
+                            path_scope: n.path_scope.clone(),
+                            session_id: n.session_id.clone(),
+                            agent_id: n.agent_id.clone(),
+                            repo: n.repo.clone(),
+                            commit_sha: n.commit_sha.clone(),
+                            accepted_commit: n.accepted_commit.clone(),
+                            dup_key: n.dup_key.clone(),
+                        }),
+                    }
+                } else {
+                    RescanAction::Keep
                 }
-            } else {
-                RescanAction::Keep
-            }
-        })
+            },
+        )
         .unwrap();
 
     assert_eq!((report.redacted, report.kept), (1, 1));

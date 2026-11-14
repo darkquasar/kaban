@@ -60,10 +60,16 @@ fn server_with_seeded_text(s: &Scratch, text: &str) -> Server {
                 &ctx,
             )
             .unwrap();
-        // a walk past the last row is the empty batch that records the marker
-        store
-            .rescan(&version, u64::MAX, 1, &mut |_| RescanAction::Keep)
-            .unwrap();
+        // a complete walk records the marker
+        let mut at = kaban_core::RescanCursor::Start;
+        while at != kaban_core::RescanCursor::Done {
+            at = store
+                .rescan(&version, at, 100, &mut |_: &kaban_core::Node| {
+                    RescanAction::Keep
+                })
+                .unwrap()
+                .cursor;
+        }
     }
     Server::start_with(
         s,

@@ -1,9 +1,10 @@
 //! `kaban rescan`: run the rescan job in the foreground (core-spec S4; core-plan C2.7) and print
-//! its report as JSON. Nodes stamped with another policy version than the loaded policy's
-//! `effective_hash()` are re-judged in batches of 500 (one transaction each); reject hits are
-//! tombstoned with a `policy-reject` event, redact hits masked in place, and
-//! `index_meta.policy_hash` records the policy once every node is stamped. Nothing to do when
-//! the hash already matches (`status: up_to_date`).
+//! its report as JSON. Under a policy whose `effective_hash()` differs from
+//! `index_meta.policy_hash` every node and edge is re-judged in batches of 500 (one transaction
+//! each); otherwise only the rows the change log names after the `policy_scan_seq` watermark
+//! are. Reject hits tombstone a node or delete an edge, redact hits are masked in place, and
+//! `policy_hash` records the policy once the walk completes. Nothing to do when every row is
+//! already judged (`status: up_to_date`).
 //!
 //! Exit codes (core-spec §6): 0 ok, 4 policy/config error, 5 store error.
 

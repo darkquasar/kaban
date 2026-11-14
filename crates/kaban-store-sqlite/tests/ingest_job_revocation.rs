@@ -4,7 +4,7 @@ use kaban_core::{
     Actor, EdgeDiff, ForgetMode, IngestJob, IngestStore, JobId, JobStatus, MemoryStore, NewNode,
     NodeId, Op, WorkspaceId, WriteBatch, WriteCtx,
 };
-use kaban_core::{Lifecycle, RescanAction};
+use kaban_core::{Lifecycle, Node, RescanAction, RescanCursor};
 use kaban_store_sqlite::SqliteStore;
 use serde_json::json;
 
@@ -76,7 +76,7 @@ fn batch_tombstone_and_rescan_reject_revoke_and_failed_batch_rolls_back() {
         let (store, document, job, ctx) = fixture();
         if route == 1 {
             store
-                .rescan("changed", 0, 100, &mut |n| {
+                .rescan("changed", RescanCursor::Start, 100, &mut |n: &Node| {
                     if n.kind == "Document" {
                         RescanAction::Reject
                     } else {

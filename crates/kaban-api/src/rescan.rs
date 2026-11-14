@@ -1,38 +1,41 @@
 //! The rescan job (core-spec S4 "rescan job after policy change"; core-plan C2.7; MD-18,
-//! MD-19): on every start, when the database's `index_meta.policy_hash` differs from the loaded
-//! policy's `effective_hash()`, every stored node is re-judged in batches of [`RESCAN_BATCH`],
-//! one write transaction per batch walking the table by row position, the cancellation token
-//! checked between batches. Nodes carry no policy stamp (REC-08): the marker, recorded with the
-//! final empty batch, is what a later start compares. The binary runs it on `spawn_blocking`
-//! after serving starts (`kaban serve`) or in the foreground (`kaban rescan`).
+//! MD-19): on every start the stored rows the loaded policy has not judged yet are re-judged in
+//! batches of [`RESCAN_BATCH`], one write transaction per batch, the cancellation token checked
+//! between batches. Rows carry no policy stamp (REC-08); the store's change log is the freshness
+//! signal. When the database's `index_meta.policy_hash` differs from the loaded policy's
+//! `effective_hash()` the run walks every node and every edge; otherwise it judges only the rows
+//! the change log names after the `policy_scan_seq` watermark, so a row written after a complete
+//! walk (by a process still under an older policy, say) or behind a running walk's cursor is
+//! judged by the next run. The binary runs it on `spawn_blocking` after serving starts
+//! (`kaban serve`) or in the foreground (`kaban rescan`).
 //!
 //! ```text
-//!   rescan_if_policy_changed(token)                      store (one BEGIN IMMEDIATE per batch)
-//!   +------------------------------------------+        +-----------------------------------+
-//!   | marker == version => UpToDate             |        | SELECT <=500 nodes WHERE          |
-//!   | loop:                                     |  =>    |   rid > cursor                    |
-//!   |   store.rescan(version, cursor, 500, f) --+------->|   AND lifecycle <> 'purged'       |
-//!   |   cursor := report.cursor                 |        | none: index_meta.policy_hash :=   |
-//!   |   scanned == 0 => Completed               |        |   version (same transaction)      |
-//!   |   token cancelled => Cancelled            |        | per node: judge(node) ->          |
-//!   |   (earlier batches committed)             |        |   Keep   : nothing                |
-//!   +------------------------------------------+        |   Redact : rewrite every string   |
-//!                                                        |            column, new hash,      |
-//!   judge = scan_node_strings (inventory.rs):            |            rev+1                  |
-//!   the same persisted strings the read projection       |   Reject : tombstone              |
-//!   scans; reject anywhere => Reject                     | COMMIT                            |
-//!                                                        +-----------------------------------+
+//!   rescan_if_policy_changed(token)                  store.rescan (one BEGIN IMMEDIATE each)
+//!   +---------------------------------------+       +------------------------------------+
+//!   | marker == version and                 |       | change log after the watermark      |
+//!   |   watermark == head => UpToDate        |       |   (rows behind the walk's cursor)   |
+//!   | loop from Start:                      |  =>   | walk: nodes, then edges             |
+//!   |   store.rescan(version, cursor, 500) -+------>| complete walk: policy_hash :=       |
+//!   |   cursor == Done => Completed         |       |   version (same transaction)        |
+//!   |   token cancelled => Cancelled        |       | per row: judge(row) ->              |
+//!   |   (earlier batches committed)         |       |   Keep / Redact in place /          |
+//!   +---------------------------------------+       |   Reject (tombstone node, drop edge)|
+//!                                                   | watermark := head after own writes  |
+//!   judge = scan_node_strings (inventory.rs)        +------------------------------------+
+//!   for nodes, the props scan of `link` for edges
 //! ```
 
 use crate::api::KabanApi;
 use crate::error::ApiError;
 use crate::types::{RescanOutcome, RescanStatus};
-use kaban_core::{IndexMeta, Node, RescanAction, RescanReport};
+use kaban_core::{
+    Edge, EdgeRescanAction, IndexMeta, Node, RescanAction, RescanCursor, RescanJudge, RescanReport,
+};
 use kaban_policy::Policy;
 use std::sync::{Arc, RwLock};
 use tokio_util::sync::CancellationToken;
 
-/// Nodes per rescan transaction (MD-18).
+/// Rows (and change-log entries) per rescan transaction (MD-18).
 pub const RESCAN_BATCH: usize = 500;
 
 /// Tool name recorded on rescan verdicts.
@@ -45,12 +48,11 @@ impl KabanApi {
         Arc::clone(&self.policy)
     }
 
-    /// Re-judge every stored node when the database's policy marker differs from the loaded
-    /// policy's version. Synchronous and blocking: callers run it on a blocking thread. One
-    /// transaction per batch of [`RESCAN_BATCH`] nodes; `cancel` is checked between batches, so
-    /// a cancelled run leaves the batches that ran committed and the marker unchanged, and the
-    /// next start walks the table again. `UpToDate` means the marker already matched or there
-    /// was no node to judge.
+    /// Re-judge the stored rows the loaded policy has not judged yet (see the module docs).
+    /// Synchronous and blocking: callers run it on a blocking thread. One transaction per
+    /// batch of [`RESCAN_BATCH`] rows; `cancel` is checked between batches, so a cancelled run
+    /// leaves the batches that ran committed (a cancelled walk leaves the marker unchanged and
+    /// the next start walks again). `UpToDate` means nothing was left to judge.
     ///
     /// # Errors
     /// Store errors; the batch that failed is rolled back and `policy_hash` is left unchanged.
@@ -68,23 +70,26 @@ impl KabanApi {
             redacted: 0,
             rejected: 0,
         };
-        // the store records the marker in the same transaction as the final empty batch
+        // a read-only check first: a database the loaded policy has fully judged takes no
+        // write transaction at start
         let marker = self.store.index_meta()?;
-        if marker.entries.get(IndexMeta::POLICY_HASH) == Some(&version) {
-            tracing::debug!(policy_version = %version, "policy unchanged; nothing to rescan");
+        let head = self.store.changes_head()?.to_string();
+        if marker.entries.get(IndexMeta::POLICY_HASH) == Some(&version)
+            && marker.entries.get(IndexMeta::POLICY_SCAN_SEQ) == Some(&head)
+        {
+            tracing::debug!(policy_version = %version, "policy unchanged and no row changed; nothing to rescan");
             return Ok(outcome);
         }
         let mut total = RescanReport::default();
+        let mut judge = Judge(self);
         loop {
             let report = self
                 .store
-                .rescan(&version, total.cursor, RESCAN_BATCH, &mut |node| {
-                    self.judge(node)
-                })?;
+                .rescan(&version, total.cursor, RESCAN_BATCH, &mut judge)?;
             total += report;
             if report.scanned > 0 {
                 if outcome.batches == 0 {
-                    tracing::info!(policy_version = %version, "policy changed; rescanning stored nodes");
+                    tracing::info!(policy_version = %version, "rescanning stored rows under the loaded policy");
                 }
                 outcome.batches += 1;
                 tracing::debug!(
@@ -95,8 +100,8 @@ impl KabanApi {
                     "rescan batch committed"
                 );
             }
-            if report.scanned == 0 {
-                // an empty database has nothing to rescan: it stays `UpToDate`
+            if report.cursor == RescanCursor::Done {
+                // nothing judged (an empty database, a log of deletes only) stays `UpToDate`
                 if outcome.batches > 0 {
                     outcome.status = RescanStatus::Completed;
                 }
@@ -122,6 +127,17 @@ impl KabanApi {
         Ok(outcome)
     }
 
+    /// Judge one stored edge's `props` with the scan `link` applies to them on write: a reject
+    /// hit deletes the edge, redact hits are masked in place.
+    fn judge_edge(&self, e: &Edge) -> EdgeRescanAction {
+        let mut red = Vec::new();
+        match self.scan_json(TOOL, "props", &e.props, &mut red) {
+            Err(_) => EdgeRescanAction::Reject,
+            Ok(props) if props != e.props => EdgeRescanAction::Redact { props },
+            Ok(_) => EdgeRescanAction::Keep,
+        }
+    }
+
     /// Judge one stored node against the loaded policy over the one inventory of persisted
     /// strings the read projection uses too (`inventory.rs`, R2-2): a reject hit on any of them
     /// tombstones the node; redact hits are masked in place in every rewritable column; a
@@ -137,5 +153,17 @@ impl KabanApi {
             },
             Ok(_) => RescanAction::Keep,
         }
+    }
+}
+
+/// The service's policy as the store's per-row judge.
+struct Judge<'a>(&'a KabanApi);
+
+impl RescanJudge for Judge<'_> {
+    fn node(&mut self, node: &Node) -> RescanAction {
+        self.0.judge(node)
+    }
+    fn edge(&mut self, edge: &Edge) -> EdgeRescanAction {
+        self.0.judge_edge(edge)
     }
 }

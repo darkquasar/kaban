@@ -7,12 +7,14 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum RescanStatus {
-    /// `index_meta.policy_hash` already matched the loaded policy: nothing was scanned.
+    /// The loaded policy had already judged every stored row: nothing was scanned.
     UpToDate,
-    /// Every node is now stamped with the loaded policy and `policy_hash` records it.
+    /// Every row the loaded policy had not judged is judged; `policy_hash` records the policy
+    /// and `policy_scan_seq` the change-log position judged up to.
     Completed,
     /// The token was cancelled between batches: the batches that ran are committed, the rest
-    /// is pending and `policy_hash` is unchanged, so the next start resumes.
+    /// is pending (an unfinished walk leaves `policy_hash` unchanged), so the next start
+    /// resumes.
     Cancelled,
 }
 
@@ -21,16 +23,16 @@ pub enum RescanStatus {
 pub struct RescanOutcome {
     /// How the run ended.
     pub status: RescanStatus,
-    /// `effective_hash()` of the loaded policy (the version stamped on every judged node).
+    /// `effective_hash()` of the loaded policy.
     pub policy_version: String,
     /// Batches (transactions) that ran.
     pub batches: u64,
-    /// Nodes judged.
+    /// Rows (nodes and edges) judged.
     pub scanned: u64,
-    /// Nodes that passed (stamped only).
+    /// Rows that passed unchanged.
     pub kept: u64,
-    /// Nodes masked in place.
+    /// Rows masked in place.
     pub redacted: u64,
-    /// Nodes tombstoned with a `policy-reject` event.
+    /// Nodes tombstoned and edges deleted.
     pub rejected: u64,
 }

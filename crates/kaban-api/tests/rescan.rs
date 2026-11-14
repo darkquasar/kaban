@@ -213,16 +213,35 @@ fn cancellation_between_batches_leaves_earlier_batches_committed_and_the_rest_pe
     // third batch
     let s = Scratch::new("kaban-api-rescan", "cancel");
     let store = s.store();
-    let v1 = api_with(&store, V1);
     let total = 2 * RESCAN_BATCH + RESCAN_BATCH / 2;
-    for i in 0..total {
-        let text = if i == 10 || i == total - 10 {
-            format!("note {i} mentions the nightjar codename")
-        } else {
-            format!("note {i} about cargo and tokio")
-        };
-        v1.remember(fact(&text)).unwrap();
-    }
+    // seeded in one batch transaction: rows carry no policy stamp (REC-08), so how they were
+    // written does not matter to the rescan, and one transaction keeps the fixture fast
+    let ops = (0..total)
+        .map(|i| {
+            let text = if i == 10 || i == total - 10 {
+                format!("note {i} mentions the nightjar codename")
+            } else {
+                format!("note {i} about cargo and tokio")
+            };
+            kaban_core::Op::UpsertNode {
+                id: NodeId::new(),
+                node: kaban_core::NewNode {
+                    kind: "Fact".into(),
+                    text,
+                    ..Default::default()
+                },
+            }
+        })
+        .collect();
+    store
+        .apply_batch(
+            kaban_core::WriteBatch::new(kaban_core::WorkspaceId::default(), ops),
+            &kaban_core::WriteCtx::new(
+                kaban_core::WorkspaceId::default(),
+                kaban_core::Actor::Agent,
+            ),
+        )
+        .unwrap();
     let v2 = api_with(&store, V2);
     let version = v2.policy_version();
 
@@ -530,4 +549,100 @@ fn content_hash_after_redact_is_neither_the_original_hash_nor_the_masked_remembe
         "{again:?}"
     );
     assert!(![a.id.as_str(), b.id.as_str()].contains(&again.id.as_str()));
+}
+
+#[test]
+fn a_stale_node_written_after_the_marker_was_set_is_rescanned_at_the_next_start() {
+    let s = Scratch::new("kaban-api-rescan", "stale-after-marker");
+    let store = s.store();
+    let v2 = api_with(&store, V2);
+    v2.remember(fact("a clean note under v2")).unwrap();
+    let first = v2
+        .rescan_if_policy_changed(&CancellationToken::new())
+        .unwrap();
+    assert_eq!(first.status, RescanStatus::Completed, "{first:?}");
+    assert_eq!(
+        store.index_meta().unwrap().get(IndexMeta::POLICY_HASH),
+        Some(v2.policy_version().as_str()),
+        "{first:?}"
+    );
+    // another process, its own connection, still running the older policy writes a node the
+    // old policy lets through
+    let other = s.store();
+    let v1 = api_with(&other, V1);
+    let stale = v1
+        .remember(fact("the nightjar codename written by an old process"))
+        .unwrap();
+    drop(v1);
+    drop(other);
+
+    // the next start with v2 (marker already equal) must still find and judge it
+    let next = v2
+        .rescan_if_policy_changed(&CancellationToken::new())
+        .unwrap();
+    assert_eq!((next.scanned, next.rejected), (1, 1), "{next:?}");
+    assert_eq!(next.status, RescanStatus::Completed, "{next:?}");
+    assert!(store.get(&nid(&stale.id), false).unwrap().is_none());
+    // and a start with nothing new scans nothing
+    let idle = v2
+        .rescan_if_policy_changed(&CancellationToken::new())
+        .unwrap();
+    assert_eq!(
+        (idle.status, idle.scanned),
+        (RescanStatus::UpToDate, 0),
+        "{idle:?}"
+    );
+}
+
+/// The stored `props` of the `rel` edge from `src` to `dst`, if it exists.
+fn edge_props(s: &Scratch, src: &str, dst: &str) -> Option<String> {
+    rusqlite::Connection::open(s.db())
+        .unwrap()
+        .query_row(
+            "SELECT e.props FROM edge e JOIN node a ON a.rid = e.src JOIN node b ON b.rid = e.dst WHERE a.id = ?1 AND b.id = ?2",
+            [src, dst],
+            |r| r.get(0),
+        )
+        .ok()
+}
+
+#[test]
+fn link_properties_a_newer_policy_forbids_are_masked_or_dropped_by_the_rescan() {
+    // Arrange: two links whose properties v1 accepts, one v2 redacts and one v2 rejects
+    let s = Scratch::new("kaban-api-rescan", "edge-props");
+    let store = s.store();
+    let v1 = api_with(&store, V1);
+    let a = v1.remember(fact("a note about cargo")).unwrap().id;
+    let b = v1.remember(fact("a note about tokio")).unwrap().id;
+    let c = v1.remember(fact("a note about serde")).unwrap().id;
+    for (to, note) in [(&b, "the old password hunter2"), (&c, "the nightjar plan")] {
+        v1.link(kaban_api::LinkRequest {
+            from: a.clone(),
+            rel: "RELATES_TO".into(),
+            to: to.clone(),
+            confidence: None,
+            props: Some(serde_json::json!({ "note": note })),
+        })
+        .unwrap();
+    }
+    assert!(edge_props(&s, &a, &b).unwrap().contains("hunter2"));
+
+    // Act: the server starts with v2
+    let v2 = api_with(&store, V2);
+    let outcome = v2
+        .rescan_if_policy_changed(&CancellationToken::new())
+        .unwrap();
+
+    // Assert: the redacted value is gone from the stored edge, the rejected edge is deleted
+    assert_eq!(outcome.status, RescanStatus::Completed, "{outcome:?}");
+    assert_eq!((outcome.redacted, outcome.rejected), (1, 1), "{outcome:?}");
+    let masked = edge_props(&s, &a, &b).unwrap();
+    assert!(!masked.contains("hunter2"), "{masked}");
+    assert!(masked.contains(MASK), "{masked}");
+    assert!(masked.contains("\"owner\":\"human\""), "{masked}");
+    assert_eq!(edge_props(&s, &a, &c), None, "the rejected edge is dropped");
+    let again = v2
+        .rescan_if_policy_changed(&CancellationToken::new())
+        .unwrap();
+    assert_eq!(again.status, RescanStatus::UpToDate, "{again:?}");
 }

@@ -1201,20 +1201,73 @@ pub enum RescanAction {
     Reject,
 }
 
+/// What the rescan job decided for one stored edge: its `props` are the only content an edge
+/// persists beyond schema names (MED-01 of the T3 review). The store applies the action inside
+/// the batch's transaction.
+#[derive(Debug, Clone, PartialEq)]
+pub enum EdgeRescanAction {
+    /// The edge passes the loaded policy: nothing changes.
+    Keep,
+    /// Redact hits: the masked `props` replace the stored ones in place.
+    Redact {
+        /// The whole `props` object after masking.
+        props: Value,
+    },
+    /// A reject hit: the edge is deleted (an edge has no lifecycle to hide it with).
+    Reject,
+}
+
+/// Decides, per stored row, what a rescan batch does (core-spec S4). Runs inside the store's
+/// batch transaction and must not call back into the store.
+pub trait RescanJudge {
+    /// The action for one non-purged node.
+    fn node(&mut self, node: &Node) -> RescanAction;
+    /// The action for one edge.
+    fn edge(&mut self, edge: &Edge) -> EdgeRescanAction;
+}
+
+/// A node-only judge: the closure decides per node and every edge is kept.
+impl<F: FnMut(&Node) -> RescanAction> RescanJudge for F {
+    fn node(&mut self, node: &Node) -> RescanAction {
+        self(node)
+    }
+    fn edge(&mut self, _edge: &Edge) -> EdgeRescanAction {
+        EdgeRescanAction::Keep
+    }
+}
+
+/// Where a rescan resumes. A full walk visits every node, then every edge, then catches the
+/// change log up; once the walk completed (the `policy_hash` marker matches) a run starts at
+/// the change log directly. The change-log position itself is persisted by the store
+/// ([`IndexMeta::POLICY_SCAN_SEQ`]), so it survives a cancelled or crashed run.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub enum RescanCursor {
+    /// Before the first batch of a run: the store picks the full walk or the change log.
+    #[default]
+    Start,
+    /// Walking nodes after this row id.
+    Nodes(u64),
+    /// Walking edges after this row id (every node is walked).
+    Edges(u64),
+    /// The walk is complete; rows the change log names after the watermark are judged.
+    Changes,
+    /// Nothing is left to judge.
+    Done,
+}
+
 /// What one `rescan` batch did.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 pub struct RescanReport {
-    /// Nodes judged in this batch (`0` = nothing left to rescan).
+    /// Rows (nodes and edges) judged in this batch.
     pub scanned: u64,
-    /// Nodes that passed unchanged.
+    /// Rows that passed unchanged.
     pub kept: u64,
-    /// Nodes masked in place.
+    /// Rows masked in place.
     pub redacted: u64,
-    /// Nodes tombstoned.
+    /// Nodes tombstoned and edges deleted.
     pub rejected: u64,
-    /// The position after the last node this batch judged: the next batch starts there
-    /// (`0` before the first batch).
-    pub cursor: u64,
+    /// Where the next batch starts ([`RescanCursor::Done`] when nothing is left).
+    pub cursor: RescanCursor,
 }
 
 impl std::ops::AddAssign for RescanReport {
@@ -1223,7 +1276,7 @@ impl std::ops::AddAssign for RescanReport {
         self.kept += rhs.kept;
         self.redacted += rhs.redacted;
         self.rejected += rhs.rejected;
-        self.cursor = self.cursor.max(rhs.cursor);
+        self.cursor = rhs.cursor;
     }
 }
 
@@ -1239,6 +1292,12 @@ impl IndexMeta {
     /// Key of the `effective_hash()` of the policy the whole database was last rescanned
     /// against (MD-19).
     pub const POLICY_HASH: &'static str = "policy_hash";
+    /// Key of the change-log watermark of the policy rescan: every node and edge change with a
+    /// `seq` at or below it has been judged by the policy the rescan last ran under. A
+    /// mutation freshness signal independent of the rows (no per-record policy stamp,
+    /// REC-08): rows written later, by any process under any policy, are judged by the next
+    /// run.
+    pub const POLICY_SCAN_SEQ: &'static str = "policy_scan_seq";
     /// Key of the schema version (core-spec §7).
     pub const SCHEMA_VERSION: &'static str = "schema_version";
     /// Key of the database identity.

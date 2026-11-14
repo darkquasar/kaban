@@ -1,18 +1,17 @@
-//! Node lifecycle: the policy rescan (`rescan_impl`), forget (`forget_impl`), reactivation
+//! Node lifecycle: forget (`forget_impl`), reactivation
 //! (`reactivate_node`) and the purge (`purge_in_place`, `purge_hygiene`, `purge_cleanup`).
 //! Split out of `sqlite.rs` (OWN-79).
 
 use crate::anchors;
-use crate::rows::{NODE_COLS, bad_enum, row_node_at};
+use crate::rows::bad_enum;
 use crate::sql_error::SqlResultExt;
 use kaban_core::Result;
 use kaban_core::{
-    BatchReport, ForgetMode, ForgetOutcome, IndexMeta, Lifecycle, MaintenanceOutcome, Node, NodeId,
-    OutcomeKind, RescanAction, RescanReport, StoreCapabilities, StoreError, WriteCtx, now_iso,
+    BatchReport, ForgetMode, ForgetOutcome, Lifecycle, MaintenanceOutcome, NodeId, OutcomeKind,
+    StoreCapabilities, StoreError, WriteCtx, now_iso,
 };
 use rusqlite::{Connection, OptionalExtension, params};
 
-use super::nodes::redacted_content_hash;
 use super::{SqliteStore, Tenant};
 
 /// What every purge's post-commit hygiene leaves behind (SS-03): the freed pages and their
@@ -320,104 +319,5 @@ impl SqliteStore {
             physically_cleaned,
             cleanup,
         }
-    }
-    /// The body of [`kaban_core::IngestStore::rescan`].
-    pub(super) fn rescan_impl(
-        &self,
-        policy_version: &str,
-        after: u64,
-        batch: usize,
-        f: &mut dyn FnMut(&Node) -> RescanAction,
-    ) -> Result<RescanReport> {
-        let mut conn = self.write();
-        let tx = conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .sql()?;
-        // the batch is read under the write lock, so a node judged here cannot be rewritten by
-        // another writer before its action lands; purged ghosts carry no content to judge
-        let nodes: Vec<(i64, Node)> = {
-            let mut st = tx.prepare_cached(&format!(
-                "SELECT rid, {NODE_COLS} FROM node WHERE rid > ?1 AND lifecycle <> 'purged' ORDER BY rid LIMIT ?2"
-            )).sql()?;
-            let limit = i64::try_from(batch).unwrap_or(i64::MAX);
-            let after = i64::try_from(after).unwrap_or(i64::MAX);
-            let rows = st
-                .query_map(params![after, limit], |r| {
-                    Ok((r.get(0)?, row_node_at(r, 1)?))
-                })
-                .sql()?;
-            rows.collect::<rusqlite::Result<_>>().sql()?
-        };
-        let mut report = RescanReport {
-            cursor: after,
-            ..RescanReport::default()
-        };
-        if nodes.is_empty() {
-            // the walk is complete: the database-wide marker (MD-19) is recorded in this same
-            // transaction; an equal marker is left untouched (no write, no changes row)
-            tx.execute(
-                "INSERT INTO index_meta(key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value WHERE value <> excluded.value",
-                params![IndexMeta::POLICY_HASH, policy_version],
-            ).sql()?;
-        }
-        let now = now_iso();
-        for (rid, node) in &nodes {
-            report.scanned += 1;
-            report.cursor = u64::try_from(*rid).unwrap_or_default();
-            match f(node) {
-                RescanAction::Keep => {
-                    report.kept += 1;
-                }
-                RescanAction::Redact { strings } => {
-                    // every rewritable string column is replaced (R2-2) and the content
-                    // identity with it: the pre-redaction hash would keep a guess oracle on
-                    // the masked secret, and a hash of the masked text alone would let two
-                    // notes masked alike collide on `node_hash_active`, so the new hash is
-                    // domain-tagged and mixes in the node id
-                    let hash = redacted_content_hash(&node.id, &strings);
-                    let bodies = crate::body_codec::Writer::for_connection(&tx)?;
-                    tx.execute(
-                        "UPDATE node SET text=?1, summary=?2, tags=?3, props=?4, path_scope=?5, session_id=?6, agent_id=?7, repo=?8, commit_sha=?9, accepted_commit=?10, dup_key=?11, content_hash=?12, updated_at=?13, rev=rev+1 WHERE rid=?14",
-                        params![
-                            bodies.stored(&strings.text),
-                            strings.summary,
-                            serde_json::to_string(&strings.tags)?,
-                            serde_json::to_string(&strings.props)?,
-                            serde_json::to_string(&strings.path_scope)?,
-                            strings.session_id,
-                            strings.agent_id,
-                            strings.repo,
-                            strings.commit_sha,
-                            strings.accepted_commit,
-                            strings.dup_key,
-                            hash,
-                            now,
-                            rid
-                        ],
-                    ).sql()?;
-                    // EN-F10 (E2.7b): the rewritten `path_scope` (and a `CodeRef`'s masked
-                    // `props`) move the record's anchor keys in this transaction, as every
-                    // other node write's do, or the `governing` prefilter keeps a stale key
-                    crate::anchors::rekey(&tx, *rid)?;
-                    report.redacted += 1;
-                }
-                RescanAction::Reject => {
-                    crate::jobs::revoke_document(&tx, node.id.as_str(), &node.workspace_id)?;
-                    // the `ForgetMode::Tombstone` path (lifecycle only, edges kept); a node that
-                    // is already tombstoned is left as it is
-                    if node.lifecycle != Lifecycle::Tombstoned {
-                        kaban_core::lifecycle_transition(node.lifecycle, Lifecycle::Tombstoned)?;
-                        tx.execute(
-                            "UPDATE node SET lifecycle='tombstoned', valid_to=?1, updated_at=?1, rev=rev+1 WHERE rid=?2",
-                            params![now, rid],
-                        ).sql()?;
-                    }
-                    report.rejected += 1;
-                }
-            }
-            super::artifacts::invalidate_stale(&tx, *rid)?;
-        }
-        tx.commit().sql()?;
-        Ok(report)
     }
 }

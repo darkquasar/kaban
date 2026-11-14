@@ -15,6 +15,7 @@ pub(crate) mod artifacts;
 mod batch;
 mod claims;
 mod nodes;
+mod rescan;
 
 use crate::anchors;
 use crate::candidates;
@@ -37,9 +38,9 @@ use kaban_core::{
     ActorId, BatchReport, Change, ChangeLogStore, DiscoveredRules, Edge, FailurePatch, ForgetMode,
     ForgetOutcome, GovernedSet, Hit, IndexMeta, IngestStore, Lease, LeaseStore, Lifecycle, LinkReq,
     MemoryStore, Method, NewNode, Node, NodeId, Ontology, PendingFailuresQuery, RecallQuery,
-    RememberOutcome, RescanAction, RescanReport, SchemaStore, SessionEdit, SessionEditKind,
-    SessionStore, StoreError, TraverseQuery, TraverseResult, TypeDef, WorkspaceId, WriteBatch,
-    WriteCtx, new_id, now_iso,
+    RememberOutcome, RescanCursor, RescanJudge, RescanReport, SchemaStore, SessionEdit,
+    SessionEditKind, SessionStore, StoreError, TraverseQuery, TraverseResult, TypeDef, WorkspaceId,
+    WriteBatch, WriteCtx, new_id, now_iso,
 };
 use kaban_core::{AnchorPredicates, SnapshotAttach, SnapshotSymbol, SymbolPage};
 use kaban_core::{
@@ -1595,11 +1596,11 @@ impl IngestStore for SqliteStore {
     fn rescan(
         &self,
         policy_version: &str,
-        after: u64,
+        at: RescanCursor,
         batch: usize,
-        f: &mut dyn FnMut(&Node) -> RescanAction,
+        judge: &mut dyn RescanJudge,
     ) -> Result<RescanReport> {
-        self.rescan_impl(policy_version, after, batch, f)
+        self.rescan_impl(policy_version, at, batch, judge)
     }
     fn index_meta(&self) -> Result<IndexMeta> {
         let conn = self.lock();
