@@ -18,7 +18,6 @@ thiserror.workspace = true
 tokio-util.workspace = true   # CancellationToken for the rescan job (C2.7, MD-18)
 tracing.workspace = true
 time.workspace = true         # `--since` anchor formatting and `checked_at` (C3.3, M3-21)
-globset.workspace = true      # exact path_scope attribution of git changes (C3.3, M3-22)
 yaml_serde.workspace = true # `.kaban/*.md` frontmatter (C5.1, M5-1, M5-21)
 blake3.workspace = true       # `index_meta.ontology_hash:<ns>` of a loaded ontology file (EN-F2, E1.3; already locked)
 

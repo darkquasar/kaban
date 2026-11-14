@@ -1484,7 +1484,6 @@ name = "kaban-api"
 version = "3.0.0"
 dependencies = [
  "blake3",
- "globset",
  "kaban-codegraph",
  "kaban-core",
  "kaban-index",
@@ -1629,7 +1628,6 @@ dependencies = [
  "getrandom 0.3.4",
  "hex",
  "hmac",
- "kaban-core",
  "proptest",
  "regex",
  "rustix",
@@ -1655,7 +1653,6 @@ dependencies = [
  "kaban-store-sqlite",
  "kaban-vtab",
  "open-cypher",
- "proptest",
  "rusqlite",
  "rustix",
  "serde_json",
