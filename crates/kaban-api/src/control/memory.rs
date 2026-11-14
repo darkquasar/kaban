@@ -8,7 +8,6 @@ use crate::types::{
     StatsResponse, TraverseRequest, TraverseResponse,
 };
 use kaban_core::TypeDef;
-use schemars::JsonSchema;
 
 /// `forget.mode` wire values (`kaban_core::ForgetMode`, `rename_all = "lowercase"`).
 const FORGET_MODES: &[&str] = &["tombstone", "invalidate", "archive", "purge"];
@@ -27,25 +26,24 @@ const STORE_SCOPES: &[&str] = &["project", "personal"];
 pub(super) const WRITE_OUTCOMES: &[&str] =
     &["rejected", "committed", "committed_not_yet_searchable"];
 
-/// `traverse.edge_filter.layers[]` wire values: the stored spellings of `kaban_core::Layer`,
-/// `Layer::ALL` in order (EN-E6, EN-E7). Spelled out on purpose: `tests/control.rs` asserts
-/// this list equals `Layer::ALL` and the schemars `enum` of the vocabulary, so a new layer
-/// fails the registry test until this row moves (engine-spec EN-E7 `Verify:`).
-pub const LAYER_VALUES: &[&str] = &[
-    "human",
-    "v4",
-    "reconcile",
-    "script",
-    "llm",
-    "gliner",
+/// `traverse.edge_filter.producers[]` wire values: the stored spellings of
+/// `kaban_core::Producer`, `Producer::ALL` in order (PC-16). Spelled out on purpose:
+/// `tests/control.rs` asserts this list equals `Producer::ALL` and the schemars `enum` of the
+/// vocabulary, so a new producer fails the registry test until this row moves.
+pub const PRODUCER_VALUES: &[&str] = &[
+    "authored",
+    "hook_events",
+    "document_ingest",
     "gazetteer",
-    "embed",
-    "fts",
-    "fuzzy",
+    "extractor:llm",
+    "extractor:gliner",
+    "extractor:script",
+    "scip_import",
+    "git_history",
 ];
 
 /// `traverse.edge_filter.methods[]` wire values: the stored spellings of `kaban_core::Method`,
-/// `Method::ALL` in order (EN-E6, EN-E7); pinned like [`LAYER_VALUES`].
+/// `Method::ALL` in order (EN-E6, EN-E7); pinned like [`PRODUCER_VALUES`].
 pub const METHOD_VALUES: &[&str] = &[
     "id",
     "path",
@@ -61,85 +59,14 @@ pub const METHOD_VALUES: &[&str] = &[
     "rule",
     "heuristic",
     "link",
-    "accept",
     "remember",
-    "er",
-    "er_judge",
-    "reconciled",
     "ingest_submit",
 ];
 
-const RECALL_LAYERS: &[&str] = &["fts", "fuzzy", "sim"];
-
-/// CLI-only machine reset; document paths remain CONTENT, never control identifiers.
-#[derive(Debug, serde::Deserialize, JsonSchema)]
-#[allow(dead_code)]
-struct LayerMaintenanceRequest {
-    layer: kaban_core::Layer,
-    #[serde(default)]
-    document: Option<String>,
-}
-
-/// Schema mirror of the fixed maintenance refusal vocabulary.
-#[derive(Debug, serde::Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-#[allow(dead_code)]
-enum MaintenanceRefusal {
-    #[serde(rename = "current_producer")]
-    Current,
-    #[serde(rename = "untracked_producer")]
-    Untracked,
-    #[serde(rename = "unavailable_producer")]
-    Unavailable,
-}
-
-/// Schema mirror of core bounded retirement accounting; no MCP wire addition.
-#[derive(Debug, serde::Deserialize, JsonSchema)]
-#[allow(dead_code)]
-struct MaintenanceResponse {
-    transactions: u32,
-    rows: u64,
-    #[serde(default)]
-    refused: Option<MaintenanceRefusal>,
-    #[serde(default)]
-    untracked: u64,
-}
+const RECALL_MODES: &[&str] = &["lexical", "fuzzy"];
 
 /// The memory tools' rows of [`super::REGISTRY`].
 pub(super) const ROWS: &[ControlEntry] = &[
-    entry(
-        "forget_layer",
-        Direction::Request,
-        "layer",
-        Shape::Enum(LAYER_VALUES),
-    ),
-    entry(
-        "reindex_layer",
-        Direction::Request,
-        "layer",
-        Shape::Enum(LAYER_VALUES),
-    ),
-    entry(
-        "forget_layer",
-        Direction::Response,
-        "refused",
-        Shape::Enum(&[
-            "current_producer",
-            "untracked_producer",
-            "unavailable_producer",
-        ]),
-    ),
-    entry(
-        "reindex_layer",
-        Direction::Response,
-        "refused",
-        Shape::Enum(&[
-            "current_producer",
-            "untracked_producer",
-            "unavailable_producer",
-        ]),
-    ),
-    // request side: node ids named by the caller, the forget mode enum
     entry("remember", Direction::Request, "links[].to", Shape::NodeId),
     entry(
         "remember",
@@ -175,8 +102,8 @@ pub(super) const ROWS: &[ControlEntry] = &[
     entry(
         "traverse",
         Direction::Request,
-        "edge_filter.layers[]",
-        Shape::Enum(LAYER_VALUES),
+        "edge_filter.producers[]",
+        Shape::Enum(PRODUCER_VALUES),
     ),
     entry(
         "traverse",
@@ -212,8 +139,8 @@ pub(super) const ROWS: &[ControlEntry] = &[
     entry(
         "recall",
         Direction::Request,
-        "layers[]",
-        Shape::Enum(RECALL_LAYERS),
+        "modes[]",
+        Shape::Enum(RECALL_MODES),
     ),
     entry("traverse", Direction::Response, "nodes[].id", Shape::NodeId),
     entry("traverse", Direction::Response, "edges[].id", Shape::NodeId),
@@ -317,7 +244,5 @@ pub(super) fn schemas() -> Vec<ToolSchemas> {
         super::schemas::<SchemaExtendRequest, TypeDef>("schema_extend"),
         super::schemas::<ForgetRequest, ForgetResponse>("forget"),
         super::schemas::<StatsRequest, StatsResponse>("stats"),
-        super::schemas::<LayerMaintenanceRequest, MaintenanceResponse>("forget_layer"),
-        super::schemas::<LayerMaintenanceRequest, MaintenanceResponse>("reindex_layer"),
     ]
 }

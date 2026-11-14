@@ -3,9 +3,8 @@ source: crates/kaban/tests/cli_stats.rs
 expression: "budget_table(&cfg, RunFlags { symbols: true })"
 ---
 key | default | effective | source | cap_lifted
-budget.l0_rss_mb | 64 | 64 | default | false
+text.build_rss_mb | 64 | 64 | default | false
 gazetteer.max_automaton_mb | 25 | 200 | --symbols | true
-embed.max_scan_rss_mb | 32 | 32 | default | false
 ingest.lru_mib | 8 | 8 | default | false
 index.deadline_secs | 600 | 600 | default | false
 index.quota.file_bytes | 1073741824 | 1073741824 | default | false

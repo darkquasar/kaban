@@ -136,21 +136,14 @@ fn an_absent_file_and_a_file_spelling_every_register_default_both_equal_default(
             d.gazetteer.max_chunk_ms.to_string(),
         ),
         ("gazetteer.v4_symbols", d.gazetteer.v4_symbols.to_string()),
-        ("embed.model", format!("{:?}", d.embed.model)),
-        ("embed.dtype", d.embed.dtype.clone()),
-        ("embed.knn_k", d.embed.knn_k.to_string()),
-        ("embed.tau.default", d.embed.tau["default"].to_string()),
         (
-            "embed.scan_window_rows",
-            d.embed.scan_window_rows.to_string(),
+            "extractors.holdout_min_f1",
+            d.extractors.holdout_min_f1.to_string(),
         ),
-        ("embed.max_scan_rss_mb", d.embed.max_scan_rss_mb.to_string()),
         (
-            "embed.min_topk_overlap",
-            d.embed.min_topk_overlap.to_string(),
+            "extractors.holdout_min_spans",
+            d.extractors.holdout_min_spans.to_string(),
         ),
-        ("l3.holdout_min_f1", d.l3.holdout_min_f1.to_string()),
-        ("l3.holdout_min_spans", d.l3.holdout_min_spans.to_string()),
         ("recall.fusion", d.recall.fusion.clone()),
         ("recall.rrf_k", d.recall.rrf_k.to_string()),
         (
@@ -201,7 +194,7 @@ fn an_absent_file_and_a_file_spelling_every_register_default_both_equal_default(
             d.pipeline.retire_batch_rows.to_string(),
         ),
         ("link.default", d.link.default.clone()),
-        ("budget.l0_rss_mb", d.budget.l0_rss_mb.to_string()),
+        ("text.build_rss_mb", d.text.build_rss_mb.to_string()),
         ("bench.min_samples", d.bench.min_samples.to_string()),
         (
             "bench.why_regression_pct",
@@ -218,15 +211,8 @@ fn an_absent_file_and_a_file_spelling_every_register_default_both_equal_default(
         ("gazetteer.max_automaton_mb", "25"),
         ("gazetteer.max_chunk_ms", "1"),
         ("gazetteer.v4_symbols", "true"),
-        ("embed.model", "None"),
-        ("embed.dtype", "int8"),
-        ("embed.knn_k", "5"),
-        ("embed.tau.default", "0.8"),
-        ("embed.scan_window_rows", "4096"),
-        ("embed.max_scan_rss_mb", "32"),
-        ("embed.min_topk_overlap", "0.9"),
-        ("l3.holdout_min_f1", "0.5"),
-        ("l3.holdout_min_spans", "200"),
+        ("extractors.holdout_min_f1", "0.5"),
+        ("extractors.holdout_min_spans", "200"),
         ("recall.fusion", "rrf(60)"),
         ("recall.rrf_k", "60"),
         ("recall.judged_min_queries", "100"),
@@ -247,7 +233,7 @@ fn an_absent_file_and_a_file_spelling_every_register_default_both_equal_default(
         ("ingest.default_with", "None"),
         ("pipeline.retire_batch_rows", "1000"),
         ("link.default", "none"),
-        ("budget.l0_rss_mb", "64"),
+        ("text.build_rss_mb", "64"),
         ("bench.min_samples", "30"),
         ("bench.why_regression_pct", "10"),
     ];
@@ -264,7 +250,7 @@ fn an_unknown_key_at_any_depth_fails_parse_with_the_field_path_and_never_the_val
         ("unknown_key.yaml", "ontology.pattern_size_limit_kb"),
         ("unknown_key_depth3.yaml", "index.quota.file_bytez"),
         ("unknown_section.yaml", "ontologies"),
-        ("wrong_type.yaml", "embed.tau.Decision"),
+        ("wrong_type.yaml", "recall.column_weights.text"),
         ("not_a_mapping.yaml", ""),
     ];
     for (file, path) in cases {
@@ -340,42 +326,9 @@ fn the_retired_trigram_keys_are_unknown_keys() {
 }
 
 #[test]
-fn embedding_model_is_reserved_but_absent_null_and_empty_are_admitted() {
-    let path = std::env::temp_dir().join(format!("kaban-embed-model-{}.yaml", std::process::id()));
-    for yaml in [
-        "embed:\n  model:\n    name: test-model\n",
-        "embed:\n  model:\n    name: AKIAQWERTYUIOPASDFGH\n",
-        "embed:\n  model:\n    arbitrary: value\n",
-    ] {
-        std::fs::write(&path, yaml).unwrap();
-        let error = load(&path).unwrap_err();
-        assert_eq!(
-            error,
-            ConfigError::NotAvailable {
-                path: "embed.model"
-            }
-        );
-        assert_eq!(error.to_string(), "not_available_in_this_release");
-    }
-    for yaml in ["{}", "embed:\n  model: null\n", "embed:\n  model: {}\n"] {
-        std::fs::write(&path, yaml).unwrap();
-        assert!(load(&path).is_ok());
-    }
-    std::fs::remove_file(path).unwrap();
-}
-
-#[test]
 fn maps_are_replaced_whole_and_optional_keys_set_show_in_the_overrides() {
     let mut cfg = load(&fixture("maps_replace.yaml")).unwrap();
     assert_eq!(cfg.recall.column_weights.len(), 1);
-    assert_eq!(
-        cfg.embed.model.as_ref().unwrap(),
-        &std::collections::BTreeMap::new()
-    );
-    cfg.embed.model = Some(std::collections::BTreeMap::from([
-        ("name".to_owned(), "potion-base-4M".to_owned()),
-        ("dims".to_owned(), "256".to_owned()),
-    ]));
     assert_eq!(cfg.ingest.default_with.as_deref(), Some(""));
     // Override rendering remains useful for constructed configs; admission separately
     // rejects enrollment in this release.
@@ -383,8 +336,6 @@ fn maps_are_replaced_whole_and_optional_keys_set_show_in_the_overrides() {
     assert_eq!(
         cfg.effective_overrides(),
         vec![
-            ("embed.model.dims".to_owned(), "256".to_owned()),
-            ("embed.model.name".to_owned(), "potion-base-4M".to_owned()),
             ("ingest.default_with".to_owned(), "gliner".to_owned()),
             (
                 "recall.column_weights.ident_terms".to_owned(),
@@ -467,7 +418,16 @@ fn index_keys_load_strictly_with_the_plan_defaults_and_show_as_overrides() {
 /// refused like any other unknown key: the error names the section, never a value.
 #[test]
 fn a_removed_feature_section_is_refused_naming_the_section() {
-    for section in ["reconcile", "er", "why", "briefing", "discovered"] {
+    for section in [
+        "reconcile",
+        "er",
+        "why",
+        "briefing",
+        "discovered",
+        "embed",
+        "l3",
+        "budget",
+    ] {
         let path = std::env::temp_dir().join(format!(
             "kaban-config-removed-{}-{section}.yaml",
             std::process::id()

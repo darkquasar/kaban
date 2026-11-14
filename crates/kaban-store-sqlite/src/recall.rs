@@ -259,20 +259,7 @@ pub(crate) fn recall_with(
     index: &dyn TextIndex,
     eligible: &dyn Fn(&Node) -> bool,
 ) -> Result<Vec<Hit>> {
-    let permits = |layer| {
-        q.layers
-            .as_ref()
-            .is_none_or(|layers| layers.contains(&layer))
-    };
-    if q.layers
-        .as_ref()
-        .is_some_and(|layers| layers.contains(&kaban_core::RecallLayer::Sim))
-    {
-        return Err(StoreError::InvalidName(
-            "sim".into(),
-            "not_available_in_this_release",
-        ));
-    }
+    let permits = |mode| q.modes.as_ref().is_none_or(|modes| modes.contains(&mode));
     let limit = if q.limit == 0 { 10 } else { q.limit.min(100) };
     let seed_k = (limit * 5).clamp(20, 100);
     let k =
@@ -286,13 +273,13 @@ pub(crate) fn recall_with(
         q,
         MatchMode::Lexical,
         seed_k,
-        permits(kaban_core::RecallLayer::Fts),
+        permits(kaban_core::RecallMode::Lexical),
     );
     let mut fuzzy = Seeds::new(
         q,
         MatchMode::Fuzzy,
         seed_k,
-        permits(kaban_core::RecallLayer::Fuzzy),
+        permits(kaban_core::RecallMode::Fuzzy),
     );
     let mut target = seed_k;
     loop {
@@ -359,7 +346,7 @@ fn fuse(
     let hops = q.hops.min(2);
     // archived rows (superseded records, archived notes) join the frontier and the result only
     // on request; invalidated records are tombstoned (F5) and never return (M3-12)
-    let archived_ok = q.include_superseded || q.include_archived;
+    let archived_ok = q.include_archived;
     if hops > 0 {
         let mut frontier: Vec<(i64, f64, usize)> = lexical
             .iter()
@@ -369,8 +356,8 @@ fn fuse(
             .collect();
         // the workspace (review R1-5) and lifecycle (review R2-4) predicates apply while
         // the frontier is built: a neighbour outside the workspace, tombstoned or purged,
-        // or archived without `include_superseded` / `include_archived` (M3-12: the same
-        // frontier rule), is never scored and never expanded from
+        // or archived without `include_archived` (M3-12), is never scored and never expanded
+        // from
         let graph_sql: Vec<[String; 2]> = lexical.iter().take(20).map(|TextHit { kind, .. }| {
             std::array::from_fn(|index| {
                 let rels = match rank_hints(ontology, kind) {

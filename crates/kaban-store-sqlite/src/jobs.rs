@@ -6,11 +6,13 @@ use crate::sql_error::SqlResultExt;
 use kaban_core::{BackendSource, IngestJob, JobId, JobStatus, Result, StoreError, WorkspaceId};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
-pub(crate) fn layer(dialect: &str) -> Result<kaban_core::Layer> {
+/// The extractor producer of a job's dialect (PC-16).
+pub(crate) fn layer(dialect: &str) -> Result<kaban_core::Producer> {
+    use kaban_core::{ExtractorKind, Producer};
     match dialect {
-        "llm" => Ok(kaban_core::Layer::Llm),
-        "gliner" => Ok(kaban_core::Layer::Gliner),
-        "none" | "script" => Ok(kaban_core::Layer::Script),
+        "llm" => Ok(Producer::Extractor(ExtractorKind::Llm)),
+        "gliner" => Ok(Producer::Extractor(ExtractorKind::Gliner)),
+        "none" | "script" => Ok(Producer::Extractor(ExtractorKind::Script)),
         _ => Err(StoreError::InvalidName("claim".into(), "invalid_layer")),
     }
 }
@@ -562,7 +564,7 @@ pub(crate) fn record_submit(
 const FINISH_SCOPE: &str = "WITH records(rid) AS (
  SELECT e.src FROM edge e JOIN node d ON d.rid=e.dst
  WHERE d.id=?1 AND d.workspace_id=?2 AND e.workspace_id=?2 AND e.rel='DERIVED_FROM'
- AND json_extract(e.props,'$.owner')='kaban-parse'
+ AND e.layer LIKE 'extractor:%'
  UNION SELECT a.subject_rid FROM assertion a JOIN node d ON d.rid=a.object_rid
  WHERE d.id=?1 AND a.workspace_id=?2 AND a.source_id=?3 AND a.subject_kind='edge'
  AND a.predicate='DERIVED_FROM' AND a.method='ingest_submit' AND a.layer IN ('llm','gliner','script')
@@ -573,7 +575,7 @@ const FINISH_SCOPE: &str = "WITH records(rid) AS (
  WHERE c.kind='Chunk' AND c.workspace_id=?2 AND s.kind='Section' AND s.workspace_id=?2
  AND d.id=?1 AND d.workspace_id=?2 AND cs.rel='PART_OF' AND sd.rel='PART_OF'
  AND cs.workspace_id=?2 AND sd.workspace_id=?2
- AND json_extract(cs.props,'$.owner')='kaban-ingest' AND json_extract(sd.props,'$.owner')='kaban-ingest'
+ AND cs.layer='document_ingest' AND sd.layer='document_ingest'
  UNION SELECT c.rid FROM ingest_jobs j, json_each(j.plan,'$.chunks') p JOIN node c ON c.id=json_extract(p.value,'$.id')
  WHERE j.workspace_id=?2 AND j.source_id=?3 AND json_extract(j.plan,'$.document_id')=?1
  AND c.workspace_id=?2 AND c.kind='Chunk'
@@ -609,7 +611,7 @@ pub(crate) fn finish_population(
     let edges = conn.prepare(&format!("{FINISH_SCOPE}
         SELECT e.src,e.dst,e.rel,s.id,d.id FROM edge e JOIN node s ON s.rid=e.src JOIN node d ON d.rid=e.dst
         WHERE e.workspace_id=?2 AND s.workspace_id=?2 AND d.workspace_id=?2
-        AND json_extract(e.props,'$.owner')='kaban-parse'
+        AND e.layer LIKE 'extractor:%'
         AND (e.source_id IS NULL OR e.source_id=?3)
         AND (e.src IN records OR (e.rel='EVIDENCE_FOR' AND e.src IN chunks))
         ORDER BY s.id,d.id,e.rel LIMIT ?4")).sql()?.query_map(args, |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).sql()?.collect::<rusqlite::Result<Vec<FinishEdge>>>().sql()?;

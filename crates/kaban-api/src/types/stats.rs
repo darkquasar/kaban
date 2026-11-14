@@ -1,6 +1,6 @@
 //! `stats`.
 
-use crate::layers::LayerRow;
+use crate::producers::ProducerRow;
 use kaban_core::StoreScope;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -44,7 +44,8 @@ pub struct StatsResponse {
     pub stores: Vec<StoreScope>,
     /// Policy summary.
     pub policy: PolicyStats,
-    /// Five default-matrix categories and last valid producer runs (EN-F52).
+    /// The seven producers with their default state, last valid run and budgets (EN-F52,
+    /// PC-16).
     #[serde(default)]
-    pub layers: Vec<LayerRow>,
+    pub producers: Vec<ProducerRow>,
 }

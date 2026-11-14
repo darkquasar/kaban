@@ -376,11 +376,11 @@ fn over_budget_skips_linking_without_losing_l0_and_forced_symbols_lifts_cap() {
     assert!(mentioned(&store).contains(&id.to_string()));
     let mut raised = api.engine().clone();
     raised.gazetteer.max_automaton_mb = 128;
-    let budget = kaban_api::layers::budgets(&raised, &kaban_api::layers::RunFlags::default())
+    let budget = kaban_api::producers::budgets(&raised, &kaban_api::producers::RunFlags::default())
         .into_iter()
         .find(|budget| budget.key == "gazetteer.max_automaton_mb")
         .unwrap();
-    assert_eq!(budget.source, kaban_api::layers::BudgetSource::Config);
+    assert_eq!(budget.source, kaban_api::producers::BudgetSource::Config);
     assert!(!budget.cap_lifted);
     let raised_api = Arc::new(KabanApi::with_config(
         store.clone(),

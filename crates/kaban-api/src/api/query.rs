@@ -11,7 +11,7 @@ use crate::types::{
     TraverseRequest, TraverseResponse,
 };
 use kaban_core::{
-    AnchoredRow, CodeRef, CodeRefFilter, Fixed, Layer, Method, NodeId, RecallQuery, StoreScope,
+    AnchoredRow, CodeRef, CodeRefFilter, Fixed, Method, NodeId, Producer, RecallQuery, StoreScope,
     TraverseQuery,
 };
 
@@ -51,7 +51,7 @@ impl KabanApi {
         let enrich_ids = self.gate_all(t, "enrich", &p.enrich, &mut red)?;
         let enrichers = self.resolve_enrichers(&enrich_ids)?;
         let q = RecallQuery {
-            layers: p.layers,
+            modes: p.modes,
             fuzzy: p.fuzzy,
             query,
             kinds,
@@ -59,7 +59,6 @@ impl KabanApi {
             workspace_id: self.read_workspace(workspace_id.as_deref()),
             limit: p.limit.unwrap_or(10),
             hops: p.hops.unwrap_or(1),
-            include_superseded: p.include_superseded,
             include_archived: p.include_archived,
             r#ref,
         };
@@ -166,7 +165,7 @@ impl KabanApi {
         let edge_filter = match &p.edge_filter {
             Some(f) => Some((
                 f.min_score,
-                self.gate_all(t, "edge_filter.layers", &f.layers, &mut red)?,
+                self.gate_all(t, "edge_filter.producers", &f.producers, &mut red)?,
                 self.gate_all(t, "edge_filter.methods", &f.methods, &mut red)?,
             )),
             None => None,
@@ -186,8 +185,8 @@ impl KabanApi {
             Some(_) => return Err(ApiError::Invalid("unknown_kind_set".into())),
         }
         let edge_filter = match edge_filter {
-            Some((min_score, layers, methods)) => {
-                Some(Self::edge_filter(min_score, &layers, &methods)?)
+            Some((min_score, producers, methods)) => {
+                Some(Self::edge_filter(min_score, &producers, &methods)?)
             }
             None => None,
         };
@@ -256,7 +255,7 @@ impl KabanApi {
     /// fixed word (the gated value is never echoed).
     fn edge_filter(
         min_score: Option<f64>,
-        layers: &[String],
+        producers: &[String],
         methods: &[String],
     ) -> Result<kaban_core::EdgeFilter, ApiError> {
         let min_score = match min_score {
@@ -265,9 +264,9 @@ impl KabanApi {
             })?),
             None => None,
         };
-        let layers = layers
+        let producers = producers
             .iter()
-            .map(|l| Layer::parse(l).ok_or_else(|| ApiError::Invalid("unknown_layer".into())))
+            .map(|p| Producer::parse(p).ok_or_else(|| ApiError::Invalid("unknown_producer".into())))
             .collect::<Result<Vec<_>, _>>()?;
         let methods = methods
             .iter()
@@ -275,7 +274,7 @@ impl KabanApi {
             .collect::<Result<Vec<_>, _>>()?;
         Ok(kaban_core::EdgeFilter {
             min_score,
-            layers,
+            producers,
             methods,
         })
     }
@@ -373,10 +372,10 @@ impl KabanApi {
             store,
             stores: vec![StoreScope::Project],
             policy,
-            // Optional bookkeeping must not hide usable counters or sibling layers.
-            layers: self.store.index_meta().map_or_else(
-                |_| crate::layers::LayerRegistry.enabled(self.engine()),
-                |meta| crate::layers::LayerRegistry.with_runs(self.engine(), &meta),
+            // Optional bookkeeping must not hide usable counters or the other producers.
+            producers: self.store.index_meta().map_or_else(
+                |_| crate::producers::ProducerRegistry.enabled(self.engine()),
+                |meta| crate::producers::ProducerRegistry.with_runs(self.engine(), &meta),
             ),
         })
     }

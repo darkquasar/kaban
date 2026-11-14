@@ -32,9 +32,9 @@ pub(crate) struct RecallArgs {
         default_value = "exact_id,error_string,natural_language,identifier"
     )]
     pub classes: String,
-    /// Semicolon-separated layer sets (`fts`, `fuzzy`); sim is unavailable.
-    #[arg(long, default_value = "fts;fts,fuzzy")]
-    pub layers: String,
+    /// Semicolon-separated recall mode sets (`lexical`, `fuzzy`).
+    #[arg(long, default_value = "lexical;lexical,fuzzy")]
+    pub modes: String,
     /// Verify the effective configured RRF selection; never override it per request.
     #[arg(long)]
     pub fusion: Option<String>,
@@ -177,30 +177,28 @@ fn classes(input: &str) -> Result<BTreeSet<QueryClass>> {
     Ok(result)
 }
 
-fn layer_sets(input: &str) -> Result<Vec<Vec<kaban_core::RecallLayer>>> {
-    use kaban_core::RecallLayer;
+fn layer_sets(input: &str) -> Result<Vec<Vec<kaban_core::RecallMode>>> {
+    use kaban_core::RecallMode;
     let mut result = Vec::new();
     let mut names = BTreeSet::new();
     for set in input.split(';') {
         let mut layers = Vec::new();
         for name in set.split(',') {
             let layer = match name {
-                "fts" => RecallLayer::Fts,
-                "fuzzy" => RecallLayer::Fuzzy,
-                "sim" | "embed" => bail!("not_available_in_this_release: sim/embed"),
-                _ => bail!("unknown recall layer"),
+                "lexical" => RecallMode::Lexical,
+                "fuzzy" => RecallMode::Fuzzy,
+                _ => bail!("unknown recall mode"),
             };
             ensure!(!layers.contains(&layer), "duplicate recall layer");
             layers.push(layer);
         }
         ensure!(
-            layers.contains(&RecallLayer::Fts),
-            "evaluation requires fts"
+            layers.contains(&RecallMode::Lexical),
+            "evaluation requires lexical"
         );
         layers.sort_by_key(|layer| match layer {
-            RecallLayer::Fts => 0,
-            RecallLayer::Fuzzy => 1,
-            RecallLayer::Sim => 2,
+            RecallMode::Lexical => 0,
+            RecallMode::Fuzzy => 1,
         });
         ensure!(
             names.insert(serde_json::to_string(&layers)?),
@@ -358,7 +356,7 @@ pub(crate) fn evaluate(
     fixtures: &Fixtures,
     map: &SourceMap,
     selected: &BTreeSet<QueryClass>,
-    layers: &[kaban_core::RecallLayer],
+    layers: &[kaban_core::RecallMode],
 ) -> Result<Value> {
     let reverse = map.reverse();
     let mut rows = Vec::new();
@@ -374,8 +372,8 @@ pub(crate) fn evaluate(
         let text = query_text(query, map)?;
         let response = api.recall(RecallRequest {
             query: text.clone(),
-            layers: Some(layers.to_vec()),
-            fuzzy: layers.contains(&kaban_core::RecallLayer::Fuzzy),
+            modes: Some(layers.to_vec()),
+            fuzzy: layers.contains(&kaban_core::RecallMode::Fuzzy),
             workspace_id: Some(query.workspace.clone()),
             limit: Some(10),
             ..Default::default()
@@ -434,7 +432,7 @@ pub(crate) fn evaluate_edges(
             max_depth: Some(1),
             limit: Some(500),
             edge_filter: Some(EdgeFilter {
-                layers: vec!["gazetteer".into()],
+                producers: vec!["gazetteer".into()],
                 ..Default::default()
             }),
             ..Default::default()
@@ -460,7 +458,7 @@ pub(crate) fn evaluate_edges(
     }
     let precision = edge_precision(&fixtures.edges, &predictions)?;
     Ok(
-        json!({ "layer": "gazetteer", "rel": "MENTIONS", "precision": precision.precision,
+        json!({ "producer": "gazetteer", "rel": "MENTIONS", "precision": precision.precision,
         "coverage": precision.coverage, "judged": precision.judged, "predicted": precision.predicted,
         "judged_predicted": precision.judged_predicted, "correct": precision.correct,
         "unjudged": precision.unjudged, "duplicates": precision.duplicates,
@@ -509,12 +507,12 @@ fn paired(
         ..Default::default()
     };
     let mut fts = request.clone();
-    fts.layers = Some(vec![kaban_core::RecallLayer::Fts]);
+    fts.modes = Some(vec![kaban_core::RecallMode::Lexical]);
     fts.fuzzy = false;
     let mut fused = request;
-    fused.layers = Some(vec![
-        kaban_core::RecallLayer::Fts,
-        kaban_core::RecallLayer::Fuzzy,
+    fused.modes = Some(vec![
+        kaban_core::RecallMode::Lexical,
+        kaban_core::RecallMode::Fuzzy,
     ]);
     let traverse = TraverseRequest {
         start_ids: vec![map.resolve("ws1", "corpus:0")?.into()],
@@ -630,7 +628,7 @@ fn recall(
     args: &RecallArgs,
 ) -> Result<Value> {
     let selected = classes(&args.classes)?;
-    let sets = layer_sets(&args.layers)?;
+    let sets = layer_sets(&args.modes)?;
     let k = check_fusion(args.fusion.as_deref(), engine)?;
     let fixtures = load(
         &args.sources,
@@ -888,7 +886,7 @@ mod tests {
             &fixtures,
             &map,
             &classes("identifier").unwrap(),
-            &[kaban_core::RecallLayer::Fts],
+            &[kaban_core::RecallMode::Lexical],
         )
         .unwrap();
         assert_eq!(result["queries"].as_array().unwrap().len(), 25);
@@ -916,7 +914,7 @@ mod tests {
                 &fixtures,
                 &map,
                 &classes("exact_id").unwrap(),
-                &[kaban_core::RecallLayer::Fts]
+                &[kaban_core::RecallMode::Lexical]
             )
             .is_err()
         );
@@ -1009,8 +1007,10 @@ mod tests {
                 src: src.clone(),
                 dst: NodeId::parse(map.resolve("ws1", target).unwrap()).unwrap(),
                 rel: "MENTIONS".into(),
-                props: Some(json!({"layer": "gazetteer", "method": "exact", "offset": 0,
-                    "len": 3, "score": 9000, "source_id": "synthetic"})),
+                props: Some(
+                    json!({"producer": "gazetteer", "method": "exact", "offset": 0,
+                    "len": 3, "score": 9000, "source_id": "synthetic"}),
+                ),
             });
         }
         store

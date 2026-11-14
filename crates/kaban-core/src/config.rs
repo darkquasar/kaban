@@ -84,51 +84,17 @@ impl Default for Gazetteer {
     }
 }
 
-/// `[embed]` (EN-F26, EN-F26a).
+/// `[extractors]` (EN-F27a; the old `[l3]`, PC-16).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
-pub struct Embed {
-    /// Reserved external model identity; nonempty configuration is unavailable in this release.
-    pub model: Option<BTreeMap<String, String>>,
-    /// Vector storage type (`int8` | `f32`).
-    pub dtype: String,
-    /// Mutual kNN neighbourhood size.
-    pub knn_k: u32,
-    /// Per-kind similarity threshold; the `default` entry applies to every kind without one.
-    pub tau: BTreeMap<String, f64>,
-    /// Rows per scan window.
-    pub scan_window_rows: u32,
-    /// RSS delta budget of one query scan in MiB (opt-in budget; 0 is out of range).
-    pub max_scan_rss_mb: u32,
-    /// Minimum int8/f32 top-k overlap before int8 storage is kept.
-    pub min_topk_overlap: f64,
-}
-
-impl Default for Embed {
-    fn default() -> Self {
-        Self {
-            model: None,
-            dtype: "int8".to_owned(),
-            knn_k: 5,
-            tau: BTreeMap::from([("default".to_owned(), 0.80)]),
-            scan_window_rows: 4096,
-            max_scan_rss_mb: 32,
-            min_topk_overlap: 0.9,
-        }
-    }
-}
-
-/// `[l3]` (EN-F27a).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields, default)]
-pub struct L3 {
+pub struct Extractors {
     /// Holdout F1 an extractor must reach before `--with` is accepted.
     pub holdout_min_f1: f64,
     /// Minimum judged spans in the holdout.
     pub holdout_min_spans: u32,
 }
 
-impl Default for L3 {
+impl Default for Extractors {
     fn default() -> Self {
         Self {
             holdout_min_f1: 0.50,
@@ -384,17 +350,18 @@ impl Default for Link {
     }
 }
 
-/// `[budget]` (EN-N3; both opt-in budgets, 0 is out of range).
+/// `[text]` (EN-N3; the text index build budget, the old `budget.l0_rss_mb`, PC-16; an opt-in
+/// budget, 0 is out of range).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
-pub struct Budget {
-    /// L0 RSS budget in MiB.
-    pub l0_rss_mb: u32,
+pub struct Text {
+    /// Text index build RSS budget in MiB.
+    pub build_rss_mb: u32,
 }
 
-impl Default for Budget {
+impl Default for Text {
     fn default() -> Self {
-        Self { l0_rss_mb: 64 }
+        Self { build_rss_mb: 64 }
     }
 }
 
@@ -429,10 +396,8 @@ pub struct EngineConfig {
     pub ontology: OntologyCfg,
     /// `[gazetteer]`
     pub gazetteer: Gazetteer,
-    /// `[embed]`
-    pub embed: Embed,
-    /// `[l3]`
-    pub l3: L3,
+    /// `[extractors]`
+    pub extractors: Extractors,
     /// `[recall]`
     pub recall: Recall,
     /// `[ask]`
@@ -445,8 +410,8 @@ pub struct EngineConfig {
     pub index: Index,
     /// `[link]`
     pub link: Link,
-    /// `[budget]`
-    pub budget: Budget,
+    /// `[text]`
+    pub text: Text,
     /// `[bench]`
     pub bench: Bench,
 }
@@ -483,13 +448,12 @@ pub enum ConfigError {
 }
 
 /// The opt-in budgets (engine-plan §4 memory policy, OWN-54/SD-11): a positive integer each.
-const BUDGETS: [&str; 11] = [
+const BUDGETS: [&str; 10] = [
     "ingest.claim_ttl_s",
     "ingest.claim_max_attempts",
     "ingest.claim_scan_max",
-    "budget.l0_rss_mb",
+    "text.build_rss_mb",
     "gazetteer.max_automaton_mb",
-    "embed.max_scan_rss_mb",
     "ingest.lru_mib",
     "index.deadline_secs",
     "index.quota.file_bytes",
@@ -544,16 +508,6 @@ fn parse(text: &str) -> Result<EngineConfig, ConfigError> {
     {
         return Err(ConfigError::NotAvailable {
             path: "ingest.default_with",
-        });
-    }
-    if cfg
-        .embed
-        .model
-        .as_ref()
-        .is_some_and(|model| !model.is_empty())
-    {
-        return Err(ConfigError::NotAvailable {
-            path: "embed.model",
         });
     }
     cfg.recall.effective_rrf_k()?;

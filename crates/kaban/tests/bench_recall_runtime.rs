@@ -153,8 +153,8 @@ fn cli_refuses_cc_sim_embed_bad_classes_and_effective_config_mismatch_before_wri
         ),
         (
             "sim",
-            vec!["--layers", "fts,fuzzy,sim"],
-            "not_available_in_this_release",
+            vec!["--modes", "lexical,fuzzy,sim"],
+            "unknown recall mode",
         ),
         (
             "badclass",
@@ -224,8 +224,8 @@ fn cli_honors_effective_query_minimum_and_rrf_and_sample_minimum() {
             "rrf:7",
             "--classes",
             "identifier",
-            "--layers",
-            "fts,fuzzy",
+            "--modes",
+            "lexical,fuzzy",
             "--warmup",
             "1",
         ])

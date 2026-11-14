@@ -7,8 +7,8 @@
 
 use kaban_api::{ApiError, KabanApi, RememberRequest};
 use kaban_core::{
-    Actor, EdgeDiff, GraphStore, IngestStore, NewNode, NodeId, Op, Owner, StoreError, WorkspaceId,
-    WriteBatch, WriteCtx,
+    Actor, EdgeDiff, GraphStore, IngestStore, NewNode, NodeId, Op, Producer, StoreError,
+    WorkspaceId, WriteBatch, WriteCtx,
 };
 use kaban_policy::Policy;
 use kaban_store_sqlite::SqliteStore;
@@ -43,10 +43,10 @@ fn pairs(r: &kaban_api::TraverseResponse) -> Vec<(String, String)> {
     p
 }
 
-/// Three edges out of `a`, one per provenance the stored scoring columns distinguish
-/// (migration 0004): a human `remember` link (`layer = human`, `score = 1.0`), a structural
-/// ingest edge (`Owned { kaban-ingest }`, no layer, no score) and a projected `gliner` claim
-/// (`layer = gliner`, `method = gliner`, `score = 0.6`).
+/// Three edges out of `a`, one per provenance the stored producer and scoring columns
+/// distinguish: an authored `remember` link (`authored`, `score = 1.0`), a structural ingest
+/// edge (`Owned { document_ingest }`, no method, no score) and an extractor's `gliner` edge
+/// (`extractor:gliner`, `method = gliner`, `score = 0.6`).
 struct Scored {
     api: KabanApi,
     a: String,
@@ -104,12 +104,14 @@ fn scored() -> Scored {
                 src: a_id,
                 dst: claimed.clone(),
                 rel: "RELATES_TO".into(),
-                props: Some(json!({"layer": "gliner", "method": "gliner", "score": 6000})),
+                props: Some(
+                    json!({"producer": "extractor:gliner", "method": "gliner", "score": 6000}),
+                ),
             },
         ],
     );
     b.edge_diff = EdgeDiff::Owned {
-        owner: Owner::KabanIngest,
+        producer: Producer::DocumentIngest,
     };
     store
         .apply_batch(b, &WriteCtx::new(WorkspaceId::default(), Actor::Agent))
@@ -180,16 +182,16 @@ fn an_unknown_rel_is_refused_as_unknown_rel() {
     assert_no_probe(&err, "QWJ7X", "unknown_rel");
 }
 
-/// EN-F46 `edge_filter.layers`: `["human"]` keeps the human link and drops the ingest edge,
-/// whose `layer` column is empty; the node the dropped edge led to is not reached.
+/// EN-F46 `edge_filter.producers` (PC-16): `["authored"]` keeps the authored link and drops
+/// the ingest and extractor edges; the nodes the dropped edges led to are not reached.
 #[test]
-fn edge_filter_layers_human_keeps_the_link_and_drops_the_ingest_edge() {
+fn edge_filter_producers_authored_keeps_the_link_and_drops_the_ingest_edge() {
     let s = scored();
     let all = traverse_json(&s.api, json!({"start_ids": [s.a]})).unwrap();
     assert_eq!(all.edges.len(), 3, "the fixture: {all:?}");
     let human = traverse_json(
         &s.api,
-        json!({"start_ids": [s.a], "edge_filter": {"layers": ["human"]}}),
+        json!({"start_ids": [s.a], "edge_filter": {"producers": ["authored"]}}),
     )
     .unwrap();
     assert_eq!(
@@ -252,19 +254,26 @@ fn edge_filter_min_score_drops_edges_below_it_and_edges_without_a_score() {
     );
 }
 
-/// EN-F46 `edge_filter`: an unknown layer or method is refused with a fixed word, never
-/// echoed; a score outside 0..1 is refused.
+/// EN-F46 `edge_filter`: an unknown producer or method is refused with a fixed word, never
+/// echoed; a score outside 0..1 is refused; the removed `layers` key is refused.
 #[test]
-fn edge_filter_refuses_an_unknown_layer_method_or_score() {
+fn edge_filter_refuses_an_unknown_producer_method_or_score() {
     let s = scored();
     let err = traverse_json(
         &s.api,
-        json!({"start_ids": [s.a], "edge_filter": {"layers": ["carrier-pigeon-ZXQV9"]}}),
+        json!({"start_ids": [s.a], "edge_filter": {"producers": ["carrier-pigeon-ZXQV9"]}}),
     )
-    .expect_err("an unknown layer");
+    .expect_err("an unknown producer");
     assert!(
-        matches!(&err, ApiError::Invalid(m) if m == "unknown_layer"),
+        matches!(&err, ApiError::Invalid(m) if m == "unknown_producer"),
         "{err:?}"
+    );
+    assert!(
+        serde_json::from_value::<kaban_api::TraverseRequest>(
+            json!({"start_ids": [s.a], "edge_filter": {"layers": ["gazetteer"]}})
+        )
+        .is_err(),
+        "the removed `layers` key is refused"
     );
     let err = traverse_json(
         &s.api,

@@ -11,16 +11,7 @@ gazetteer:
   max_automaton_mb: 25
   max_chunk_ms: 1
   v4_symbols: true
-embed:
-  model: null
-  dtype: int8
-  knn_k: 5
-  tau:
-    default: 0.80
-  scan_window_rows: 4096
-  max_scan_rss_mb: 32
-  min_topk_overlap: 0.9
-l3:
+extractors:
   holdout_min_f1: 0.50
   holdout_min_spans: 200
 recall:
@@ -55,8 +46,8 @@ index:
     tmp_bytes: 536870912
 link:
   default: none
-budget:
-  l0_rss_mb: 64
+text:
+  build_rss_mb: 64
 bench:
   min_samples: 30
   why_regression_pct: 10

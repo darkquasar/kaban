@@ -1,6 +1,6 @@
 //! Source-bound identity for derived publications.
 
-use crate::{Layer, Node, NodeId, WorkspaceId};
+use crate::{Node, NodeId, Producer, WorkspaceId};
 use serde::{Deserialize, Serialize};
 
 /// Closed shipped producer identity. Source lineage and complete-set generations are not
@@ -34,11 +34,11 @@ impl BuiltinProducer {
     #[must_use]
     pub fn matches_legacy_assertion(
         self,
-        layer: Layer,
+        layer: Producer,
         id: Option<&str>,
         version: Option<&str>,
     ) -> bool {
-        layer == Layer::Gazetteer
+        layer == Producer::Gazetteer
             && id.is_none()
             && version.is_some_and(|value| {
                 value == "1"
@@ -56,42 +56,6 @@ impl BuiltinProducer {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CurrentProducerAuthority(BuiltinProducer);
 
-/// Explicit layer maintenance operation; never a generic owner-wide edge diff.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LayerMaintenance {
-    /// Discard machine projections for a fresh explicit derivation.
-    Reindex,
-    /// Permanently reject existing claims while preserving their immutable history.
-    Forget,
-}
-
-/// Fixed, content-free maintenance refusal categories.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MaintenanceRefusal {
-    /// The requested producer is still the shipped current producer.
-    CurrentProducer,
-    /// Historical claims cannot be bound to a known producer publication safely.
-    UntrackedProducer,
-    /// The layer or producer mapping is unknown or deferred in this release.
-    UnavailableProducer,
-}
-
-/// Bounded maintenance accounting, including a visible zero-write refusal.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RetireReport {
-    /// Committed transactions containing maintenance writes, including state-only resets.
-    pub transactions: u32,
-    /// Artifact and claim rows retired, never canonical node rows.
-    pub rows: u64,
-    /// Fixed reason for a refused request.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub refused: Option<MaintenanceRefusal>,
-    /// Number of historical claims whose mapping could not be established.
-    #[serde(default)]
-    pub untracked: u64,
-}
-
 /// Content-free offline findings about derived publication and sink freshness.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ArtifactDiagnostics {
@@ -107,17 +71,12 @@ impl CurrentProducerAuthority {
     /// Resolve admitted builtins. `link.default=none` still protects the current Gazetteer:
     /// an explicit per-run Gazetteer override remains admitted. Deferred layers fail closed.
     #[must_use]
-    pub fn from_config(config: &crate::config::EngineConfig, layer: Layer) -> Option<Self> {
-        if layer != Layer::Gazetteer
+    pub fn from_config(config: &crate::config::EngineConfig, layer: Producer) -> Option<Self> {
+        if layer != Producer::Gazetteer
             || !matches!(config.link.default.as_str(), "none" | "gazetteer")
             || config
                 .ingest
                 .default_with
-                .as_ref()
-                .is_some_and(|value| !value.is_empty())
-            || config
-                .embed
-                .model
                 .as_ref()
                 .is_some_and(|value| !value.is_empty())
         {
@@ -177,7 +136,7 @@ impl From<&Node> for SourceRev {
 #[must_use]
 pub fn artifact_key(
     source_rev: &SourceRev,
-    layer: Layer,
+    layer: Producer,
     producer_id: &str,
     config_hash: &str,
     policy_version: &str,
@@ -204,8 +163,9 @@ pub struct DerivedArtifact {
     pub key: ArtifactKey,
     /// Publication tenant.
     pub workspace_id: WorkspaceId,
-    /// Machine layer; human publications are refused.
-    pub layer: Layer,
+    /// The producer of the publication (stored in the `layer` column until T4); authored
+    /// publications are refused.
+    pub layer: Producer,
     /// Versioned producer identifier.
     pub producer_id: String,
     /// Source storage coordinate, checked inside the transaction.

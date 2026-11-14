@@ -2,9 +2,9 @@
 #![allow(clippy::unwrap_used)]
 
 use kaban_api::{BudgetSource, RunFlags, budgets};
-use kaban_core::Layer;
+use kaban_core::Producer;
 use kaban_core::config::EngineConfig;
-use kaban_store_sqlite::{LayerRunOutcome, SqliteStore};
+use kaban_store_sqlite::{ProducerRunOutcome, SqliteStore};
 use serde_json::{Value, json};
 use std::fmt::Write;
 use std::process::Command;
@@ -22,13 +22,13 @@ fn stats_cli(scratch: &common::Scratch, args: &[&str]) -> std::process::Output {
 }
 
 #[test]
-fn tool_resource_and_cli_share_the_matrix_and_preserve_old_fields() {
+fn tool_resource_and_cli_share_the_producers_and_preserve_old_fields() {
     let scratch = common::Scratch::new("kaban-stats", "parity");
     std::fs::create_dir_all(scratch.home()).unwrap();
     {
         let store = SqliteStore::open(&scratch.db(), &scratch.home().join("keys")).unwrap();
         store
-            .record_layer_run(Layer::Gazetteer, 42, LayerRunOutcome::Failed)
+            .record_producer_run(Producer::Gazetteer, 42, ProducerRunOutcome::Failed)
             .unwrap();
     }
     let mut server = common::Server::start(&scratch);
@@ -44,8 +44,8 @@ fn tool_resource_and_cli_share_the_matrix_and_preserve_old_fields() {
     assert_eq!(output.status.code(), Some(0), "{output:?}");
     assert_eq!(String::from_utf8_lossy(&output.stdout).lines().count(), 1);
     let cli: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(tool["layers"], resource["layers"]);
-    assert_eq!(tool["layers"], cli["layers"]);
+    assert_eq!(tool["producers"], resource["producers"]);
+    assert_eq!(tool["producers"], cli["producers"]);
     for field in [
         "nodes",
         "edges",
@@ -62,20 +62,26 @@ fn tool_resource_and_cli_share_the_matrix_and_preserve_old_fields() {
     }
     for value in [&tool, &resource, &cli] {
         assert!(value["db_bytes"].as_u64().is_some_and(|bytes| bytes > 0));
-        // four rows (spec 05 OWN-M: no retired trigram row): fts, gazetteer, embed, extractors
-        assert_eq!(value["layers"][0]["on"], true);
-        assert_eq!(value["layers"][1]["last_run"], 42);
-        assert_eq!(value["layers"][1]["last_outcome"], "failed");
-        assert_eq!(value["layers"][2]["on"], false);
+        // seven rows (PC-16): authored, hook_events, document_ingest, gazetteer, extractor,
+        // scip_import, git_history; no `layers` matrix
+        assert!(value.get("layers").is_none(), "{value}");
+        assert_eq!(value["producers"][0]["on"], true);
+        assert_eq!(value["producers"][3]["last_run"], 42);
+        assert_eq!(value["producers"][3]["last_outcome"], "failed");
+        assert_eq!(value["producers"][4]["on"], false);
         assert_eq!(
-            value["layers"][2]["reason_off"],
+            value["producers"][4]["reason_off"],
+            "explicit_selection_only"
+        );
+        assert_eq!(value["producers"][6]["on"], false);
+        assert_eq!(
+            value["producers"][6]["reason_off"],
             "not_available_in_this_release"
         );
-        assert_eq!(value["layers"][3]["on"], false);
     }
     insta::assert_snapshot!(
-        "matrix_embed_off",
-        serde_json::to_string_pretty(&tool["layers"]).unwrap()
+        "producers_default",
+        serde_json::to_string_pretty(&tool["producers"]).unwrap()
     );
 }
 
@@ -147,8 +153,10 @@ fn budget_table(cfg: &EngineConfig, flags: RunFlags) -> String {
     output
 }
 
+/// The `embed` section is gone (PC-16, no compatibility): any spelling of it is refused
+/// naming the key, never echoing a value, before a database exists.
 #[test]
-fn embedding_model_admission_is_exit_four_without_echo_or_database_creation() {
+fn the_removed_embed_section_is_exit_four_naming_the_key_without_echo_or_database_creation() {
     let scratch = common::Scratch::new("kaban-stats", "embed-model-admission");
     std::fs::create_dir_all(scratch.home()).unwrap();
     let config = scratch.home().join("config.yaml");
@@ -167,15 +175,16 @@ fn embedding_model_admission_is_exit_four_without_echo_or_database_creation() {
     let output = run();
     assert_eq!(output.status.code(), Some(4), "{output:?}");
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("not_available_in_this_release"));
+    assert!(stderr.contains("config key invalid: embed"), "{stderr}");
     assert!(!stderr.contains("AKIAQWERTYUIOPASDFGH"));
     assert!(!scratch.db().exists());
     for yaml in ["embed:\n  model: null\n", "embed:\n  model: {}\n"] {
         std::fs::write(&config, yaml).unwrap();
-        assert_eq!(
-            run().status.code(),
-            Some(5),
-            "accepted config reaches missing diagnostic DB"
+        let output = run();
+        assert_eq!(output.status.code(), Some(4), "{output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("config key invalid: embed"),
+            "{output:?}"
         );
         assert!(!scratch.db().exists());
     }

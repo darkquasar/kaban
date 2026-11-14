@@ -4,7 +4,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // test code: failures are the assertion
 
-use kaban_api::{ApiConfig, KabanApi, RememberRequest, StatsRequest, StatsResponse};
+use kaban_api::{ApiConfig, KabanApi, RememberRequest, StatsRequest};
 use kaban_core::IngestStore;
 use kaban_core::config::EngineConfig;
 use kaban_policy::Policy;
@@ -49,19 +49,11 @@ fn stats_is_a_superset_with_engine_schema_version_stores_and_effective_hash() {
         "{v}"
     );
     assert_eq!(v["stores"], json!(["project"]), "{v}");
-    assert_eq!(v["layers"].as_array().unwrap().len(), 4);
-    assert_eq!(v["layers"][0]["layer"], "fts");
-    assert_eq!(v["layers"][0]["on"], true);
-    assert_eq!(v["layers"][2]["on"], false);
-    assert_eq!(v["layers"][3]["on"], false);
-    let mut legacy = v.clone();
-    legacy.as_object_mut().unwrap().remove("layers");
-    assert_eq!(
-        serde_json::from_value::<StatsResponse>(legacy)
-            .unwrap()
-            .layers,
-        Vec::new()
-    );
+    assert!(v.get("layers").is_none(), "{v}");
+    assert_eq!(v["producers"].as_array().unwrap().len(), 7);
+    assert_eq!(v["producers"][0]["producer"], "authored");
+    assert_eq!(v["producers"][0]["on"], true);
+    assert_eq!(v["producers"][4]["on"], false);
     assert_eq!(v["policy"]["effective_hash"], json!(effective), "{v}");
     assert_ne!(
         effective,
@@ -74,10 +66,10 @@ fn stats_is_a_superset_with_engine_schema_version_stores_and_effective_hash() {
 fn stats_reports_configured_layers_and_isolates_bad_run_metadata() {
     let store = Arc::new(SqliteStore::open_memory().unwrap());
     store
-        .set_index_meta("layer_run:gazetteer", r#"{"at":42,"outcome":"failed"}"#)
+        .set_index_meta("producer_run:gazetteer", r#"{"at":42,"outcome":"failed"}"#)
         .unwrap();
     store
-        .set_index_meta("layer_run:embed", "malformed")
+        .set_index_meta("producer_run:hook_events", "malformed")
         .unwrap();
     let signer = store.signer();
     let engine = EngineConfig::default();
@@ -91,17 +83,16 @@ fn stats_reports_configured_layers_and_isolates_bad_run_metadata() {
         },
     );
     let stats = api.stats(StatsRequest::default()).unwrap();
-    assert_eq!(stats.layers.len(), 4);
-    assert!(stats.layers[0].on);
-    assert!(!stats.layers[1].on);
-    assert_eq!(stats.layers[1].last_run, Some(42));
+    assert_eq!(stats.producers.len(), 7);
+    assert!(stats.producers[0].on);
+    let gazetteer = &stats.producers[3];
+    assert!(!gazetteer.on);
+    assert_eq!(gazetteer.last_run, Some(42));
     assert_eq!(
-        stats.layers[1].last_outcome,
-        Some(kaban_api::layers::LayerOutcome::Failed)
+        gazetteer.last_outcome,
+        Some(kaban_api::producers::ProducerOutcome::Failed)
     );
-    assert!(!stats.layers[2].on);
-    assert_eq!(stats.layers[2].last_run, None);
-    assert!(!stats.layers[3].on);
+    assert_eq!(stats.producers[1].last_run, None);
 }
 
 #[test]

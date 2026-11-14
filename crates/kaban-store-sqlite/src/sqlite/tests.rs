@@ -275,7 +275,7 @@ fn filters_apply_before_limit_and_supersedes_archives_the_target() {
         s.recall(&RecallQuery {
             query: "blue green".into(),
             limit: 5,
-            include_superseded: true,
+            include_archived: true,
             ..Default::default()
         })
         .unwrap()
@@ -286,7 +286,7 @@ fn filters_apply_before_limit_and_supersedes_archives_the_target() {
             query: "canary now".into(),
             limit: 5,
             hops: 1,
-            include_superseded: true,
+            include_archived: true,
             ..Default::default()
         })
         .unwrap();

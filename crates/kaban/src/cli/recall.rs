@@ -17,9 +17,9 @@ use std::process::ExitCode;
 pub(crate) struct Flags {
     /// Free-text query: keywords, identifiers, error strings (omit with --stdin-json)
     query: Option<String>,
-    /// Retrieval sources: fts,fuzzy (sim is reserved)
+    /// Match modes: lexical,fuzzy
     #[arg(long, value_delimiter = ',')]
-    layers: Vec<String>,
+    modes: Vec<String>,
     /// Also search fuzzy matches when lexical retrieval hits
     #[arg(long)]
     fuzzy: bool,
@@ -38,10 +38,7 @@ pub(crate) struct Flags {
     /// Graph expansion hops 0..2 (default 1)
     #[arg(long)]
     hops: Option<u8>,
-    /// Also return superseded (archived) records reached through graph expansion
-    #[arg(long, default_value_t = false)]
-    include_superseded: bool,
-    /// Also return archived records of any governance reached through graph expansion
+    /// Also return archived (for example superseded) records reached through graph expansion
     #[arg(long, default_value_t = false)]
     include_archived: bool,
     /// Return full text instead of summaries
@@ -54,14 +51,13 @@ impl ToolArgs for Flags {
 
     fn any_given(&self) -> bool {
         self.query.is_some()
-            || !self.layers.is_empty()
+            || !self.modes.is_empty()
             || self.fuzzy
             || !self.kinds.is_empty()
             || !self.tags.is_empty()
             || self.workspace_id.is_some()
             || self.limit.is_some()
             || self.hops.is_some()
-            || self.include_superseded
             || self.include_archived
             || self.full_text
     }
@@ -75,8 +71,8 @@ impl ToolArgs for Flags {
             |values: Vec<String>| Value::Array(values.into_iter().map(Value::String).collect());
         let mut args = Map::new();
         args.insert("query".into(), Value::String(query));
-        if !self.layers.is_empty() {
-            args.insert("layers".into(), strings(self.layers));
+        if !self.modes.is_empty() {
+            args.insert("modes".into(), strings(self.modes));
         }
         args.insert("fuzzy".into(), Value::Bool(self.fuzzy));
         args.insert("kinds".into(), strings(self.kinds));
@@ -90,10 +86,6 @@ impl ToolArgs for Flags {
         if let Some(hops) = self.hops {
             args.insert("hops".into(), Value::from(hops));
         }
-        args.insert(
-            "include_superseded".into(),
-            Value::Bool(self.include_superseded),
-        );
         args.insert(
             "include_archived".into(),
             Value::Bool(self.include_archived),

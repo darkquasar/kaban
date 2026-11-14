@@ -219,7 +219,7 @@ impl ReadPlan {
                 let mut returned = 0usize;
                 for req in reqs {
                     let q = RecallQuery {
-                        layers: req.layers.clone(),
+                        modes: req.modes.clone(),
                         fuzzy: req.fuzzy,
                         query: req.query.clone(),
                         kinds: req.kinds.clone(),
@@ -230,7 +230,6 @@ impl ReadPlan {
                             .or_else(|| Some(WORKSPACES[0].0.into())),
                         limit: 10,
                         hops: 1,
-                        include_superseded: false,
                         include_archived: false,
                         r#ref: None,
                     };

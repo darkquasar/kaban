@@ -1,7 +1,7 @@
 //! Derived artifact identity is stable, boundary-safe, and policy/source-sensitive.
 #![allow(clippy::unwrap_used)]
 
-use kaban_core::{Layer, SourceRev, WorkspaceId, WriteBatch, artifact_key};
+use kaban_core::{ExtractorKind, Producer, SourceRev, WorkspaceId, WriteBatch, artifact_key};
 
 #[test]
 fn shipped_gazetteer_authority_keeps_legacy_keys_and_protects_off_mode() {
@@ -11,18 +11,18 @@ fn shipped_gazetteer_authority_keeps_legacy_keys_and_protects_off_mode() {
     assert_eq!(producer.producer_id(), "gazetteer@1");
     assert_eq!(producer.extractor_id(), "gazetteer");
     assert_eq!(producer.extractor_version(), "1");
-    assert!(CurrentProducerAuthority::from_config(&config, Layer::Gazetteer).is_some());
-    assert!(CurrentProducerAuthority::from_config(&config, Layer::Embed).is_none());
+    assert!(CurrentProducerAuthority::from_config(&config, Producer::Gazetteer).is_some());
+    assert!(CurrentProducerAuthority::from_config(&config, Producer::HookEvents).is_none());
     config.link.default = "unknown".into();
-    assert!(CurrentProducerAuthority::from_config(&config, Layer::Gazetteer).is_none());
+    assert!(CurrentProducerAuthority::from_config(&config, Producer::Gazetteer).is_none());
     for version in ["1", "1:set:0", "1:set:42"] {
-        assert!(producer.matches_legacy_assertion(Layer::Gazetteer, None, Some(version)));
+        assert!(producer.matches_legacy_assertion(Producer::Gazetteer, None, Some(version)));
     }
     for version in ["2", "1:set:", "1:set:-1", "1:set:1x"] {
-        assert!(!producer.matches_legacy_assertion(Layer::Gazetteer, None, Some(version)));
+        assert!(!producer.matches_legacy_assertion(Producer::Gazetteer, None, Some(version)));
     }
-    assert!(!producer.matches_legacy_assertion(Layer::Human, None, Some("1")));
-    assert!(!producer.matches_legacy_assertion(Layer::Gazetteer, Some("caller"), Some("1")));
+    assert!(!producer.matches_legacy_assertion(Producer::Authored, None, Some("1")));
+    assert!(!producer.matches_legacy_assertion(Producer::Gazetteer, Some("caller"), Some("1")));
 }
 
 #[test]
@@ -31,18 +31,18 @@ fn artifact_identity_separates_fields_source_layer_and_policy() {
         content_hash: "source".into(),
         rev: 7,
     };
-    let key = artifact_key(&source, Layer::Gazetteer, "ab", "c", "policy");
+    let key = artifact_key(&source, Producer::Gazetteer, "ab", "c", "policy");
     assert_eq!(
         key,
-        artifact_key(&source, Layer::Gazetteer, "ab", "c", "policy")
+        artifact_key(&source, Producer::Gazetteer, "ab", "c", "policy")
     );
     assert_ne!(
         key,
-        artifact_key(&source, Layer::Gazetteer, "a", "bc", "policy")
+        artifact_key(&source, Producer::Gazetteer, "a", "bc", "policy")
     );
     assert_ne!(
         key,
-        artifact_key(&source, Layer::Gazetteer, "ab", "c", "other-policy")
+        artifact_key(&source, Producer::Gazetteer, "ab", "c", "other-policy")
     );
     assert_ne!(
         key,
@@ -51,7 +51,7 @@ fn artifact_identity_separates_fields_source_layer_and_policy() {
                 rev: 8,
                 ..source.clone()
             },
-            Layer::Gazetteer,
+            Producer::Gazetteer,
             "ab",
             "c",
             "policy"
@@ -59,7 +59,13 @@ fn artifact_identity_separates_fields_source_layer_and_policy() {
     );
     assert_ne!(
         key,
-        artifact_key(&source, Layer::Script, "ab", "c", "policy")
+        artifact_key(
+            &source,
+            Producer::Extractor(ExtractorKind::Script),
+            "ab",
+            "c",
+            "policy"
+        )
     );
     assert_eq!(key.as_str().len(), 64);
 }

@@ -5,7 +5,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // test code: failures are the assertion
 
-use kaban_core::{EdgeDiff, NewNode, NodeId, Op, Owner, WorkspaceId, WriteBatch};
+use kaban_core::{EdgeDiff, NewNode, NodeId, Op, Producer, WorkspaceId, WriteBatch};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::json;
@@ -44,7 +44,7 @@ fn sample() -> WriteBatch {
             Op::Reactivate { id: c.clone() },
         ],
         edge_diff: EdgeDiff::Owned {
-            owner: Owner::KabanIngest,
+            producer: Producer::DocumentIngest,
         },
         artifacts: vec![],
         gazetteer_claim_sets: vec![],
@@ -73,7 +73,12 @@ fn a_batch_with_every_op_variant_survives_json_and_back_equal() {
     );
     assert_eq!(
         v["edge_diff"],
-        json!({"mode": "owned", "owner": "kaban-ingest"})
+        json!({"mode": "owned", "producer": "document_ingest"})
+    );
+    // the pre-PC-16 `owner` spelling is gone (no alias)
+    assert!(
+        serde_json::from_value::<EdgeDiff>(json!({"mode": "owned", "owner": "kaban-ingest"}))
+            .is_err()
     );
 }
 

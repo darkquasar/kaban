@@ -143,7 +143,25 @@ fn wikilinks_resolve_to_existing_documents_and_placeholders_upgrade_when_the_fil
         .find(|e| e.dst == doc_id("b.md").to_string())
         .unwrap();
     assert_eq!(to_b.props["resolved"], true);
-    assert_eq!(to_b.props["owner"], "kaban-ingest");
+    // the wikilink is the document ingest's edge (PC-16: the producer is the stored column)
+    let ingest_links = rig
+        .store
+        .traverse(&kaban_core::TraverseQuery {
+            start_ids: vec![doc_id("a.md")],
+            rels: vec!["LINKS_TO".into()],
+            max_depth: 1,
+            edge_filter: Some(kaban_core::EdgeFilter {
+                producers: vec![kaban_core::Producer::DocumentIngest],
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+        .unwrap()
+        .edges;
+    assert!(
+        ingest_links.iter().any(|e| e.id == to_b.id),
+        "{ingest_links:?}"
+    );
     let to_c = links
         .iter()
         .find(|e| e.dst == doc_id("c.md").to_string())

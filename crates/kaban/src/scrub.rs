@@ -15,6 +15,11 @@ const ARG_ERROR_PREFIX: &str = "failed to deserialize parameters:";
 /// may quote the input in a shape of its own, so nothing of it is kept).
 const UNCLASSIFIED: &str = "invalid request: a typed argument did not parse";
 
+/// Request keys a release removed (no aliases, spec 11 PC-5 as amended): an `unknown field`
+/// whose name is exactly one of these is answered with the name, so the caller learns which
+/// key went. The name echoed is this constant, never the input.
+const RETIRED_FIELDS: &[&str] = &["layers", "include_superseded", "include_candidates"];
+
 /// serde's `, expected ` separator: the expected shape follows the quoted value, so the LAST
 /// occurrence is the one serde wrote, whatever the value contains.
 const EXPECTED_SEP: &str = ", expected ";
@@ -49,7 +54,7 @@ pub(crate) fn rejected_receipt_document(api: &kaban_api::KabanApi, tool: &str) -
 ///   the value).
 /// - `unknown field`, `unknown variant`: the class and the declared names (`expected one of
 ///   ...`, type-derived), the input name dropped; a type with no fields or variants gives the
-///   class alone.
+///   class alone. An unknown field named exactly as one of [`RETIRED_FIELDS`] keeps that name.
 /// - `duplicate field`: the class alone.
 /// - anything else: [`UNCLASSIFIED`].
 pub(crate) fn typed_argument_failure(serde_msg: &str) -> String {
@@ -61,6 +66,9 @@ pub(crate) fn typed_argument_failure(serde_msg: &str) -> String {
         if msg.starts_with(class) {
             return with_expected(class, msg);
         }
+    }
+    if let Some(name) = retired_field(msg) {
+        return with_expected(&format!("unknown field `{name}` (removed)"), msg);
     }
     for (class, none) in [
         ("unknown field", ", there are no fields"),
@@ -77,6 +85,17 @@ pub(crate) fn typed_argument_failure(serde_msg: &str) -> String {
         return "duplicate field".to_owned();
     }
     UNCLASSIFIED.to_owned()
+}
+
+/// The [`RETIRED_FIELDS`] constant an `unknown field` message names, compared whole (the
+/// backticked name ends at the first backtick, and only an exact match counts).
+fn retired_field(msg: &str) -> Option<&'static str> {
+    let rest = msg.strip_prefix("unknown field `")?;
+    let (name, _) = rest.split_once('`')?;
+    RETIRED_FIELDS
+        .iter()
+        .copied()
+        .find(|retired| *retired == name)
 }
 
 /// `class, expected <shape>` when serde wrote an expected part, else the class alone.
@@ -172,6 +191,17 @@ mod tests {
             "unknown field of a fieldless type",
             "unknown field `ZXQV9, expected q`, there are no fields",
             "unknown field",
+        );
+        // a removed key keeps its (constant) name; a lookalike carrying more bytes does not
+        fixed(
+            "retired field",
+            "unknown field `layers`, expected `modes` or `query`",
+            "unknown field `layers` (removed), expected `modes` or `query`",
+        );
+        fixed(
+            "retired field lookalike",
+            "unknown field `layersZXQV9`, expected `modes` or `query`",
+            "unknown field, expected `modes` or `query`",
         );
         fixed("duplicate", "duplicate field `ZXQV9`", "duplicate field");
         // the one name kept is the request type's own

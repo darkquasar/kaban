@@ -1,13 +1,13 @@
 //! Transactional source-owned derived artifact publication and Gazetteer set retirement: a
-//! set's mention edges are written directly (`props.layer = gazetteer`, the scoring in the props).
+//! set's mention edges are written directly (`props.producer = gazetteer`, the scoring in the props).
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod common;
 
 use common::Scratch;
 use kaban_core::ActorId;
 use kaban_core::{
-    Actor, EdgeDiff, GazetteerClaimSet, IngestStore, Layer, MemoryStore, NewNode, NodeId, Op,
-    Owner, SourceRev, TraverseQuery, WorkspaceId, WriteBatch, WriteCtx,
+    Actor, EdgeDiff, GazetteerClaimSet, IngestStore, MemoryStore, NewNode, NodeId, Op, Producer,
+    SourceRev, TraverseQuery, WorkspaceId, WriteBatch, WriteCtx,
 };
 use kaban_store_sqlite::SqliteStore;
 use serde_json::json;
@@ -37,7 +37,7 @@ fn claim(chunk: &NodeId, target: &NodeId) -> Op {
 /// score).
 #[allow(clippy::needless_pass_by_value)] // call sites pass a fresh `json!` literal
 fn mention(chunk: &NodeId, target: &NodeId, extra: serde_json::Value) -> Op {
-    let mut props = json!({"layer": "gazetteer", "method": "exact", "offset": 0, "len": 10,
+    let mut props = json!({"producer": "gazetteer", "method": "exact", "offset": 0, "len": 10,
         "score": 9000, "source_id": "doc-fixture"});
     for (k, v) in extra.as_object().unwrap() {
         props[k] = v.clone();
@@ -87,7 +87,7 @@ fn empty_complete_gazetteer_set_retires_prior_claim_projection() {
         ],
     );
     first.edge_diff = EdgeDiff::Owned {
-        owner: Owner::KabanIngest,
+        producer: Producer::DocumentIngest,
     };
     first.ops.push(claim(&chunk, &target));
     store.apply_batch(first, &ctx()).unwrap();
@@ -96,7 +96,7 @@ fn empty_complete_gazetteer_set_retires_prior_claim_projection() {
     let mut payload =
         serde_json::to_value(WriteBatch::new(WorkspaceId::default(), vec![])).unwrap();
     payload["edge_diff"] = serde_json::to_value(EdgeDiff::Owned {
-        owner: Owner::KabanIngest,
+        producer: Producer::DocumentIngest,
     })
     .unwrap();
     payload["gazetteer_claim_sets"] = json!([{"document": document, "source_id":"doc-fixture", "source_rev": SourceRev::from(&store.get(&document,false).unwrap().unwrap()), "expected_generation":0,"config_hash":"off"}]);
@@ -117,7 +117,7 @@ fn complete(
 ) -> WriteBatch {
     let mut batch = WriteBatch::new(WorkspaceId::default(), mentions);
     batch.edge_diff = EdgeDiff::Owned {
-        owner: Owner::KabanIngest,
+        producer: Producer::DocumentIngest,
     };
     batch.gazetteer_claim_sets.push(GazetteerClaimSet {
         document: document.clone(),
@@ -187,29 +187,6 @@ fn complete_set_freshness_binds_source_and_distinguishes_empty_unknown_and_reset
     let rebuilt = complete(&store, &document, vec![], true);
     store.apply_batch(rebuilt, &ctx()).unwrap();
     assert!(store.gazetteer_set_fresh(&document, &workspace).unwrap());
-    let source = serde_json::to_value(store.get(&document, false).unwrap()).unwrap();
-    let authority = kaban_core::CurrentProducerAuthority::from_config(
-        &kaban_core::config::EngineConfig::default(),
-        Layer::Gazetteer,
-    )
-    .unwrap();
-    store
-        .maintain_layer(
-            authority,
-            kaban_core::LayerMaintenance::Reindex,
-            Some("note.md"),
-            10,
-            &ctx(),
-        )
-        .unwrap();
-    assert!(
-        !store.gazetteer_set_fresh(&document, &workspace).unwrap(),
-        "reset is stale even when the prior successful set was empty"
-    );
-    assert_eq!(
-        serde_json::to_value(store.get(&document, false).unwrap()).unwrap(),
-        source
-    );
     assert!(matches!(
         store.gazetteer_set_fresh(&document, &WorkspaceId::new("foreign")),
         Err(kaban_core::StoreError::NotFound(_))
@@ -289,211 +266,6 @@ fn complete_set_publishes_canonical_artifact_and_empty_set_cleans_only_its_sourc
 }
 
 #[test]
-fn obsolete_artifact_only_producer_retirement_is_bounded_and_current_refuses() {
-    use kaban_core::{CurrentProducerAuthority, MaintenanceRefusal, config::EngineConfig};
-    let scratch = Scratch::new("artifacts", "producer-retirement");
-    let store = SqliteStore::open(&scratch.db(), &scratch.keys()).unwrap();
-    let source = NodeId::new();
-    store
-        .apply_batch(
-            WriteBatch::new(
-                WorkspaceId::default(),
-                vec![node(
-                    &source,
-                    "Document",
-                    "Fixture",
-                    json!({"owner":"kaban-ingest"}),
-                )],
-            ),
-            &ctx(),
-        )
-        .unwrap();
-    let conn = rusqlite::Connection::open(scratch.db()).unwrap();
-    let rid: i64 = conn
-        .query_row("SELECT rid FROM node WHERE id=?1", [source.as_str()], |r| {
-            r.get(0)
-        })
-        .unwrap();
-    for (key, workspace, layer, producer) in [
-        ("a", "default", "gazetteer", "obsolete-fixture"),
-        ("b", "default", "gazetteer", "obsolete-fixture"),
-        ("c", "foreign", "gazetteer", "obsolete-fixture"),
-        ("d", "default", "script", "obsolete-fixture"),
-        ("e", "default", "gazetteer", "gazetteer@1"),
-    ] {
-        conn.execute(
-            "INSERT INTO derived_artifact VALUES(?1,?2,?3,?4,?5,'{}','fixture','v1',0)",
-            rusqlite::params![key, workspace, layer, producer, rid],
-        )
-        .unwrap();
-    }
-    let authority =
-        CurrentProducerAuthority::from_config(&EngineConfig::default(), Layer::Gazetteer).unwrap();
-    let current = store
-        .retire_producer(authority, "gazetteer@1", 1, &ctx())
-        .unwrap();
-    assert_eq!(current.refused, Some(MaintenanceRefusal::CurrentProducer));
-    assert_eq!(current.rows, 0);
-    assert_eq!(current.transactions, 0);
-    let report = store
-        .retire_producer(authority, "obsolete-fixture", 1, &ctx())
-        .unwrap();
-    assert_eq!(report.rows, 2);
-    assert_eq!(report.transactions, 2);
-    assert_eq!(
-        conn.query_row("SELECT count(*) FROM derived_artifact", [], |r| r
-            .get::<_, i64>(0))
-            .unwrap(),
-        3
-    );
-    assert!(store.get(&source, false).unwrap().is_some());
-    assert_eq!(
-        store
-            .retire_producer(authority, "unknown-fixture", 1, &ctx())
-            .unwrap()
-            .refused,
-        Some(MaintenanceRefusal::UnavailableProducer)
-    );
-}
-
-#[test]
-fn layer_reset_rejects_prepared_batch_after_empty_prior_set() {
-    use kaban_core::{CurrentProducerAuthority, LayerMaintenance, config::EngineConfig};
-    let scratch = Scratch::new("artifacts", "empty-reset");
-    let store = SqliteStore::open(&scratch.db(), &scratch.keys()).unwrap();
-    let (document, chunk, target) = (NodeId::new(), NodeId::new(), NodeId::new());
-    let mut first = complete(&store, &document, vec![], false);
-    first.ops.extend([
-        node(
-            &document,
-            "Document",
-            "Fixture",
-            json!({"owner":"kaban-ingest","source_id":"doc-fixture","path":"doc.md","chunk_ids":[chunk]}),
-        ),
-        node(
-            &chunk,
-            "Chunk",
-            "Architecture",
-            json!({"owner":"kaban-ingest"}),
-        ),
-        node(&target, "Fact", "Architecture", json!({})),
-    ]);
-    store.apply_batch(first, &ctx()).unwrap();
-    let stale = complete(&store, &document, vec![claim(&chunk, &target)], true);
-    let authority =
-        CurrentProducerAuthority::from_config(&EngineConfig::default(), Layer::Gazetteer).unwrap();
-    let report = store
-        .maintain_layer(authority, LayerMaintenance::Reindex, None, 1, &ctx())
-        .unwrap();
-    assert_eq!(
-        store.apply_batch(stale, &ctx()).unwrap().stale_source,
-        1,
-        "empty prior set must invalidate prepared producer batches"
-    );
-    assert_eq!(report.transactions, 1);
-    assert_eq!(
-        report.rows, 0,
-        "state-only reset is not an artifact or claim retirement"
-    );
-    store
-        .apply_batch(
-            complete(&store, &document, vec![claim(&chunk, &target)], true),
-            &ctx(),
-        )
-        .unwrap();
-    assert_eq!(hits(&store, &chunk), 1);
-}
-
-#[test]
-fn bounded_layer_reindex_and_forget_preserve_a_human_edge() {
-    use kaban_core::{CurrentProducerAuthority, LayerMaintenance, config::EngineConfig};
-    let scratch = Scratch::new("artifacts", "layer-maintenance");
-    let store = SqliteStore::open(&scratch.db(), &scratch.keys()).unwrap();
-    let (document, chunk, target) = (NodeId::new(), NodeId::new(), NodeId::new());
-    let mut batch = complete(&store, &document, vec![claim(&chunk, &target)], true);
-    batch.ops.extend([
-        node(
-            &document,
-            "Document",
-            "Fixture",
-            json!({"owner":"kaban-ingest","source_id":"doc-fixture","path":"doc.md","chunk_ids":[chunk]}),
-        ),
-        node(
-            &chunk,
-            "Chunk",
-            "Architecture",
-            json!({"owner":"kaban-ingest"}),
-        ),
-        node(&target, "Fact", "Architecture", json!({})),
-    ]);
-    store.apply_batch(batch, &ctx()).unwrap();
-    let authority =
-        CurrentProducerAuthority::from_config(&EngineConfig::default(), Layer::Gazetteer).unwrap();
-    let stale = complete(&store, &document, vec![claim(&chunk, &target)], true);
-    let reindex = store
-        .maintain_layer(
-            authority,
-            LayerMaintenance::Reindex,
-            Some("doc.md"),
-            1,
-            &ctx(),
-        )
-        .unwrap();
-    assert_eq!(reindex.rows, 2);
-    assert_eq!(reindex.transactions, 2);
-    assert_eq!(hits(&store, &chunk), 0);
-    assert_eq!(store.apply_batch(stale, &ctx()).unwrap().stale_source, 1);
-    store
-        .apply_batch(
-            complete(&store, &document, vec![claim(&chunk, &target)], true),
-            &ctx(),
-        )
-        .unwrap();
-    assert_eq!(hits(&store, &chunk), 1);
-    let human = WriteCtx::new(WorkspaceId::default(), Actor::HumanCli);
-    let linked = store
-        .link(&chunk, &target, "MENTIONS", Some(0.75), None, &human)
-        .unwrap();
-    let forgotten = store
-        .maintain_layer(authority, LayerMaintenance::Forget, None, 1, &ctx())
-        .unwrap();
-    // the human link took the triple over: only the artifact is the layer's to forget
-    assert_eq!(forgotten.rows, 1);
-    let snapshot = serde_json::to_value(&linked).unwrap();
-    store
-        .apply_batch(
-            complete(&store, &document, vec![claim(&chunk, &target)], true),
-            &ctx(),
-        )
-        .unwrap();
-    let edges = store
-        .traverse(&TraverseQuery {
-            start_ids: vec![chunk],
-            rels: vec!["MENTIONS".into()],
-            max_depth: 1,
-            ..Default::default()
-        })
-        .unwrap()
-        .edges;
-    assert_eq!(
-        serde_json::to_value(&edges[0]).unwrap(),
-        snapshot,
-        "a producer replay never overwrites a human's edge"
-    );
-    assert!(
-        store
-            .maintain_layer(
-                authority,
-                LayerMaintenance::Forget,
-                Some("foreign.md"),
-                1,
-                &ctx()
-            )
-            .is_err()
-    );
-}
-
-#[test]
 fn offline_artifact_diagnostics_report_stale_retired_and_cursor_counts_without_writes() {
     use kaban_core::{CurrentProducerAuthority, config::EngineConfig};
     let scratch = Scratch::new("artifacts", "diagnostics");
@@ -517,7 +289,8 @@ fn offline_artifact_diagnostics_report_stale_retired_and_cursor_counts_without_w
     ]);
     store.apply_batch(batch, &ctx()).unwrap();
     let authority =
-        CurrentProducerAuthority::from_config(&EngineConfig::default(), Layer::Gazetteer).unwrap();
+        CurrentProducerAuthority::from_config(&EngineConfig::default(), Producer::Gazetteer)
+            .unwrap();
     assert_eq!(
         store
             .artifact_diagnostics(&WorkspaceId::default(), authority)
@@ -602,7 +375,7 @@ fn tombstoned_document_complete_set_requires_exact_same_batch_reactivation() {
         }],
     );
     resumed.edge_diff = EdgeDiff::Owned {
-        owner: Owner::KabanIngest,
+        producer: Producer::DocumentIngest,
     };
     resumed.gazetteer_claim_sets.push(GazetteerClaimSet {
         document: document.clone(),
@@ -698,7 +471,7 @@ fn complete_set_generation_and_reactivation_refuse_archived_purged_and_unowned_d
             }],
         );
         batch.edge_diff = EdgeDiff::Owned {
-            owner: Owner::KabanIngest,
+            producer: Producer::DocumentIngest,
         };
         batch.gazetteer_claim_sets.push(GazetteerClaimSet {
             document,
@@ -833,7 +606,7 @@ fn stale_source_artifact_batch_writes_no_sentinel() {
     ))
     .unwrap();
     payload["edge_diff"] = serde_json::to_value(EdgeDiff::Owned {
-        owner: Owner::KabanIngest,
+        producer: Producer::DocumentIngest,
     })
     .unwrap();
     payload["artifacts"] = json!([{"key":"0".repeat(64), "workspace_id": WorkspaceId::default(), "layer":"gazetteer", "producer_id":"gazetteer:1", "source_rid":source_rid, "source_rev":{"content_hash":original.content_hash,"rev":original.rev}, "config_hash":"fixture", "policy_version":"v1", "published_at":0}]);
@@ -882,7 +655,7 @@ fn complete_set_rejects_foreign_document_producer_source_and_rolls_back() {
     assert!(store.apply_batch(foreign, &foreign_ctx).is_err());
     let mut producer = complete(&store, &document, vec![], false);
     producer.edge_diff = EdgeDiff::Owned {
-        owner: Owner::KabanParse,
+        producer: Producer::Extractor(kaban_core::ExtractorKind::Llm),
     };
     assert!(store.apply_batch(producer, &ctx()).is_err());
     let mut failed = complete(&store, &document, vec![], false);
@@ -939,7 +712,7 @@ fn set_less_ingest_batch_keeps_the_chunk_gazetteer_mentions() {
     assert_eq!(hits(&store, &chunk), 1);
     let mut refresh = WriteBatch::new(WorkspaceId::default(), vec![document_op, chunk_op]);
     refresh.edge_diff = EdgeDiff::Owned {
-        owner: Owner::KabanIngest,
+        producer: Producer::DocumentIngest,
     };
     store.apply_batch(refresh, &ctx()).unwrap();
     assert_eq!(
@@ -950,29 +723,29 @@ fn set_less_ingest_batch_keeps_the_chunk_gazetteer_mentions() {
 }
 
 #[test]
-fn empty_set_preserves_human_other_layer_and_foreign_lineage() {
+fn empty_set_preserves_authored_other_producer_and_foreign_lineage() {
     let scratch = Scratch::new("artifacts", "preservation");
     let store = SqliteStore::open(&scratch.db(), &scratch.keys()).unwrap();
     let document = NodeId::new();
     let chunks = [NodeId::new(), NodeId::new(), NodeId::new(), NodeId::new()];
     let targets = [NodeId::new(), NodeId::new(), NodeId::new(), NodeId::new()];
     let own = mention(&chunks[0], &targets[0], json!({"score": 9999}));
-    let human = mention(
+    let authored = mention(
         &chunks[1],
         &targets[1],
-        json!({"layer": "human", "method": "human"}),
+        json!({"producer": "authored", "method": "link"}),
     );
     let script = mention(
         &chunks[2],
         &targets[2],
-        json!({"layer": "v4", "method": "measured"}),
+        json!({"producer": "scip_import", "method": "measured"}),
     );
     let other = mention(
         &chunks[3],
         &targets[3],
         json!({"source_id": "foreign-source"}),
     );
-    let mut first = complete(&store, &document, vec![own, human, script, other], true);
+    let mut first = complete(&store, &document, vec![own, authored, script, other], true);
     first.ops.push(node(
         &document,
         "Document",
@@ -1096,9 +869,15 @@ fn parse_artifact_publication_is_idempotent_and_refuses_owner_or_foreign_key_col
         .unwrap();
     let source_rev = SourceRev::from(&store.get(&source, false).unwrap().unwrap());
     let artifact = DerivedArtifact {
-        key: artifact_key(&source_rev, Layer::Script, "script:1", "config", "v1"),
+        key: artifact_key(
+            &source_rev,
+            Producer::Extractor(kaban_core::ExtractorKind::Script),
+            "script:1",
+            "config",
+            "v1",
+        ),
         workspace_id: WorkspaceId::default(),
-        layer: Layer::Script,
+        layer: Producer::Extractor(kaban_core::ExtractorKind::Script),
         producer_id: "script:1".into(),
         source_rid,
         source_rev,
@@ -1108,7 +887,7 @@ fn parse_artifact_publication_is_idempotent_and_refuses_owner_or_foreign_key_col
     };
     let mut batch = WriteBatch::new(WorkspaceId::default(), vec![]);
     batch.edge_diff = EdgeDiff::Owned {
-        owner: Owner::KabanParse,
+        producer: Producer::Extractor(kaban_core::ExtractorKind::Script),
     };
     batch.artifacts.push(artifact.clone());
     store.apply_batch(batch.clone(), &ctx()).unwrap();
@@ -1143,7 +922,13 @@ fn parse_artifact_publication_is_idempotent_and_refuses_owner_or_foreign_key_col
         let mut other_batch = WriteBatch::new(workspace.clone(), vec![]);
         other_batch.edge_diff = batch.edge_diff.clone();
         other_batch.artifacts.push(DerivedArtifact {
-            key: artifact_key(&other_rev, Layer::Script, "script:1", "config", "v1"),
+            key: artifact_key(
+                &other_rev,
+                Producer::Extractor(kaban_core::ExtractorKind::Script),
+                "script:1",
+                "config",
+                "v1",
+            ),
             workspace_id: workspace,
             source_rid: other_rid,
             source_rev: other_rev,
@@ -1158,11 +943,17 @@ fn parse_artifact_publication_is_idempotent_and_refuses_owner_or_foreign_key_col
         count, 3,
         "same content/revision sources and tenants have independent artifact keys"
     );
-    let mut wrong = batch.clone();
-    wrong.edge_diff = EdgeDiff::Owned {
-        owner: Owner::KabanIngest,
-    };
-    assert!(store.apply_batch(wrong, &ctx()).is_err());
+    for producer in [
+        Producer::DocumentIngest,
+        Producer::Extractor(kaban_core::ExtractorKind::Llm),
+    ] {
+        let mut wrong = batch.clone();
+        wrong.edge_diff = EdgeDiff::Owned { producer };
+        assert!(
+            store.apply_batch(wrong, &ctx()).is_err(),
+            "{producer:?} must not publish a script artifact"
+        );
+    }
     conn.execute(
         "UPDATE derived_artifact SET workspace_id='foreign' WHERE artifact_key=?1",
         [artifact.key.as_str()],

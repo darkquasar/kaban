@@ -2,7 +2,7 @@
 use aho_corasick::{AhoCorasick, AhoCorasickKind, MatchKind};
 use kaban_core::config::Gazetteer;
 use kaban_core::{
-    Fixed, GraphStore, Layer, Method, Node, NodeId, Op, SNAPSHOT_SYMBOL_PAGE, SymbolPage,
+    Fixed, GraphStore, Method, Node, NodeId, Op, Producer, SNAPSHOT_SYMBOL_PAGE, SymbolPage,
     WorkspaceId, WriteBatch,
 };
 use kaban_policy::{Policy, norm_term, norm_with_offsets};
@@ -547,8 +547,8 @@ pub(crate) fn append_mentions(batch: &mut WriteBatch, mentions: &[Mention], sour
             .or_insert(mention);
     }
     for mention in selected.into_values() {
-        // the producer edge names its layer and source; the store moves them into the scoring
-        // columns with the method, score and span (`apply_batch`)
-        batch.ops.push(Op::UpsertEdge { src: mention.chunk.clone(), dst: mention.target.clone(), rel: "MENTIONS".into(), props: Some(json!({"owner": "kaban-ingest", "layer": Layer::Gazetteer.as_str(), "source_id": source_id, "method": mention.method.as_str(), "offset": mention.offset, "len": mention.len, "score": mention.score.0})) });
+        // the producer edge names its producer and source; the store moves them into the
+        // scoring columns with the method, score and span (`apply_batch`)
+        batch.ops.push(Op::UpsertEdge { src: mention.chunk.clone(), dst: mention.target.clone(), rel: "MENTIONS".into(), props: Some(json!({"producer": Producer::Gazetteer.as_str(), "source_id": source_id, "method": mention.method.as_str(), "offset": mention.offset, "len": mention.len, "score": mention.score.0})) });
     }
 }

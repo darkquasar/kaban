@@ -236,13 +236,13 @@ fn an_archived_traverse_start_is_not_found() {
     );
 }
 
-fn recall_ids(store: &SqliteStore, query: &str, include_superseded: bool) -> Vec<String> {
+fn recall_ids(store: &SqliteStore, query: &str, include_archived: bool) -> Vec<String> {
     store
         .recall(&RecallQuery {
             query: query.into(),
             hops: 2,
             limit: 10,
-            include_superseded,
+            include_archived,
             ..Default::default()
         })
         .unwrap()
@@ -252,7 +252,7 @@ fn recall_ids(store: &SqliteStore, query: &str, include_superseded: bool) -> Vec
 }
 
 /// R2-4: recall's hop expansion never runs through a tombstoned node, and through an archived
-/// one only when `include_superseded` opts in. The query matches `A` alone; `C` is reachable
+/// one only when `include_archived` opts in. The query matches `A` alone; `C` is reachable
 /// only across `B`.
 #[test]
 fn recall_does_not_expand_through_a_hidden_bridge_unless_archived_and_opted_in() {
@@ -267,7 +267,7 @@ fn recall_does_not_expand_through_a_hidden_bridge_unless_archived_and_opted_in()
     let ids = recall_ids(&store, "alpha anchors", true);
     assert!(
         ids.contains(&b) && ids.contains(&c),
-        "with include_superseded the archived B and C behind it are reachable: {ids:?}"
+        "with include_archived the archived B and C behind it are reachable: {ids:?}"
     );
 
     let store = SqliteStore::open_memory().unwrap();
@@ -277,7 +277,7 @@ fn recall_does_not_expand_through_a_hidden_bridge_unless_archived_and_opted_in()
         assert_eq!(
             ids,
             vec![a.clone()],
-            "tombstoned B must never bridge (include_superseded={opt}): {ids:?}"
+            "tombstoned B must never bridge (include_archived={opt}): {ids:?}"
         );
     }
 }

@@ -29,10 +29,10 @@ pub struct TraverseRequest {
     /// refused (`unknown_kind_set`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind_set: Option<String>,
-    /// Follow only the edges that pass every clause: a source layer in `layers`, a method in
+    /// Follow only the edges that pass every clause: a producer in `producers`, a method in
     /// `methods`, a score of at least `min_score`. An edge without a value in a filtered column
-    /// (a structural edge written without a claim) does not pass that clause. Default: every
-    /// edge.
+    /// (a structural edge carries no method or score) does not pass that clause. Default:
+    /// every edge.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub edge_filter: Option<EdgeFilter>,
     /// Keep only nodes in these governance states (`none`, `proposed`, `accepted`,
@@ -52,17 +52,20 @@ pub struct TraverseRequest {
 }
 
 /// The edge filter of `traverse` (EN-F46). Values are the stored vocabulary spellings:
-/// layers `human`, `v4`, `reconcile`, `script`, `llm`, `gliner`, `gazetteer`, `embed`;
-/// methods such as `link`, `remember`, `exact`, `alias`, `symbol`, `gliner`, `llm`. An
-/// unknown spelling is refused (`unknown_layer`, `unknown_method`).
+/// producers `authored`, `hook_events`, `document_ingest`, `gazetteer`, `extractor:llm`,
+/// `extractor:gliner`, `extractor:script`, `scip_import`, `git_history` (PC-16); methods such
+/// as `link`, `remember`, `exact`, `alias`, `symbol`, `gliner`, `llm`. An unknown spelling is
+/// refused (`unknown_producer`, `unknown_method`), so is an unknown key (the removed `layers`
+/// among them).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct EdgeFilter {
     /// Keep only edges whose score is at least this (0..1).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_score: Option<f64>,
-    /// Keep only edges from these source layers (empty: any).
+    /// Keep only edges from these producers (empty: any).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub layers: Vec<String>,
+    pub producers: Vec<String>,
     /// Keep only edges asserted by these methods (empty: any).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub methods: Vec<String>,

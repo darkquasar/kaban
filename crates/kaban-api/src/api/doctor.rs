@@ -6,7 +6,7 @@
 //! is content.
 
 use super::KabanApi;
-use crate::layers::{BudgetRow, LayerOutcome, LayerRegistry, RunFlags, budgets};
+use crate::producers::{BudgetRow, ProducerOutcome, ProducerRegistry, RunFlags, budgets};
 use crate::snapshot::{self, SnapshotOutcome};
 use kaban_codegraph::{CodeGraphReader, ReadError};
 use kaban_core::text_index::Visibility;
@@ -150,7 +150,7 @@ impl KabanApi {
         }
         if let Some(authority) = kaban_core::CurrentProducerAuthority::from_config(
             self.engine(),
-            kaban_core::Layer::Gazetteer,
+            kaban_core::Producer::Gazetteer,
         ) {
             match self.store.artifact_diagnostics(self.workspace(), authority) {
                 Ok(findings) => {
@@ -236,22 +236,22 @@ impl KabanApi {
         }
         match &metadata {
             Ok(meta) => {
-                for row in LayerRegistry.with_runs(self.engine(), meta) {
+                for row in ProducerRegistry.with_runs(self.engine(), meta) {
                     let failed = matches!(
                         row.last_outcome,
-                        Some(LayerOutcome::Failed | LayerOutcome::SkippedBudget)
+                        Some(ProducerOutcome::Failed | ProducerOutcome::SkippedBudget)
                     );
                     let detail = if failed {
-                        row.last_outcome.map_or("failed", LayerOutcome::as_str)
+                        row.last_outcome.map_or("failed", ProducerOutcome::as_str)
                     } else if row.on {
                         "on"
                     } else {
                         row.reason_off.as_deref().unwrap_or("off")
                     };
-                    report.push(&format!("layer_{}", row.layer.as_str()), !failed, detail);
+                    report.push(&format!("producer_{}", row.producer), !failed, detail);
                 }
             }
-            Err(error) => report.push("layers", false, format!("not checked: {error}")),
+            Err(error) => report.push("producers", false, format!("not checked: {error}")),
         }
         // engine-plan E3.11 Step 6 (EN-F17): anchors whose symbol the snapshot lost; facts, not damage
         let (ok, detail) = self.stale_anchors();

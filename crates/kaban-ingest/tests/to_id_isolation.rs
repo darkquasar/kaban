@@ -70,5 +70,25 @@ async fn links_resolve_only_active_same_workspace_nodes() {
         .edges;
     assert_eq!(edges.len(), 1);
     assert_eq!(edges[0].dst, same.as_str());
-    assert_eq!(edges[0].props["owner"], "kaban-parse");
+    // the submission edge is the extractor's (PC-16: the producer is the stored column)
+    let extractor = rig
+        .store
+        .traverse(&kaban_core::TraverseQuery {
+            start_ids: vec![NodeId::parse(result["records"][0]["id"].as_str().unwrap()).unwrap()],
+            rels: vec!["RELATES_TO".into()],
+            edge_filter: Some(kaban_core::EdgeFilter {
+                producers: [
+                    kaban_core::ExtractorKind::Llm,
+                    kaban_core::ExtractorKind::Gliner,
+                    kaban_core::ExtractorKind::Script,
+                ]
+                .map(kaban_core::Producer::Extractor)
+                .to_vec(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+        .unwrap()
+        .edges;
+    assert_eq!(extractor.len(), 1, "{extractor:?}");
 }

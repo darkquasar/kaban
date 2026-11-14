@@ -667,9 +667,9 @@ impl Preparer for DocumentPreparer {
                 &self.policy(),
                 cfg,
             )?;
-            let budget = kaban_api::layers::budgets(
+            let budget = kaban_api::producers::budgets(
                 self.api.engine(),
-                &kaban_api::layers::RunFlags {
+                &kaban_api::producers::RunFlags {
                     symbols: self.cfg.symbols,
                 },
             )
@@ -707,9 +707,9 @@ impl Preparer for DocumentPreparer {
                 dropped: dropped.clone(),
                 outcome: if skipped { "skipped_budget" } else { "ok" }.into(),
                 budget_lifted_by: match budget.source {
-                    kaban_api::layers::BudgetSource::Flag(flag) => Some(flag.into()),
-                    kaban_api::layers::BudgetSource::Default
-                    | kaban_api::layers::BudgetSource::Config => None,
+                    kaban_api::producers::BudgetSource::Flag(flag) => Some(flag.into()),
+                    kaban_api::producers::BudgetSource::Default
+                    | kaban_api::producers::BudgetSource::Config => None,
                 },
             };
             *self

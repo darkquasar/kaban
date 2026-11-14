@@ -5,13 +5,13 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // test code: failures are the assertion
 
 use kaban_api::control::{
-    ControlEntry, Direction, LAYER_VALUES, METHOD_VALUES, REGISTRY, Shape, append_index,
+    ControlEntry, Direction, METHOD_VALUES, PRODUCER_VALUES, REGISTRY, Shape, append_index,
     append_key, control_entry, tool_schemas,
 };
 use kaban_api::{
     ApiError, ForgetRequest, KabanApi, LinkRequest, LinkSpec, RememberRequest, TraverseRequest,
 };
-use kaban_core::{Layer, Method, NodeId};
+use kaban_core::{Method, NodeId, Producer};
 use kaban_policy::Policy;
 use kaban_store_sqlite::SqliteStore;
 use schemars::{JsonSchema, schema_for};
@@ -630,9 +630,8 @@ const CONTENT_ENUM_ALLOWANCE: &[(&str, Direction, &str)] = &[
     ("traverse", Direction::Response, "nodes[].provenance.store"),
     ("forget", Direction::Response, "lifecycle"),
     ("stats", Direction::Response, "stores[]"),
-    ("stats", Direction::Response, "layers[].layer"),
-    ("stats", Direction::Response, "layers[].producer_layers[]"),
-    ("stats", Direction::Response, "layers[].last_outcome"),
+    ("stats", Direction::Response, "producers[].last_outcome"),
+    ("stats", Direction::Response, "producers[].budgets[].source"),
     (
         "code_implementers",
         Direction::Response,
@@ -977,10 +976,9 @@ fn vocabulary_schema<T: JsonSchema>() -> BTreeSet<String> {
     values
 }
 
-/// EN-E7: every surviving `kaban-core` vocabulary (the claim ones went with governance) has `schemars` output equal to its `ALL` spellings,
-/// and the `traverse` `edge_filter.layers[]` / `methods[]` rows spell exactly those lists, so
-/// adding a variant fails here until the row moves. The spec's `layer` list (`fts`, `fuzzy`
-/// included) is the one asserted.
+/// EN-E7, PC-16: every surviving `kaban-core` vocabulary has `schemars` output equal to its
+/// `ALL` spellings, and the `traverse` `edge_filter.producers[]` / `methods[]` rows spell
+/// exactly those lists, so adding a variant fails here until the row moves.
 #[test]
 fn vocabularies_have_schema_output_equal_to_their_spellings_and_the_traverse_rows_match() {
     fn spellings<T: Copy>(all: &[T], f: impl Fn(T) -> &'static str) -> Vec<String> {
@@ -989,29 +987,15 @@ fn vocabularies_have_schema_output_equal_to_their_spellings_and_the_traverse_row
     fn set(v: &[String]) -> BTreeSet<String> {
         v.iter().cloned().collect()
     }
-    let layers = spellings(Layer::ALL, Layer::as_str);
-    assert_eq!(vocabulary_schema::<Layer>(), set(&layers));
+    let producers = spellings(Producer::ALL, Producer::as_str);
+    assert_eq!(vocabulary_schema::<Producer>(), set(&producers));
     let methods = spellings(Method::ALL, Method::as_str);
     assert_eq!(vocabulary_schema::<Method>(), set(&methods));
-    assert_eq!(LAYER_VALUES, layers);
+    assert_eq!(PRODUCER_VALUES, producers);
     assert_eq!(METHOD_VALUES, methods);
-    for s in [
-        "fts",
-        "fuzzy",
-        "gazetteer",
-        "embed",
-        "gliner",
-        "llm",
-        "script",
-        "human",
-        "v4",
-        "reconcile",
-    ] {
-        assert!(LAYER_VALUES.contains(&s), "EN-E7 layer {s} missing");
-    }
-    assert_eq!(LAYER_VALUES.len(), 10);
+    assert_eq!(PRODUCER_VALUES.len(), 9);
     for (path, values) in [
-        ("edge_filter.layers[]", LAYER_VALUES),
+        ("edge_filter.producers[]", PRODUCER_VALUES),
         ("edge_filter.methods[]", METHOD_VALUES),
     ] {
         let row = control_entry("traverse", Direction::Request, path).expect(path);
@@ -1019,17 +1003,17 @@ fn vocabularies_have_schema_output_equal_to_their_spellings_and_the_traverse_row
     }
 }
 
-/// EN-E6: a valid layer or method spelling under `edge_filter` is validated, not scanned
+/// EN-E6: a valid producer or method spelling under `edge_filter` is validated, not scanned
 /// (a word rule naming it cannot reject the request), while an unknown spelling is scanned as
 /// content and then refused by the handler; `node_kinds[]`, `rels[]` and `kind_set` stay
 /// content (a canary under `node_kinds[0]` is `Rejected` before any ontology lookup).
 #[test]
-fn traverse_layers_and_methods_are_control_while_node_kinds_stay_content() {
+fn traverse_producers_and_methods_are_control_while_node_kinds_stay_content() {
     let api = api_with("words:\n  - { term: gazetteer, action: reject, id: no-gaz }\n");
     let id = NodeId::new();
     api.prepare_args(
         "traverse",
-        &json!({"start_ids": [id.as_str()], "edge_filter": {"layers": ["gazetteer"], "methods": ["alias"]}}),
+        &json!({"start_ids": [id.as_str()], "edge_filter": {"producers": ["gazetteer"], "methods": ["alias"]}}),
     )
     .expect("a vocabulary spelling is control");
     let rules = reject_rules(api.prepare_args(
@@ -1049,24 +1033,24 @@ fn traverse_layers_and_methods_are_control_while_node_kinds_stay_content() {
         .unwrap_err();
     assert!(matches!(err, ApiError::Rejected { .. }), "{err}");
     assert!(!err.to_string().contains("unknown_kind"));
-    // an unknown layer spelling is scanned as content, then refused by the typed handler
+    // an unknown producer spelling is scanned as content, then refused by the typed handler
     let api = api_with(UUID_REJECT);
     let rules = reject_rules(api.prepare_args(
         "traverse",
-        &json!({"start_ids": [id.as_str()], "edge_filter": {"layers": [id.as_str()]}}),
+        &json!({"start_ids": [id.as_str()], "edge_filter": {"producers": [id.as_str()]}}),
     ));
     assert_eq!(rules, vec!["uuid-reject".to_owned()]);
     let err = api
         .traverse(TraverseRequest {
             start_ids: vec![id.as_str().to_owned()],
             edge_filter: Some(kaban_api::EdgeFilter {
-                layers: vec!["nope".into()],
+                producers: vec!["nope".into()],
                 ..Default::default()
             }),
             ..Default::default()
         })
         .unwrap_err();
-    assert!(err.to_string().contains("unknown_layer"), "{err}");
+    assert!(err.to_string().contains("unknown_producer"), "{err}");
 }
 
 /// EN-E6 (E2.11 default 2): the reserved `embed_submit` shape. `model.name` is content (a

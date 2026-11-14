@@ -25,10 +25,6 @@ pub(crate) struct Flags {
     /// never reappears)
     #[arg(long)]
     mode: Option<String>,
-    /// Delete this machine layer's generated edges and derived artifacts, keeping human and
-    /// other-layer state
-    #[arg(long,conflicts_with_all=["id","mode"])]
-    layer: Option<String>,
     /// Tombstone the ingested document at this workspace-relative path, with its sections
     /// and chunks (instead of a node id)
     #[cfg(feature = "ingest")]
@@ -47,9 +43,6 @@ impl ToolArgs for Flags {
     const NAME: &'static str = "forget";
 
     fn any_given(&self) -> bool {
-        if self.layer.is_some() {
-            return true;
-        }
         #[cfg(feature = "ingest")]
         if self.document.is_some() {
             return true;
@@ -58,15 +51,6 @@ impl ToolArgs for Flags {
     }
 
     fn into_raw(self) -> Result<Value, ExitCode> {
-        if let Some(layer) = self.layer {
-            let mut args = Map::new();
-            args.insert("layer".into(), Value::String(layer));
-            #[cfg(feature = "ingest")]
-            if let Some(document) = self.document {
-                args.insert("document".into(), Value::String(document));
-            }
-            return Ok(Value::Object(args));
-        }
         #[cfg(feature = "ingest")]
         if let Some(document) = self.document {
             let mut args = Map::new();
@@ -89,17 +73,6 @@ impl ToolArgs for Flags {
 /// Forget the node named by the raw request (flags or `--stdin-json`) through the seam and
 /// print the result as JSON.
 pub(crate) fn run(api: &KabanApi, raw: Value, format: Format) -> ExitCode {
-    if raw.get("layer").is_some() {
-        #[derive(serde::Deserialize)]
-        struct Request {
-            layer: kaban_core::Layer,
-            #[serde(default)]
-            document: Option<String>,
-        }
-        return run_write_tool(api, "forget_layer", raw, format, |api, request: Request| {
-            api.forget_layer(request.layer, request.document.as_deref())
-        });
-    }
     #[cfg(feature = "ingest")]
     if raw.get("document").is_some() {
         return run_write_tool(

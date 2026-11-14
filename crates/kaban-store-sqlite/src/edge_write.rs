@@ -1,12 +1,13 @@
 //! The one `edge` row writer (the `INSERT ... ON CONFLICT(src,dst,rel) DO UPDATE` statement
-//! lives here and nowhere else), its owner tag and the clock the job and batch paths share.
-//! Kept from the deleted reconciliation projection: every edge is written directly.
+//! lives here and nowhere else), the first-writer rule and the clock the job and batch paths
+//! share. Every edge carries one producer identity, stored in the `layer` column until T4
+//! renames it (PC-16).
 
 use crate::ontology::TypeTable;
 use crate::sql_error::SqlResultExt;
-use kaban_core::{Layer, Method, Owner, Result, new_id, now_iso};
+use kaban_core::{Method, Producer, Result, new_id, now_iso};
 use rusqlite::{Connection, OptionalExtension, params};
-use serde_json::{Map, Value};
+use serde_json::Value;
 
 /// Whether the connection carries the 0004 scoring columns of `edge` (`layer`, `method`,
 /// `score`, the span): a store opened at an older schema (fixtures, benches) has none.
@@ -24,16 +25,17 @@ pub(crate) fn now_unix() -> i64 {
     .unwrap_or(i64::MAX)
 }
 
-/// One `edge` row as the store writes it: the structural edges of a producer batch carry no
-/// scoring columns; a mention edge carries its span and score.
+/// One `edge` row as the store writes it: every edge names its producer; the structural edges
+/// of a producer batch carry no other scoring column, a mention edge carries its span and
+/// score.
 pub(crate) struct EdgeWrite<'a> {
     pub(crate) src: i64,
     pub(crate) dst: i64,
     pub(crate) rel: &'a str,
     pub(crate) confidence: Option<f64>,
-    /// The stored props object, `props.owner` included (EN-E4).
+    /// The stored props object.
     pub(crate) props: &'a Value,
-    pub(crate) layer: Option<Layer>,
+    pub(crate) producer: Producer,
     pub(crate) method: Option<Method>,
     pub(crate) score: Option<f64>,
     pub(crate) source_id: Option<&'a str>,
@@ -53,9 +55,30 @@ type Stored = (
     Option<u32>,
 );
 
-/// Write the edge unless the stored row already holds these values. Returns `Some(true)` for
-/// a new row, `Some(false)` for a refreshed one, `None` when nothing was written.
-pub(crate) fn write_edge(conn: &Connection, e: &EdgeWrite<'_>) -> Result<Option<bool>> {
+/// What [`write_edge`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Written {
+    /// A new row.
+    Inserted,
+    /// The producer's own row, refreshed with new values.
+    Refreshed,
+    /// The producer's own row already held these values: nothing written (N5).
+    Unchanged,
+    /// Another producer wrote the triple first and keeps the row: nothing written (owner
+    /// decision 2026-11-14; producer isolation).
+    KeptByFirstWriter,
+}
+
+impl Written {
+    /// Whether a row was inserted or changed.
+    pub(crate) fn wrote(self) -> bool {
+        matches!(self, Self::Inserted | Self::Refreshed)
+    }
+}
+
+/// Write the edge under the first-writer rule: a triple another producer wrote is left as
+/// it is, the producer's own row is refreshed unless it already holds these values.
+pub(crate) fn write_edge(conn: &Connection, e: &EdgeWrite<'_>) -> Result<Written> {
     let props = serde_json::to_string(e.props)?;
     if !scoring_columns(conn)? {
         return write_edge_0002(conn, e, &props);
@@ -80,19 +103,24 @@ pub(crate) fn write_edge(conn: &Connection, e: &EdgeWrite<'_>) -> Result<Option<
         )
         .optional()
         .sql()?;
-    let layer = e.layer.map(Layer::as_str);
+    let producer = e.producer.as_str();
     let method = e.method.map(Method::as_str);
-    if let Some((c, p, l, m, s, sid, off, len)) = &stored
-        && *c == e.confidence
-        && *p == props
-        && l.as_deref() == layer
-        && m.as_deref() == method
-        && *s == e.score
-        && sid.as_deref() == e.source_id
-        && *off == e.offset
-        && *len == e.len
-    {
-        return Ok(None);
+    if let Some((c, p, l, m, s, sid, off, len)) = &stored {
+        // a row without a producer (written before producers existed) has no first writer
+        if l.as_deref().is_some_and(|stored| stored != producer) {
+            return Ok(Written::KeptByFirstWriter);
+        }
+        if *c == e.confidence
+            && *p == props
+            && l.as_deref() == Some(producer)
+            && m.as_deref() == method
+            && *s == e.score
+            && sid.as_deref() == e.source_id
+            && *off == e.offset
+            && *len == e.len
+        {
+            return Ok(Written::Unchanged);
+        }
     }
     // the edge is tenant-scoped like its source node (F17)
     conn.execute(
@@ -109,7 +137,7 @@ pub(crate) fn write_edge(conn: &Connection, e: &EdgeWrite<'_>) -> Result<Option<
             e.confidence,
             now_iso(),
             props,
-            layer,
+            producer,
             method,
             e.score,
             e.source_id,
@@ -118,12 +146,16 @@ pub(crate) fn write_edge(conn: &Connection, e: &EdgeWrite<'_>) -> Result<Option<
         ],
     )
     .sql()?;
-    Ok(Some(stored.is_none()))
+    Ok(if stored.is_none() {
+        Written::Inserted
+    } else {
+        Written::Refreshed
+    })
 }
 
 /// The edge write of a store below schema 0004 (the 0003 fixtures and benches): no scoring
-/// columns, no claims; the pre-E2.2 statement.
-fn write_edge_0002(conn: &Connection, e: &EdgeWrite<'_>, props: &str) -> Result<Option<bool>> {
+/// columns, so no producer and no first-writer rule; the pre-E2.2 statement.
+fn write_edge_0002(conn: &Connection, e: &EdgeWrite<'_>, props: &str) -> Result<Written> {
     let stored: Option<(Option<f64>, String)> = conn
         .query_row(
             "SELECT confidence, props FROM edge WHERE src=?1 AND dst=?2 AND rel=?3",
@@ -136,7 +168,7 @@ fn write_edge_0002(conn: &Connection, e: &EdgeWrite<'_>, props: &str) -> Result<
         && *c == e.confidence
         && p == props
     {
-        return Ok(None);
+        return Ok(Written::Unchanged);
     }
     conn.execute(
         "INSERT INTO edge(id,src,dst,rel,confidence,created_at,props,workspace_id)
@@ -145,52 +177,9 @@ fn write_edge_0002(conn: &Connection, e: &EdgeWrite<'_>, props: &str) -> Result<
         params![new_id(), e.src, e.dst, e.rel, e.confidence, now_iso(), props],
     )
     .sql()?;
-    Ok(Some(stored.is_none()))
-}
-
-/// The stored `props.owner` of the `(src, dst, rel)` edge, if the row exists and carries one.
-pub(crate) fn stored_owner(
-    conn: &Connection,
-    src: i64,
-    dst: i64,
-    rel: &str,
-) -> Result<Option<String>> {
-    Ok(conn
-        .query_row(
-            "SELECT json_extract(props, '$.owner') FROM edge WHERE src=?1 AND dst=?2 AND rel=?3",
-            params![src, dst, rel],
-            |r| r.get::<_, Option<String>>(0),
-        )
-        .optional()
-        .sql()?
-        .flatten())
-}
-
-/// The `props.owner` tag of an edge a batch writes (EN-E4): the producer's value when it
-/// set one, else the batch's owner. A batch is the trusted producer boundary, so only it may
-/// name an owner through `props`.
-pub(crate) fn owned_props(props: Option<&Value>, owner: Owner) -> Value {
-    let mut map = object(props);
-    map.entry("owner")
-        .or_insert_with(|| Value::String(owner.as_str().to_owned()));
-    Value::Object(map)
-}
-
-/// The props of a human `link`: always `owner = human`, whatever owner the caller put in
-/// `props`. The overwrite guard and the MD-23 diff trust this tag, so a caller-supplied
-/// producer owner would hand the human's edge to that producer.
-pub(crate) fn human_props(props: Option<&Value>) -> Value {
-    let mut map = object(props);
-    map.insert(
-        "owner".to_owned(),
-        Value::String(Owner::Human.as_str().to_owned()),
-    );
-    Value::Object(map)
-}
-
-fn object(props: Option<&Value>) -> Map<String, Value> {
-    match props {
-        Some(Value::Object(m)) => m.clone(),
-        _ => Map::new(),
-    }
+    Ok(if stored.is_none() {
+        Written::Inserted
+    } else {
+        Written::Refreshed
+    })
 }

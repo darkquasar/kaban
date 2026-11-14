@@ -2229,27 +2229,23 @@ expression: a
           "cap_lifted": false,
           "default": 64,
           "effective": 64,
-          "key": "budget.l0_rss_mb",
+          "group": "text",
+          "key": "text.build_rss_mb",
           "source": "default"
         },
         {
           "cap_lifted": false,
           "default": 25,
           "effective": 25,
+          "group": "gazetteer",
           "key": "gazetteer.max_automaton_mb",
-          "source": "default"
-        },
-        {
-          "cap_lifted": false,
-          "default": 32,
-          "effective": 32,
-          "key": "embed.max_scan_rss_mb",
           "source": "default"
         },
         {
           "cap_lifted": false,
           "default": 8,
           "effective": 8,
+          "group": "document_ingest",
           "key": "ingest.lru_mib",
           "source": "default"
         },
@@ -2257,6 +2253,7 @@ expression: a
           "cap_lifted": false,
           "default": 600,
           "effective": 600,
+          "group": "scip_import",
           "key": "index.deadline_secs",
           "source": "default"
         },
@@ -2264,6 +2261,7 @@ expression: a
           "cap_lifted": false,
           "default": 1073741824,
           "effective": 1073741824,
+          "group": "scip_import",
           "key": "index.quota.file_bytes",
           "source": "default"
         },
@@ -2271,6 +2269,7 @@ expression: a
           "cap_lifted": false,
           "default": 4294967296,
           "effective": 4294967296,
+          "group": "scip_import",
           "key": "index.quota.run_dir_bytes",
           "source": "default"
         },
@@ -2278,6 +2277,7 @@ expression: a
           "cap_lifted": false,
           "default": 536870912,
           "effective": 536870912,
+          "group": "scip_import",
           "key": "index.quota.tmp_bytes",
           "source": "default"
         }
@@ -2340,22 +2340,37 @@ expression: a
         },
         {
           "detail": "on",
-          "name": "layer_fts",
+          "name": "producer_authored",
+          "ok": true
+        },
+        {
+          "detail": "on",
+          "name": "producer_hook_events",
+          "ok": true
+        },
+        {
+          "detail": "on",
+          "name": "producer_document_ingest",
           "ok": true
         },
         {
           "detail": "not_enabled",
-          "name": "layer_gazetteer",
-          "ok": true
-        },
-        {
-          "detail": "not_available_in_this_release",
-          "name": "layer_embed",
+          "name": "producer_gazetteer",
           "ok": true
         },
         {
           "detail": "explicit_selection_only",
-          "name": "layer_extractors",
+          "name": "producer_extractor",
+          "ok": true
+        },
+        {
+          "detail": "explicit_selection_only",
+          "name": "producer_scip_import",
+          "ok": true
+        },
+        {
+          "detail": "not_available_in_this_release",
+          "name": "producer_git_history",
           "ok": true
         },
         {

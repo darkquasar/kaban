@@ -8,7 +8,6 @@ mod card;
 mod forget;
 mod ingest;
 pub mod ingest_jobs;
-mod layer;
 mod recall;
 mod receipt;
 mod remember;
@@ -34,7 +33,6 @@ pub use stats::{PolicyStats, StatsRequest, StatsResponse};
 
 pub use forget::{ForgetRequest, ForgetResponse};
 
-pub use layer::LayerMaintenanceResponse;
 pub use receipt::{ReceiptIdentities, WriteOutcome, WriteReceipt};
 
 pub use rescan::{RescanOutcome, RescanStatus};

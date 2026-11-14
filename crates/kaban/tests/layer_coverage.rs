@@ -1,15 +1,15 @@
 //! EN-F22 coverage and the EN-E7 pair check (engine-plan E3.12, RE-15), black-box through the
 //! binary: every producer 3.0.0 ships writes through its public interface (plain `ingest` = L0,
 //! the `fuzzy` recall layer, `ingest --link gazetteer`, one structured `script` submit, one
-//! `ingest_claim` submit, one MCP `link` = human), then the stored `(layer, method)` columns of
-//! `edge` are read back from the database file. L2 (`embed`) rows are absent by
-//! design (OWN-93/94: no embedding producer in 3.0.0).
+//! `ingest_claim` submit, one MCP `link` = authored), then the stored `(layer, method)` columns
+//! of `edge` (the producer is stored in `layer` until T4 renames it, PC-16) are read back from
+//! the database file. No embedding producer exists (PC-16).
 #![cfg(feature = "ingest")]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // test code: failures are the assertion
 mod common;
 
 use common::{Scratch, Server};
-use kaban_core::{Layer, Method};
+use kaban_core::{Method, Producer};
 use rusqlite::{Connection, OpenFlags};
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
@@ -22,12 +22,12 @@ use std::time::Duration;
 type Pair = (Option<String>, Option<String>);
 
 /// The pairs outside the EN-E7 closed vocabularies: a NULL column or a spelling
-/// [`Layer::parse`] / [`Method::parse`] does not know.
+/// [`Producer::parse`] / [`Method::parse`] does not know.
 fn outside_enums<'a>(pairs: impl IntoIterator<Item = &'a Pair>) -> Vec<Pair> {
     pairs
         .into_iter()
         .filter(|(layer, method)| {
-            layer.as_deref().and_then(Layer::parse).is_none()
+            layer.as_deref().and_then(Producer::parse).is_none()
                 || method.as_deref().and_then(Method::parse).is_none()
         })
         .cloned()
@@ -94,7 +94,14 @@ fn full_layer_run(s: &Scratch) -> PathBuf {
     cli(
         s,
         &root,
-        &["recall", "chekout", "--layers", "fts,fuzzy", "--hops", "0"],
+        &[
+            "recall",
+            "chekout",
+            "--modes",
+            "lexical,fuzzy",
+            "--hops",
+            "0",
+        ],
         None,
     );
     // gazetteer: a known record, then a document that mentions it
@@ -203,35 +210,35 @@ fn full_layer_run_stores_only_closed_vocabulary_pairs() {
     full_layer_run(&s);
     let conn = read_only(&s);
     let edges = pairs(&conn, "edge");
-    let labelled: Vec<&Pair> = edges
-        .iter()
-        .filter(|(l, m)| l.is_some() || m.is_some())
-        .collect();
+    // the document ingest's structural rows (the `PART_OF` hierarchy) carry no method by design
+    let structural: Pair = (Some(Producer::DocumentIngest.as_str().to_owned()), None);
+    let labelled: Vec<&Pair> = edges.iter().filter(|p| **p != structural).collect();
     assert_eq!(outside_enums(labelled), Vec::<Pair>::new(), "{edges:?}");
     // every producer of the run left its own pair (the coverage, not only the absence of bad rows)
     for expected in [
         pair("gazetteer", "exact"),
-        pair("script", "ingest_submit"),
-        pair("gliner", "ingest_submit"),
-        pair("human", "link"),
+        pair("extractor:script", "ingest_submit"),
+        pair("extractor:gliner", "ingest_submit"),
+        pair("authored", "link"),
     ] {
         assert!(edges.contains(&expected), "{expected:?} in {edges:?}");
     }
 }
 
-/// EN-F22 for edges: every producer edge carries `layer` and `method`. A producer's
-/// structural row (the L0 `PART_OF` hierarchy, owner-tagged) carries neither by design, so a
-/// half-labelled or untagged row is the only failure.
+/// EN-F22 for edges, under PC-16: every edge carries its producer, and every producer edge a
+/// `method`. The document ingest's structural row (the `PART_OF` hierarchy) carries no method
+/// by design, so a row without a producer, or a non-structural row without a method, is the
+/// only failure.
 #[test]
-fn full_layer_run_leaves_no_edge_without_layer_or_method() {
+fn full_layer_run_leaves_no_edge_without_a_producer_or_method() {
     let s = Scratch::new("kaban-e312-coverage", "edges");
     full_layer_run(&s);
     let conn = read_only(&s);
     let unlabelled: Vec<(String, String)> = conn
         .prepare(
-            "SELECT rel, coalesce(json_extract(props, '$.owner'), '') FROM edge \
-             WHERE (layer IS NULL OR method IS NULL) AND NOT (layer IS NULL AND method IS NULL \
-             AND rel = 'PART_OF' AND json_extract(props, '$.owner') = 'kaban-ingest')",
+            "SELECT rel, coalesce(layer, '') FROM edge \
+             WHERE layer IS NULL OR (method IS NULL \
+             AND NOT (rel = 'PART_OF' AND layer = 'document_ingest'))",
         )
         .unwrap()
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
@@ -243,10 +250,12 @@ fn full_layer_run_leaves_no_edge_without_layer_or_method() {
 
 #[test]
 fn a_pair_outside_the_enums_is_rejected() {
-    let known = pair("human", "link");
+    let known = pair("authored", "link");
     let injected = [
         pair("vector", "exact"),
-        pair("human", "guess"),
+        pair("authored", "guess"),
+        // the removed pre-PC-16 producer spelling
+        pair("human", "link"),
         (None, Some("link".to_owned())),
         (Some("gazetteer".to_owned()), None),
     ];

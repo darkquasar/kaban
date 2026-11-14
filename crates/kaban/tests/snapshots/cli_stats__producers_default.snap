@@ -1,0 +1,113 @@
+---
+source: crates/kaban/tests/cli_stats.rs
+expression: "serde_json::to_string_pretty(&tool[\"producers\"]).unwrap()"
+---
+[
+  {
+    "budgets": [],
+    "last_outcome": null,
+    "last_run": null,
+    "on": true,
+    "producer": "authored",
+    "reason_off": null
+  },
+  {
+    "budgets": [],
+    "last_outcome": null,
+    "last_run": null,
+    "on": true,
+    "producer": "hook_events",
+    "reason_off": null
+  },
+  {
+    "budgets": [
+      {
+        "cap_lifted": false,
+        "default": 8,
+        "effective": 8,
+        "group": "document_ingest",
+        "key": "ingest.lru_mib",
+        "source": "default"
+      }
+    ],
+    "last_outcome": null,
+    "last_run": null,
+    "on": true,
+    "producer": "document_ingest",
+    "reason_off": null
+  },
+  {
+    "budgets": [
+      {
+        "cap_lifted": false,
+        "default": 25,
+        "effective": 25,
+        "group": "gazetteer",
+        "key": "gazetteer.max_automaton_mb",
+        "source": "default"
+      }
+    ],
+    "last_outcome": "failed",
+    "last_run": 42,
+    "on": false,
+    "producer": "gazetteer",
+    "reason_off": "not_enabled"
+  },
+  {
+    "budgets": [],
+    "last_outcome": null,
+    "last_run": null,
+    "on": false,
+    "producer": "extractor",
+    "reason_off": "explicit_selection_only"
+  },
+  {
+    "budgets": [
+      {
+        "cap_lifted": false,
+        "default": 600,
+        "effective": 600,
+        "group": "scip_import",
+        "key": "index.deadline_secs",
+        "source": "default"
+      },
+      {
+        "cap_lifted": false,
+        "default": 1073741824,
+        "effective": 1073741824,
+        "group": "scip_import",
+        "key": "index.quota.file_bytes",
+        "source": "default"
+      },
+      {
+        "cap_lifted": false,
+        "default": 4294967296,
+        "effective": 4294967296,
+        "group": "scip_import",
+        "key": "index.quota.run_dir_bytes",
+        "source": "default"
+      },
+      {
+        "cap_lifted": false,
+        "default": 536870912,
+        "effective": 536870912,
+        "group": "scip_import",
+        "key": "index.quota.tmp_bytes",
+        "source": "default"
+      }
+    ],
+    "last_outcome": null,
+    "last_run": null,
+    "on": false,
+    "producer": "scip_import",
+    "reason_off": "explicit_selection_only"
+  },
+  {
+    "budgets": [],
+    "last_outcome": null,
+    "last_run": null,
+    "on": false,
+    "producer": "git_history",
+    "reason_off": "not_available_in_this_release"
+  }
+]

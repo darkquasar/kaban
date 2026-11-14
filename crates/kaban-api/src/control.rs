@@ -28,7 +28,7 @@ pub use code::{
     MATCHED_BY_VALUES, POLICY_VALUES, RANKING_VALUES, RESOURCE_VALUES, ROLE_VALUES,
 };
 pub use ingest::{DIMS, DTYPE_VALUES};
-pub use memory::{LAYER_VALUES, METHOD_VALUES};
+pub use memory::{METHOD_VALUES, PRODUCER_VALUES};
 
 use kaban_core::NodeId;
 use schemars::{JsonSchema, Schema, schema_for};
@@ -303,7 +303,7 @@ pub const RESERVED: &[&str] = &["embed_submit"];
 /// Entries of [`tool_schemas`] that are CLI verbs going through the seam (`run_tool`) and are
 /// not MCP tools (E2.10 boundary review BR-8): machine layer maintenance is CLI-only.
 /// Subtracted by `crates/kaban/tests/mcp_control.rs` like [`RESOURCE_ONLY`].
-pub const CLI_ONLY: &[&str] = &["forget_layer", "reindex_layer"];
+pub const CLI_ONLY: &[&str] = &[];
 
 /// The schemas of every tool the adapters expose (the same request and response types the MCP
 /// adapter dispatches on), plus the [`RESOURCE_ONLY`] bodies, the [`RESERVED`] shapes and the

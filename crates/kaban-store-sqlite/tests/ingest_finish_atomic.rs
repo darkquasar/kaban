@@ -44,14 +44,14 @@ fn edge(src: &NodeId, dst: &NodeId, rel: &str, props: Value) -> Op {
     }
 }
 
-/// A submission edge as structured submit writes it: owned by `kaban-parse`, scored, with the
-/// source lineage in the `source_id` column.
+/// A submission edge as structured submit writes it: under the `extractor:llm` producer,
+/// scored, with the source lineage in the `source_id` column.
 fn parse_edge(src: &NodeId, dst: &NodeId, rel: &str) -> Op {
     edge(
         src,
         dst,
         rel,
-        json!({"owner":"kaban-parse","layer":"llm","method":"ingest_submit","score":10000,"source_id":"di-not-node"}),
+        json!({"producer":"extractor:llm","method":"ingest_submit","score":10000,"source_id":"di-not-node"}),
     )
 }
 
@@ -72,6 +72,7 @@ fn fixture() -> Fixture {
         NodeId::new(),
     );
     let ingest = json!({"owner":"kaban-ingest"});
+    let structure = json!({"producer":"document_ingest"});
     let mut batch = WriteBatch::new(
         ctx.workspace_id.clone(),
         vec![
@@ -97,8 +98,9 @@ fn fixture() -> Fixture {
                 json!({"rationale":"orphan reason"}),
             ),
             node(&target, "Fact", "target", json!({})),
-            edge(&old_chunk, &section, "PART_OF", ingest.clone()),
-            edge(&section, &document, "PART_OF", ingest),
+            // the document structure is the document ingest's (PC-16 producer column)
+            edge(&old_chunk, &section, "PART_OF", structure.clone()),
+            edge(&section, &document, "PART_OF", structure),
             parse_edge(&record, &document, "DERIVED_FROM"),
             parse_edge(&orphan, &document, "DERIVED_FROM"),
             parse_edge(&record, &target, "RELATES_TO"),

@@ -639,7 +639,15 @@ fn link_properties_a_newer_policy_forbids_are_masked_or_dropped_by_the_rescan() 
     let masked = edge_props(&s, &a, &b).unwrap();
     assert!(!masked.contains("hunter2"), "{masked}");
     assert!(masked.contains(MASK), "{masked}");
-    assert!(masked.contains("\"owner\":\"human\""), "{masked}");
+    let producer: String = rusqlite::Connection::open(s.db())
+        .unwrap()
+        .query_row(
+            "SELECT e.layer FROM edge e JOIN node d ON d.rid = e.dst WHERE d.id = ?1",
+            [&b],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(producer, "authored", "the masked link keeps its producer");
     assert_eq!(edge_props(&s, &a, &c), None, "the rejected edge is dropped");
     let again = v2
         .rescan_if_policy_changed(&CancellationToken::new())

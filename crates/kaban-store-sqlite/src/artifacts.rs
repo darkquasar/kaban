@@ -1,168 +1,9 @@
 //! Transaction-local source publication and Gazetteer complete-set state.
 
-pub(super) struct MaintenanceContext<'a> {
-    pub(super) write: &'a WriteCtx,
-}
-
-/// Only artifact-only obsolete producers are qualified; historical claim versions are not.
-pub(super) fn retire_producer(
-    conn: &mut Connection,
-    context: &MaintenanceContext<'_>,
-    authority: kaban_core::CurrentProducerAuthority,
-    old_producer: &str,
-    batch_rows: u32,
-) -> Result<kaban_core::RetireReport> {
-    use kaban_core::{MaintenanceRefusal, RetireReport};
-    if batch_rows == 0 {
-        return Err(StoreError::EdgeSetRefused);
-    }
-    if old_producer == authority.producer().producer_id() {
-        return Ok(RetireReport {
-            refused: Some(MaintenanceRefusal::CurrentProducer),
-            ..RetireReport::default()
-        });
-    }
-    let workspace = &context.write.workspace_id;
-    let tracked: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM derived_artifact WHERE workspace_id=?1 AND layer='gazetteer' AND producer_id=?2)", params![workspace.as_str(),old_producer], |r| r.get(0)).sql()?;
-    if !tracked {
-        return Ok(RetireReport {
-            refused: Some(MaintenanceRefusal::UnavailableProducer),
-            ..RetireReport::default()
-        });
-    }
-    let invalid_source: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM derived_artifact d LEFT JOIN node n ON n.rid=d.source_rid WHERE d.workspace_id=?1 AND d.layer='gazetteer' AND d.producer_id=?2 AND (n.rid IS NULL OR n.workspace_id<>?1 OR n.kind<>'Document' OR COALESCE(json_extract(n.props,'$.owner'),'')<>'kaban-ingest'))",params![workspace.as_str(),old_producer],|r|r.get(0)).sql()?;
-    if invalid_source {
-        return Err(StoreError::EdgeSetRefused);
-    }
-    let mut report = RetireReport::default();
-    loop {
-        let tx = conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .sql()?;
-        let keys = tx.prepare_cached("SELECT d.artifact_key FROM derived_artifact d JOIN node n ON n.rid=d.source_rid WHERE d.workspace_id=?1 AND d.layer='gazetteer' AND d.producer_id=?2 AND n.workspace_id=?1 AND n.kind='Document' AND json_extract(n.props,'$.owner')='kaban-ingest' ORDER BY d.artifact_key LIMIT ?3").sql()?.query_map(params![workspace.as_str(),old_producer,batch_rows],|r|r.get::<_,String>(0)).sql()?.collect::<rusqlite::Result<Vec<_>>>().sql()?;
-        if keys.is_empty() {
-            tx.rollback().sql()?;
-            break;
-        }
-        for key in &keys {
-            tx.execute("DELETE FROM derived_artifact WHERE artifact_key=?1 AND workspace_id=?2 AND layer='gazetteer' AND producer_id=?3",params![key,workspace.as_str(),old_producer]).sql()?;
-        }
-        tx.commit().sql()?;
-        report.transactions += 1;
-        report.rows += keys.len() as u64;
-    }
-    Ok(report)
-}
-
-pub(super) fn maintain_layer(
-    conn: &mut Connection,
-    context: &MaintenanceContext<'_>,
-    // the current-producer check was a claim check; the bridge until `forget_layer` goes
-    // (OD-P1, T3 slice B) keeps the parameter
-    _authority: kaban_core::CurrentProducerAuthority,
-    operation: kaban_core::LayerMaintenance,
-    document_path: Option<&str>,
-    batch_rows: u32,
-) -> Result<kaban_core::RetireReport> {
-    let ctx = context.write;
-    if batch_rows == 0 {
-        return Err(StoreError::EdgeSetRefused);
-    }
-    let mut report = kaban_core::RetireReport::default();
-    let mut reset_documents = BTreeSet::new();
-    let document: Option<String> = if let Some(path) = document_path {
-        Some(conn.query_row("SELECT id FROM node WHERE workspace_id=?1 AND kind='Document' AND json_extract(props,'$.owner')='kaban-ingest' AND json_extract(props,'$.path')=?2",params![ctx.workspace_id.as_str(),path],|r|r.get(0)).optional().sql()?.ok_or_else(||StoreError::NotFound("document".into()))?)
-    } else {
-        None
-    };
-    // the layer's mention edges go first, in bounded transactions
-    loop {
-        let tx = conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .sql()?;
-        let rows = tx.execute("DELETE FROM edge WHERE rowid IN (SELECT e.rowid FROM edge e WHERE e.workspace_id=?1 AND e.layer='gazetteer' AND (?2 IS NULL OR e.source_id=(SELECT json_extract(props,'$.source_id') FROM node WHERE id=?2 AND workspace_id=?1)) LIMIT ?3)", params![ctx.workspace_id.as_str(), document, batch_rows]).sql()?;
-        tx.commit().sql()?;
-        if rows == 0 {
-            break;
-        }
-        report.transactions += 1;
-        report.rows += rows as u64;
-    }
-    loop {
-        let tx = conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .sql()?;
-        let keys=tx.prepare_cached("SELECT d.artifact_key,n.id FROM derived_artifact d JOIN node n ON n.rid=d.source_rid WHERE d.workspace_id=?1 AND d.layer='gazetteer' AND n.workspace_id=?1 AND (?2 IS NULL OR n.id=?2) ORDER BY d.producer_id,d.artifact_key LIMIT ?3").sql()?.query_map(params![ctx.workspace_id.as_str(),document,batch_rows],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?))).sql()?.collect::<rusqlite::Result<Vec<_>>>().sql()?;
-        if keys.is_empty() {
-            tx.rollback().sql()?;
-            break;
-        }
-        for (key, source) in &keys {
-            if operation == kaban_core::LayerMaintenance::Reindex
-                && !reset_documents.contains(source)
-            {
-                let source_id = NodeId::parse(source)?;
-                if self::document(&tx, &source_id, &ctx.workspace_id, false)?.is_some() {
-                    reset_set(&tx, &source_id, &ctx.workspace_id)?;
-                    reset_documents.insert(source.clone());
-                }
-            }
-            tx.execute(
-                "DELETE FROM derived_artifact WHERE artifact_key=?1 AND workspace_id=?2",
-                params![key, ctx.workspace_id.as_str()],
-            )
-            .sql()?;
-        }
-        tx.commit().sql()?;
-        report.transactions += 1;
-        report.rows += keys.len() as u64;
-    }
-    if operation == kaban_core::LayerMaintenance::Reindex {
-        let mut after = String::new();
-        loop {
-            // Bounded read-only keyset enumeration outside IMMEDIATE, including documents
-            // whose last complete set was empty (no claim or artifact can identify them).
-            let sources = if let Some(selected) = &document {
-                if !after.is_empty() {
-                    break;
-                }
-                vec![selected.clone()]
-            } else {
-                conn.prepare_cached("SELECT id FROM node WHERE workspace_id=?1 AND kind='Document' AND id>?2 AND lifecycle='active' AND json_extract(props,'$.owner')='kaban-ingest' ORDER BY id LIMIT ?3").sql()?.query_map(params![ctx.workspace_id.as_str(),after,batch_rows],|r|r.get::<_,String>(0)).sql()?.collect::<rusqlite::Result<Vec<_>>>().sql()?
-            };
-            if sources.is_empty() {
-                break;
-            }
-            let tx = conn
-                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-                .sql()?;
-            let mut changed = false;
-            for source in sources {
-                after.clone_from(&source);
-                if reset_documents.contains(&source) {
-                    continue;
-                }
-                let source_id = NodeId::parse(&source)?;
-                if self::document(&tx, &source_id, &ctx.workspace_id, false)?.is_some() {
-                    reset_set(&tx, &source_id, &ctx.workspace_id)?;
-                    reset_documents.insert(source);
-                    changed = true;
-                }
-            }
-            tx.commit().sql()?;
-            if changed {
-                report.transactions += 1;
-            }
-        }
-    }
-    Ok(report)
-}
-
 use crate::sql_error::SqlResultExt;
-use kaban_core::WriteCtx;
 use kaban_core::{
-    BuiltinProducer, DerivedArtifact, GazetteerClaimSet, GovernedSet, Layer, Lifecycle, NodeId, Op,
-    Owner, Result, SourceRev, StoreError, WorkspaceId, WriteBatch, artifact_key, canonical_json,
+    BuiltinProducer, DerivedArtifact, GazetteerClaimSet, GovernedSet, Lifecycle, NodeId, Op,
+    Producer, Result, SourceRev, StoreError, WorkspaceId, WriteBatch, artifact_key, canonical_json,
 };
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
@@ -206,7 +47,7 @@ fn state_key(document: &NodeId, workspace: &WorkspaceId) -> String {
         "gazetteer-set:{}",
         artifact_key(
             &source,
-            Layer::Gazetteer,
+            Producer::Gazetteer,
             "kaban-ingest:complete-set:1",
             workspace.as_str(),
             "state:1"
@@ -308,41 +149,29 @@ pub(super) fn set_fresh(conn: &Connection, id: &NodeId, workspace: &WorkspaceId)
         && state.policy_version.as_deref() == Some(policy.as_str()))
 }
 
-/// Explicit replay invalidates the optimistic set generation without changing source nodes.
-pub(super) fn reset_set(
-    conn: &Connection,
-    document: &NodeId,
-    workspace: &WorkspaceId,
-) -> Result<()> {
-    let prior = state(conn, document, workspace)?;
-    let generation = prior
-        .generation
-        .checked_add(1)
-        .ok_or(StoreError::EdgeSetRefused)?;
-    let encoded = serde_json::to_string(&json!({"generation":generation,"fingerprint":""}))?;
-    conn.execute("INSERT INTO index_meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",params![state_key(document,workspace),encoded]).sql()?;
-    Ok(())
-}
-
 /// All optimistic guards run before any batch write.
 pub(super) fn stale_sources(
     conn: &Connection,
     batch: &WriteBatch,
     governed: &GovernedSet,
 ) -> Result<u32> {
-    if !batch.gazetteer_claim_sets.is_empty() && batch.edge_diff.owner() != Owner::KabanIngest {
+    // a Gazetteer set travels with the document ingest batch that refreshes its chunks
+    if !batch.gazetteer_claim_sets.is_empty()
+        && batch.edge_diff.producer() != Producer::DocumentIngest
+    {
         return Err(StoreError::EdgeSetRefused);
     }
     let mut stale = BTreeSet::new();
     for artifact in &batch.artifacts {
-        let allowed_owner = match artifact.layer {
-            Layer::Gazetteer | Layer::V4 => Owner::KabanIngest,
-            Layer::Script | Layer::Llm | Layer::Gliner => Owner::KabanParse,
-            Layer::Reconcile => Owner::KabanReconcile,
-            _ => return Err(StoreError::EdgeSetRefused),
+        // the batch that publishes an artifact is the producer pipeline that derives it: the
+        // document ingest for Gazetteer and SCIP publications, the extractor for its own
+        let allowed = match (artifact.layer, batch.edge_diff.producer()) {
+            (Producer::Gazetteer | Producer::ScipImport, Producer::DocumentIngest) => true,
+            (Producer::Extractor(kind), Producer::Extractor(batch_kind)) => kind == batch_kind,
+            _ => false,
         };
         if artifact.workspace_id != batch.workspace_id
-            || batch.edge_diff.owner() != allowed_owner
+            || !allowed
             || artifact.producer_id.is_empty()
         {
             return Err(StoreError::EdgeSetRefused);
@@ -434,7 +263,9 @@ pub(super) fn prepare_sets(
             else {
                 continue;
             };
-            if props["layer"] != Layer::Gazetteer.as_str() || props["source_id"] != set.source_id {
+            if props["producer"] != Producer::Gazetteer.as_str()
+                || props["source_id"] != set.source_id
+            {
                 continue;
             }
             if rel != "MENTIONS"
@@ -459,7 +290,7 @@ pub(super) fn prepare_sets(
                 content_hash: canonical,
                 rev: 0,
             },
-            Layer::Gazetteer,
+            Producer::Gazetteer,
             "kaban-ingest:set-fingerprint:1",
             "",
             "",
@@ -489,7 +320,7 @@ pub(super) fn prepare_sets(
             let producer = BuiltinProducer::Gazetteer.producer_id();
             let key = artifact_key(
                 &revision,
-                Layer::Gazetteer,
+                Producer::Gazetteer,
                 producer,
                 &set.config_hash,
                 &policy,
@@ -498,7 +329,7 @@ pub(super) fn prepare_sets(
             batch.artifacts.push(DerivedArtifact {
                 key,
                 workspace_id: batch.workspace_id.clone(),
-                layer: Layer::Gazetteer,
+                layer: Producer::Gazetteer,
                 producer_id: producer.to_owned(),
                 source_rid: rid,
                 source_rev: revision,

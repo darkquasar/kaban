@@ -734,12 +734,10 @@ impl SqliteStore {
     /// R3-3): an id from another workspace is `NotFound`, so no cross-workspace edge and no
     /// `SUPERSEDES`/`INVALIDATES` side effect on another tenant's node can happen (S6, F17).
     ///
-    /// Since E2.2 (engine-spec EN-F9) the edge is not written here: the call is a human claim
-    /// (`layer = human`, `method` as the caller says, the caller's confidence as the raw
-    /// score, the gated props as the value), recorded as an `assertion` row and projected
-    /// through the reconciliation of its triple, so `link`, the inline links of `remember`
-    /// and the M5 import all produce one human assertion and one edge. A store below schema
-    /// 0004 (fixtures) writes the edge directly, as before.
+    /// The edge is written under the `authored` producer (`method` as the caller says, the
+    /// caller's confidence as the score, the gated props as the value) and the first-writer
+    /// rule: a triple another producer wrote first keeps that producer's row, and the stored
+    /// row is returned. A store below schema 0004 (fixtures) has no producer column.
     #[allow(clippy::too_many_arguments)] // the one transactional edge write; every caller passes all of them
     fn link_in(
         conn: &Connection,
@@ -767,7 +765,6 @@ impl SqliteStore {
                 |r| r.get(0),
             )
             .sql()?;
-        let props = edge_write::human_props(Some(&props));
         let scoring = edge_write::scoring_columns(conn)?;
         edge_write::write_edge(
             conn,
@@ -777,10 +774,10 @@ impl SqliteStore {
                 rel,
                 confidence,
                 props: &props,
-                layer: scoring.then_some(kaban_core::Layer::Human),
+                producer: kaban_core::Producer::Authored,
                 method: scoring.then_some(method),
-                // a human link scores its confidence, 1.0 when it names none (the human
-                // claim's score before T3, EN-F46 `edge_filter.min_score`)
+                // an authored link scores its confidence, 1.0 when it names none (EN-F46
+                // `edge_filter.min_score`)
                 score: scoring.then(|| confidence.unwrap_or(1.0)),
                 source_id: None,
                 offset: None,
@@ -1449,14 +1446,6 @@ impl IngestStore for SqliteStore {
     fn jobs_exhausted(&self, workspace: &WorkspaceId, attempts: u32) -> Result<u64> {
         crate::jobs::exhausted(&self.lock(), workspace, attempts)
     }
-    fn jobs_reindex(
-        &self,
-        layer: kaban_core::Layer,
-        limit: u32,
-        ctx: &WriteCtx,
-    ) -> Result<kaban_core::RetireReport> {
-        self.jobs_reindex_impl(layer, limit, ctx)
-    }
     fn jobs_prune(&self, workspace: &WorkspaceId, now: i64, limit: u32) -> Result<u32> {
         crate::jobs::prune(&self.lock(), workspace, now, limit)
     }
@@ -1502,44 +1491,12 @@ impl IngestStore for SqliteStore {
     fn job_mark_stale(&self, job: &kaban_core::JobId, workspace: &WorkspaceId) -> Result<bool> {
         crate::jobs::mark_stale(&self.lock(), job, workspace)
     }
-    fn retire_producer(
-        &self,
-        authority: kaban_core::CurrentProducerAuthority,
-        old_producer: &str,
-        batch_rows: u32,
-        ctx: &WriteCtx,
-    ) -> Result<kaban_core::RetireReport> {
-        artifacts::retire_producer(
-            &mut self.write(),
-            &artifacts::MaintenanceContext { write: ctx },
-            authority,
-            old_producer,
-            batch_rows,
-        )
-    }
     fn artifact_diagnostics(
         &self,
         workspace: &WorkspaceId,
         authority: kaban_core::CurrentProducerAuthority,
     ) -> Result<kaban_core::ArtifactDiagnostics> {
         doctor::artifact_diagnostics(&self.lock(), workspace, authority)
-    }
-    fn maintain_layer(
-        &self,
-        authority: kaban_core::CurrentProducerAuthority,
-        operation: kaban_core::LayerMaintenance,
-        document_path: Option<&str>,
-        batch_rows: u32,
-        ctx: &WriteCtx,
-    ) -> Result<kaban_core::RetireReport> {
-        artifacts::maintain_layer(
-            &mut self.write(),
-            &artifacts::MaintenanceContext { write: ctx },
-            authority,
-            operation,
-            document_path,
-            batch_rows,
-        )
     }
     fn artifact_source(
         &self,

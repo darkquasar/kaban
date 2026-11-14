@@ -9,8 +9,7 @@ use crate::rows::bad_enum;
 use crate::sql_error::SqlResultExt;
 use kaban_core::Result;
 use kaban_core::{
-    BatchReport, EdgeDiff, Lifecycle, Op, OutcomeKind, Owner, StoreError, WriteBatch, WriteCtx,
-    now_iso,
+    BatchReport, EdgeDiff, Lifecycle, Op, OutcomeKind, StoreError, WriteBatch, WriteCtx, now_iso,
 };
 use rusqlite::{Connection, OptionalExtension, params};
 use std::collections::BTreeSet;
@@ -18,67 +17,6 @@ use std::collections::BTreeSet;
 use super::{LinkEffect, SqliteStore};
 
 impl SqliteStore {
-    pub(super) fn jobs_reindex_impl(
-        &self,
-        layer: kaban_core::Layer,
-        limit: u32,
-        ctx: &WriteCtx,
-    ) -> Result<kaban_core::RetireReport> {
-        if !matches!(
-            layer,
-            kaban_core::Layer::Llm | kaban_core::Layer::Gliner | kaban_core::Layer::Script
-        ) || limit == 0
-        {
-            return Err(StoreError::EdgeSetRefused);
-        }
-        let dialect = if layer == kaban_core::Layer::Script {
-            "none"
-        } else {
-            layer.as_str()
-        };
-        let mut conn = self.write();
-        let mut report = kaban_core::RetireReport::default();
-        loop {
-            let tx = conn
-                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-                .sql()?;
-            let keys = tx.prepare("SELECT artifact_key FROM derived_artifact a JOIN node n ON n.rid=a.source_rid WHERE a.workspace_id=?1 AND a.layer=?2 AND n.workspace_id=?1 AND n.kind='Document' AND json_extract(n.props,'$.owner')='kaban-ingest' ORDER BY artifact_key LIMIT ?3").sql()?.query_map(params![ctx.workspace_id.as_str(),layer.as_str(),limit],|r|r.get::<_,String>(0)).sql()?.collect::<rusqlite::Result<Vec<_>>>().sql()?;
-            if keys.is_empty() {
-                break;
-            }
-            for key in &keys {
-                tx.execute("DELETE FROM derived_artifact WHERE artifact_key=?", [key])
-                    .sql()?;
-            }
-            tx.commit().sql()?;
-            report.rows += keys.len() as u64;
-            report.transactions += 1;
-        }
-        loop {
-            let tx = conn
-                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-                .sql()?;
-            let jobs = tx.prepare("SELECT job_id FROM ingest_jobs WHERE workspace_id=?1 AND \"with\"=?2 ORDER BY job_id LIMIT ?3").sql()?.query_map(params![ctx.workspace_id.as_str(),dialect,limit],|r|r.get::<_,String>(0)).sql()?.collect::<rusqlite::Result<Vec<_>>>().sql()?;
-            if jobs.is_empty() {
-                break;
-            }
-            for id in &jobs {
-                // Only completed attempts may be removed; unmarked exhausted counters survive reset.
-                tx.execute("DELETE FROM leases WHERE name IN (SELECT json_extract(plan,'$.lease.name') FROM ingest_jobs WHERE job_id=?1 AND workspace_id=?2 AND status='finished' UNION ALL SELECT 'attempt:'||json_extract(plan,'$.lease.name') FROM ingest_jobs WHERE job_id=?1 AND workspace_id=?2 AND status='finished')",params![id,ctx.workspace_id.as_str()]).sql()?;
-                tx.execute("UPDATE leases SET expires_at=unixepoch()-1 WHERE name IN (SELECT json_extract(plan,'$.lease.name') FROM ingest_jobs WHERE job_id=?1 AND workspace_id=?2)",params![id,ctx.workspace_id.as_str()]).sql()?;
-                tx.execute(
-                    "DELETE FROM ingest_jobs WHERE job_id=?1 AND workspace_id=?2",
-                    params![id, ctx.workspace_id.as_str()],
-                )
-                .sql()?;
-            }
-            tx.commit().sql()?;
-            report.rows += jobs.len() as u64;
-            report.transactions += 1;
-        }
-        Ok(report)
-    }
-
     pub(super) fn job_finish_impl(
         &self,
         request: &kaban_core::JobFinishRequest,
@@ -128,7 +66,7 @@ impl SqliteStore {
                 for (src, dst, rel, src_id, dst_id) in population.edges {
                     if !named.contains(&(src_id, dst_id, rel.clone())) {
                         // Delete only an owned remainder; never a human/foreign replacement.
-                        tx.execute("DELETE FROM edge WHERE src=?1 AND dst=?2 AND rel=?3 AND json_extract(props,'$.owner')='kaban-parse'",params![src,dst,rel]).sql()?;
+                        tx.execute("DELETE FROM edge WHERE src=?1 AND dst=?2 AND rel=?3 AND layer LIKE 'extractor:%'",params![src,dst,rel]).sql()?;
                         let remains: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM edge WHERE src=?1 AND dst=?2 AND rel=?3)",params![src,dst,rel],|r|r.get(0)).sql()?;
                         if !remains {
                             outcome.deleted_edges += 1;
@@ -272,7 +210,7 @@ impl SqliteStore {
         tx: &Connection,
         mut batch: WriteBatch,
     ) -> Result<BatchReport> {
-        let owner = batch.edge_diff.owner();
+        let batch_producer = batch.edge_diff.producer();
         let stale_source = super::artifacts::stale_sources(tx, &batch, &self.governed())?;
         if stale_source != 0 {
             return Ok(BatchReport {
@@ -342,10 +280,12 @@ impl SqliteStore {
         }
         let prepared = super::artifacts::prepare_sets(tx, &mut batch)?;
         super::artifacts::publish(tx, &batch.artifacts)?;
-        // then the edges of the batch, tagged with its owner (EN-E4): an edge whose stored row
-        // is unchanged writes nothing (N5); every edge the batch names is kept by the diff
-        // below. A producer edge names its layer in `props.layer` (moved to the `layer`
-        // column) with its `method`, `score` and span, which become the scoring columns.
+        // then the edges of the batch, each under one producer: the edge's own
+        // `props.producer` (the trusted batch boundary), else the batch's. The first writer of
+        // a `(src, dst, rel)` triple keeps the row: another producer's upsert of it writes
+        // nothing and is counted (owner decision 2026-11-14). An edge whose stored row is
+        // unchanged writes nothing (N5); every edge the batch names is kept by the diff below.
+        // A producer edge's `method`, `score` and span become the scoring columns.
         let mut kept: Vec<(i64, i64, String)> = Vec::new();
         for op in &batch.ops {
             if let Op::UpsertEdge {
@@ -363,21 +303,8 @@ impl SqliteStore {
                     return Err(StoreError::SelfLink(src.to_string()));
                 }
                 Self::edge_rule(tx, &tenant.governed, rel, &skind, &dkind)?;
-                let mut props = edge_write::owned_props(props.as_ref(), owner);
-                // a human's edge is never a producer's to overwrite (the write-side twin of
-                // the diff rule below, OWN-83 (4)): the triple stays the human's, named
-                if props["owner"] != Owner::Human.as_str()
-                    && edge_write::stored_owner(tx, srid, drid, rel)?.as_deref()
-                        == Some(Owner::Human.as_str())
-                {
-                    kept.push((srid, drid, rel.clone()));
-                    continue;
-                }
-                let scored = if scoring {
-                    Scored::take(&mut props)
-                } else {
-                    Scored::default()
-                };
+                let mut props = props.clone().unwrap_or_else(|| serde_json::json!({}));
+                let scored = Scored::take(&mut props, batch_producer);
                 let written = edge_write::write_edge(
                     tx,
                     &EdgeWrite {
@@ -387,7 +314,7 @@ impl SqliteStore {
                         // a producer edge's confidence is its own score (no prior applies)
                         confidence: scored.score,
                         props: &props,
-                        layer: scored.layer,
+                        producer: scored.producer,
                         method: scored.method,
                         score: scored.score,
                         source_id: scored.source_id.as_deref(),
@@ -395,7 +322,9 @@ impl SqliteStore {
                         len: scored.len,
                     },
                 )?;
-                if written.is_some()
+                if written == edge_write::Written::KeptByFirstWriter {
+                    report.edges_kept_by_first_writer += 1;
+                } else if written.wrote()
                     && let Some(effect) = LinkEffect::of(&tenant.governed, rel)
                 {
                     Self::mark_target(tx, dst.as_str(), effect, &now_iso())?;
@@ -406,35 +335,35 @@ impl SqliteStore {
         super::artifacts::record_sets(tx, &batch.workspace_id, &prepared, &kept)?;
         // MD-23 / EN-E4: outgoing edges of each upserted node that the batch did not name are
         // deleted (the edge delete trigger writes their changes rows); incoming edges are
-        // untouched. A layer never deletes an edge it did not create: `Complete { producer }`
-        // and `Owned { owner }` delete only the rows whose `props.owner` is the batch's named
-        // producer (OWN-83 (4); E2.5e, RW2-3: a human's row is never a batch's to delete
-        // whatever its `layer`, so `producer: human` deletes nothing, and an untagged legacy
-        // row is no producer's); `None` nothing. Gazetteer mentions are their set's lineage:
-        // only `record_sets` retires them, so a set-less ingest batch (a structured job's L0
-        // refresh of the same chunks) keeps them.
-        upserted.sort_unstable();
-        upserted.dedup();
-        for rid in upserted {
-            let outgoing: Vec<(i64, i64, String, String)> = {
-                let mut st = tx
-                    .prepare_cached("SELECT src, dst, rel, props FROM edge WHERE src=? AND layer IS NOT 'gazetteer'")
+        // untouched. Producer isolation: `Complete` and `Owned` delete only the unnamed rows
+        // whose stored producer is the batch's, so a rerun never deletes another producer's
+        // row; `None` deletes nothing. A store below 0004 stores no producer and deletes
+        // nothing. Gazetteer mentions are their set's lineage: `record_sets` retires them.
+        if let Some(deleting) = batch.edge_diff.deleting().filter(|_| scoring) {
+            upserted.sort_unstable();
+            upserted.dedup();
+            for rid in upserted {
+                let outgoing: Vec<(i64, i64, String)> = {
+                    let mut st = tx
+                        .prepare_cached("SELECT src, dst, rel FROM edge WHERE src=?1 AND layer=?2")
+                        .sql()?;
+                    let rows = st
+                        .query_map(params![rid, deleting.as_str()], |r| {
+                            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+                        })
+                        .sql()?;
+                    rows.collect::<rusqlite::Result<_>>().sql()?
+                };
+                for (src, dst, rel) in outgoing {
+                    if kept.contains(&(src, dst, rel.clone())) {
+                        continue;
+                    }
+                    tx.execute(
+                        "DELETE FROM edge WHERE src=? AND dst=? AND rel=?",
+                        params![src, dst, rel],
+                    )
                     .sql()?;
-                let rows = st
-                    .query_map([rid], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
-                    .sql()?;
-                rows.collect::<rusqlite::Result<_>>().sql()?
-            };
-            for (src, dst, rel, props) in outgoing {
-                let unnamed = !kept.contains(&(src, dst, rel.clone()));
-                if !unnamed || !batch.edge_diff.deletes(&props) {
-                    continue;
                 }
-                tx.execute(
-                    "DELETE FROM edge WHERE src=? AND dst=? AND rel=?",
-                    params![src, dst, rel],
-                )
-                .sql()?;
             }
         }
         let (first, last): (Option<i64>, Option<i64>) = tx
@@ -450,44 +379,12 @@ impl SqliteStore {
     }
 }
 
-/// Whether the diff rule deletes an unnamed outgoing edge with these stored `props` (EN-E4: a
-/// layer never deletes an edge it did not create). Only a positively identified producer has
-/// rows to delete, and only the rows tagged with it; a human is never that producer.
-trait DeletesUnnamed {
-    fn deletes(&self, props_json: &str) -> bool;
-}
-
-impl DeletesUnnamed for EdgeDiff {
-    fn deletes(&self, props_json: &str) -> bool {
-        match self {
-            Self::None => false,
-            // OWN-83 (4), after E2.5e (the wave-2 review's RW2-3): a human's row is never a
-            // batch's to delete, whatever its `layer` (a pre-0004 human `link` carries `owner
-            // = human` and a NULL `layer`, and the migration backfills nothing), so the human
-            // producer is refused here, by the predicate; an untagged legacy row (no `owner`,
-            // no `layer`) matches no producer's tag. Both spellings delete by the same tag:
-            // `Complete` states the producer's complete set, `Owned` its own rows.
-            Self::Complete { producer: owner } | Self::Owned { owner } => {
-                *owner != Owner::Human
-                    && stored_owner(props_json).is_some_and(|o| o == owner.as_str())
-            }
-        }
-    }
-}
-
-/// The `props.owner` of a stored edge row, if it carries one.
-fn stored_owner(props_json: &str) -> Option<String> {
-    serde_json::from_str::<serde_json::Value>(props_json)
-        .ok()
-        .and_then(|v| v.get("owner").and_then(|o| o.as_str().map(str::to_owned)))
-}
-
-/// The scoring columns of a producer edge, read from its props (`layer` is moved out of the
-/// props into its column; `method`, `score` (fixed point, `/ 10000`), `source_id`, `offset` and
-/// `len` stay in the props as written). An edge without a known `layer` has none.
-#[derive(Default)]
+/// The producer and scoring columns of a batch edge, read from its props: `producer` (an
+/// edge naming its own producer at the trusted batch boundary, else the batch's) is moved
+/// out of the props into the `layer` column; `method`, `score` (fixed point, `/ 10000`),
+/// `source_id`, `offset` and `len` stay in the props as written.
 struct Scored {
-    layer: Option<kaban_core::Layer>,
+    producer: kaban_core::Producer,
     method: Option<kaban_core::Method>,
     score: Option<f64>,
     source_id: Option<String>,
@@ -496,25 +393,27 @@ struct Scored {
 }
 
 impl Scored {
-    fn take(props: &mut serde_json::Value) -> Self {
+    fn take(props: &mut serde_json::Value, batch: kaban_core::Producer) -> Self {
         let Some(map) = props.as_object_mut() else {
-            return Self::default();
+            return Self {
+                producer: batch,
+                method: None,
+                score: None,
+                source_id: None,
+                offset: None,
+                len: None,
+            };
         };
-        let Some(layer) = map
-            .get("layer")
-            .and_then(serde_json::Value::as_str)
-            .and_then(kaban_core::Layer::parse)
-        else {
-            return Self::default();
-        };
-        map.remove("layer");
+        let named = map
+            .remove("producer")
+            .and_then(|v| v.as_str().and_then(kaban_core::Producer::parse));
         let int = |key: &str| {
             map.get(key)
                 .and_then(serde_json::Value::as_u64)
                 .and_then(|v| u32::try_from(v).ok())
         };
         Self {
-            layer: Some(layer),
+            producer: named.unwrap_or(batch),
             method: map
                 .get("method")
                 .and_then(serde_json::Value::as_str)

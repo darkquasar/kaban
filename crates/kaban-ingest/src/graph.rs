@@ -17,9 +17,9 @@
 //! lacks are tombstoned (overwrite mode; `history: true` is DI3.4).
 //!
 //! Engine boundary (engine-plan §10, EN-F25): identifier matching (`find_mentions`, the
-//! gazetteer, `MENTIONS`) is not here. The store-side owned edge diff (spec D5 [A-3],
-//! `EdgeDiff::Owned`) is core EN-E4 and has not landed; every edge written here already carries
-//! `props.owner = "kaban-ingest"`; DI1.8 landed `EdgeDiff::Owned` and every batch here uses it.
+//! gazetteer, `MENTIONS`) is not here. Every batch here uses the owned edge diff (spec D5
+//! [A-3], `EdgeDiff::Owned` under the `document_ingest` producer, PC-16): every edge it writes
+//! is stored under that producer, and a re-ingest deletes only those.
 
 use crate::chunk::{ChunkDraft, estimate_tokens, slices_for};
 use crate::extract::{AnchorKind, LinkDraft, SectionDraft};
@@ -32,16 +32,16 @@ use crate::model::{
     PreparedGraph, SectionNode, SectionProps, SourceId, TOKEN_ESTIMATOR,
 };
 use kaban_core::{
-    EdgeDiff, INGEST_OWNER, NewNode, Node, NodeId, Op, Owner, WorkspaceId, WriteBatch,
+    EdgeDiff, INGEST_OWNER, NewNode, Node, NodeId, Op, Producer, WorkspaceId, WriteBatch,
 };
 use kaban_policy::Policy;
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
-/// `props.owner` of every node and edge this pipeline writes (spec D5 [A-3]): the core's
-/// [`INGEST_OWNER`], the wire form of [`Owner::KabanIngest`] that `EdgeDiff::Owned` compares
-/// against and the only owner the store reactivates for (DI1.8; typed in E2.2).
+/// `props.owner` of every Document, Section and Chunk node this pipeline writes (spec D5
+/// [A-3]): the core's [`INGEST_OWNER`], the only owner the store reactivates for (DI1.8). The
+/// pipeline's edges carry their producer in the edge row instead (PC-16).
 pub const EDGE_OWNER: &str = INGEST_OWNER;
 
 /// Every batch this pipeline writes: the owned edge diff (spec D5 [A-3], engine-spec EN-E4), so
@@ -50,7 +50,7 @@ pub const EDGE_OWNER: &str = INGEST_OWNER;
 pub fn ingest_batch(workspace: &WorkspaceId, ops: Vec<Op>) -> WriteBatch {
     let mut batch = WriteBatch::new(workspace.clone(), ops);
     batch.edge_diff = EdgeDiff::Owned {
-        owner: Owner::KabanIngest,
+        producer: Producer::DocumentIngest,
     };
     batch
 }
@@ -415,7 +415,6 @@ struct LinkEdgeProps<'a> {
     alias: Option<&'a str>,
     resolved: bool,
     embed: bool,
-    owner: &'static str,
 }
 
 impl<'a> LinkEdgeProps<'a> {
@@ -427,7 +426,6 @@ impl<'a> LinkEdgeProps<'a> {
             alias: link.alias.as_deref(),
             resolved,
             embed: link.embed,
-            owner: EDGE_OWNER,
         })
         .unwrap_or_default()
     }
@@ -438,7 +436,7 @@ fn owned_edge(src: &NodeId, dst: &NodeId, rel: &str) -> Op {
         src: src.clone(),
         dst: dst.clone(),
         rel: rel.to_owned(),
-        props: Some(json!({ "owner": EDGE_OWNER })),
+        props: None,
     }
 }
 

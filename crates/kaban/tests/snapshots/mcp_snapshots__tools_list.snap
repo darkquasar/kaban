@@ -6971,28 +6971,24 @@ expression: tools
           ],
           "type": "object"
         },
-        "RecallLayer": {
-          "description": "Recall sources, distinct from assertion producer layers.",
+        "RecallMode": {
+          "description": "Recall match modes (PC-16): how the text index matches the query.",
           "oneOf": [
             {
-              "const": "fts",
+              "const": "lexical",
               "description": "Lexical full-text retrieval.",
               "type": "string"
             },
             {
               "const": "fuzzy",
-              "description": "Fuzzy (typo-tolerant) retrieval by the text index (spec 05 OWN-M: `fuzzy` on the wire).",
-              "type": "string"
-            },
-            {
-              "const": "sim",
-              "description": "Reserved similarity retrieval, unavailable in this release.",
+              "description": "Fuzzy (typo-tolerant) retrieval by the text index (spec 05 OWN-M).",
               "type": "string"
             }
           ]
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
       "properties": {
         "enrich": {
           "description": "Enrichers to run on the `CodeRef` pointers of the result (core-spec F19). An id this\nprocess has not configured is an error listing the configured ones; none ships in v3.0.",
@@ -7023,12 +7019,7 @@ expression: tools
         },
         "include_archived": {
           "default": false,
-          "description": "Also return archived records of any governance reached through graph expansion.",
-          "type": "boolean"
-        },
-        "include_superseded": {
-          "default": false,
-          "description": "Also return superseded (archived) records reached through graph expansion. Invalidated\nand tombstoned records never return.",
+          "description": "Also return archived (for example superseded) records reached through graph expansion.\nInvalidated and tombstoned records never return.",
           "type": "boolean"
         },
         "kinds": {
@@ -7039,22 +7030,22 @@ expression: tools
           },
           "type": "array"
         },
-        "layers": {
-          "description": "Retrieval sources (fts, fuzzy, reserved sim); absent uses enabled defaults.",
-          "items": {
-            "$ref": "#/$defs/RecallLayer"
-          },
-          "type": [
-            "array",
-            "null"
-          ]
-        },
         "limit": {
           "description": "Max results (default 10, max 100).",
           "format": "uint",
           "minimum": 0,
           "type": [
             "integer",
+            "null"
+          ]
+        },
+        "modes": {
+          "description": "Match modes (`lexical`, `fuzzy`); absent uses the enabled defaults.",
+          "items": {
+            "$ref": "#/$defs/RecallMode"
+          },
+          "type": [
+            "array",
             "null"
           ]
         },
@@ -8479,168 +8470,74 @@ expression: tools
     "name": "stats",
     "outputSchema": {
       "$defs": {
-        "Layer": {
-          "description": "Assertion source layers in strongest-source order (engine-spec EN-E7); the text index layers `fts` and `fuzzy` (EN-F22, spec 05 OWN-M) close the list.",
+        "BudgetOrigin": {
+          "description": "Owned wire provenance: flag spelling is reported separately.",
           "oneOf": [
             {
-              "const": "human",
-              "description": "`human`",
+              "const": "default",
+              "description": "Register default.",
               "type": "string"
             },
             {
-              "const": "v4",
-              "description": "`v4`",
+              "const": "config",
+              "description": "Saved override.",
               "type": "string"
             },
             {
-              "const": "reconcile",
-              "description": "`reconcile`",
-              "type": "string"
-            },
-            {
-              "const": "script",
-              "description": "`script`",
-              "type": "string"
-            },
-            {
-              "const": "llm",
-              "description": "`llm`",
-              "type": "string"
-            },
-            {
-              "const": "gliner",
-              "description": "`gliner`",
-              "type": "string"
-            },
-            {
-              "const": "gazetteer",
-              "description": "`gazetteer`",
-              "type": "string"
-            },
-            {
-              "const": "embed",
-              "description": "`embed`",
-              "type": "string"
-            },
-            {
-              "const": "fts",
-              "description": "`fts`",
-              "type": "string"
-            },
-            {
-              "const": "fuzzy",
-              "description": "`fuzzy`",
+              "const": "flag",
+              "description": "Run-local flag.",
               "type": "string"
             }
           ]
         },
-        "LayerOutcome": {
-          "description": "A fixed, content-free producer result stored under `layer_run:<layer>`.",
-          "oneOf": [
-            {
-              "const": "ok",
-              "description": "Completed.",
-              "type": "string"
-            },
-            {
-              "const": "failed",
-              "description": "Producer failed; other layers remain usable.",
-              "type": "string"
-            },
-            {
-              "const": "skipped_budget",
-              "description": "Resource cap prevented this layer from running.",
-              "type": "string"
-            }
-          ]
-        },
-        "LayerRow": {
-          "description": "One of the five default-matrix rows.",
+        "BudgetRow": {
+          "description": "An owned resource-policy row, suitable for report round trips.",
           "properties": {
-            "last_outcome": {
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/LayerOutcome"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "Last fixed run outcome, absent when no valid bookkeeping exists."
-            },
-            "last_run": {
-              "description": "Latest valid run timestamp, including explicitly selected runs.",
-              "format": "int64",
-              "type": [
-                "integer",
-                "null"
-              ]
-            },
-            "layer": {
-              "$ref": "#/$defs/MatrixLayer",
-              "description": "Matrix display category (not a producer vocabulary extension)."
-            },
-            "on": {
-              "description": "Whether configuration enables the layer by default.",
+            "cap_lifted": {
+              "description": "Whether enforcement is explicitly bypassed for this run.",
               "type": "boolean"
             },
-            "owner": {
-              "description": "Edge producer, when the layer has one.",
+            "default": {
+              "description": "Register value, in the key's documented units.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "effective": {
+              "description": "Configured value, not a sentinel for a lifted cap.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "flag": {
+              "description": "Fixed flag spelling when a run lifts the cap.",
               "type": [
                 "string",
                 "null"
               ]
             },
-            "producer_layers": {
-              "description": "Actual closed-vocabulary sources represented by the row.",
-              "items": {
-                "$ref": "#/$defs/Layer"
-              },
-              "type": "array"
+            "group": {
+              "description": "The producer or index the budget bounds (`text`, `gazetteer`, `document_ingest`,\n`scip_import`).",
+              "type": "string"
             },
-            "reason_off": {
-              "description": "Fixed reason when the default is disabled.",
-              "type": [
-                "string",
-                "null"
-              ]
+            "key": {
+              "description": "Dotted configuration key.",
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/$defs/BudgetOrigin",
+              "description": "Policy provenance."
             }
           },
           "required": [
-            "layer",
-            "producer_layers",
-            "on",
-            "owner",
-            "last_run",
-            "last_outcome",
-            "reason_off"
+            "group",
+            "key",
+            "default",
+            "effective",
+            "source",
+            "cap_lifted"
           ],
           "type": "object"
-        },
-        "MatrixLayer": {
-          "description": "Display categories, not new assertion-source vocabulary values.",
-          "oneOf": [
-            {
-              "const": "fts",
-              "description": "L0 lexical index and chunks.",
-              "type": "string"
-            },
-            {
-              "const": "gazetteer",
-              "description": "L1 optional mention dictionary.",
-              "type": "string"
-            },
-            {
-              "const": "embed",
-              "description": "Reserved L2 embeddings, unavailable in this release (OWN-94).",
-              "type": "string"
-            },
-            {
-              "const": "extractors",
-              "description": "L3 explicit extractors (llm, gliner and script).",
-              "type": "string"
-            }
-          ]
         },
         "PolicyStats": {
           "description": "Policy summary in `stats`.",
@@ -8686,6 +8583,81 @@ expression: tools
           ],
           "type": "object"
         },
+        "ProducerOutcome": {
+          "description": "A fixed, content-free producer result stored under `producer_run:<producer>`.",
+          "oneOf": [
+            {
+              "const": "ok",
+              "description": "Completed.",
+              "type": "string"
+            },
+            {
+              "const": "failed",
+              "description": "Producer failed; the other producers remain usable.",
+              "type": "string"
+            },
+            {
+              "const": "skipped_budget",
+              "description": "Resource cap prevented this producer from running.",
+              "type": "string"
+            }
+          ]
+        },
+        "ProducerRow": {
+          "description": "One `stats.producers` row (PC-16): a producer, whether it runs by default, its last run\nand the budgets that bound it.",
+          "properties": {
+            "budgets": {
+              "description": "The resource budgets that bound the producer (empty when none does).",
+              "items": {
+                "$ref": "#/$defs/BudgetRow"
+              },
+              "type": "array"
+            },
+            "last_outcome": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ProducerOutcome"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Last fixed run outcome, absent when no valid bookkeeping exists."
+            },
+            "last_run": {
+              "description": "Latest valid run timestamp, including explicitly selected runs.",
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "on": {
+              "description": "Whether the producer runs by default.",
+              "type": "boolean"
+            },
+            "producer": {
+              "description": "The producer (`extractor` stands for its three kinds).",
+              "type": "string"
+            },
+            "reason_off": {
+              "description": "Fixed reason when the producer is off by default.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "producer",
+            "on",
+            "last_run",
+            "last_outcome",
+            "reason_off",
+            "budgets"
+          ],
+          "type": "object"
+        },
         "StoreScope": {
           "description": "Which database a record lives in (core-spec §4 `store_scope`, F18).",
           "oneOf": [
@@ -8705,17 +8677,17 @@ expression: tools
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": true,
       "properties": {
-        "layers": {
-          "default": [],
-          "description": "Five default-matrix categories and last valid producer runs (EN-F52).",
-          "items": {
-            "$ref": "#/$defs/LayerRow"
-          },
-          "type": "array"
-        },
         "policy": {
           "$ref": "#/$defs/PolicyStats",
           "description": "Policy summary."
+        },
+        "producers": {
+          "default": [],
+          "description": "The seven producers with their default state, last valid run and budgets (EN-F52,\nPC-16).",
+          "items": {
+            "$ref": "#/$defs/ProducerRow"
+          },
+          "type": "array"
         },
         "stores": {
           "description": "Stores this server reads (`project`; `personal` arrives in M6, F18).",
@@ -8728,7 +8700,7 @@ expression: tools
       "required": [
         "stores",
         "policy",
-        "layers"
+        "producers"
       ],
       "type": "object"
     }
@@ -8745,15 +8717,9 @@ expression: tools
     "inputSchema": {
       "$defs": {
         "EdgeFilter": {
-          "description": "The edge filter of `traverse` (EN-F46). Values are the stored vocabulary spellings:\nlayers `human`, `v4`, `reconcile`, `script`, `llm`, `gliner`, `gazetteer`, `embed`;\nmethods such as `link`, `remember`, `exact`, `alias`, `symbol`, `gliner`, `llm`. An\nunknown spelling is refused (`unknown_layer`, `unknown_method`).",
+          "additionalProperties": false,
+          "description": "The edge filter of `traverse` (EN-F46). Values are the stored vocabulary spellings:\nproducers `authored`, `hook_events`, `document_ingest`, `gazetteer`, `extractor:llm`,\n`extractor:gliner`, `extractor:script`, `scip_import`, `git_history` (PC-16); methods such\nas `link`, `remember`, `exact`, `alias`, `symbol`, `gliner`, `llm`. An unknown spelling is\nrefused (`unknown_producer`, `unknown_method`), so is an unknown key (the removed `layers`\namong them).",
           "properties": {
-            "layers": {
-              "description": "Keep only edges from these source layers (empty: any).",
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
             "methods": {
               "description": "Keep only edges asserted by these methods (empty: any).",
               "items": {
@@ -8768,6 +8734,13 @@ expression: tools
                 "number",
                 "null"
               ]
+            },
+            "producers": {
+              "description": "Keep only edges from these producers (empty: any).",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
             }
           },
           "type": "object"
@@ -8845,7 +8818,7 @@ expression: tools
               "type": "null"
             }
           ],
-          "description": "Follow only the edges that pass every clause: a source layer in `layers`, a method in\n`methods`, a score of at least `min_score`. An edge without a value in a filtered column\n(a structural edge written without a claim) does not pass that clause. Default: every\nedge."
+          "description": "Follow only the edges that pass every clause: a producer in `producers`, a method in\n`methods`, a score of at least `min_score`. An edge without a value in a filtered column\n(a structural edge carries no method or score) does not pass that clause. Default:\nevery edge."
         },
         "follow_anchors": {
           "default": false,

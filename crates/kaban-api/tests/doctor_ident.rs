@@ -105,7 +105,7 @@ fn metadata_read_failure_is_named_and_does_not_hide_siblings() {
     let row = ident_check(&report);
     assert!(!row.ok);
     assert_eq!(row.detail, "not checked: backend read failed");
-    for name in ["db_modes", "integrity", "fts_integrity", "layers"] {
+    for name in ["db_modes", "integrity", "fts_integrity", "producers"] {
         assert!(
             report.checks.iter().any(|row| row.name == name),
             "{report:?}"

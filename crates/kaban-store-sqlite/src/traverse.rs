@@ -26,9 +26,9 @@ const ANCHORED_PER_NODE: usize = 200;
 const ANCHORED_TOTAL: usize = 500;
 
 /// Append the relationship filter (`rels` bound as `?3..`, M3 review R3-7), the EN-F46 edge
-/// filter (its values bound after the rels, in the order `layers`, `methods`, `min_score`)
+/// filter (its values bound after the rels, in the order `producers`, `methods`, `min_score`)
 /// and the deterministic hub cut to a neighbour query: the filters run before the cut, so a
-/// hub whose oldest 200 edges use other relationships or layers still yields its matching
+/// hub whose oldest 200 edges use other relationships or producers still yields its matching
 /// neighbours. The order key stays `e.id`, a column (N5).
 fn with_rels_and_hub_cut(select: &str, rels: usize, edge_filter: Option<&EdgeFilter>) -> String {
     let in_list = |column: &str, n: usize| {
@@ -40,7 +40,7 @@ fn with_rels_and_hub_cut(select: &str, rels: usize, edge_filter: Option<&EdgeFil
     };
     let mut filter = in_list("rel", rels);
     if let Some(f) = edge_filter {
-        filter.push_str(&in_list("layer", f.layers.len()));
+        filter.push_str(&in_list("layer", f.producers.len()));
         filter.push_str(&in_list("method", f.methods.len()));
         if f.min_score.is_some() {
             filter.push_str(" AND e.score >= ?");
@@ -57,7 +57,7 @@ fn edge_filter_params(edge_filter: Option<&EdgeFilter>) -> Vec<Box<dyn rusqlite:
     };
     let mut p: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
     p.extend(
-        f.layers
+        f.producers
             .iter()
             .map(|l| Box::new(l.as_str()) as Box<dyn rusqlite::ToSql>),
     );

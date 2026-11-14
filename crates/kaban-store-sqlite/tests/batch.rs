@@ -858,19 +858,31 @@ fn owned_node(kind: &str, text: &str, owner: &str) -> NewNode {
     }
 }
 
+/// The producer an old owner spelling of these fixtures stands for (PC-16 folded the owner
+/// vocabulary into `Producer`; `kaban-embed` stands for a third producer).
+fn producer_of(owner: &str) -> kaban_core::Producer {
+    use kaban_core::{ExtractorKind, Producer};
+    match owner {
+        "kaban-ingest" => Producer::DocumentIngest,
+        "kaban-parse" => Producer::Extractor(ExtractorKind::Llm),
+        "human" => Producer::Authored,
+        _ => Producer::ScipImport,
+    }
+}
+
 fn owned_edge(src: &NodeId, dst: &NodeId, rel: &str, owner: &str) -> Op {
     Op::UpsertEdge {
         src: src.clone(),
         dst: dst.clone(),
         rel: rel.into(),
-        props: Some(serde_json::json!({ "owner": owner })),
+        props: Some(serde_json::json!({ "producer": producer_of(owner).as_str() })),
     }
 }
 
 fn owned_batch(ops: Vec<Op>, owner: &str) -> WriteBatch {
     let mut b = WriteBatch::new(WorkspaceId::default(), ops);
     b.edge_diff = EdgeDiff::Owned {
-        owner: kaban_core::Owner::parse(owner).unwrap(),
+        producer: producer_of(owner),
     };
     b
 }
@@ -924,7 +936,7 @@ fn owned_edge_diff_keeps_foreign_edges_across_a_document_edit() {
             &record,
             "EVIDENCE_FOR",
             None,
-            Some(serde_json::json!({ "owner": "kaban-parse" })),
+            Some(serde_json::json!({ "producer": "extractor:llm" })),
             &ctx(),
         )
         .unwrap();
@@ -1159,15 +1171,14 @@ fn reactivate_refuses_governed_kinds_and_foreign_owners() {
 /// unnamed edges; `INGEST_OWNER` is the wire form of `Owner::KabanIngest`.
 #[test]
 fn an_embed_owned_batch_deletes_only_its_own_unnamed_edges() {
-    use kaban_core::{INGEST_OWNER, Owner};
-    assert_eq!(INGEST_OWNER, Owner::KabanIngest.as_str());
+    use kaban_core::Producer;
     assert_eq!(
         serde_json::to_value(EdgeDiff::Owned {
-            owner: Owner::KabanIngest
+            producer: Producer::DocumentIngest
         })
-        .unwrap()["owner"],
-        serde_json::json!("kaban-ingest"),
-        "the JSON wire form is unchanged"
+        .unwrap()["producer"],
+        serde_json::json!("document_ingest"),
+        "the JSON wire form names the producer"
     );
     let store = SqliteStore::open_memory().unwrap();
     let (c1, doc, other, vec_) = (NodeId::new(), NodeId::new(), NodeId::new(), NodeId::new());
@@ -1193,7 +1204,7 @@ fn an_embed_owned_batch_deletes_only_its_own_unnamed_edges() {
     let embed = |ops| {
         let mut b = batch(ops);
         b.edge_diff = EdgeDiff::Owned {
-            owner: Owner::KabanEmbed,
+            producer: Producer::ScipImport,
         };
         b
     };
@@ -1228,15 +1239,15 @@ fn an_embed_owned_batch_deletes_only_its_own_unnamed_edges() {
     );
 }
 
-/// E2.5a (EN-E4 "a layer never deletes an edge it did not create"), moved by E2.5e (RW2-3): a
-/// chunk written by a producer under the default rule carries a human `link` (`layer =
-/// human`) and a layer's `MENTIONS` edge (`props.owner = kaban-parse`, `layer` set); the
-/// producer re-upserts the chunk naming
-/// no edge at all: both foreign rows survive, and so does the first batch's `PART_OF`,
-/// tagged `human` like the link and so no identified producer's to delete (E2.5a deleted it).
+/// E2.5a (EN-E4 "a producer never deletes an edge it did not create"), under PC-16: a chunk
+/// written under the default rule (`authored`) carries an authored `link` and an extractor's
+/// `MENTIONS` edge (`producer = extractor:gliner`); a default-rule re-upsert of the chunk
+/// naming no edge at all deletes nothing: both rows survive, and so does the first batch's
+/// `PART_OF`.
 #[test]
-fn complete_diff_keeps_edges_of_other_layers() {
-    let store = SqliteStore::open_memory().unwrap();
+fn complete_diff_keeps_edges_of_other_producers() {
+    let s = common::Scratch::new("e25a-other-producers", "current");
+    let store = SqliteStore::open(&s.db(), &s.keys()).unwrap();
     let (doc, chunk, human_target, entity) =
         (NodeId::new(), NodeId::new(), NodeId::new(), NodeId::new());
     // the producer's first batch: the `WriteBatch::new` default (`None`, OWN-83 (4))
@@ -1264,27 +1275,24 @@ fn complete_diff_keeps_edges_of_other_layers() {
                 src: chunk.clone(),
                 dst: entity.clone(),
                 rel: "MENTIONS".into(),
-                props: Some(
-                    serde_json::json!({"layer": "gliner", "method": "gliner", "score": 9000}),
-                ),
+                props: Some(serde_json::json!(
+                    {"producer": "extractor:gliner", "method": "gliner", "score": 9000}
+                )),
             },
         ],
         "kaban-parse",
     );
     store.apply_batch(claimed, &ctx()).unwrap();
-    let owners: std::collections::BTreeMap<String, serde_json::Value> = out_edges(&store, &chunk)
-        .into_iter()
-        .map(|(dst, props)| (dst, props["owner"].clone()))
-        .collect();
-    assert_eq!(owners.len(), 3, "{owners:?}");
-    assert_eq!(owners[&doc.to_string()], serde_json::json!("human"));
+    let producers = out_producers(&s.db(), &chunk);
+    assert_eq!(producers.len(), 3, "{producers:?}");
+    assert_eq!(producers[&doc.to_string()].as_deref(), Some("authored"));
     assert_eq!(
-        owners[&human_target.to_string()],
-        serde_json::json!("human")
+        producers[&human_target.to_string()].as_deref(),
+        Some("authored")
     );
     assert_eq!(
-        owners[&entity.to_string()],
-        serde_json::json!("kaban-parse")
+        producers[&entity.to_string()].as_deref(),
+        Some("extractor:gliner")
     );
     // the producer re-ingests the chunk and names none of its edges
     store
@@ -1302,8 +1310,26 @@ fn complete_diff_keeps_edges_of_other_layers() {
     assert_eq!(
         out_neighbours(&store, &chunk),
         expect,
-        "the human link and the layer's MENTIONS survive a default-rule re-upsert, and so does the first batch's PART_OF: tagged `human` like the link, it is no identified producer's (E2.5e, RW2-3)"
+        "the authored link and the extractor's MENTIONS survive a default-rule re-upsert, and so does the first batch's PART_OF (the default rule deletes nothing)"
     );
+}
+
+/// The stored producer (`layer` column, PC-16) of every outgoing edge of `from`, by target id.
+fn out_producers(
+    db: &std::path::Path,
+    from: &NodeId,
+) -> std::collections::BTreeMap<String, Option<String>> {
+    let conn = rusqlite::Connection::open(db).unwrap();
+    let mut st = conn
+        .prepare(
+            "SELECT d.id, e.layer FROM edge e JOIN node s ON s.rid = e.src
+             JOIN node d ON d.rid = e.dst WHERE s.id = ?1",
+        )
+        .unwrap();
+    st.query_map([from.as_str()], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap()
 }
 
 /// Every outgoing edge of `from` as stored, serialised (id, endpoints, rel, confidence,
@@ -1330,11 +1356,11 @@ fn out_edge_rows(store: &SqliteStore, from: &NodeId) -> Vec<serde_json::Value> {
         .collect()
 }
 
-/// RW2-3 on a store at the current schema: a human `link` through the public path carries the
-/// human layer at rest (`layer = human`, the reconcile path's projection) and survives a
-/// default-rule re-upsert of its source byte-identical.
+/// RW2-3 on a store at the current schema: a `link` through the public path carries the
+/// `authored` producer at rest and survives a default-rule re-upsert of its source
+/// byte-identical.
 #[test]
-fn a_human_link_on_the_current_schema_carries_the_human_layer_and_survives_complete() {
+fn a_link_on_the_current_schema_carries_the_authored_producer_and_survives_complete() {
     let s = common::Scratch::new("e25e-link-layer", "current");
     let store = SqliteStore::open(&s.db(), &s.keys()).unwrap();
     let (doc, chunk, human_target) = (NodeId::new(), NodeId::new(), NodeId::new());
@@ -1360,7 +1386,11 @@ fn a_human_link_on_the_current_schema_carries_the_human_layer_and_survives_compl
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(layer.as_deref(), Some("human"), "the human layer at rest");
+    assert_eq!(
+        layer.as_deref(),
+        Some("authored"),
+        "the authored producer at rest"
+    );
     let before = out_edge_rows(&store, &chunk);
     store
         .apply_batch(
@@ -1417,7 +1447,7 @@ fn owned_embed_leaves_ingest_mentions_and_human_links() {
     let embed = |ops| {
         let mut b = batch(ops);
         b.edge_diff = EdgeDiff::Owned {
-            owner: kaban_core::Owner::KabanEmbed,
+            producer: kaban_core::Producer::ScipImport,
         };
         b
     };
@@ -1581,12 +1611,11 @@ fn a_disallowed_endpoint_is_endpoint_not_allowed_on_every_edge_path() {
 }
 
 /// OWN-83 (4), EN-E4 (engine-plan E2.8): `Complete { producer }` deletes exactly the unnamed
-/// outgoing rows tagged with that producer. A chunk carries an ingest-tagged row (`props.owner
-/// = kaban-ingest`), a human `link` (`owner = human`, `layer = human`) and an untagged legacy
-/// row (no `owner`, no `layer`); the ingest producer re-upserts the chunk under
-/// `{"mode":"complete","producer":"kaban-ingest"}` naming no edge: its own row goes, the
-/// human link and the legacy row survive byte-identical. `producer: human` is refused by the
-/// predicate, not the type: a human `Complete` re-upsert deletes nothing.
+/// outgoing rows stored under that producer. A chunk carries a `document_ingest` row, an
+/// authored `link` and an untagged legacy row (no producer); the ingest producer re-upserts
+/// the chunk under `{"mode":"complete","producer":"document_ingest"}` naming no edge: its own
+/// row goes, the authored link and the legacy row survive byte-identical. A third producer's
+/// `Complete` re-upsert owns none of these rows and deletes nothing.
 #[test]
 fn a_complete_producer_batch_deletes_only_its_own_unnamed_rows() {
     let s = common::Scratch::new("e28-complete-producer", "current");
@@ -1637,8 +1666,8 @@ fn a_complete_producer_batch_deletes_only_its_own_unnamed_rows() {
             .cloned()
     };
     assert_eq!(
-        row_to(&before, &ingest_target).unwrap()["props"]["owner"],
-        serde_json::json!(ingest)
+        out_producers(&s.db(), &chunk)[&ingest_target.to_string()].as_deref(),
+        Some("document_ingest")
     );
     let complete = |producer: &str| -> WriteBatch {
         let mut b = batch(vec![upsert(&chunk, "Fact", "a chunk, re-ingested")]);
@@ -1650,16 +1679,18 @@ fn a_complete_producer_batch_deletes_only_its_own_unnamed_rows() {
         b
     };
 
-    // a human `Complete` identifies no producer's rows: nothing is deleted
-    store.apply_batch(complete("human"), &ctx()).unwrap();
+    // a third producer's `Complete` owns none of these rows: nothing is deleted
+    store.apply_batch(complete("scip_import"), &ctx()).unwrap();
     assert_eq!(
         out_edge_rows(&store, &chunk),
         before,
-        "a human producer deletes nothing"
+        "another producer deletes nothing"
     );
 
     // the ingest producer's `Complete`: its own unnamed row goes, nothing else moves
-    store.apply_batch(complete(ingest), &ctx()).unwrap();
+    store
+        .apply_batch(complete("document_ingest"), &ctx())
+        .unwrap();
     let after = out_edge_rows(&store, &chunk);
     assert_eq!(
         row_to(&after, &ingest_target),
@@ -1669,7 +1700,7 @@ fn a_complete_producer_batch_deletes_only_its_own_unnamed_rows() {
     assert_eq!(
         row_to(&after, &human_target),
         row_to(&before, &human_target),
-        "the human link survives byte-identical"
+        "the authored link survives byte-identical"
     );
     assert_eq!(
         row_to(&after, &legacy_target),
@@ -1679,12 +1710,14 @@ fn a_complete_producer_batch_deletes_only_its_own_unnamed_rows() {
     assert_eq!(after.len(), 2, "{after:?}");
 }
 
-/// A human `link` is the human's whatever owner its caller put in `props`: the link path
-/// forces `owner = human`, so neither a producer batch that omits the triple nor one that
-/// upserts the same triple can delete or overwrite it (OWN-83 (4)).
+/// A `link` is `authored` whatever producer its caller put in `props` (the props are the
+/// caller's values, the producer is the column), so neither a producer batch that omits the
+/// triple (producer isolation) nor one that upserts the same triple (first writer keeps the
+/// row) can delete or overwrite it.
 #[test]
-fn a_human_link_with_a_conflicting_owner_prop_stays_human_against_producer_batches() {
-    let store = SqliteStore::open_memory().unwrap();
+fn a_link_with_a_conflicting_producer_prop_stays_authored_against_producer_batches() {
+    let s = common::Scratch::new("pc16-link-producer-prop", "current");
+    let store = SqliteStore::open(&s.db(), &s.keys()).unwrap();
     let (chunk, target) = (NodeId::new(), NodeId::new());
     let owner = "kaban-ingest";
     store
@@ -1705,11 +1738,15 @@ fn a_human_link_with_a_conflicting_owner_prop_stays_human_against_producer_batch
             &target,
             "RELATES_TO",
             None,
-            Some(serde_json::json!({ "owner": owner, "note": "the human's" })),
+            Some(serde_json::json!({ "producer": "document_ingest", "note": "the human's" })),
             &ctx(),
         )
         .unwrap();
-    assert_eq!(linked.props["owner"], "human", "{linked:?}");
+    assert_eq!(
+        out_producers(&s.db(), &chunk)[&target.to_string()].as_deref(),
+        Some("authored"),
+        "{linked:?}"
+    );
     let stored = out_edges(&store, &chunk);
 
     // a producer batch re-names the chunk without the triple, then upserts the same triple
@@ -1721,14 +1758,16 @@ fn a_human_link_with_a_conflicting_owner_prop_stays_human_against_producer_batch
         .unwrap();
     let mut producer = owned_edge(&chunk, &target, "RELATES_TO", owner);
     if let Op::UpsertEdge { props, .. } = &mut producer {
-        *props = Some(serde_json::json!({ "owner": owner, "note": "the producer's" }));
+        *props =
+            Some(serde_json::json!({ "producer": "document_ingest", "note": "the producer's" }));
     }
-    store
+    let report = store
         .apply_batch(
             owned_batch(vec![upsert(&chunk, "Chunk", "chunk"), producer], owner),
             &ctx(),
         )
         .unwrap();
+    assert_eq!(report.edges_kept_by_first_writer, 1, "{report:?}");
 
     assert_eq!(
         out_edges(&store, &chunk),
@@ -1736,6 +1775,9 @@ fn a_human_link_with_a_conflicting_owner_prop_stays_human_against_producer_batch
         "the human link is unchanged"
     );
     assert_eq!(stored.len(), 1, "{stored:?}");
-    assert_eq!(stored[0].1["owner"], "human", "{stored:?}");
     assert_eq!(stored[0].1["note"], "the human's", "{stored:?}");
+    assert_eq!(
+        out_producers(&s.db(), &chunk)[&target.to_string()].as_deref(),
+        Some("authored")
+    );
 }

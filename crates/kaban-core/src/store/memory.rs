@@ -66,7 +66,7 @@ pub trait MemoryStore: Send + Sync {
     ) -> Result<Edge>;
     /// Hybrid recall (BM25 + graph expansion + RRF), deterministic order. Lifecycle is
     /// enforced while every hop frontier is built (R2-4): expansion runs through active nodes,
-    /// through archived ones only when `include_superseded` opts in, never through tombstoned
+    /// through archived ones only when `include_archived` opts in, never through tombstoned
     /// or purged ones, so a hidden node never bridges to an otherwise unreachable one.
     ///
     /// # Errors

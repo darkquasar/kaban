@@ -19,8 +19,8 @@ mod error;
 mod git;
 pub mod hooks;
 mod inventory;
-pub mod layers;
 pub mod ontology;
+pub mod producers;
 mod project;
 mod rescan;
 mod sanitize;
@@ -42,8 +42,8 @@ pub use enrich::{EnrichBudget, Enricher, Enrichment, FollowUp, FollowUpTool, Noo
 pub use error::ApiError;
 pub use git::{GitError, GitRunner};
 pub use hooks::{HookEvent, HookHost, HookOutcome};
-pub use layers::{BudgetSource, BudgetView, RunFlags, budgets};
 pub use ontology::{LoadReport, OntologyRegistry, OntologySummary, validate_kind_props};
+pub use producers::{BudgetSource, BudgetView, RunFlags, budgets};
 pub use rescan::RESCAN_BATCH;
 
 pub use types::*;

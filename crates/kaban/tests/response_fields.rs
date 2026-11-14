@@ -1,7 +1,8 @@
 //! REC-08: the response schemas of `remember`, `forget`, `recall`, `stats` and `doctor` drop their
 //! governance, audit and projector-lag fields and are otherwise unchanged. The baseline is the
 //! c15cd88 catalog (`fixtures/response_fields_c15cd88.json`: every `outputSchema` property path
-//! and every `doctor` check name); the allowed removals are listed here.
+//! and every `doctor` check name); the allowed removals are listed here, with the PC-16
+//! replacement of the `stats.layers` matrix and the `layer_*` checks by the producer rows.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // test code: failures are the assertion
 
@@ -15,19 +16,41 @@ use std::time::Duration;
 
 const DEADLINE: Duration = Duration::from_secs(10);
 
-/// The `outputSchema` property paths each tool may lose (REC-08): governance and audit fields.
-const REMOVED_PATHS: [(&str, &str); 4] = [
+/// The `outputSchema` property paths each tool may lose (REC-08): governance and audit fields,
+/// and the `stats.layers` matrix PC-16 replaced.
+const REMOVED_PATHS: [(&str, &str); 12] = [
     ("forget", "/governance"),
     ("forget", "/outbox_seq"),
     ("recall", "#Card/governance"),
     ("remember", "#Card/governance"),
+    ("stats", "/layers"),
+    ("stats", "#LayerRow/layer"),
+    ("stats", "#LayerRow/producer_layers"),
+    ("stats", "#LayerRow/on"),
+    ("stats", "#LayerRow/owner"),
+    ("stats", "#LayerRow/last_run"),
+    ("stats", "#LayerRow/last_outcome"),
+    ("stats", "#LayerRow/reason_off"),
+];
+
+/// The `outputSchema` path prefixes a tool may gain: the `stats.producers` rows (PC-16) and
+/// the budget rows they carry.
+const ADDED_PREFIXES: [(&str, &str); 3] = [
+    ("stats", "/producers"),
+    ("stats", "#ProducerRow/"),
+    ("stats", "#BudgetRow/"),
 ];
 
 /// The `stats` counters that go: projector lag and the conflict count.
 const REMOVED_STATS: [&str; 3] = ["changes_lag", "outbox_lag", "conflicts"];
 
-/// The `doctor` checks that go: governance, audit and projector lag.
-const REMOVED_CHECKS: [&str; 11] = [
+/// The `doctor` checks that go: governance, audit and projector lag, and the four `layer_*`
+/// rows PC-16 replaced by one row per producer.
+const REMOVED_CHECKS: [&str; 15] = [
+    "layer_fts",
+    "layer_gazetteer",
+    "layer_embed",
+    "layer_extractors",
     "conflicts",
     "unresolved",
     "priors",
@@ -109,7 +132,15 @@ fn response_schemas_lose_only_the_governance_audit_and_lag_fields() {
             .map(|(_, p)| (*p).to_owned())
             .collect();
         let missing: BTreeSet<String> = before.difference(&now).cloned().collect();
-        let added: BTreeSet<String> = now.difference(&before).cloned().collect();
+        let added: BTreeSet<String> = now
+            .difference(&before)
+            .filter(|p| {
+                !ADDED_PREFIXES
+                    .iter()
+                    .any(|(t, prefix)| t == tool && p.starts_with(prefix))
+            })
+            .cloned()
+            .collect();
         assert_eq!(missing, allowed, "{tool}: removed paths");
         assert!(added.is_empty(), "{tool}: added paths {added:?}");
     }
@@ -162,7 +193,10 @@ fn doctor_drops_only_the_governance_audit_and_lag_checks() {
         .iter()
         .map(|c| c["name"].as_str().unwrap())
         .collect();
-    let unknown: Vec<&&str> = names.difference(&before).collect();
+    let unknown: Vec<&&str> = names
+        .difference(&before)
+        .filter(|name| !name.starts_with("producer_"))
+        .collect();
     assert!(
         unknown.is_empty(),
         "checks not in the baseline: {unknown:?}"

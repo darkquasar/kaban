@@ -3,8 +3,8 @@
 mod common;
 use kaban_core::{
     Actor, EdgeDiff, IngestJob, IngestStore, JobClaimRequest, JobFinishRequest,
-    JobFinishStateUpdate, JobId, JobStatus, JobSubmitContract, Layer, LeaseStore, MemoryStore,
-    NewNode, NodeId, Op, SourceRev, StoreError, WorkspaceId, WriteBatch, WriteCtx,
+    JobFinishStateUpdate, JobId, JobStatus, JobSubmitContract, LeaseStore, MemoryStore, NewNode,
+    NodeId, Op, SourceRev, StoreError, WorkspaceId, WriteBatch, WriteCtx,
 };
 use kaban_store_sqlite::SqliteStore;
 use serde_json::{Value, json};
@@ -262,12 +262,6 @@ fn default_pending_scan_is_path_ordered_bounded_at_one_thousand_and_keeps_exhaus
     store.jobs_prune(&workspace, i64::MAX, 1000).unwrap();
     assert!(claim(&store, &first).is_none());
     assert_eq!(store.jobs_exhausted(&workspace, 3).unwrap(), 1);
-    let report = store.jobs_reindex(Layer::Gliner, 1, &ctx()).unwrap();
-    assert!(report.transactions > 0);
-    assert!(
-        claim(&store, &first).is_none(),
-        "reset cannot erase an unmarked exhausted attempt cap"
-    );
     let obsolete_name = format!("ingest:{workspace}:gliner:{}@old-revision", id(&first));
     let obsolete = store
         .lease_acquire(&obsolete_name, "old", 300)

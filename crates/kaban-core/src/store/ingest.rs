@@ -82,21 +82,6 @@ pub trait IngestStore: Send + Sync {
         let _ = (workspace, attempts);
         Ok(0)
     }
-    /// Explicit DB-only reset of one extractor layer, preserving other authorities.
-    /// # Errors
-    /// Invalid layer/bound, unsafe ownership or backend failure.
-    fn jobs_reindex(
-        &self,
-        layer: crate::Layer,
-        limit: u32,
-        ctx: &WriteCtx,
-    ) -> Result<crate::RetireReport> {
-        let _ = (layer, limit, ctx);
-        Err(crate::StoreError::InvalidName(
-            "layer".into(),
-            "unavailable_producer",
-        ))
-    }
     /// Atomically retire omitted scoped claims/edges and retain the gated canonical report.
     /// Callback cannot lock the store or await; errors roll back the complete transaction.
     /// # Errors
@@ -181,19 +166,6 @@ pub trait IngestStore: Send + Sync {
             "not_available_in_this_release",
         ))
     }
-    /// Retire obsolete tracked artifact-only publications in bounded tenant transactions.
-    /// No obsolete claim-producing Gazetteer version is admitted: ambiguous claims refuse
-    /// before writes, and the trusted current producer always refuses.
-    ///
-    /// # Errors
-    /// Invalid batch bound, invalid source ownership, or transactional backend errors.
-    fn retire_producer(
-        &self,
-        authority: crate::CurrentProducerAuthority,
-        old_producer: &str,
-        batch_rows: u32,
-        ctx: &WriteCtx,
-    ) -> Result<crate::RetireReport>;
     /// Offline read-only artifact and reserved sink freshness checks; reports counts only.
     ///
     /// # Errors
@@ -203,19 +175,6 @@ pub trait IngestStore: Send + Sync {
         workspace: &WorkspaceId,
         authority: crate::CurrentProducerAuthority,
     ) -> Result<crate::ArtifactDiagnostics>;
-    /// Bounded, tenant-scoped maintenance of an admitted machine layer. Document paths
-    /// must have passed the service CONTENT gate before this storage lookup.
-    ///
-    /// # Errors
-    /// Invalid source ownership, invalid batch bound, or transactional backend errors.
-    fn maintain_layer(
-        &self,
-        authority: crate::CurrentProducerAuthority,
-        operation: crate::LayerMaintenance,
-        document_path: Option<&str>,
-        batch_rows: u32,
-        ctx: &WriteCtx,
-    ) -> Result<crate::RetireReport>;
     /// Apply one ingestion batch in one write transaction (core-plan C2.6; F16 store side):
     /// node ops in order, then edge ops, then the MD-23 edge diff (outgoing edges of each
     /// upserted node that the batch did not name are deleted; incoming edges are untouched),

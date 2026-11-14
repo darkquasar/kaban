@@ -32,8 +32,7 @@ mod validator;
 
 pub use artifact::{
     ArtifactDiagnostics, ArtifactKey, ArtifactSource, BuiltinProducer, CurrentProducerAuthority,
-    DerivedArtifact, GazetteerClaimSet, LayerMaintenance, MaintenanceRefusal, RetireReport,
-    SourceRev, artifact_key,
+    DerivedArtifact, GazetteerClaimSet, SourceRev, artifact_key,
 };
 pub use audit::{
     Actor, ActorId, AuditEntry, AuditOp, Durability, InvalidActorId, WorkspaceId, WriteCtx,
@@ -53,7 +52,7 @@ pub use model::{
     AnchoredKind, AnchoredRow, BatchReport, BodyLocation, CodeRef, CodeRefFilter, ConventionProps,
     DecisionProps, Edge, EdgeDiff, EdgeFilter, EdgeRescanAction, Evidence, FailureProps,
     ForgetMode, ForgetOutcome, Hit, IndexMeta, LinkReq, Location, NewNode, Node, Op, OpOutcome,
-    OutcomeKind, RecallLayer, RecallQuery, RedactedStrings, RememberOutcome, RescanAction,
+    OutcomeKind, RecallMode, RecallQuery, RedactedStrings, RememberOutcome, RescanAction,
     RescanCursor, RescanJudge, RescanReport, TraverseDirection, TraverseQuery, TraverseResult,
     TypeDeclaration, TypeDef, WorkspaceFilter, WriteBatch,
 };
@@ -65,7 +64,7 @@ pub use model::{
     EvidenceRun, FailurePatch, PendingFailuresQuery, PendingScope, SessionEdit, SessionEditKind,
 };
 // typed edge owners (EN-E4) and the producer vocabulary moved out of reconciliation
-pub use model::{Fixed, FixedError, Layer, Method, Owner};
+pub use model::{ExtractorKind, Fixed, FixedError, Method, Producer};
 // ontologies as data (engine-plan E1.2)
 pub use ontology::{
     KindName, NamespaceSet, Ns, ONTOLOGY_ERROR_TEXTS, Ontology, OntologyError, OntologyFile,

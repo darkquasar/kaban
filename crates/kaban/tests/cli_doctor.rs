@@ -153,10 +153,12 @@ fn engine_overrides_are_reported_and_invalid_config_never_creates_a_database() {
     let s = Scratch::new("kaban-doctor", "engine-config");
     std::fs::create_dir_all(s.home()).unwrap();
     let path = s.home().join("config.yaml");
-    // ... the retired trigram key among them (spec 05 OWN-M): an unknown key like any other
+    // ... the retired trigram key and the removed `budget` section (PC-16: `text.build_rss_mb`
+    // replaced `budget.l0_rss_mb`, no alias) among them: an unknown key like any other
     for yaml in [
-        "budget:\n  l0_rss_mb: 0\n",
-        "budget:\n  unknown: 1\n",
+        "text:\n  build_rss_mb: 0\n",
+        "text:\n  unknown: 1\n",
+        "budget:\n  l0_rss_mb: 321\n",
         "index:\n  trigram: true\n",
     ] {
         std::fs::write(&path, yaml).unwrap();
@@ -167,25 +169,25 @@ fn engine_overrides_are_reported_and_invalid_config_never_creates_a_database() {
     }
     std::fs::remove_file(&path).unwrap();
     seed(&s, &["diagnostic config test"]);
-    std::fs::write(&path, "budget:\n  l0_rss_mb: 321\n").unwrap();
+    std::fs::write(&path, "text:\n  build_rss_mb: 321\n").unwrap();
     let out = doctor(&s, &s.db(), &[]);
     assert_eq!(out.status.code(), Some(0), "{out:?}");
     let value = report(&out);
     let rows = value["budgets"].as_array().unwrap();
-    assert_eq!(rows.len(), 8);
+    assert_eq!(rows.len(), 7);
     let row = rows
         .iter()
-        .find(|row| row["key"] == "budget.l0_rss_mb")
+        .find(|row| row["key"] == "text.build_rss_mb")
         .unwrap();
     assert_eq!(row["effective"], 321);
     assert_eq!(row["source"], "config");
     assert_eq!(row["cap_lifted"], false);
     assert_eq!(
-        check(&value, "layer_embed")["detail"],
+        check(&value, "producer_git_history")["detail"],
         "not_available_in_this_release"
     );
     assert_eq!(
-        check(&value, "layer_extractors")["detail"],
+        check(&value, "producer_extractor")["detail"],
         "explicit_selection_only"
     );
 }
@@ -250,10 +252,14 @@ fn a_healthy_database_passes_and_a_corrupted_fts_shadow_table_fails_deterministi
             "text_index_watermark",
             "text_index_lag",
             "ident_terms_version",
-            "layer_fts",
-            "layer_gazetteer",
-            "layer_embed",
-            "layer_extractors",
+            // PC-16: one row per producer, in `stats.producers` order
+            "producer_authored",
+            "producer_hook_events",
+            "producer_document_ingest",
+            "producer_gazetteer",
+            "producer_extractor",
+            "producer_scip_import",
+            "producer_git_history",
             // engine-plan E3.11 Step 6: CodeRef anchors the current snapshot no longer holds
             "stale_anchors"
         ]
@@ -362,8 +368,8 @@ fn fts_integrity_passes_with_archived_and_tombstoned_rows_and_vacuum_is_its_own_
     assert_eq!(check(&v, "vacuum")["ok"], true, "{v}");
     // the checks without the governance, audit and lag rows (REC-08): the artifact checks,
     // the E3.11 `stale_anchors` line, the spec 05 SS-21 `text_index`, `text_index_watermark`
-    // and `text_index_lag` lines and the vacuum line
-    assert_eq!(v["checks"].as_array().unwrap().len(), 17);
+    // and `text_index_lag` lines, one line per producer (seven, PC-16) and the vacuum line
+    assert_eq!(v["checks"].as_array().unwrap().len(), 20);
     // without the flag there is no vacuum line
     let v = report(&doctor(&s, &s.db(), &[]));
     assert!(

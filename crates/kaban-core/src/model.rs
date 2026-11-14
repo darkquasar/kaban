@@ -431,24 +431,22 @@ pub enum RememberOutcome {
     },
 }
 
-/// Recall sources, distinct from assertion producer layers.
+/// Recall match modes (PC-16): how the text index matches the query.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
-pub enum RecallLayer {
+pub enum RecallMode {
     /// Lexical full-text retrieval.
-    Fts,
-    /// Fuzzy (typo-tolerant) retrieval by the text index (spec 05 OWN-M: `fuzzy` on the wire).
+    Lexical,
+    /// Fuzzy (typo-tolerant) retrieval by the text index (spec 05 OWN-M).
     Fuzzy,
-    /// Reserved similarity retrieval, unavailable in this release.
-    Sim,
 }
 
 /// Parameters of a recall.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct RecallQuery {
-    /// Explicit retrieval sources; absent uses enabled defaults.
+    /// Explicit match modes; absent uses the enabled defaults.
     #[serde(default)]
-    pub layers: Option<Vec<RecallLayer>>,
+    pub modes: Option<Vec<RecallMode>>,
     /// Request fuzzy retrieval even when lexical retrieval hits.
     #[serde(default)]
     pub fuzzy: bool,
@@ -464,11 +462,9 @@ pub struct RecallQuery {
     pub limit: usize,
     /// Graph expansion hops (capped at 2).
     pub hops: u8,
-    /// Also return archived nodes (superseded records) reached through graph expansion; the text
-    /// index holds active rows only, so archived nodes never seed a recall.
-    pub include_superseded: bool,
-    /// Also return archived nodes of any governance reached through graph expansion (core-spec
-    /// §4 "`include_archived` opts in"; same frontier rule as `include_superseded`, M3-12).
+    /// Also return archived nodes (superseded records, archived notes) reached through graph
+    /// expansion (core-spec §4 "`include_archived` opts in", M3-12); the text index holds active
+    /// rows only, so archived nodes never seed a recall.
     pub include_archived: bool,
     /// Restrict the lexical seeds to notes linked `ABOUT` or `EVIDENCE_FOR` to a `CodeRef`
     /// matching this filter (core-spec F3 "about this `CodeRef`"; `None` = no restriction).
@@ -646,9 +642,9 @@ pub struct EdgeFilter {
     /// Keep only edges whose `score` (the winning claim's raw score) is at least this.
     #[serde(default)]
     pub min_score: Option<Fixed>,
-    /// Keep only edges of these source layers (empty = any).
+    /// Keep only edges of these producers (empty = any).
     #[serde(default)]
-    pub layers: Vec<Layer>,
+    pub producers: Vec<Producer>,
     /// Keep only edges of these methods (empty = any).
     #[serde(default)]
     pub methods: Vec<Method>,
@@ -893,97 +889,49 @@ impl WriteBatch {
     }
 }
 
-/// Who wrote an edge (engine-spec EN-E4): the `props.owner` vocabulary [`EdgeDiff::Owned`]
-/// compares against. The wire strings are the ones DI1.8 landed (`"kaban-ingest"` is
-/// [`crate::INGEST_OWNER`]), so the JSON form of a batch is unchanged.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[non_exhaustive]
-pub enum Owner {
-    /// The docs-ingest pipeline (L0/L1).
-    #[serde(rename = "kaban-ingest")]
-    KabanIngest,
-    /// The parse layer (L3).
-    #[serde(rename = "kaban-parse")]
-    KabanParse,
-    /// The embedding layer (L2).
-    #[serde(rename = "kaban-embed")]
-    KabanEmbed,
-    /// The reconciler's own writes.
-    #[serde(rename = "kaban-reconcile")]
-    KabanReconcile,
-    /// A human (`link`, `remember(links)`, `accept`, the M5 import).
-    #[serde(rename = "human")]
-    Human,
-}
-
-impl Owner {
-    /// The stored `props.owner` spelling.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::KabanIngest => "kaban-ingest",
-            Self::KabanParse => "kaban-parse",
-            Self::KabanEmbed => "kaban-embed",
-            Self::KabanReconcile => "kaban-reconcile",
-            Self::Human => "human",
-        }
-    }
-    /// Parse a stored spelling; anything else is not an owner.
-    #[must_use]
-    pub fn parse(value: &str) -> Option<Self> {
-        match value {
-            "kaban-ingest" => Some(Self::KabanIngest),
-            "kaban-parse" => Some(Self::KabanParse),
-            "kaban-embed" => Some(Self::KabanEmbed),
-            "kaban-reconcile" => Some(Self::KabanReconcile),
-            "human" => Some(Self::Human),
-            _ => None,
-        }
-    }
-}
-
-impl std::fmt::Display for Owner {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
 /// The end-of-batch edge diff rule (engine-spec EN-E4; docs-ingest-spec D5 [A-3]; OWN-83
-/// (4)): which outgoing edges of an upserted node that the batch did not name are deleted. A
-/// layer never deletes an edge it did not create: both deleting rules reach only the unnamed
-/// rows tagged `props.owner = <the named producer>`, and never a human's row whatever its
-/// `layer` (the store's predicate refuses `producer: human`, not the type). An untagged
-/// legacy row (no `owner`) is no producer's. Wire form: `{"mode": "complete", "producer":
-/// "kaban-ingest"}`, `{"mode": "owned", "owner": "kaban-ingest"}`, `{"mode": "none"}`.
+/// (4)): which outgoing edges of an upserted node that the batch did not name are deleted.
+/// Producer isolation: both deleting rules reach only the unnamed rows whose stored producer
+/// is the batch's, so a producer rerun never deletes another producer's row. Wire form:
+/// `{"mode": "complete", "producer": "document_ingest"}`, `{"mode": "owned", "producer":
+/// "extractor:llm"}`, `{"mode": "none"}`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "mode", rename_all = "snake_case")]
 pub enum EdgeDiff {
     /// The batch names the complete outgoing edge set of each upserted node for `producer`
-    /// (MD-23 under EN-E4): the unnamed rows tagged with that producer are deleted.
+    /// (MD-23 under EN-E4): the unnamed rows of that producer are deleted.
     Complete {
-        /// The producer whose complete set this is, for example [`Owner::KabanIngest`].
-        producer: Owner,
+        /// The producer whose complete set this is, for example [`Producer::DocumentIngest`].
+        producer: Producer,
     },
-    /// Only the unnamed outgoing edges whose `props.owner` equals `owner`: a producer never
-    /// deletes an edge it did not create (a human `link`, `remember`, another layer).
+    /// Only the unnamed outgoing edges `producer` wrote are deleted.
     Owned {
-        /// The producer, for example [`Owner::KabanIngest`].
-        owner: Owner,
+        /// The producer, for example an [`Producer::Extractor`].
+        producer: Producer,
     },
-    /// No deletion at all (the [`WriteBatch::new`] default).
+    /// No deletion at all (the [`WriteBatch::new`] default); the edges are authored.
     #[default]
     None,
 }
 
 impl EdgeDiff {
-    /// The owner every edge of the batch is tagged with (EN-E4): the named producer, else a
-    /// human (today's `link`, `remember(links)` and the `None` batches).
+    /// The producer every edge of the batch is written under unless an edge names its own
+    /// (`props.producer`, the trusted batch boundary): the named producer, else
+    /// [`Producer::Authored`].
     #[must_use]
-    pub fn owner(&self) -> Owner {
+    pub fn producer(&self) -> Producer {
         match self {
-            Self::Complete { producer } => *producer,
-            Self::Owned { owner } => *owner,
-            Self::None => Owner::Human,
+            Self::Complete { producer } | Self::Owned { producer } => *producer,
+            Self::None => Producer::Authored,
+        }
+    }
+
+    /// The producer whose unnamed rows the diff deletes, if any.
+    #[must_use]
+    pub fn deleting(&self) -> Option<Producer> {
+        match self {
+            Self::Complete { producer } | Self::Owned { producer } => Some(*producer),
+            Self::None => None,
         }
     }
 }
@@ -1084,6 +1032,10 @@ pub struct BatchReport {
     /// Nodes moved `tombstoned -> active` by `Op::Reactivate` (DI1.8).
     #[serde(default, skip_serializing_if = "is_zero")]
     pub reactivated: u32,
+    /// Edges the batch named on a `(src, dst, rel)` triple another producer wrote first: the
+    /// first writer keeps the row and nothing was written (owner decision 2026-11-14).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub edges_kept_by_first_writer: u32,
     /// Per node op, in batch order, what the store did (DI1.8, RD2-8).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub outcomes: Vec<OpOutcome>,
@@ -1295,8 +1247,8 @@ impl IndexMeta {
     }
 }
 
-// Producer vocabulary moved out of the deleted reconciliation module (T3, PC-16). Slice B
-// replaces `Layer` with `Producer`; `Method` stays here.
+// Producer vocabulary moved out of the deleted reconciliation module (T3, PC-16): `Producer`
+// replaces the old `Layer` and `Owner` vocabularies; `Method` keeps its non-governance values.
 macro_rules! vocabulary {
     ($name:ident, $doc:literal, {$($variant:ident => $text:literal),+ $(,)?}) => {
         #[doc = $doc]
@@ -1313,25 +1265,122 @@ macro_rules! vocabulary {
         }
     };
 }
-vocabulary!(
-    Layer,
-    "Assertion source layers in strongest-source order (engine-spec EN-E7); the text index layers `fts` and `fuzzy` (EN-F22, spec 05 OWN-M) close the list.",
-    {
-        Human => "human",
-        V4 => "v4",
-        Reconcile => "reconcile",
-        Script => "script",
-        Llm => "llm",
-        Gliner => "gliner",
-        Gazetteer => "gazetteer",
-        Embed => "embed",
-        Fts => "fts",
-        Fuzzy => "fuzzy",
+/// Which extractor produced an `extractor:*` record (PC-16).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ExtractorKind {
+    /// A language-model extractor.
+    Llm,
+    /// The `GLiNER` span extractor.
+    Gliner,
+    /// A user script.
+    Script,
+}
+
+/// Who produced an edge or a derived artifact, named for the source its records come from
+/// (PC-16; who acted stays in the actor fields). One identity per row, stored in the
+/// `edge.layer` and `derived_artifact.layer` columns until T4 renames them `producer`. A
+/// producer rerun deletes only the rows it wrote, and the first producer to write a
+/// `(src, dst, rel)` triple keeps the row (owner decision 2026-11-14).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Producer {
+    /// `remember` and `link`: records a person or an agent wrote directly.
+    Authored,
+    /// The hook event stream.
+    HookEvents,
+    /// The document ingest pipeline (documents, sections, chunks and their structure).
+    DocumentIngest,
+    /// The mention dictionary run over ingested chunks (`gazetteer@1`).
+    Gazetteer,
+    /// A structured extractor submission.
+    Extractor(ExtractorKind),
+    /// A SCIP code index import.
+    ScipImport,
+    /// The git history producer.
+    GitHistory,
+}
+
+impl Producer {
+    /// Every producer, in the `stats.producers` order (one `Extractor` per kind).
+    pub const ALL: &'static [Self] = &[
+        Self::Authored,
+        Self::HookEvents,
+        Self::DocumentIngest,
+        Self::Gazetteer,
+        Self::Extractor(ExtractorKind::Llm),
+        Self::Extractor(ExtractorKind::Gliner),
+        Self::Extractor(ExtractorKind::Script),
+        Self::ScipImport,
+        Self::GitHistory,
+    ];
+
+    /// The stored and wire spelling.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Authored => "authored",
+            Self::HookEvents => "hook_events",
+            Self::DocumentIngest => "document_ingest",
+            Self::Gazetteer => "gazetteer",
+            Self::Extractor(ExtractorKind::Llm) => "extractor:llm",
+            Self::Extractor(ExtractorKind::Gliner) => "extractor:gliner",
+            Self::Extractor(ExtractorKind::Script) => "extractor:script",
+            Self::ScipImport => "scip_import",
+            Self::GitHistory => "git_history",
+        }
     }
-);
+
+    /// Parse only a known stored spelling.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        Self::ALL.iter().copied().find(|p| p.as_str() == value)
+    }
+
+    /// The `stats.producers` row name: the producer without its extractor kind.
+    #[must_use]
+    pub const fn family(self) -> &'static str {
+        match self {
+            Self::Extractor(_) => "extractor",
+            other => other.as_str(),
+        }
+    }
+}
+
+impl std::fmt::Display for Producer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl Serialize for Producer {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for Producer {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = String::deserialize(deserializer)?;
+        Self::parse(&value).ok_or_else(|| serde::de::Error::custom("unknown_producer"))
+    }
+}
+
+impl schemars::JsonSchema for Producer {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "Producer".into()
+    }
+
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        let values: Vec<&str> = Self::ALL.iter().map(|p| p.as_str()).collect();
+        schemars::json_schema!({
+            "description": "The producer of an edge (PC-16).",
+            "type": "string",
+            "enum": values,
+        })
+    }
+}
 vocabulary!(
     Method,
-    "Closed assertion method vocabulary.",
+    "Closed edge method vocabulary: how a producer matched or wrote an edge.",
     {
         Id => "id",
         Path => "path",
@@ -1347,11 +1396,7 @@ vocabulary!(
         Rule => "rule",
         Heuristic => "heuristic",
         Link => "link",
-        Accept => "accept",
         Remember => "remember",
-        Er => "er",
-        ErJudge => "er_judge",
-        Reconciled => "reconciled",
         IngestSubmit => "ingest_submit",
     }
 );

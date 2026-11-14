@@ -68,8 +68,8 @@ fn tag_filter_runs_before_limit_so_a_low_ranked_tagged_note_is_still_found() {
     assert_eq!(none.len(), 0, "{none:?}");
 }
 
-/// M3-12 (MD-20): `include_archived` opts archived rows of any governance into the hop frontier
-/// with the same rule as `include_superseded`; a tombstoned row stays unreachable either way.
+/// M3-12 (MD-20): `include_archived` opts archived rows into the hop frontier; a tombstoned
+/// row stays unreachable either way.
 #[test]
 fn include_archived_reaches_an_archived_fact_through_expansion_but_never_a_tombstoned_one() {
     let ids = |mode: ForgetMode, include_archived: bool| {

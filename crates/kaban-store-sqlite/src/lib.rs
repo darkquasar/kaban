@@ -18,9 +18,9 @@ mod edge_write;
 mod ident;
 pub mod index_rows;
 mod jobs;
-mod layers;
 mod leases;
 mod ontology;
+mod producers;
 mod projector_thread;
 mod recall;
 mod rows;
@@ -44,6 +44,6 @@ pub use connection::{ExclusiveHold, exclusive_hold};
 pub fn register_body_reader(conn: &rusqlite::Connection) -> kaban_core::Result<()> {
     body_codec::register(conn)
 }
-pub use layers::{LayerRunOutcome, LayerRunRecord};
+pub use producers::{ProducerRunOutcome, ProducerRunRecord};
 pub use schema::{LATEST_SCHEMA_VERSION, MigrationReport, Migrator};
 pub use sqlite::SqliteStore;

@@ -236,7 +236,7 @@ fn workflow(mcp: bool) {
     assert_eq!(d.call("ingest_finish", &current).unwrap(), report);
     let marker: i64 = db(&s)
         .query_row(
-            "SELECT count(*) FROM derived_artifact WHERE layer='gliner'",
+            "SELECT count(*) FROM derived_artifact WHERE layer='extractor:gliner'",
             [],
             |r| r.get(0),
         )
@@ -263,7 +263,8 @@ fn workflow(mcp: bool) {
         .unwrap();
     assert_eq!(retained, 0);
     assert_eq!(d.claim(), json!({"job":null}));
-    ok(&cli(&s, &root, &["reindex", "layer", "gliner"], None));
+    // the layer reset is gone (OD-P1): a source edit is what reopens extraction of `a.md`
+    seed(&s, &root, "a.md", "# Source\n\nHarmless body, revised.\n");
     let reset = d
         .call(
             "ingest_claim",
@@ -271,32 +272,25 @@ fn workflow(mcp: bool) {
         )
         .unwrap();
     assert!(reset["job"].is_string());
-    assert_eq!(
-        reset["job"], first["job"],
-        "job identity stays deterministic"
-    );
     let reset_fence = reset["lease"]["fence"].as_u64().unwrap();
     assert!(
         reset_fence > 2,
-        "retention and reset cannot recycle a generation"
+        "retention and a source edit cannot recycle a generation"
     );
     let before = state(&s);
+    // the edit revoked the superseded holder's job: it is refused, not revived
     let late_submit = d.call("ingest_submit", &old);
     let late_finish = d.call("ingest_finish", &old);
     assert!(
         late_submit
             .as_ref()
-            .is_err_and(|error| error.contains("lease_lost"))
+            .is_err_and(|error| error.contains("job_revoked"))
             && late_finish
                 .as_ref()
-                .is_err_and(|error| error.contains("lease_lost")),
-        "prune and reindex must not revive a superseded holder: submit={late_submit:?}, finish={late_finish:?}"
+                .is_err_and(|error| error.contains("job_revoked")),
+        "prune and a source edit must not revive a superseded holder: submit={late_submit:?}, finish={late_finish:?}"
     );
-    assert_eq!(
-        state(&s),
-        before,
-        "superseded pre-reset holder cannot write"
-    );
+    assert_eq!(state(&s), before, "superseded pre-edit holder cannot write");
     for expected in [reset_fence + 1, reset_fence + 2] {
         expire(&s);
         assert_eq!(d.claim()["lease"]["fence"], expected);

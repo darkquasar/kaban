@@ -584,14 +584,14 @@ impl Ingestor {
                 .map_or(0, |duration| duration.as_secs());
             let at = i64::try_from(at).unwrap_or(i64::MAX);
             let outcome = if telemetry.outcome == "skipped_budget" {
-                kaban_api::layers::LayerOutcome::SkippedBudget
+                kaban_api::producers::ProducerOutcome::SkippedBudget
             } else {
-                kaban_api::layers::LayerOutcome::Ok
+                kaban_api::producers::ProducerOutcome::Ok
             };
-            let run = kaban_api::layers::LayerRun { at, outcome };
+            let run = kaban_api::producers::ProducerRun { at, outcome };
             let raw = serde_json::to_string(&run)
                 .map_err(|_| IngestError::Config("gazetteer telemetry failed".into()))?;
-            self.store.set_index_meta("layer_run:gazetteer", &raw)?;
+            self.store.set_index_meta("producer_run:gazetteer", &raw)?;
         }
         Ok(report)
     }

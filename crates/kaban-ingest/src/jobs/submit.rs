@@ -245,18 +245,13 @@ pub async fn submit(api: &KabanApi, root: &Path, raw: Value) -> Result<Value, Jo
             "DERIVED_FROM",
             &envelope.document_id,
             json!({
-                "owner":"kaban-parse","mode":row.mode,"with":row.dialect,
+                "mode":row.mode,"with":row.dialect,
                 "pipeline_version":row.pipeline_version,"content_hash":row.content_hash,
                 "chunk_ids":evidence_ids
             }),
         ));
         for chunk in evidence_ids {
-            pending_edges.push(owned_edge(
-                &chunk,
-                "EVIDENCE_FOR",
-                &id,
-                json!({"owner":"kaban-parse"}),
-            ));
+            pending_edges.push(owned_edge(&chunk, "EVIDENCE_FOR", &id, json!({})));
         }
         placed.insert(
             local.clone(),
@@ -326,12 +321,7 @@ pub async fn submit(api: &KabanApi, root: &Path, raw: Value) -> Result<Value, Jo
             skip(&mut skipped, &from, "edge_not_allowed", None);
             continue;
         }
-        pending_edges.push(owned_edge(
-            &src.id,
-            &rel,
-            &dst,
-            json!({"owner":"kaban-parse"}),
-        ));
+        pending_edges.push(owned_edge(&src.id, &rel, &dst, json!({})));
     }
     for target in ret.about {
         let target = if NodeId::parse(&target).is_ok() {
@@ -340,12 +330,7 @@ pub async fn submit(api: &KabanApi, root: &Path, raw: Value) -> Result<Value, Jo
             gate.field("to_id", &target)?
         };
         if let Some((id, _)) = resolve_target(api, &target)? {
-            pending_edges.push(owned_edge(
-                &envelope.document_id,
-                "ABOUT",
-                &id,
-                json!({"owner":"kaban-parse"}),
-            ));
+            pending_edges.push(owned_edge(&envelope.document_id, "ABOUT", &id, json!({})));
         } else {
             skip(&mut skipped, "", "unknown_target", None);
         }
@@ -354,15 +339,15 @@ pub async fn submit(api: &KabanApi, root: &Path, raw: Value) -> Result<Value, Jo
     for _ in &ret.pair_judgements {
         skip(&mut skipped, "", "not_requested", None);
     }
-    // every edge of the submission names its producer layer (by dialect), method and score,
-    // which the store moves to the `layer`, `method` and `score` columns (EN-F22). Outgoing
+    // every edge of the submission names its extractor producer (by dialect), method and
+    // score, which the store moves to the producer, `method` and `score` columns (EN-F22). Outgoing
     // record and provenance edges score their source record's confidence, evidence citations
     // their destination record's; a document `ABOUT` has no record and scores one. No prior
     // or reconciliation applies: the score is stored as given.
-    let layer = match row.dialect.as_str() {
-        "llm" => "llm",
-        "gliner" => "gliner",
-        _ => "script",
+    let producer = match row.dialect.as_str() {
+        "llm" => kaban_core::Producer::Extractor(kaban_core::ExtractorKind::Llm),
+        "gliner" => kaban_core::Producer::Extractor(kaban_core::ExtractorKind::Gliner),
+        _ => kaban_core::Producer::Extractor(kaban_core::ExtractorKind::Script),
     };
     let mut named_edges = BTreeSet::new();
     for mut edge in pending_edges {
@@ -379,7 +364,7 @@ pub async fn submit(api: &KabanApi, root: &Path, raw: Value) -> Result<Value, Jo
                 .or_else(|| placed.values().find(|record| record.id == *dst))
                 .map_or(1.0, |record| record.confidence);
             let score = Fixed::from_f64(confidence).map_err(|_| invalid())?;
-            map.insert("layer".into(), json!(layer));
+            map.insert("producer".into(), json!(producer.as_str()));
             map.insert("score".into(), json!(u32::from(score)));
             map.insert("method".into(), json!("ingest_submit"));
             map.insert("source_id".into(), json!(row.source_id));

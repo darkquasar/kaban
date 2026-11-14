@@ -1,8 +1,8 @@
-//! Layer-run bookkeeping uses existing metadata and leaves records/indexes alone.
+//! Producer-run bookkeeping uses existing metadata and leaves records/indexes alone.
 #![allow(clippy::unwrap_used)]
 
-use kaban_core::{IngestStore, Layer, MemoryStore};
-use kaban_store_sqlite::{LayerRunOutcome, LayerRunRecord, SqliteStore};
+use kaban_core::{IngestStore, MemoryStore, Producer};
+use kaban_store_sqlite::{ProducerRunOutcome, ProducerRunRecord, SqliteStore};
 
 mod common;
 
@@ -27,9 +27,9 @@ fn bookkeeping_creates_no_optional_tables() {
             .any(|name| name == "node_fts_tri" || name == "embedding")
     );
     store
-        .record_layer_run(Layer::Gazetteer, 42, LayerRunOutcome::Ok)
+        .record_producer_run(Producer::Gazetteer, 42, ProducerRunOutcome::Ok)
         .unwrap();
-    assert!(store.layer_run(Layer::Gazetteer).unwrap().is_some());
+    assert!(store.producer_run(Producer::Gazetteer).unwrap().is_some());
     assert_eq!(tables(), before);
 }
 
@@ -37,27 +37,38 @@ fn bookkeeping_creates_no_optional_tables() {
 fn fixed_runs_round_trip_without_changing_counters() {
     let store = SqliteStore::open_memory().unwrap();
     let before = store.stats(None).unwrap();
-    assert_eq!(store.layer_run(Layer::Gazetteer).unwrap(), None);
+    assert_eq!(store.producer_run(Producer::Gazetteer).unwrap(), None);
     store
-        .record_layer_run(Layer::Gazetteer, 42, LayerRunOutcome::Failed)
+        .record_producer_run(Producer::Gazetteer, 42, ProducerRunOutcome::Failed)
         .unwrap();
     assert_eq!(
-        store.layer_run(Layer::Gazetteer).unwrap(),
-        Some(LayerRunRecord {
+        store.producer_run(Producer::Gazetteer).unwrap(),
+        Some(ProducerRunRecord {
             at: 42,
-            outcome: LayerRunOutcome::Failed
+            outcome: ProducerRunOutcome::Failed
         })
     );
     store
-        .record_layer_run(Layer::Fts, 43, LayerRunOutcome::Ok)
+        .record_producer_run(Producer::DocumentIngest, 43, ProducerRunOutcome::Ok)
         .unwrap();
     store
-        .record_layer_run(Layer::Embed, 44, LayerRunOutcome::SkippedBudget)
+        .record_producer_run(Producer::HookEvents, 44, ProducerRunOutcome::SkippedBudget)
         .unwrap();
-    assert_eq!(store.layer_run(Layer::Fts).unwrap().unwrap().at, 43);
     assert_eq!(
-        store.layer_run(Layer::Embed).unwrap().unwrap().outcome,
-        LayerRunOutcome::SkippedBudget
+        store
+            .producer_run(Producer::DocumentIngest)
+            .unwrap()
+            .unwrap()
+            .at,
+        43
+    );
+    assert_eq!(
+        store
+            .producer_run(Producer::HookEvents)
+            .unwrap()
+            .unwrap()
+            .outcome,
+        ProducerRunOutcome::SkippedBudget
     );
     assert_eq!(store.stats(None).unwrap(), before);
 }
@@ -71,24 +82,28 @@ fn malformed_and_negative_runs_are_ignored_without_writes() {
         r#"{"at":4,"outcome":"arbitrary"}"#,
         r#"{"at":4,"outcome":"ok","message":"caller text"}"#,
     ] {
-        store.set_index_meta("layer_run:gazetteer", value).unwrap();
+        store
+            .set_index_meta("producer_run:gazetteer", value)
+            .unwrap();
         let before = store.index_meta().unwrap().entries;
-        assert_eq!(store.layer_run(Layer::Gazetteer).unwrap(), None);
+        assert_eq!(store.producer_run(Producer::Gazetteer).unwrap(), None);
         assert_eq!(store.index_meta().unwrap().entries, before);
     }
     let before = store.index_meta().unwrap().entries;
     assert!(
         store
-            .record_layer_run(Layer::Gazetteer, -5, LayerRunOutcome::Ok)
+            .record_producer_run(Producer::Gazetteer, -5, ProducerRunOutcome::Ok)
             .is_err()
     );
     assert_eq!(store.index_meta().unwrap().entries, before);
-    store.set_index_meta("layer_run:gazetteer", "12").unwrap();
+    store
+        .set_index_meta("producer_run:gazetteer", "12")
+        .unwrap();
     assert_eq!(
-        store.layer_run(Layer::Gazetteer).unwrap(),
-        Some(LayerRunRecord {
+        store.producer_run(Producer::Gazetteer).unwrap(),
+        Some(ProducerRunRecord {
             at: 12,
-            outcome: LayerRunOutcome::Ok
+            outcome: ProducerRunOutcome::Ok
         })
     );
 }
