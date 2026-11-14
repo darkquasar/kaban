@@ -18,78 +18,24 @@ impl BuiltinProducer {
         "gazetteer@1"
     }
 
-    /// Logical extractor name. Legacy v1 assertions deliberately retain `extractor_id=None`.
+    /// Logical extractor name.
     #[must_use]
     pub const fn extractor_id(self) -> &'static str {
         "gazetteer"
     }
 
-    /// Version before the store's generation-qualified assertion identity stamping.
+    /// Descriptor version.
     #[must_use]
     pub const fn extractor_version(self) -> &'static str {
         "1"
     }
-
-    /// Recognize the explicit legacy v1 assertion mapping without rewriting its key.
-    #[must_use]
-    pub fn matches_legacy_assertion(
-        self,
-        layer: Producer,
-        id: Option<&str>,
-        version: Option<&str>,
-    ) -> bool {
-        layer == Producer::Gazetteer
-            && id.is_none()
-            && version.is_some_and(|value| {
-                value == "1"
-                    || value.strip_prefix("1:set:").is_some_and(|generation| {
-                        !generation.is_empty()
-                            && generation.bytes().all(|byte| byte.is_ascii_digit())
-                            && generation.parse::<u64>().is_ok()
-                    })
-            })
-    }
 }
 
-/// Trusted maintenance authority derived from the shipped descriptor and effective config.
-/// It cannot be constructed from a user-supplied "current producer" string.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CurrentProducerAuthority(BuiltinProducer);
-
-/// Content-free offline findings about derived publication and sink freshness.
+/// Content-free offline findings about derived publication freshness.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ArtifactDiagnostics {
     /// Tenant artifacts whose source revision, policy or active lifecycle no longer matches.
     pub stale_artifacts: u64,
-    /// Tenant Gazetteer artifacts naming a producer other than the shipped current one.
-    pub retired_producers: u64,
-    /// Reserved/global sink cursors behind the global `ChangeLog` head.
-    pub cursors_behind: u64,
-}
-
-impl CurrentProducerAuthority {
-    /// Resolve admitted builtins. `link.default=none` still protects the current Gazetteer:
-    /// an explicit per-run Gazetteer override remains admitted. Deferred layers fail closed.
-    #[must_use]
-    pub fn from_config(config: &crate::config::EngineConfig, layer: Producer) -> Option<Self> {
-        if layer != Producer::Gazetteer
-            || !matches!(config.link.default.as_str(), "none" | "gazetteer")
-            || config
-                .ingest
-                .default_with
-                .as_ref()
-                .is_some_and(|value| !value.is_empty())
-        {
-            return None;
-        }
-        Some(Self(BuiltinProducer::Gazetteer))
-    }
-
-    /// The closed descriptor authorized by the effective loaded configuration.
-    #[must_use]
-    pub const fn producer(self) -> BuiltinProducer {
-        self.0
-    }
 }
 
 /// An opaque, deterministic derived publication identity.

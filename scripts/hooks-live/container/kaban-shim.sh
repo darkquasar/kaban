@@ -6,7 +6,7 @@
 # records ONE reduced line per call to $KBN_KABAN_CALLS (tmpfs) and passes stdin, stdout, stderr
 # and the exit status through untouched:
 #   argv      the subcommand and its flag words only (fixed vocabulary: `hook`, the event, the host,
-#             `sync` and the other M5 subcommands, the kaban flags listed below); free-text
+#             the other subcommands, the kaban flags listed below); free-text
 #             arguments (remember text, path scopes, ids)
 #             and any flag outside the list (including `--flag=value` spellings) are counted, not kept
 #   rc        the exit status (PR-9: a 2 from `kaban hook` is a violation the harness flags)
@@ -27,13 +27,12 @@ free=0
 for a in "$@"; do
   case "$a" in
     hook|session-start|pre-tool-use|post-tool-use|post-tool-use-failure|subagent-stop|stop|fix|post-commit|\
-    remember|accept|recall|why|doctor|forget|serve|bench|scan|verify-audit|rescan|sync|rebuild|resolve|export|\
+    remember|recall|doctor|forget|serve|bench|scan|rescan|stats|reindex|ontology|ingest|\
     Decision|Convention|Failure|Fact|Improvement|Episode|\
-    --json|--stdin-json|--host|--db|--global-db|--policy|--workspace|--audit-export|--version|--help|-V|-h|\
-    --path-scope|--importance|--props|--reason|--kind|--full-text|--limit|--path|--query|--hops|--tag|\
+    --json|--stdin-json|--host|--db|--global-db|--policy|--workspace|--actor-id|--version|--help|-V|-h|\
+    --path-scope|--importance|--props|--kind|--full-text|--limit|--hops|--tag|--fuzzy|--modes|\
     --link|--ref|--summary|--confidence|--agent-id|--session-id|--workspace-id|--include-archived|\
-    --include-superseded|--mode|--signer|--confirmation-token|--confirmed-by-user|--token-stdin|--vacuum|\
-    --stage|--repo|--take|--format|--write) argv+=("$a") ;;
+    --mode|--optimize|--vacuum) argv+=("$a") ;;
     claude-code|codex|pi) argv+=("$a") ;;
     *) free=$((free + 1)) ;;
   esac

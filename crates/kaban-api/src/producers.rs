@@ -255,15 +255,7 @@ impl ProducerRegistry {
                     .iter()
                     .filter_map(|producer| {
                         let value = meta.get(&format!("producer_run:{}", producer.as_str()))?;
-                        let run =
-                            serde_json::from_str::<ProducerRun>(value)
-                                .ok()
-                                .or_else(|| {
-                                    value.parse::<i64>().ok().map(|at| ProducerRun {
-                                        at,
-                                        outcome: ProducerOutcome::Ok,
-                                    })
-                                })?;
+                        let run = serde_json::from_str::<ProducerRun>(value).ok()?;
                         (run.at >= 0).then_some(run)
                     })
                     .max_by_key(|run| run.at);

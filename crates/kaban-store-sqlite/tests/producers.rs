@@ -73,6 +73,7 @@ fn fixed_runs_round_trip_without_changing_counters() {
     assert_eq!(store.stats(None).unwrap(), before);
 }
 
+
 #[test]
 fn malformed_and_negative_runs_are_ignored_without_writes() {
     let store = SqliteStore::open_memory().unwrap();
@@ -96,14 +97,9 @@ fn malformed_and_negative_runs_are_ignored_without_writes() {
             .is_err()
     );
     assert_eq!(store.index_meta().unwrap().entries, before);
+    // the record is the JSON object only: a bare integer (the old bookkeeping) is no run
     store
         .set_index_meta("producer_run:gazetteer", "12")
         .unwrap();
-    assert_eq!(
-        store.producer_run(Producer::Gazetteer).unwrap(),
-        Some(ProducerRunRecord {
-            at: 12,
-            outcome: ProducerRunOutcome::Ok
-        })
-    );
+    assert_eq!(store.producer_run(Producer::Gazetteer).unwrap(), None);
 }

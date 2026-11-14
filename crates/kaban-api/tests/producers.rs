@@ -94,6 +94,7 @@ fn seven_producer_rows_with_their_budgets_and_extractors_stay_explicit() {
 
 #[test]
 fn valid_latest_runs_survive_malformed_siblings() {
+    // a bare integer is not a run record: no compatibility reading of the old bookkeeping
     let mut meta = IndexMeta::default();
     meta.entries
         .insert("producer_run:authored".into(), "12".into());
@@ -116,8 +117,8 @@ fn valid_latest_runs_survive_malformed_siblings() {
         r#"{"at":99,"outcome":"arbitrary"}"#.into(),
     );
     let rows = ProducerRegistry.with_runs(&EngineConfig::default(), &meta);
-    assert_eq!(rows[0].last_run, Some(12));
-    assert_eq!(rows[0].last_outcome, Some(ProducerOutcome::Ok));
+    assert_eq!(rows[0].last_run, None);
+    assert_eq!(rows[0].last_outcome, None);
     assert_eq!(rows[1].last_run, None);
     assert_eq!(rows[3].last_outcome, Some(ProducerOutcome::Failed));
     assert_eq!(rows[4].last_run, Some(31));

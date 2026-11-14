@@ -166,15 +166,11 @@ pub trait IngestStore: Send + Sync {
             "not_available_in_this_release",
         ))
     }
-    /// Offline read-only artifact and reserved sink freshness checks; reports counts only.
+    /// Offline read-only artifact freshness checks; reports counts only.
     ///
     /// # Errors
     /// Backend read failures; no repair, publication or optimization is performed.
-    fn artifact_diagnostics(
-        &self,
-        workspace: &WorkspaceId,
-        authority: crate::CurrentProducerAuthority,
-    ) -> Result<crate::ArtifactDiagnostics>;
+    fn artifact_diagnostics(&self, workspace: &WorkspaceId) -> Result<crate::ArtifactDiagnostics>;
     /// Apply one ingestion batch in one write transaction (core-plan C2.6; F16 store side):
     /// node ops in order, then edge ops, then the MD-23 edge diff (outgoing edges of each
     /// upserted node that the batch did not name are deleted; incoming edges are untouched),

@@ -50,8 +50,8 @@ and do not remove usable sibling statistics.
 ## Remaining defaults register
 
 These are configuration defaults, not claims that every reserved capability ships.
-The sections of removed features, `reconcile`, `er`, `why`, `briefing`, `discovered` and `embed`,
-are removed, and so are the renamed `l3` (now `extractors`) and `budget` (its `l0_rss_mb` is now
+The sections of removed features, `reconcile`, `er`, `why`, `briefing`, `discovered`, `embed`
+and `pipeline` (its only key, `retire_batch_rows`, went with layer retirement), are removed, and so are the renamed `l3` (now `extractors`) and `budget` (its `l0_rss_mb` is now
 `text.build_rss_mb`): a file that still spells one is refused like any unknown key, naming the
 section. There are no aliases.
 Use quality/latency measurements from your own workload before changing a knob.
@@ -82,7 +82,6 @@ Use quality/latency measurements from your own workload before changing a knob.
 | `ingest.metadata_allowance_kib` | 4 | Admitted metadata size |
 | `ingest.lru_entries` | 4 | Reserved cache entry capacity; cache deferred |
 | `ingest.default_with` | unset | Reserved enrollment; nonempty values unavailable |
-| `pipeline.retire_batch_rows` | 1000 | Retirement latency and transaction duration |
 | `index.isolation` | preferred | Indexer isolation availability |
 | `index.share_caches` | unset | Explicit cache-sharing policy |
 | `index.container_image` | unset | Explicit indexer container selection |

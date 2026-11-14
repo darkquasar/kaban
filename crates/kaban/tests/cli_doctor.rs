@@ -244,7 +244,6 @@ fn a_healthy_database_passes_and_a_corrupted_fts_shadow_table_fails_deterministi
             "fts_integrity",
             "claim_exhausted",
             "stale_artifacts",
-            "retired_producers",
             "schema_version",
             // spec 05 SS-21: the text index, its payload watermark and its lag behind the
             // canonical head (OWN-M: every database serves its own Tantivy index)
@@ -366,10 +365,10 @@ fn fts_integrity_passes_with_archived_and_tombstoned_rows_and_vacuum_is_its_own_
     assert_eq!(check(&v, "fts_integrity")["ok"], true, "{v}");
     assert_eq!(check(&v, "integrity")["ok"], true, "{v}");
     assert_eq!(check(&v, "vacuum")["ok"], true, "{v}");
-    // the checks without the governance, audit and lag rows (REC-08): the artifact checks,
-    // the E3.11 `stale_anchors` line, the spec 05 SS-21 `text_index`, `text_index_watermark`
+    // the checks without the governance, audit and lag rows (REC-08): the stale-artifact
+    // check (`retired_producers` went with layer retirement, OD-P1), the E3.11 `stale_anchors` line, the spec 05 SS-21 `text_index`, `text_index_watermark`
     // and `text_index_lag` lines, one line per producer (seven, PC-16) and the vacuum line
-    assert_eq!(v["checks"].as_array().unwrap().len(), 20);
+    assert_eq!(v["checks"].as_array().unwrap().len(), 19);
     // without the flag there is no vacuum line
     let v = report(&doctor(&s, &s.db(), &[]));
     assert!(

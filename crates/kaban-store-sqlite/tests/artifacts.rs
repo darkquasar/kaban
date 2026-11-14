@@ -266,8 +266,7 @@ fn complete_set_publishes_canonical_artifact_and_empty_set_cleans_only_its_sourc
 }
 
 #[test]
-fn offline_artifact_diagnostics_report_stale_retired_and_cursor_counts_without_writes() {
-    use kaban_core::{CurrentProducerAuthority, config::EngineConfig};
+fn offline_artifact_diagnostics_report_stale_counts_without_writes() {
     let scratch = Scratch::new("artifacts", "diagnostics");
     let store = SqliteStore::open(&scratch.db(), &scratch.keys()).unwrap();
     let (document, chunk, target) = (NodeId::new(), NodeId::new(), NodeId::new());
@@ -288,38 +287,24 @@ fn offline_artifact_diagnostics_report_stale_retired_and_cursor_counts_without_w
         node(&target, "Fact", "Architecture", json!({})),
     ]);
     store.apply_batch(batch, &ctx()).unwrap();
-    let authority =
-        CurrentProducerAuthority::from_config(&EngineConfig::default(), Producer::Gazetteer)
-            .unwrap();
     assert_eq!(
-        store
-            .artifact_diagnostics(&WorkspaceId::default(), authority)
-            .unwrap(),
+        store.artifact_diagnostics(&WorkspaceId::default()).unwrap(),
         kaban_core::ArtifactDiagnostics::default()
     );
     let conn = rusqlite::Connection::open(scratch.db()).unwrap();
     conn.execute(
-        "UPDATE derived_artifact SET source_rev='malformed',producer_id='retired-fixture'",
-        [],
-    )
-    .unwrap();
-    conn.execute(
-        "INSERT INTO projections(name,last_seq) VALUES('reconcile:1',0)",
+        "UPDATE derived_artifact SET source_rev='malformed'",
         [],
     )
     .unwrap();
     let before: i64 = conn
         .query_row("SELECT max(seq) FROM changes", [], |r| r.get(0))
         .unwrap();
-    let findings = store
-        .artifact_diagnostics(&WorkspaceId::default(), authority)
-        .unwrap();
+    let findings = store.artifact_diagnostics(&WorkspaceId::default()).unwrap();
     assert_eq!(findings.stale_artifacts, 1);
-    assert_eq!(findings.retired_producers, 1);
-    assert_eq!(findings.cursors_behind, 1);
     assert_eq!(
         store
-            .artifact_diagnostics(&WorkspaceId::new("foreign"), authority)
+            .artifact_diagnostics(&WorkspaceId::new("foreign"))
             .unwrap()
             .stale_artifacts,
         0

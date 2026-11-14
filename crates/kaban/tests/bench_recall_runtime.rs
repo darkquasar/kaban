@@ -44,13 +44,10 @@ fn default_feature_recall_cli_retains_map_samples_and_refuses_existing_database(
     );
     let result: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(result["bench_schema"], 3);
-    assert_eq!(
-        result["recall_evaluation"]["layer_sets"]
-            .as_array()
-            .unwrap()
-            .len(),
-        2
-    );
+    let mode_sets = result["recall_evaluation"]["mode_sets"].as_array().unwrap();
+    assert_eq!(mode_sets.len(), 2);
+    assert_eq!(mode_sets[0]["modes"], serde_json::json!(["lexical"]));
+    assert!(mode_sets[0].get("layers").is_none(), "{}", mode_sets[0]);
     assert_eq!(result["recall_evaluation"]["paired"]["samples"], 30);
     assert_eq!(
         result["recall_evaluation"]["paired"]["n2"]["status"],
@@ -131,7 +128,7 @@ fn text_index_tantivy_measures_the_production_adapter() {
     assert_eq!(result["recall_evaluation"]["text_index"], "tantivy");
     let index_dir = scratch.db().with_extension("index").join("tantivy");
     assert!(index_dir.join("meta.json").is_file(), "{index_dir:?}");
-    let with_hits = result["recall_evaluation"]["layer_sets"][0]["queries"]
+    let with_hits = result["recall_evaluation"]["mode_sets"][0]["queries"]
         .as_array()
         .unwrap()
         .iter()

@@ -55,7 +55,7 @@ pub(crate) struct RecallArgs {
     #[arg(long)]
     pub out: Option<PathBuf>,
     /// Measure one EN-N3 layer set in this fresh process instead of the recall evaluation:
-    /// l0, l0+trigram, l0+gazetteer-run, l0+l3-brief, or l0+l2-query (deferred row)
+    /// l0, l0+gazetteer-run or l0+l3-brief
     #[arg(long, value_name = "LAYER_SET")]
     pub measure: Option<String>,
 }
@@ -177,34 +177,34 @@ fn classes(input: &str) -> Result<BTreeSet<QueryClass>> {
     Ok(result)
 }
 
-fn layer_sets(input: &str) -> Result<Vec<Vec<kaban_core::RecallMode>>> {
+fn mode_sets(input: &str) -> Result<Vec<Vec<kaban_core::RecallMode>>> {
     use kaban_core::RecallMode;
     let mut result = Vec::new();
     let mut names = BTreeSet::new();
     for set in input.split(';') {
-        let mut layers = Vec::new();
+        let mut modes = Vec::new();
         for name in set.split(',') {
-            let layer = match name {
+            let mode = match name {
                 "lexical" => RecallMode::Lexical,
                 "fuzzy" => RecallMode::Fuzzy,
                 _ => bail!("unknown recall mode"),
             };
-            ensure!(!layers.contains(&layer), "duplicate recall layer");
-            layers.push(layer);
+            ensure!(!modes.contains(&mode), "duplicate recall mode");
+            modes.push(mode);
         }
         ensure!(
-            layers.contains(&RecallMode::Lexical),
+            modes.contains(&RecallMode::Lexical),
             "evaluation requires lexical"
         );
-        layers.sort_by_key(|layer| match layer {
+        modes.sort_by_key(|mode| match mode {
             RecallMode::Lexical => 0,
             RecallMode::Fuzzy => 1,
         });
         ensure!(
-            names.insert(serde_json::to_string(&layers)?),
-            "duplicate layer set"
+            names.insert(serde_json::to_string(&modes)?),
+            "duplicate mode set"
         );
-        result.push(layers);
+        result.push(modes);
     }
     Ok(result)
 }
@@ -356,7 +356,7 @@ pub(crate) fn evaluate(
     fixtures: &Fixtures,
     map: &SourceMap,
     selected: &BTreeSet<QueryClass>,
-    layers: &[kaban_core::RecallMode],
+    modes: &[kaban_core::RecallMode],
 ) -> Result<Value> {
     let reverse = map.reverse();
     let mut rows = Vec::new();
@@ -372,8 +372,8 @@ pub(crate) fn evaluate(
         let text = query_text(query, map)?;
         let response = api.recall(RecallRequest {
             query: text.clone(),
-            modes: Some(layers.to_vec()),
-            fuzzy: layers.contains(&kaban_core::RecallMode::Fuzzy),
+            modes: Some(modes.to_vec()),
+            fuzzy: modes.contains(&kaban_core::RecallMode::Fuzzy),
             workspace_id: Some(query.workspace.clone()),
             limit: Some(10),
             ..Default::default()
@@ -402,7 +402,7 @@ pub(crate) fn evaluate(
             "unavailable": scores.len() - available.len(), "mean_ndcg_at_10":
                 (!available.is_empty()).then(|| available.iter().sum::<f64>() / available.len() as f64) })
     }).collect();
-    Ok(json!({ "layers": layers, "status": "evaluated", "queries": rows, "classes": classes }))
+    Ok(json!({ "modes": modes, "status": "evaluated", "queries": rows, "classes": classes }))
 }
 
 /// Actual gazetteer-projected MENTIONS only; no candidate judgment is emitted as a prediction.
@@ -628,7 +628,7 @@ fn recall(
     args: &RecallArgs,
 ) -> Result<Value> {
     let selected = classes(&args.classes)?;
-    let sets = layer_sets(&args.modes)?;
+    let sets = mode_sets(&args.modes)?;
     let k = check_fusion(args.fusion.as_deref(), engine)?;
     let fixtures = load(
         &args.sources,
@@ -674,7 +674,7 @@ fn recall(
     )?;
     let rows = sets
         .iter()
-        .map(|layers| evaluate(&api, &fixtures, &map, &selected, layers))
+        .map(|modes| evaluate(&api, &fixtures, &map, &selected, modes))
         .collect::<Result<Vec<_>>>()?;
     let samples = args.samples.max(30).max(engine.bench.min_samples as usize);
     // the fuzzy layer of the fused request is the store's own index's
@@ -690,7 +690,7 @@ fn recall(
         args.n,
         json!({ "mode": "recall", "text_index": "tantivy",
         "selected_classes": selected.iter().map(|class| class_name(*class)).collect::<Vec<_>>(),
-        "selected_layer_sets": sets, "effective_config": engine, "effective_fusion": format!("rrf({k})"),
+        "selected_mode_sets": sets, "effective_config": engine, "effective_fusion": format!("rrf({k})"),
         "minimum_queries": (engine.recall.judged_min_queries as usize).max(100),
         "minimum_samples": (engine.bench.min_samples as usize).max(30),
         "corpus": { "seed": format!("{SEED:#x}"), "notes": args.n, "edges_per_node": args.edges_per_node,
@@ -698,7 +698,7 @@ fn recall(
         "fixtures": { "sources_sha256": hash(&args.sources)?, "queries_sha256": hash(&args.judged)?,
             "edges_sha256": hash(&args.edge_judged)?, "query_count": fixtures.queries.len(),
             "query_counts_by_class": query_counts, "edge_count": fixtures.edges.len() },
-        "layer_sets": rows, "paired": timing,
+        "mode_sets": rows, "paired": timing,
         "availability": { "fuzzy": "text_index", "sim": "not_available_in_this_release", "embed": "not_available_in_this_release", "cc": "not_available_in_this_release" },
         "quality_informational": true }),
         "recall",

@@ -64,19 +64,11 @@ pub(crate) fn optimize_fts(conn: &Connection) -> Result<MaintenanceOutcome> {
 pub(crate) fn artifact_diagnostics(
     conn: &Connection,
     workspace: &kaban_core::WorkspaceId,
-    authority: kaban_core::CurrentProducerAuthority,
 ) -> Result<kaban_core::ArtifactDiagnostics> {
     use crate::sql_error::SqlResultExt;
-    use rusqlite::params;
     let stale_artifacts=conn.query_row("SELECT count(*) FROM derived_artifact d LEFT JOIN node n ON n.rid=d.source_rid WHERE d.workspace_id=?1 AND (n.rid IS NULL OR n.workspace_id<>d.workspace_id OR n.lifecycle<>'active' OR d.policy_version<>n.policy_version OR CASE WHEN json_valid(d.source_rev) THEN json_extract(d.source_rev,'$.content_hash') IS NOT n.content_hash OR json_extract(d.source_rev,'$.rev') IS NOT n.rev ELSE 1 END)",[workspace.as_str()],|row|row.get::<_,i64>(0)).sql()?;
-    let retired_producers=conn.query_row("SELECT count(*) FROM derived_artifact WHERE workspace_id=?1 AND layer='gazetteer' AND producer_id<>?2",params![workspace.as_str(),authority.producer().producer_id()],|row|row.get::<_,i64>(0)).sql()?;
-    let cursors_behind=conn.query_row("SELECT count(*) FROM projections WHERE name LIKE 'reconcile:%' AND last_seq<(SELECT COALESCE(max(seq),0) FROM changes)",[],|row|row.get::<_,i64>(0)).sql()?;
     Ok(kaban_core::ArtifactDiagnostics {
         stale_artifacts: u64::try_from(stale_artifacts)
-            .map_err(|_| backend_error(rusqlite::Error::InvalidQuery))?,
-        retired_producers: u64::try_from(retired_producers)
-            .map_err(|_| backend_error(rusqlite::Error::InvalidQuery))?,
-        cursors_behind: u64::try_from(cursors_behind)
             .map_err(|_| backend_error(rusqlite::Error::InvalidQuery))?,
     })
 }

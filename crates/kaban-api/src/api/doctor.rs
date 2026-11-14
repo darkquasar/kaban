@@ -148,37 +148,17 @@ impl KabanApi {
                 "not checked: backend read failure",
             ),
         }
-        if let Some(authority) = kaban_core::CurrentProducerAuthority::from_config(
-            self.engine(),
-            kaban_core::Producer::Gazetteer,
-        ) {
-            match self.store.artifact_diagnostics(self.workspace(), authority) {
-                Ok(findings) => {
-                    report.push(
-                        "stale_artifacts",
-                        findings.stale_artifacts == 0,
-                        findings.stale_artifacts.to_string(),
-                    );
-                    report.push(
-                        "retired_producers",
-                        findings.retired_producers == 0,
-                        findings.retired_producers.to_string(),
-                    );
-                }
-                Err(_) => {
-                    report.push(
-                        "artifact_diagnostics",
-                        false,
-                        "not checked: backend read failure",
-                    );
-                }
-            }
-        } else {
-            report.push(
+        match self.store.artifact_diagnostics(self.workspace()) {
+            Ok(findings) => report.push(
+                "stale_artifacts",
+                findings.stale_artifacts == 0,
+                findings.stale_artifacts.to_string(),
+            ),
+            Err(_) => report.push(
                 "artifact_diagnostics",
                 false,
-                "not checked: unavailable producer",
-            );
+                "not checked: backend read failure",
+            ),
         }
         // informational: the one schema version this kaban serves (OWN-P: a database at any
         // other version was refused at the open, with the way out, before this report)

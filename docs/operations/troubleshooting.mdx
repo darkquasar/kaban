@@ -87,8 +87,7 @@ fully indexed. If older stored content is withheld on output, review the
 1. Confirm the same database and bound workspace as the write. The default
    workspace depends on the Git root directory name; outside Git it is `default`.
 2. Check whether ingestion actually admitted content. Per-document failures,
-   blocked content, forgotten documents, and candidates pending review are not
-   equivalent to searchable accepted content.
+   blocked content and forgotten documents are not searchable content.
 3. Start with words actually present in the text. Embedding similarity is
    unavailable; a text query is not a semantic search request.
 4. Check optional producer state in `stats`/`doctor`. Gazetteer linking is not on by

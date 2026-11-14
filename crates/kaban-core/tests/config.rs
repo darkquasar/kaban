@@ -189,10 +189,6 @@ fn an_absent_file_and_a_file_spelling_every_register_default_both_equal_default(
             "ingest.default_with",
             format!("{:?}", d.ingest.default_with),
         ),
-        (
-            "pipeline.retire_batch_rows",
-            d.pipeline.retire_batch_rows.to_string(),
-        ),
         ("link.default", d.link.default.clone()),
         ("text.build_rss_mb", d.text.build_rss_mb.to_string()),
         ("bench.min_samples", d.bench.min_samples.to_string()),
@@ -231,7 +227,6 @@ fn an_absent_file_and_a_file_spelling_every_register_default_both_equal_default(
         ("ingest.lru_entries", "4"),
         ("ingest.lru_mib", "8"),
         ("ingest.default_with", "None"),
-        ("pipeline.retire_batch_rows", "1000"),
         ("link.default", "none"),
         ("text.build_rss_mb", "64"),
         ("bench.min_samples", "30"),
@@ -427,6 +422,7 @@ fn a_removed_feature_section_is_refused_naming_the_section() {
         "embed",
         "l3",
         "budget",
+        "pipeline",
     ] {
         let path = std::env::temp_dir().join(format!(
             "kaban-config-removed-{}-{section}.yaml",
@@ -445,4 +441,21 @@ fn a_removed_feature_section_is_refused_naming_the_section() {
         assert!(!err.to_string().contains("secret_value_x"), "{err}");
         std::fs::remove_file(path).unwrap();
     }
+}
+
+/// `pipeline.retire_batch_rows` had no reader once layer retirement went (OD-P1), and it was the
+/// only key of `[pipeline]`: a config that still sets it is refused naming the section.
+#[test]
+fn the_retired_pipeline_section_is_refused_naming_it() {
+    let path = std::env::temp_dir().join(format!(
+        "kaban-config-removed-pipeline-{}.yaml",
+        std::process::id()
+    ));
+    std::fs::write(&path, "pipeline:\n  retire_batch_rows: 1000\n").unwrap();
+    let result = load(&path);
+    std::fs::remove_file(&path).unwrap();
+    assert!(
+        matches!(&result, Err(ConfigError::Parse { path }) if path == "pipeline"),
+        "{result:?}"
+    );
 }

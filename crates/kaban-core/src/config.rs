@@ -231,22 +231,6 @@ impl Default for Ingest {
     }
 }
 
-/// `[pipeline]` (EN-F15a).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields, default)]
-pub struct Pipeline {
-    /// Rows retired per transaction.
-    pub retire_batch_rows: u32,
-}
-
-impl Default for Pipeline {
-    fn default() -> Self {
-        Self {
-            retire_batch_rows: 1000,
-        }
-    }
-}
-
 /// `[index]`: the v4 `kaban-index` keys of
 /// stage1-spec §10 / stage1-plan CG4.2 (OWN-29 isolation policy, OWN-54/SD-11 budgets with a
 /// user override, RV-8 `quota.tmp_bytes`). Every key spells its register default; `doctor`
@@ -404,8 +388,6 @@ pub struct EngineConfig {
     pub ask: Ask,
     /// `[ingest]`
     pub ingest: Ingest,
-    /// `[pipeline]`
-    pub pipeline: Pipeline,
     /// `[index]`
     pub index: Index,
     /// `[link]`

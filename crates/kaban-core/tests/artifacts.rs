@@ -4,25 +4,12 @@
 use kaban_core::{ExtractorKind, Producer, SourceRev, WorkspaceId, WriteBatch, artifact_key};
 
 #[test]
-fn shipped_gazetteer_authority_keeps_legacy_keys_and_protects_off_mode() {
-    use kaban_core::{BuiltinProducer, CurrentProducerAuthority, config::EngineConfig};
-    let mut config = EngineConfig::default();
+fn shipped_gazetteer_descriptor_has_a_stable_identity() {
+    use kaban_core::BuiltinProducer;
     let producer = BuiltinProducer::Gazetteer;
     assert_eq!(producer.producer_id(), "gazetteer@1");
     assert_eq!(producer.extractor_id(), "gazetteer");
     assert_eq!(producer.extractor_version(), "1");
-    assert!(CurrentProducerAuthority::from_config(&config, Producer::Gazetteer).is_some());
-    assert!(CurrentProducerAuthority::from_config(&config, Producer::HookEvents).is_none());
-    config.link.default = "unknown".into();
-    assert!(CurrentProducerAuthority::from_config(&config, Producer::Gazetteer).is_none());
-    for version in ["1", "1:set:0", "1:set:42"] {
-        assert!(producer.matches_legacy_assertion(Producer::Gazetteer, None, Some(version)));
-    }
-    for version in ["2", "1:set:", "1:set:-1", "1:set:1x"] {
-        assert!(!producer.matches_legacy_assertion(Producer::Gazetteer, None, Some(version)));
-    }
-    assert!(!producer.matches_legacy_assertion(Producer::Authored, None, Some("1")));
-    assert!(!producer.matches_legacy_assertion(Producer::Gazetteer, Some("caller"), Some("1")));
 }
 
 #[test]

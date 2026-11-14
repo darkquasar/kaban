@@ -33,8 +33,6 @@ ingest:
   lru_entries: 4
   lru_mib: 8
   default_with: null
-pipeline:
-  retire_batch_rows: 1000
 index:
   isolation: preferred
   container_image: null

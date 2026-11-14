@@ -1468,12 +1468,8 @@ impl IngestStore for SqliteStore {
     fn job_mark_stale(&self, job: &kaban_core::JobId, workspace: &WorkspaceId) -> Result<bool> {
         crate::jobs::mark_stale(&self.lock(), job, workspace)
     }
-    fn artifact_diagnostics(
-        &self,
-        workspace: &WorkspaceId,
-        authority: kaban_core::CurrentProducerAuthority,
-    ) -> Result<kaban_core::ArtifactDiagnostics> {
-        doctor::artifact_diagnostics(&self.lock(), workspace, authority)
+    fn artifact_diagnostics(&self, workspace: &WorkspaceId) -> Result<kaban_core::ArtifactDiagnostics> {
+        doctor::artifact_diagnostics(&self.lock(), workspace)
     }
     fn artifact_source(
         &self,

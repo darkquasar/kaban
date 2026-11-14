@@ -57,7 +57,7 @@ impl SqliteStore {
         self.set_index_meta(&format!("producer_run:{}", producer.as_str()), &record)
     }
 
-    /// Read a valid run, tolerating absent/malformed bookkeeping and legacy integer values.
+    /// Read a valid run; absent or malformed bookkeeping reads as no run.
     ///
     /// # Errors
     /// Propagates metadata read errors; never mutates metadata on a read.
@@ -66,13 +66,7 @@ impl SqliteStore {
         let Some(value) = metadata.get(&format!("producer_run:{}", producer.as_str())) else {
             return Ok(None);
         };
-        let run = decode_run(value).or_else(|| {
-            value.parse::<i64>().ok().map(|at| ProducerRunRecord {
-                at,
-                outcome: ProducerRunOutcome::Ok,
-            })
-        });
-        Ok(run.filter(|run| run.at >= 0))
+        Ok(decode_run(value).filter(|run| run.at >= 0))
     }
 }
 

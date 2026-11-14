@@ -2303,11 +2303,6 @@ expression: a
           "ok": true
         },
         {
-          "detail": "0",
-          "name": "retired_producers",
-          "ok": true
-        },
-        {
           "detail": "13",
           "name": "schema_version",
           "ok": true

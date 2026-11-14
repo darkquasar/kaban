@@ -12,7 +12,6 @@
 //!                    (build peak, retained automaton), producer-origin MENTIONS precision,
 //!                    then (after the row is read) per-chunk match time, informational
 //!   l0+l3-brief      ingest_brief + ingest_next on a 100 KiB target, warm; cache N/A
-//!   l0+l2-query      deferred row (OWN-93/94), no process work
 //! ```
 //!
 //! Bounds are the effective values of `kaban_api::producers::budgets` for the loaded engine
@@ -61,7 +60,6 @@ const RW_E3_W2_1: &str = "RW-E3-W2-1 (Medium, deferred): the evaluator reads MEN
 enum LayerSet {
     L0,
     Gazetteer,
-    L2Query,
     L3Brief,
 }
 
@@ -70,7 +68,6 @@ impl LayerSet {
         Ok(match name {
             "l0" => Self::L0,
             "l0+gazetteer-run" => Self::Gazetteer,
-            "l0+l2-query" => Self::L2Query,
             "l0+l3-brief" => Self::L3Brief,
             _ => bail!("unknown layer set"),
         })
@@ -80,7 +77,6 @@ impl LayerSet {
         match self {
             Self::L0 => "l0",
             Self::Gazetteer => "l0+gazetteer-run",
-            Self::L2Query => "l0+l2-query",
             Self::L3Brief => "l0+l3-brief",
         }
     }
@@ -90,14 +86,13 @@ impl LayerSet {
         match self {
             Self::L0 => Some("text.build_rss_mb"),
             Self::Gazetteer => Some("gazetteer.max_automaton_mb"),
-            Self::L2Query => Some("embed.max_scan_rss_mb"),
             Self::L3Brief => None,
         }
     }
 }
 
-/// The RP-13 row. `pass` is `None` for an informational (L3) or deferred (L2) row, so no
-/// cache or embed pass is ever fabricated; the measured fields are `None` only when deferred.
+/// The RP-13 row. `pass` is `None` for an informational (L3) row, so no cache pass is ever
+/// fabricated.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct LayerMeasurement {
     layer_set: &'static str,
@@ -136,7 +131,7 @@ fn judge(set: LayerSet, seen: &Observed, bound_bytes: u64) -> Option<bool> {
                     .retained
                     .is_some_and(|retained| retained <= bound_bytes),
         ),
-        LayerSet::L2Query | LayerSet::L3Brief => None,
+        LayerSet::L3Brief => None,
     }
 }
 
@@ -237,8 +232,8 @@ struct Rig<'a> {
 }
 
 impl Rig<'_> {
-    fn queries(&self, layers: &[RecallMode]) -> Result<Value> {
-        evaluate(self.api, self.fixtures, self.map, self.classes, layers)
+    fn queries(&self, modes: &[RecallMode]) -> Result<Value> {
+        evaluate(self.api, self.fixtures, self.map, self.classes, modes)
     }
 }
 
@@ -514,31 +509,8 @@ pub(super) fn run(
         .iter()
         .filter(|row| row.source != kaban_api::producers::BudgetOrigin::Default)
         .collect();
-    let deferred = json!({ "l0+l2-query": "OWN-93/94: embed vectors and L2 not in this release",
-        "cache": "OWN-93", "cc_fusion": "OWN-68 SC-06", "holdout_f1": "OWN-68 SC-03",
+    let deferred = json!({ "cache": "OWN-93", "cc_fusion": "OWN-68 SC-06", "holdout_f1": "OWN-68 SC-03",
         "500k": "OWN-68 SC-13" });
-    if set == LayerSet::L2Query {
-        let row = LayerMeasurement {
-            layer_set: set.name(),
-            status: "deferred",
-            total_vm_hwm_bytes: None,
-            baseline_vm_hwm_bytes: None,
-            delta_bytes: None,
-            build_peak_delta_bytes: None,
-            retained_bytes: None,
-            cache_bytes: None,
-            bound_key: set.bound_key(),
-            bound_bytes: None,
-            pass: None,
-        };
-        return envelope(
-            0,
-            json!({ "mode": "layers", "layer_measurements": [row], "effective_budgets": rows,
-            "overrides": overrides, "deferred": deferred,
-            "layer_gate": { "status": "deferred", "pass": null } }),
-            "layers",
-        );
-    }
     ensure!(
         args.n >= 5 && args.warmup > 0,
         "corpus requires at least five notes and warmup"
@@ -622,7 +594,7 @@ pub(super) fn run(
                     layer,
                 )
             }
-            LayerSet::L0 | LayerSet::L2Query => unreachable!("handled above"),
+            LayerSet::L0 => unreachable!("handled above"),
         };
         seen.baseline = baseline;
         (seen, layer)
@@ -729,6 +701,8 @@ mod tests {
         let l3 = measurement(LayerSet::L3Brief, &l0(10 * MIB), &rows).unwrap();
         assert_eq!((l3.pass, l3.cache_bytes, l3.bound_key), (None, None, None));
         assert!(LayerSet::parse("l0+cache").is_err());
+        // the embed layer is gone: its deferred set is no longer a set
+        assert!(LayerSet::parse("l0+l2-query").is_err());
     }
 
     #[test]
