@@ -167,8 +167,9 @@ pub enum Durability {
 }
 
 /// Context of one write (REC-06): the workspace, the actor and how hard the commit waits for
-/// the disk, plus the repository identity stamped on new records and the slot the store
-/// records the call's terminal sequence in (the receipt reads it; PC-4 survivors).
+/// the disk, plus the slot the store records the call's terminal sequence in (the receipt
+/// reads it; the PC-4 survivor). A record's repository identity travels on the record itself
+/// (`NewNode::repo`), the one path the store reads it from.
 #[derive(Debug, Clone)]
 pub struct WriteCtx {
     /// Workspace the write belongs to.
@@ -178,9 +179,6 @@ pub struct WriteCtx {
     pub actor: Actor,
     /// How hard the commit waits for the disk.
     pub durability: Durability,
-    /// Identity of the repository this process runs in (its root directory name, M3-23), if
-    /// any: stamped on a record's `repo` column when it is still unset.
-    pub repo: Option<String>,
     /// The call's terminal `changes.seq` (spec 05 SS-10), recorded by the store from inside
     /// the write transaction right before its commit (the log head at that moment: the call's
     /// last change row, or the head it saw when it wrote none) and read by the service for
@@ -214,13 +212,12 @@ impl Clone for TerminalSeq {
 }
 
 impl WriteCtx {
-    /// A context with normal durability and no repository identity.
+    /// A context with normal durability.
     pub fn new(workspace_id: WorkspaceId, actor: Actor) -> Self {
         Self {
             workspace_id,
             actor,
             durability: Durability::Normal,
-            repo: None,
             terminal_seq: TerminalSeq::unset(),
         }
     }
@@ -239,13 +236,6 @@ impl WriteCtx {
     #[must_use]
     pub fn terminal_seq(&self) -> Option<u64> {
         self.terminal_seq.get()
-    }
-
-    /// The same context with a repository identity.
-    #[must_use]
-    pub fn with_repo(mut self, repo: Option<String>) -> Self {
-        self.repo = repo;
-        self
     }
 
     /// The same context committing with `durability`.
