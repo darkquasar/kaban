@@ -92,7 +92,6 @@ pub fn target_schema(
         semantics: "Fill fields only from source text; absent fields stay absent; quotes are verbatim. Published props are restricted to declared non-internal fields, including empty props for undeclared schemas; core validation is unchanged.".into(),
         allowed_edges,
         kaban_adds: vec![["record".into(), "DERIVED_FROM".into(), "Document".into()], ["Chunk".into(), "EVIDENCE_FOR".into(), "record".into()]],
-        governance: crate::extract::structured_prep::dialect::GOVERNANCE.into(),
     })
 }
 

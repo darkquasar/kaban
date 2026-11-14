@@ -4241,7 +4241,7 @@ expression: tools
               "type": "string"
             },
             "score": {
-              "description": "Advisory matcher score, never acceptance evidence.",
+              "description": "Advisory matcher score.",
               "format": "double",
               "type": "number"
             }
@@ -4704,15 +4704,11 @@ expression: tools
               },
               "type": "array"
             },
-            "governance": {
-              "description": "Governed records remain proposed.",
-              "type": "string"
-            },
             "json_schema": {
               "description": "Canonical extractor schema projected for these kinds."
             },
             "kaban_adds": {
-              "description": "Provenance edges added by kaban, never acceptance.",
+              "description": "Provenance edges added by kaban.",
               "items": {
                 "items": {
                   "type": "string"
@@ -4751,8 +4747,7 @@ expression: tools
             "required",
             "semantics",
             "allowed_edges",
-            "kaban_adds",
-            "governance"
+            "kaban_adds"
           ],
           "type": "object"
         },
@@ -4800,7 +4795,7 @@ expression: tools
               "type": "string"
             },
             "note": {
-              "description": "Advisory warning/explanation; never an acceptance promise.",
+              "description": "Advisory warning or explanation.",
               "type": "string"
             }
           },
@@ -4982,7 +4977,7 @@ expression: tools
               "type": "string"
             },
             "score": {
-              "description": "Advisory matcher score, never acceptance evidence.",
+              "description": "Advisory matcher score.",
               "format": "double",
               "type": "number"
             }
@@ -5555,15 +5550,11 @@ expression: tools
               },
               "type": "array"
             },
-            "governance": {
-              "description": "Governed records remain proposed.",
-              "type": "string"
-            },
             "json_schema": {
               "description": "Canonical extractor schema projected for these kinds."
             },
             "kaban_adds": {
-              "description": "Provenance edges added by kaban, never acceptance.",
+              "description": "Provenance edges added by kaban.",
               "items": {
                 "items": {
                   "type": "string"
@@ -5602,8 +5593,7 @@ expression: tools
             "required",
             "semantics",
             "allowed_edges",
-            "kaban_adds",
-            "governance"
+            "kaban_adds"
           ],
           "type": "object"
         },
@@ -5651,7 +5641,7 @@ expression: tools
               "type": "string"
             },
             "note": {
-              "description": "Advisory warning/explanation; never an acceptance promise.",
+              "description": "Advisory warning or explanation.",
               "type": "string"
             }
           },
@@ -5710,7 +5700,7 @@ expression: tools
       "readOnlyHint": false,
       "title": "Finish ingestion job"
     },
-    "description": "Finish a workspace-scoped structured ingestion job: reconcile the union of successful submits, preserve human and foreign edges, and retain a gated canonical report for bounded byte-identical retries. Reopens and revalidates the source and current policy; no extractor is executed.",
+    "description": "Finish a workspace-scoped structured ingestion job: reconcile the union of successful submits, preserve authored and other producers' edges, and retain a gated canonical report for bounded byte-identical retries. Reopens and revalidates the source and current policy; no extractor is executed.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
@@ -6205,7 +6195,7 @@ expression: tools
       "readOnlyHint": false,
       "title": "Submit ingestion records"
     },
-    "description": "Validate a workspace-scoped structured extractor return against its checked source and pinned ontology, then atomically publish proposed records, acceptance-safe revision candidates, L3 assertions, owned edges, successful audit and bounded job accumulation. No extractor is executed; governed relationships and foreign targets are refused.",
+    "description": "Validate a workspace-scoped structured extractor return against its checked source and pinned ontology, then write its records and the producer's edges as active records in one commit and count the submit on the job. No extractor is executed; lifecycle relationships (SUPERSEDES, INVALIDATES, CONTRADICTS) and foreign targets are refused.",
     "inputSchema": {
       "$defs": {
         "EdgeDraft": {
@@ -6327,7 +6317,7 @@ expression: tools
           "description": "Folded §4.1 record payload. No synthesized title or identity field.",
           "properties": {
             "confidence": {
-              "description": "Optional confidence, never acceptance evidence.",
+              "description": "Optional confidence, stored as the score of the record's edges.",
               "format": "double",
               "type": [
                 "number",

@@ -293,7 +293,7 @@ pub struct RecordDraft {
     /// Optional source-supported tags.
     #[serde(default)]
     pub tags: Vec<String>,
-    /// Optional confidence, never acceptance evidence.
+    /// Optional confidence, stored as the score of the record's edges.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confidence: Option<f64>,
     /// Ontology-restricted properties, with all internal properties excluded.
@@ -581,7 +581,7 @@ pub struct TypeSuggestion {
     pub candidates: Vec<TypeCandidate>,
     /// Explicit or suggested source type used for kind selection.
     pub chosen: String,
-    /// Advisory warning/explanation; never an acceptance promise.
+    /// Advisory warning or explanation.
     pub note: String,
 }
 
@@ -599,10 +599,8 @@ pub struct TargetSchema {
     pub semantics: String,
     /// Explicit ontology-permitted source/relation/target triples.
     pub allowed_edges: Vec<[String; 3]>,
-    /// Provenance edges added by kaban, never acceptance.
+    /// Provenance edges added by kaban.
     pub kaban_adds: Vec<[String; 3]>,
-    /// Governed records remain proposed.
-    pub governance: String,
 }
 
 /// Published ingestion bounds, including the full serialized result ceiling.
@@ -724,7 +722,7 @@ pub struct AboutCandidate {
     pub id: String,
     /// Loaded target kind; content, not a control.
     pub kind: String,
-    /// Advisory matcher score, never acceptance evidence.
+    /// Advisory matcher score.
     pub score: f64,
 }
 

@@ -536,7 +536,7 @@ impl KabanServer {
     }
 
     #[tool(
-        description = "Finish a workspace-scoped structured ingestion job: reconcile the union of successful submits, preserve human and foreign edges, and retain a gated canonical report for bounded byte-identical retries. Reopens and revalidates the source and current policy; no extractor is executed.",
+        description = "Finish a workspace-scoped structured ingestion job: reconcile the union of successful submits, preserve authored and other producers' edges, and retain a gated canonical report for bounded byte-identical retries. Reopens and revalidates the source and current policy; no extractor is executed.",
         output_schema = output_schema::<IngestFinishReport>(),
         annotations(title = "Finish ingestion job", read_only_hint = false,
             destructive_hint = true, idempotent_hint = true, open_world_hint = false)
@@ -552,7 +552,7 @@ impl KabanServer {
     }
 
     #[tool(
-        description = "Validate a workspace-scoped structured extractor return against its checked source and pinned ontology, then atomically publish proposed records, acceptance-safe revision candidates, L3 assertions, owned edges, successful audit and bounded job accumulation. No extractor is executed; governed relationships and foreign targets are refused.",
+        description = "Validate a workspace-scoped structured extractor return against its checked source and pinned ontology, then write its records and the producer's edges as active records in one commit and count the submit on the job. No extractor is executed; lifecycle relationships (SUPERSEDES, INVALIDATES, CONTRADICTS) and foreign targets are refused.",
         output_schema = output_schema::<IngestSubmitReport>(),
         annotations(title = "Submit ingestion records", read_only_hint = false,
             destructive_hint = false, idempotent_hint = true, open_world_hint = false)
