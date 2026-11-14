@@ -59,7 +59,6 @@ impl HookScratch {
                 workspace: WorkspaceId::new(REPO),
                 repo_root: Some(self.repo()),
                 repo: Some(REPO.to_owned()),
-                record_signer_identity: false,
                 engine: std::sync::Arc::default(),
             },
         )

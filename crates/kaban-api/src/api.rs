@@ -43,9 +43,6 @@ pub struct ApiConfig {
     /// Repository identity (the root directory's name, the same rule as the default
     /// workspace, M3-23): stamped on records this process creates or accepts.
     pub repo: Option<String>,
-    /// Whether `accept` records the git identity (`user.email`) as `signer` when the caller
-    /// gives none (core-spec F4). No flag sets it in M3 (M3-19): always `false`.
-    pub record_signer_identity: bool,
     /// The engine configuration (engine-spec §15.1; engine-plan E1.1, SO-11): loaded once at
     /// startup from `<KABAN_HOME>/config.yaml`, the register defaults otherwise. Every
     /// threshold the service applies is read from here and nowhere else.

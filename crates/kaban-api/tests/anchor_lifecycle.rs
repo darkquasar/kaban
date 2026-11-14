@@ -42,7 +42,6 @@ impl Fixture {
                 workspace: WorkspaceId::default(),
                 repo_root: None,
                 repo: Some("repo".into()),
-                record_signer_identity: false,
                 engine: Arc::default(),
             },
         );

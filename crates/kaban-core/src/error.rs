@@ -205,64 +205,14 @@ pub enum StoreError {
     /// An ontology error raised at the record seam (EN-F7 texts).
     #[error(transparent)]
     Ontology(#[from] crate::ontology::OntologyError),
-    /// A producer's edge set or derived artifact does not match its owner, layer, workspace
-    /// or source (a gazetteer set or a layer maintenance the store refuses), so the batch is
-    /// refused before any write. The text is the fixed class; the triple is caller data and
+    /// A producer's edge set or derived artifact does not match its producer, workspace or
+    /// source (a gazetteer set the store refuses), so the batch is refused before any write. The text is the fixed class; the triple is caller data and
     /// is not echoed.
     #[error("edge_set_refused")]
     EdgeSetRefused,
-    /// A batch assertion names a subject, span or object the batch's workspace does not hold (EN-S3, F17): unknown, purged or another tenant's; the whole
-    /// batch fails before any claim row is written. The id is echoed as the other
-    /// `NotFound` paths do (an id is control, not content).
-    #[error("assertion subject not found in the batch's workspace: {0}")]
-    AssertionSubjectNotFound(String),
-    /// A batch assertion's fixed-point input is out of range (EN-F12a: a `raw_score` above
-    /// 10000); nothing is written.
+    /// A fixed-point input is out of range (EN-F12a: a value above 10000); nothing is written.
     #[error(transparent)]
     Fixed(#[from] crate::FixedError),
-    /// A human edge claim (`link`, an inline link of `remember`) was recorded but its group
-    /// has no winner to materialise (a zero-confidence claim is `no_valid_support`), so no
-    /// edge exists; the rel is control, not content.
-    #[error("claim_rejected: no edge materialised for '{0}'")]
-    ClaimRejected(String),
-    /// A claim's `supersedes` is refused (OWN-86 (3); EN-F8): it names no claim of the
-    /// batch's workspace, a claim of another conflict group, or closes a cycle inside the
-    /// batch. The whole batch fails before any claim row is written; the text is the fixed
-    /// class, never the key.
-    #[error("{0}")]
-    SupersedesInvalid(SupersedesClass),
-}
-
-/// Why a claim's `supersedes` was refused ([`StoreError::SupersedesInvalid`]): a fixed class,
-/// so the refusal carries no key and no value.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive] // a later rule adds a class; match with a fallback arm
-pub enum SupersedesClass {
-    /// The key names no claim the batch's workspace holds: unknown, purged, or another
-    /// tenant's (one class for all three, so the refusal is no existence oracle across tenants).
-    NotFound,
-    /// The named claim is of another conflict group (workspace, claim class, subject, detail).
-    CrossGroup,
-    /// The batch's `supersedes` references form a cycle (A supersedes B supersedes A, or longer).
-    Cycle,
-}
-
-impl SupersedesClass {
-    /// The class as the refusal renders it.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::NotFound => "supersedes_not_found",
-            Self::CrossGroup => "supersedes_cross_group",
-            Self::Cycle => "supersedes_cycle",
-        }
-    }
-}
-
-impl std::fmt::Display for SupersedesClass {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
 }
 
 impl std::fmt::Debug for StoreError {
@@ -331,14 +281,7 @@ impl std::fmt::Debug for StoreError {
             }
             Self::Ontology(e) => f.debug_tuple("Ontology").field(e).finish(),
             Self::EdgeSetRefused => f.write_str("EdgeSetRefused"),
-            Self::AssertionSubjectNotFound(id) => {
-                f.debug_tuple("AssertionSubjectNotFound").field(id).finish()
-            }
             Self::Fixed(e) => f.debug_tuple("Fixed").field(e).finish(),
-            Self::ClaimRejected(rel) => f.debug_tuple("ClaimRejected").field(rel).finish(),
-            Self::SupersedesInvalid(class) => {
-                f.debug_tuple("SupersedesInvalid").field(class).finish()
-            }
         }
     }
 }

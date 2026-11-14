@@ -7,13 +7,14 @@
 //! `NodeState`, `Tenant`), the query helpers (`fts_expr`, `WS_COL`, `in_workspace`), the
 //! code-graph attach (`cg_read`) and every role-trait impl, which forwards the moved bodies:
 //! - `nodes.rs`: the `remember` workflow, node placement and upsert, the content hashes;
-//! - `claims.rs`: the policy rescan, forget, purge, reactivation;
+//! - `forget.rs`: forget, purge, reactivation;
+//! - `rescan.rs`: the policy rescan;
 //! - `batch.rs`: the `apply_batch` transaction and the edge diff.
 
 #[path = "artifacts.rs"]
 pub(crate) mod artifacts;
 mod batch;
-mod claims;
+mod forget;
 mod nodes;
 mod rescan;
 

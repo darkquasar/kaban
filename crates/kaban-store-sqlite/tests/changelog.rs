@@ -299,7 +299,7 @@ struct ProbeSink<'a> {
 
 impl Sink for ProbeSink<'_> {
     fn id(&self) -> SinkId {
-        SinkId::EXPORT
+        SinkId("export")
     }
     fn consume(&mut self, changes: &[Change]) -> kaban_core::Result<Ack> {
         self.seen.extend(changes.iter().map(|c| c.seq));

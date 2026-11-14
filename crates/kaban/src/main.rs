@@ -460,7 +460,6 @@ fn assemble_api_with(
             workspace,
             repo_root,
             repo,
-            record_signer_identity: false,
             engine: Arc::new(engine),
         },
     ))

@@ -129,8 +129,6 @@ pub(crate) fn store_exit_code(e: &StoreError) -> u8 {
         | StoreError::InvalidId(_)
         // EN-F7: an ontology error at the record seam is request-shaped like the kind errors
         | StoreError::Ontology(_)
-        // OWN-86 (3): a refused `supersedes` is request-shaped, a fixed class
-        | StoreError::SupersedesInvalid(_)
         // OWN-P: a database of another schema version is refused with guidance, request-shaped
         | StoreError::SchemaUnsupported { .. } => EXIT_INVALID,
         StoreError::NotFound(_) => EXIT_NOT_FOUND,

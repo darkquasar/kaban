@@ -39,7 +39,7 @@ pub use audit::{
 };
 // canonical JSON, `props_schema` validator subset (engine-plan E1.1)
 pub use canon::canonical_json;
-pub use error::{BackendSource, Result, StoreError, SupersedesClass};
+pub use error::{BackendSource, Result, StoreError};
 pub use ids::{InvalidNodeId, NodeId, new_id, now_iso};
 pub use lease::Lease;
 // `RuleSet` (engine-plan E1.4): the live EN-F4 ontology rules read from the loaded files

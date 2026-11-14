@@ -565,10 +565,6 @@ const FINISH_SCOPE: &str = "WITH records(rid) AS (
  SELECT e.src FROM edge e JOIN node d ON d.rid=e.dst
  WHERE d.id=?1 AND d.workspace_id=?2 AND e.workspace_id=?2 AND e.rel='DERIVED_FROM'
  AND e.layer LIKE 'extractor:%'
- UNION SELECT a.subject_rid FROM assertion a JOIN node d ON d.rid=a.object_rid
- WHERE d.id=?1 AND a.workspace_id=?2 AND a.source_id=?3 AND a.subject_kind='edge'
- AND a.predicate='DERIVED_FROM' AND a.method='ingest_submit' AND a.layer IN ('llm','gliner','script')
- AND json_extract(a.value,'$.owner')='kaban-parse'
 ), chunks(rid) AS (
  SELECT c.rid FROM node c JOIN edge cs ON cs.src=c.rid JOIN node s ON s.rid=cs.dst
  JOIN edge sd ON sd.src=s.rid JOIN node d ON d.rid=sd.dst
