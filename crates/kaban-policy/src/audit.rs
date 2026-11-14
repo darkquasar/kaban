@@ -1,30 +1,25 @@
-//! Audit signing and key management (core-spec S3). The chain of record is the `audit` table
-//! inside the SQLite database (`kaban-store-sqlite`); this module owns the HMAC key
-//! (`$KABAN_HOME/keys/<db-id>.key`, 0600, created once with `O_EXCL`; concurrent creators retry
-//! and reuse), the [`AuditSigner`] used by the store for the chain and by the service layer for
-//! `input_hmac` stubs, and the optional JSONL export (`--audit-export`), which is a copy for
-//! external shipping and not the chain of record.
+//! Keyed hashing and key management (core-spec S3). This module owns the per-database HMAC
+//! key (`$KABAN_HOME/keys/<db-id>.key`, 0600, created once with `O_EXCL`; concurrent creators
+//! retry and reuse) and the [`AuditSigner`] the service layer uses for keyed identities of
+//! gated material.
 
 use hmac::{Hmac, Mac};
-use kaban_core::AuditEntry;
-use serde_json::json;
 use sha2::Sha256;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
 use thiserror::Error;
 use zeroize::Zeroizing;
 
 /// Length of the HMAC key in bytes.
 pub const KEY_LEN: usize = 32;
 
-/// Why the audit key or export could not be initialised or written.
+/// Why the key could not be initialised.
 #[derive(Debug, Error)]
 pub enum AuditError {
-    /// Key file or export file I/O failed.
+    /// Key file I/O failed.
     #[error("audit i/o failed: {0}")]
     Io(#[from] std::io::Error),
     /// The OS random source failed while creating the key.
@@ -173,63 +168,4 @@ pub fn open_or_create_key(dir: &Path, db_id: &str) -> Result<Zeroizing<[u8; KEY_
         }
     }
     Err(AuditError::BadKeyLength { len: 0 })
-}
-
-/// Optional JSONL copy of audit entries for external shipping (`--audit-export`). Each line
-/// carries the entry (rule ids and keyed hashes only), a timestamp and a per-process line chain
-/// (`prev` = HMAC of the previous line). The chain of record is the database's `audit` table;
-/// export failures are logged by the caller and never reject a write.
-#[derive(Debug)]
-pub struct AuditExport {
-    path: PathBuf,
-    signer: Arc<dyn AuditSigner>,
-    prev: Mutex<String>,
-}
-
-impl AuditExport {
-    /// Export to `path` (created 0600, appended), chaining lines with `signer`.
-    pub fn new(path: PathBuf, signer: Arc<dyn AuditSigner>) -> Self {
-        Self {
-            path,
-            signer,
-            prev: Mutex::new("genesis".into()),
-        }
-    }
-
-    /// Append one line per entry and fsync.
-    ///
-    /// # Errors
-    /// `Io` when the file cannot be appended to or synced.
-    pub fn append(&self, entries: &[AuditEntry]) -> Result<(), AuditError> {
-        if entries.is_empty() {
-            return Ok(());
-        }
-        let mut prev = self
-            .prev
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let mut f = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .mode(0o600)
-            .open(&self.path)?;
-        if f.metadata()?.len() == 0 {
-            // just created (or still empty): exact 0600 whatever the umask (C2.5b, P-6)
-            f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-        }
-        for e in entries {
-            let line = json!({
-                "ts": kaban_core::now_iso(),
-                "op": e.op.as_str(), "tool": e.tool, "field": e.field,
-                "workspace_id": e.workspace_id, "policy_version": e.policy_version,
-                "input_hmac": e.input_hmac, "rules": e.rules, "node_id": e.node_id,
-                "prev": *prev,
-            })
-            .to_string();
-            writeln!(f, "{line}")?;
-            *prev = self.signer.hmac_hex(line.as_bytes());
-        }
-        f.sync_data()?;
-        Ok(())
-    }
 }

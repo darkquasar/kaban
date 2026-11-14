@@ -4669,25 +4669,6 @@ expression: tools
           ],
           "type": "object"
         },
-        "PairRef": {
-          "additionalProperties": false,
-          "description": "Exact counterpart of the core ER pair reference.",
-          "properties": {
-            "a": {
-              "description": "First requested node.",
-              "type": "string"
-            },
-            "b": {
-              "description": "Second requested node.",
-              "type": "string"
-            }
-          },
-          "required": [
-            "a",
-            "b"
-          ],
-          "type": "object"
-        },
         "TargetSchema": {
           "additionalProperties": false,
           "description": "Ontology-derived extractor contract, frozen in the job envelope.",
@@ -4864,14 +4845,6 @@ expression: tools
           "$ref": "#/$defs/TargetSchema",
           "description": "Frozen ontology-derived extractor schema."
         },
-        "uncertain_pairs": {
-          "default": [],
-          "description": "Explicit uncertain pairs, never inferred acceptance.",
-          "items": {
-            "$ref": "#/$defs/PairRef"
-          },
-          "type": "array"
-        },
         "with": {
           "$ref": "#/$defs/IngestDialect",
           "description": "Explicit extractor instruction dialect."
@@ -4889,7 +4862,6 @@ expression: tools
         "extractor_hints",
         "candidates",
         "about_candidates",
-        "uncertain_pairs",
         "next"
       ],
       "type": "object"
@@ -5183,14 +5155,6 @@ expression: tools
               "$ref": "#/$defs/TargetSchema",
               "description": "Frozen ontology-derived extractor schema."
             },
-            "uncertain_pairs": {
-              "default": [],
-              "description": "Explicit uncertain pairs, never inferred acceptance.",
-              "items": {
-                "$ref": "#/$defs/PairRef"
-              },
-              "type": "array"
-            },
             "with": {
               "$ref": "#/$defs/IngestDialect",
               "description": "Explicit extractor instruction dialect."
@@ -5208,7 +5172,6 @@ expression: tools
             "extractor_hints",
             "candidates",
             "about_candidates",
-            "uncertain_pairs",
             "next"
           ],
           "type": "object"
@@ -5512,25 +5475,6 @@ expression: tools
           },
           "required": [
             "job"
-          ],
-          "type": "object"
-        },
-        "PairRef": {
-          "additionalProperties": false,
-          "description": "Exact counterpart of the core ER pair reference.",
-          "properties": {
-            "a": {
-              "description": "First requested node.",
-              "type": "string"
-            },
-            "b": {
-              "description": "Second requested node.",
-              "type": "string"
-            }
-          },
-          "required": [
-            "a",
-            "b"
           ],
           "type": "object"
         },
@@ -6274,44 +6218,6 @@ expression: tools
           ],
           "type": "object"
         },
-        "PairJudgement": {
-          "additionalProperties": false,
-          "description": "Exact counterpart of core ER judgement; no invented confidence or authority.",
-          "properties": {
-            "pair": {
-              "$ref": "#/$defs/PairRef",
-              "description": "Pair requested by this brief."
-            },
-            "same": {
-              "description": "Whether the external judge considers it one entity.",
-              "type": "boolean"
-            }
-          },
-          "required": [
-            "pair",
-            "same"
-          ],
-          "type": "object"
-        },
-        "PairRef": {
-          "additionalProperties": false,
-          "description": "Exact counterpart of the core ER pair reference.",
-          "properties": {
-            "a": {
-              "description": "First requested node.",
-              "type": "string"
-            },
-            "b": {
-              "description": "Second requested node.",
-              "type": "string"
-            }
-          },
-          "required": [
-            "a",
-            "b"
-          ],
-          "type": "object"
-        },
         "RecordDraft": {
           "additionalProperties": false,
           "description": "Folded §4.1 record payload. No synthesized title or identity field.",
@@ -6433,14 +6339,6 @@ expression: tools
           "description": "AM-3 links to existing candidates.",
           "items": {
             "$ref": "#/$defs/LinkDraft"
-          },
-          "type": "array"
-        },
-        "pair_judgements": {
-          "default": [],
-          "description": "External pair judgements, normal-rank only; requested pairs only.",
-          "items": {
-            "$ref": "#/$defs/PairJudgement"
           },
           "type": "array"
         },
@@ -6639,16 +6537,6 @@ expression: tools
             {
               "const": "too_large",
               "description": "Payload exceeds its ceiling.",
-              "type": "string"
-            },
-            {
-              "const": "not_requested",
-              "description": "Pair was not requested by the authoritative brief.",
-              "type": "string"
-            },
-            {
-              "const": "duplicate",
-              "description": "Duplicate requested pair judgement.",
               "type": "string"
             }
           ]

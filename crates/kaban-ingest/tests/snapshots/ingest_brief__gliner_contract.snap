@@ -145,38 +145,6 @@ expression: "json!({\"instructions\":result.handling_plan.instructions,\"target_
           },
           "type": "array"
         },
-        "pair_judgements": {
-          "items": {
-            "additionalProperties": false,
-            "properties": {
-              "pair": {
-                "additionalProperties": false,
-                "properties": {
-                  "a": {
-                    "type": "string"
-                  },
-                  "b": {
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "a",
-                  "b"
-                ],
-                "type": "object"
-              },
-              "same": {
-                "type": "boolean"
-              }
-            },
-            "required": [
-              "pair",
-              "same"
-            ],
-            "type": "object"
-          },
-          "type": "array"
-        },
         "records": {
           "items": {
             "oneOf": [

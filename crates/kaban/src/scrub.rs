@@ -25,6 +25,7 @@ const RETIRED_FIELDS: &[&str] = &[
     "follow_anchors",
     "kind_set",
     "governance",
+    "pair_judgements",
 ];
 
 /// serde's `, expected ` separator: the expected shape follows the quoted value, so the LAST

@@ -80,10 +80,6 @@ pub enum IngestSkipReason {
     UnknownTarget,
     /// Payload exceeds its ceiling.
     TooLarge,
-    /// Pair was not requested by the authoritative brief.
-    NotRequested,
-    /// Duplicate requested pair judgement.
-    Duplicate,
 }
 
 /// Closed evidence drop vocabulary; invalid evidence does not discard the record.
@@ -338,26 +334,6 @@ pub struct LinkDraft {
     pub to_id: String,
 }
 
-/// Exact counterpart of the core ER pair reference.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct PairRef {
-    /// First requested node.
-    pub a: String,
-    /// Second requested node.
-    pub b: String,
-}
-
-/// Exact counterpart of core ER judgement; no invented confidence or authority.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct PairJudgement {
-    /// Pair requested by this brief.
-    pub pair: PairRef,
-    /// Whether the external judge considers it one entity.
-    pub same: bool,
-}
-
 /// Canonical `ingest_submit` body, also the sole source of extractor JSON Schema.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -382,9 +358,6 @@ pub struct StructuredReturn {
     /// Existing candidate node ids, not new records.
     #[serde(default)]
     pub about: Vec<String>,
-    /// External pair judgements, normal-rank only; requested pairs only.
-    #[serde(default)]
-    pub pair_judgements: Vec<PairJudgement>,
 }
 
 /// Canonical request name; no separate schema or duplicate payload definition.
@@ -707,9 +680,6 @@ pub struct IngestBrief {
     /// Existing candidate identities suitable for explicit about references.
     #[serde(default)]
     pub about_candidates: Vec<AboutCandidate>,
-    /// Explicit uncertain pairs, never inferred acceptance.
-    #[serde(default)]
-    pub uncertain_pairs: Vec<PairRef>,
     /// Suggested explicit continuation tool calls.
     pub next: Vec<IngestNextCall>,
 }

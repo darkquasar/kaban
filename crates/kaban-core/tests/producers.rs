@@ -1,8 +1,9 @@
 //! PC-16: the complete producer vocabulary round-trips by its stored spelling and matches the
-//! schema; the old layer and owner spellings are not producers.
+//! schema; the old layer and owner spellings are not producers. The edge method vocabulary
+//! lost the embedding and human-judgement methods with their producers.
 #![allow(clippy::unwrap_used)]
 
-use kaban_core::Producer;
+use kaban_core::{Method, Producer};
 
 #[test]
 fn complete_producer_vocabulary_round_trips_and_matches_schema() {
@@ -52,4 +53,16 @@ fn complete_producer_vocabulary_round_trips_and_matches_schema() {
         .map(|entry| entry.as_str().unwrap())
         .collect();
     assert_eq!(variants, expected);
+}
+
+#[test]
+fn the_retired_embed_and_human_methods_are_not_methods() {
+    for retired in ["embed", "human"] {
+        assert_eq!(Method::parse(retired), None, "{retired}");
+        assert!(
+            serde_json::from_str::<Method>(&format!("\"{retired}\"")).is_err(),
+            "{retired}"
+        );
+    }
+    assert_eq!(Method::parse("link"), Some(Method::Link));
 }

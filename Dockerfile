@@ -15,5 +15,5 @@ FROM scratch
 COPY --from=build /kaban /kaban
 COPY examples/policy.yaml /etc/kaban/policy.yaml
 VOLUME /data
-ENV KABAN_DB=/data/kaban.db KABAN_POLICY=/etc/kaban/policy.yaml KABAN_AUDIT_EXPORT=/data/audit.jsonl
+ENV KABAN_DB=/data/kaban.db KABAN_POLICY=/etc/kaban/policy.yaml
 ENTRYPOINT ["/kaban"]

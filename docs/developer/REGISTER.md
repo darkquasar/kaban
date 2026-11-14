@@ -59,8 +59,8 @@ the native stdio registration above for the local handoff.
   "args": ["run", "--rm", "-i", "-v", "kaban:/data", "kaban"] } } }
 ```
 `-i` is required (stdio); do not allocate a TTY. Mount your own policy with
-`-v /path/policy.yaml:/etc/kaban/policy.yaml:ro`. The image sets `KABAN_DB=/data/kaban.db`,
-`KABAN_POLICY=/etc/kaban/policy.yaml` and `KABAN_AUDIT_EXPORT=/data/audit.jsonl`.
+`-v /path/policy.yaml:/etc/kaban/policy.yaml:ro`. The image sets `KABAN_DB=/data/kaban.db` and
+`KABAN_POLICY=/etc/kaban/policy.yaml`.
 The image holds the `kaban` server only: no `kaban-index` and no SCIP indexer (OWN-68 SC-13,
 SC-11; the image refresh follows 3.0.0). Index on the host with the native `kaban-index`, and
 the container's `code_*` tools answer `no_snapshot` unless the host's `$KABAN_HOME/codegraph/`

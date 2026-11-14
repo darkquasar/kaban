@@ -323,38 +323,6 @@ expression: a
               },
               "type": "array"
             },
-            "pair_judgements": {
-              "items": {
-                "additionalProperties": false,
-                "properties": {
-                  "pair": {
-                    "additionalProperties": false,
-                    "properties": {
-                      "a": {
-                        "type": "string"
-                      },
-                      "b": {
-                        "type": "string"
-                      }
-                    },
-                    "required": [
-                      "a",
-                      "b"
-                    ],
-                    "type": "object"
-                  },
-                  "same": {
-                    "type": "boolean"
-                  }
-                },
-                "required": [
-                  "pair",
-                  "same"
-                ],
-                "type": "object"
-              },
-              "type": "array"
-            },
             "records": {
               "items": {
                 "oneOf": [
@@ -463,7 +431,6 @@ expression: a
         },
         "semantics": "Fill fields only from source text; absent fields stay absent; quotes are verbatim. Published props are restricted to declared non-internal fields, including empty props for undeclared schemas; core validation is unchanged."
       },
-      "uncertain_pairs": [],
       "with": "gliner"
     },
     "hierarchy": {
@@ -992,38 +959,6 @@ expression: a
               },
               "type": "array"
             },
-            "pair_judgements": {
-              "items": {
-                "additionalProperties": false,
-                "properties": {
-                  "pair": {
-                    "additionalProperties": false,
-                    "properties": {
-                      "a": {
-                        "type": "string"
-                      },
-                      "b": {
-                        "type": "string"
-                      }
-                    },
-                    "required": [
-                      "a",
-                      "b"
-                    ],
-                    "type": "object"
-                  },
-                  "same": {
-                    "type": "boolean"
-                  }
-                },
-                "required": [
-                  "pair",
-                  "same"
-                ],
-                "type": "object"
-              },
-              "type": "array"
-            },
             "records": {
               "items": {
                 "oneOf": [
@@ -1240,7 +1175,6 @@ expression: a
         },
         "semantics": "Fill fields only from source text; absent fields stay absent; quotes are verbatim. Published props are restricted to declared non-internal fields, including empty props for undeclared schemas; core validation is unchanged."
       },
-      "uncertain_pairs": [],
       "with": "llm"
     },
     "decision": "@14",
@@ -1781,38 +1715,6 @@ expression: a
               },
               "type": "array"
             },
-            "pair_judgements": {
-              "items": {
-                "additionalProperties": false,
-                "properties": {
-                  "pair": {
-                    "additionalProperties": false,
-                    "properties": {
-                      "a": {
-                        "type": "string"
-                      },
-                      "b": {
-                        "type": "string"
-                      }
-                    },
-                    "required": [
-                      "a",
-                      "b"
-                    ],
-                    "type": "object"
-                  },
-                  "same": {
-                    "type": "boolean"
-                  }
-                },
-                "required": [
-                  "pair",
-                  "same"
-                ],
-                "type": "object"
-              },
-              "type": "array"
-            },
             "records": {
               "items": {
                 "oneOf": [
@@ -1921,7 +1823,6 @@ expression: a
         },
         "semantics": "Fill fields only from source text; absent fields stay absent; quotes are verbatim. Published props are restricted to declared non-internal fields, including empty props for undeclared schemas; core validation is unchanged."
       },
-      "uncertain_pairs": [],
       "with": "gliner"
     },
     "mentions": {

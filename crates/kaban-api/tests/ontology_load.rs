@@ -262,7 +262,7 @@ impl Repo {
             .len()
     }
 
-    /// Every byte of the database, its WAL and its audit export side (what a leak would land
+    /// Every byte of the database and its WAL and shared-memory sides (what a leak would land
     /// in), as one lossy string.
     fn disk_bytes(&self) -> String {
         let mut all = Vec::new();

@@ -1,35 +1,7 @@
-//! The write context every store write takes (REC-06), the workspace and actor identities, and
-//! the denylist verdict record the ingest gate and the JSONL audit writer of `kaban-policy`
-//! share (rule ids, field names, keyed hashes; never the offending value).
+//! The write context every store write takes (REC-06) and the workspace and actor identities.
 
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
-
-/// Which gated operation an audit row records.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum AuditOp {
-    /// The denylist refused a write; nothing was stored.
-    Reject,
-    /// A redact-action hit was masked before storing or returning.
-    Redact,
-    /// A node was invalidated or archived.
-    Forget,
-    /// A node was purged (destructive).
-    Purge,
-}
-
-impl AuditOp {
-    /// Stable lowercase name used in the `audit.op` column and exports.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Reject => "reject",
-            Self::Redact => "redact",
-            Self::Forget => "forget",
-            Self::Purge => "purge",
-        }
-    }
-}
 
 /// Workspace identifier (core-spec S6). Plain string newtype; `"*"` is the explicit wildcard
 /// on reads and never a stored value.
@@ -132,29 +104,6 @@ impl std::fmt::Display for ActorId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[error("an actor id is 1 to {max} bytes without whitespace or control characters", max = ActorId::MAX_LEN)]
 pub struct InvalidActorId;
-
-/// One audit record. Carries rule ids, field names and keyed hashes only.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AuditEntry {
-    /// What happened.
-    pub op: AuditOp,
-    /// Tool or entry point (`remember`, `read`, `forget`, ...).
-    pub tool: String,
-    /// Field that was gated (`text`, `props`, `all`, ...).
-    pub field: String,
-    /// Workspace of the write.
-    pub workspace_id: WorkspaceId,
-    /// Effective policy version that produced the verdict.
-    pub policy_version: String,
-    /// `HMAC(audit_key, input)` of the gated string (a stub that cannot confirm a guess).
-    pub input_hmac: String,
-    /// Rule ids that fired.
-    pub rules: Vec<String>,
-    /// Node the entry refers to, when known. Read-path entries are deduplicated per
-    /// `(node_id, policy_version)`; write-path entries carry `None` before the id exists.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub node_id: Option<String>,
-}
 
 /// How hard a write's commit waits for the disk (REC-06 write context, plan T3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

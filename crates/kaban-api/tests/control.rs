@@ -35,8 +35,7 @@ fn ingest_submit_control_ids_and_closed_report_values_are_registered() {
     api.prepare_args(
         "ingest_submit",
         &json!({"job":"a".repeat(64),"records":[{"evidence":[{"chunk_id":id}]}],
-        "edges":[{"to_id":id}],"links":[{"to_id":id}],"about":[id],
-        "pair_judgements":[{"pair":{"a":id,"b":id},"same":true}]}),
+        "edges":[{"to_id":id}],"links":[{"to_id":id}],"about":[id]}),
     )
     .unwrap();
     assert!(

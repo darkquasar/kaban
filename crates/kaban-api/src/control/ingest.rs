@@ -176,18 +176,6 @@ pub(super) const ROWS: &[ControlEntry] = &[
     entry(
         "ingest_claim",
         Direction::Response,
-        "brief.uncertain_pairs[].a",
-        Shape::NodeId,
-    ),
-    entry(
-        "ingest_claim",
-        Direction::Response,
-        "brief.uncertain_pairs[].b",
-        Shape::NodeId,
-    ),
-    entry(
-        "ingest_claim",
-        Direction::Response,
         "brief.next[].tool",
         Shape::Enum(&["ingest_next", "ingest_brief"]),
     ),
@@ -318,18 +306,6 @@ pub(super) const ROWS: &[ControlEntry] = &[
     ),
     entry(
         "ingest_submit",
-        Direction::Request,
-        "pair_judgements[].pair.a",
-        Shape::NodeId,
-    ),
-    entry(
-        "ingest_submit",
-        Direction::Request,
-        "pair_judgements[].pair.b",
-        Shape::NodeId,
-    ),
-    entry(
-        "ingest_submit",
         Direction::Response,
         "job",
         Shape::Hex { min: 64, max: 64 },
@@ -366,8 +342,6 @@ pub(super) const ROWS: &[ControlEntry] = &[
             "unknown_ref",
             "unknown_target",
             "too_large",
-            "not_requested",
-            "duplicate",
         ]),
     ),
     entry(
@@ -466,18 +440,6 @@ pub(super) const ROWS: &[ControlEntry] = &[
         "ingest_brief",
         Direction::Response,
         "about_candidates[].id",
-        Shape::NodeId,
-    ),
-    entry(
-        "ingest_brief",
-        Direction::Response,
-        "uncertain_pairs[].a",
-        Shape::NodeId,
-    ),
-    entry(
-        "ingest_brief",
-        Direction::Response,
-        "uncertain_pairs[].b",
         Shape::NodeId,
     ),
     entry(

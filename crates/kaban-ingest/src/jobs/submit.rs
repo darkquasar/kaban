@@ -335,10 +335,6 @@ pub async fn submit(api: &KabanApi, root: &Path, raw: Value) -> Result<Value, Jo
             skip(&mut skipped, "", "unknown_target", None);
         }
     }
-    // The brief requests no uncertain pairs, so every returned judgement is unsolicited.
-    for _ in &ret.pair_judgements {
-        skip(&mut skipped, "", "not_requested", None);
-    }
     // every edge of the submission names its extractor producer (by dialect), method and
     // score, which the store moves to the producer, `method` and `score` columns (EN-F22). Outgoing
     // record and provenance edges score their source record's confidence, evidence citations

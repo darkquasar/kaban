@@ -34,9 +34,7 @@ pub use artifact::{
     ArtifactDiagnostics, ArtifactKey, ArtifactSource, BuiltinProducer, DerivedArtifact,
     GazetteerClaimSet, SourceRev, artifact_key,
 };
-pub use audit::{
-    Actor, ActorId, AuditEntry, AuditOp, Durability, InvalidActorId, WorkspaceId, WriteCtx,
-};
+pub use audit::{Actor, ActorId, Durability, InvalidActorId, WorkspaceId, WriteCtx};
 // canonical JSON, `props_schema` validator subset (engine-plan E1.1)
 pub use canon::canonical_json;
 pub use error::{BackendSource, Result, StoreError};
