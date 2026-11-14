@@ -345,12 +345,7 @@ fn two_namespaces_may_declare_vendor_and_a_bare_vendor_from_a_third_file_is_ambi
         vec!["props.counterparty".to_owned(), "props.region".to_owned()]
     );
     let rel = &o.rels[&q("contracts", "SIGNED_WITH")];
-    assert_eq!(
-        rel.to,
-        vec![kaban_core::ontology::resolve::RelEnd::Kind(q(
-            "vendors", "Vendor"
-        ))]
-    );
+    assert_eq!(rel.to, vec![q("vendors", "Vendor")]);
     // the merged schema validates like any E1.1 schema
     let errors = kaban_core::validate(&contract.props_schema, &serde_json::json!({"signed_at": 1}));
     assert_eq!(
@@ -679,4 +674,20 @@ fn a_rules_block_loads_with_display_and_dedup() {
     let set = kaban_core::RuleSet::from_ontology(&o);
     assert!(set.dedups("shop:Plan") && !set.dedups("shop:Note"));
     assert!(set.archives_on_link("shop:REPLACES"));
+}
+
+/// The `path` endpoint literal went with path scoping (PC-20 item 4): a rel ending at `path`
+/// names an undeclared kind and is refused with the field path.
+#[test]
+fn a_rel_ending_at_the_removed_path_literal_is_refused() {
+    let text = "ontology: shop\nversion: 1\nkinds:\n  Thing: {description: t}\nrels:\n  COVERS: {from: [Thing], to: [path], directed: true}\n";
+    let err = resolve(
+        &[OntologyFile::from_yaml(text).unwrap()],
+        &NamespaceSet::new(),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(&err, OntologyError::UnknownKind { path } if path == "rels.COVERS.to"),
+        "{err:?}"
+    );
 }

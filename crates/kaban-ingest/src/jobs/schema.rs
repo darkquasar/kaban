@@ -68,16 +68,11 @@ pub fn target_schema(
         .values()
         .filter(|rel| !kaban_core::is_lifecycle_rel(&rel.id.name) && rel.on_link.is_none())
     {
-        let ends = |ends: &[kaban_core::ontology::resolve::RelEnd]| -> Vec<String> {
+        let ends = |ends: &[kaban_core::Qualified]| -> Vec<String> {
             if ends.is_empty() {
                 return names.clone();
             }
-            ends.iter()
-                .filter_map(|end| match end {
-                    kaban_core::ontology::resolve::RelEnd::Kind(id) => Some(stored_name(id)),
-                    kaban_core::ontology::resolve::RelEnd::Path => None,
-                })
-                .collect()
+            ends.iter().map(stored_name).collect()
         };
         for from in ends(&rel.from) {
             for to in ends(&rel.to) {

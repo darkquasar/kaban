@@ -1,10 +1,10 @@
 ---
 title: "Kaban"
-description: "Local memory and code context for coding agents, with explicit human governance."
+description: "Local memory and code context for coding agents."
 ---
 
 Kaban helps a coding agent remember what your project learned, why a decision was
-made, and which records govern a file it is about to edit. It is useful when
+made, and which records apply to a file it is about to edit. It is useful when
 sessions are short but the project's reasoning needs to survive them.
 
 Records and typed relationships live in a local SQLite graph. Full-text search
@@ -15,14 +15,15 @@ over stdio. There is no HTTP daemon or hosted model behind it.
 ## A concrete workflow
 
 Suppose a team chooses SQLite for its integration database. A Fact can record
-where it is used. A Decision can retain the rationale and govern `src/storage/**`.
+where it is used. A Decision can retain the rationale with the path scope `src/storage/**`.
 An agent recalls it before changing `src/storage/db.rs` and receives the
 recorded rationale instead of guessing from old chat history. A later Failure can record a migration problem, with a linked
 Improvement preserving how it was fixed.
 
-Human-governed memory is more than a collection of notes: proposals, acceptance,
-supersession and provenance distinguish what was suggested from what a person
-approved. A successful extraction is not human acceptance.
+Memory is more than a collection of notes: typed relationships, supersession and
+provenance record what replaced what and which producer wrote each edge. Every
+write, including extractor output, is an active record at once; there is no review
+queue, so what an agent stores is what later recall returns.
 
 ## Three sources of context
 

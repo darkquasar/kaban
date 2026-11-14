@@ -106,15 +106,6 @@ impl FromIterator<Ns> for NamespaceSet {
     }
 }
 
-/// One end of a relationship: a kind or the `path` literal.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RelEnd {
-    /// A resolved kind.
-    Kind(Qualified),
-    /// The literal `path` (a `GOVERNS` target).
-    Path,
-}
-
 /// A kind after inheritance and mixins.
 #[derive(Debug, Clone)]
 pub struct ResolvedKind {
@@ -147,10 +138,10 @@ pub struct ResolvedKind {
 pub struct ResolvedRel {
     /// Identity.
     pub id: Qualified,
-    /// Allowed sources (empty = any).
-    pub from: Vec<RelEnd>,
-    /// Allowed targets (empty = any).
-    pub to: Vec<RelEnd>,
+    /// Allowed source kinds (empty = any).
+    pub from: Vec<Qualified>,
+    /// Allowed target kinds (empty = any).
+    pub to: Vec<Qualified>,
     /// Directed edge.
     pub directed: bool,
     /// Human description.
@@ -459,18 +450,10 @@ pub fn resolve_with(
             .ok_or_else(|| file_error(&path("from")))?;
         let to = body.to.as_ref().ok_or_else(|| file_error(&path("to")))?;
         let directed = body.directed.ok_or_else(|| file_error(&path("directed")))?;
-        let ends = |names: &[String], key: &str| -> Result<Vec<RelEnd>, OntologyError> {
-            let allow_path = key == "to";
+        let ends = |names: &[String], key: &str| -> Result<Vec<Qualified>, OntologyError> {
             names
                 .iter()
-                .map(|name| {
-                    if allow_path && name == "path" {
-                        Ok(RelEnd::Path)
-                    } else {
-                        decl.lookup(&q.ns, name, &path(key), &decl.kinds)
-                            .map(RelEnd::Kind)
-                    }
-                })
+                .map(|name| decl.lookup(&q.ns, name, &path(key), &decl.kinds))
                 .collect()
         };
         ontology.rels.insert(

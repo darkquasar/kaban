@@ -13,7 +13,6 @@
 
 use crate::rows::row_typedef;
 use crate::sql_error::SqlResultExt;
-use kaban_core::ontology::resolve::RelEnd;
 use kaban_core::{
     Qualified, Result, StoreError, TypeDeclaration, TypeDef, split_stored, stored_name,
 };
@@ -120,15 +119,10 @@ fn format_stored(ns: &str, name: &str) -> String {
     }
 }
 
-fn json_ends(ends: &[RelEnd]) -> String {
+fn json_ends(ends: &[Qualified]) -> String {
     serde_json::Value::Array(
         ends.iter()
-            .map(|e| {
-                serde_json::Value::String(match e {
-                    RelEnd::Kind(q) => stored_name(q),
-                    RelEnd::Path => "path".to_owned(),
-                })
-            })
+            .map(|q| serde_json::Value::String(stored_name(q)))
             .collect(),
     )
     .to_string()

@@ -17,7 +17,6 @@
 mod common;
 
 use common::{Scratch, ctx, nid};
-use kaban_core::ontology::resolve::RelEnd;
 use kaban_core::{
     IngestStore, LinkReq, MemoryStore, NamespaceSet, NewNode, Node, Qualified, RememberOutcome,
     RuleSet, SchemaStore, TraverseDirection, TraverseQuery, TypeDeclaration, TypeDef, WorkspaceId,
@@ -74,14 +73,7 @@ fn declare_ontologies(store: &SqliteStore) -> Arc<RuleSet> {
     files.push(kaban_core::OntologyFile::from_yaml(SHOP_YAML).unwrap());
     let ontology = resolve(&files, &NamespaceSet::new()).unwrap();
     let user = |q: &Qualified| matches!(q.ns.as_str(), "ops" | "shop");
-    let ends = |ends: &[RelEnd]| -> Vec<String> {
-        ends.iter()
-            .filter_map(|end| match end {
-                RelEnd::Kind(q) => Some(stored_name(q)),
-                RelEnd::Path => None,
-            })
-            .collect()
-    };
+    let ends = |ends: &[Qualified]| -> Vec<String> { ends.iter().map(stored_name).collect() };
     for kind in ontology.kinds.values().filter(|k| user(&k.id)) {
         store
             .schema_extend(TypeDef {

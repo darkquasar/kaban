@@ -17,8 +17,8 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 
-use kaban_core::ontology::meta::{OnLink, Rules};
-use kaban_core::ontology::resolve::{RelEnd, ResolvedKind, resolve_with};
+use kaban_core::ontology::meta::Rules;
+use kaban_core::ontology::resolve::{ResolvedKind, resolve_with};
 use kaban_core::{
     NamespaceSet, Ns, Ontology, OntologyError, OntologyFile, Qualified, RuleSet, TypeDef,
     ValidatorLimits, stored_name,
@@ -446,17 +446,6 @@ impl OntologyRegistry {
     pub fn rule_set(&self) -> Arc<RuleSet> {
         Arc::clone(&self.read().rules)
     }
-
-    /// Every rel with an `on_link` side effect, by stored name.
-    pub fn rels_with_on_link(&self) -> Vec<(String, OnLink)> {
-        let state = self.read();
-        state
-            .ontology
-            .rels
-            .values()
-            .filter_map(|r| r.on_link.map(|on| (stored_name(&r.id), on)))
-            .collect()
-    }
 }
 
 /// Validate a write's `props` against the `props_schema` of `kind` in the registry (engine-spec
@@ -579,15 +568,7 @@ fn check_builtin_immutable(file: &Loaded) -> Result<(), ApiError> {
 /// the namespace's hash and version. The hash is written last, so a partial write never reads
 /// as a completed load: the next load repeats the upserts.
 fn write_namespace(api: &KabanApi, ontology: &Ontology, file: &Loaded) -> Result<(), ApiError> {
-    let ends = |ends: &[RelEnd]| -> Vec<String> {
-        ends.iter()
-            .filter_map(|end| match end {
-                RelEnd::Kind(q) => Some(stored_name(q)),
-                // the `path` literal has no `schema_type` row before 0004 (as the seeds)
-                RelEnd::Path => None,
-            })
-            .collect()
-    };
+    let ends = |ends: &[Qualified]| -> Vec<String> { ends.iter().map(stored_name).collect() };
     for kind in ontology.kinds.values().filter(|k| k.id.ns == file.ns) {
         api.store.schema_extend(TypeDef {
             kind: "label".into(),
