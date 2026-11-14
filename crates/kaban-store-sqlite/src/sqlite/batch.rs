@@ -64,8 +64,12 @@ impl SqliteStore {
                 let named: BTreeSet<_> = current.named_edges.iter().cloned().collect();
                 for (src, dst, rel, src_id, dst_id) in population.edges {
                     if !named.contains(&(src_id, dst_id, rel.clone())) {
-                        // Delete only an owned remainder; never a human/foreign replacement.
-                        tx.execute("DELETE FROM edge WHERE src=?1 AND dst=?2 AND rel=?3 AND layer LIKE 'extractor:%'",params![src,dst,rel]).sql()?;
+                        // Delete only the job's own producer's remainder, never another's row.
+                        tx.execute(
+                            "DELETE FROM edge WHERE src=?1 AND dst=?2 AND rel=?3 AND layer=?4",
+                            params![src, dst, rel, population.producer.as_str()],
+                        )
+                        .sql()?;
                         let remains: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM edge WHERE src=?1 AND dst=?2 AND rel=?3)",params![src,dst,rel],|r|r.get(0)).sql()?;
                         if !remains {
                             outcome.deleted_edges += 1;

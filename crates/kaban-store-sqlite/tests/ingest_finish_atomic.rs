@@ -19,6 +19,7 @@ struct Fixture {
     old_chunk: NodeId,
     record: NodeId,
     orphan: NodeId,
+    target: NodeId,
     ctx: WriteCtx,
     rev: SourceRev,
 }
@@ -44,14 +45,14 @@ fn edge(src: &NodeId, dst: &NodeId, rel: &str, props: Value) -> Op {
     }
 }
 
-/// A submission edge as structured submit writes it: under the `extractor:llm` producer,
-/// scored, with the source lineage in the `source_id` column.
-fn parse_edge(src: &NodeId, dst: &NodeId, rel: &str) -> Op {
+/// A submission edge as structured submit writes it: under the extractor producer of
+/// `dialect`, scored, with the source lineage in the `source_id` column.
+fn submitted_edge(dialect: &str, src: &NodeId, dst: &NodeId, rel: &str) -> Op {
     edge(
         src,
         dst,
         rel,
-        json!({"producer":"extractor:llm","method":"ingest_submit","score":10000,"source_id":"di-not-node"}),
+        json!({"producer":format!("extractor:{dialect}"),"method":"ingest_submit","score":10000,"source_id":"di-not-node"}),
     )
 }
 
@@ -60,6 +61,12 @@ fn parse_edge(src: &NodeId, dst: &NodeId, rel: &str) -> Op {
 /// orphan's provenance, an unnamed `record -> target` edge and the earlier chunk's evidence for
 /// the orphan.
 fn fixture() -> Fixture {
+    fixture_for("llm")
+}
+
+/// [`fixture`] with the job and its four submission edges under the extractor `dialect`.
+fn fixture_for(dialect: &str) -> Fixture {
+    let parse_edge = |src: &NodeId, dst: &NodeId, rel: &str| submitted_edge(dialect, src, dst, rel);
     let store = SqliteStore::open_memory().unwrap();
     let ctx = WriteCtx::new(WorkspaceId::default(), Actor::Agent);
     let (document, chunk, old_chunk, section, record, orphan, target) = (
@@ -119,7 +126,7 @@ fn fixture() -> Fixture {
         pipeline_version: "1".into(),
         chunk_config_hash: "chunks".into(),
         mode: "structured".into(),
-        dialect: "llm".into(),
+        dialect: dialect.into(),
         doc_type: "generic".into(),
         kinds: vec!["Fact".into()],
         plan_json: json!({"v":1,"document_id":document,"chunks":[{"id":chunk}],"submit_state":{"named_records":[record]},"finished_report_json":null}).to_string(),
@@ -143,6 +150,7 @@ fn fixture() -> Fixture {
         old_chunk,
         record,
         orphan,
+        target,
         ctx,
         rev,
     }
@@ -342,4 +350,115 @@ fn historical_chunk_evidence_is_deleted_after_the_prior_finished_job_is_pruned()
     let report = finish(&f, 100);
     assert_eq!(report["deleted"], 3, "{report}");
     assert!(!rels(&f).iter().any(|rel| rel == "EVIDENCE_FOR"));
+}
+
+/// Every edge touching a fixture node, keyed by `(src, dst, rel)`, as comparable JSON.
+fn all_edges(f: &Fixture) -> std::collections::BTreeMap<(String, String, String), Value> {
+    f.store
+        .traverse(&TraverseQuery {
+            start_ids: vec![
+                f.document.clone(),
+                f.chunk.clone(),
+                f.old_chunk.clone(),
+                f.record.clone(),
+                f.orphan.clone(),
+                f.target.clone(),
+            ],
+            max_depth: 1,
+            ..Default::default()
+        })
+        .unwrap()
+        .edges
+        .into_iter()
+        .map(|e| {
+            (
+                (e.src.clone(), e.dst.clone(), e.rel.clone()),
+                serde_json::to_value(e).unwrap(),
+            )
+        })
+        .collect()
+}
+
+fn key(src: &NodeId, dst: &NodeId, rel: &str) -> (String, String, String) {
+    (src.to_string(), dst.to_string(), rel.into())
+}
+
+/// PC-20 (2) producer isolation across extractor dialects on one source: a finish deletes only
+/// its own producer's omitted rows. Each ordering writes the first producer's fixture, then a
+/// second producer's rows over the same records (its own provenance for `target`, relations out
+/// of the first producer's `record`, evidence from both chunks), finishes the first job, then
+/// opens and finishes a job of the second dialect that names one of its rows.
+#[test]
+fn a_finish_never_deletes_another_extractor_producers_rows() {
+    for (first, second) in [("llm", "gliner"), ("gliner", "llm")] {
+        let mut f = fixture_for(first);
+        let theirs = vec![
+            submitted_edge(second, &f.target, &f.document, "DERIVED_FROM"),
+            submitted_edge(second, &f.record, &f.orphan, "RELATES_TO"),
+            submitted_edge(second, &f.target, &f.record, "RELATES_TO"),
+            submitted_edge(second, &f.chunk, &f.record, "EVIDENCE_FOR"),
+            submitted_edge(second, &f.old_chunk, &f.target, "EVIDENCE_FOR"),
+        ];
+        let their_keys = [
+            key(&f.target, &f.document, "DERIVED_FROM"),
+            key(&f.record, &f.orphan, "RELATES_TO"),
+            key(&f.target, &f.record, "RELATES_TO"),
+            key(&f.chunk, &f.record, "EVIDENCE_FOR"),
+            key(&f.old_chunk, &f.target, "EVIDENCE_FOR"),
+        ];
+        let mut batch = WriteBatch::new(f.ctx.workspace_id.clone(), theirs);
+        batch.edge_diff = EdgeDiff::None;
+        f.store.apply_batch(batch, &f.ctx).unwrap();
+        let before = all_edges(&f);
+        let report = finish(&f, 100);
+        assert_eq!(report["deleted"], 3, "{first} then {second}: {report}");
+        let after = all_edges(&f);
+        for k in &their_keys {
+            assert_eq!(
+                after.get(k),
+                before.get(k),
+                "{first} finish kept {second}'s row {k:?} byte for byte"
+            );
+        }
+        let mine = key(&f.record, &f.document, "DERIVED_FROM");
+        assert!(after.contains_key(&mine), "{first}'s named row stays");
+        for k in [
+            key(&f.orphan, &f.document, "DERIVED_FROM"),
+            key(&f.record, &f.target, "RELATES_TO"),
+            key(&f.old_chunk, &f.orphan, "EVIDENCE_FOR"),
+        ] {
+            assert!(
+                !after.contains_key(&k),
+                "{first}'s omitted row {k:?} is gone"
+            );
+        }
+
+        let mut other = f.job.clone();
+        other.job = JobId::from_digest(&[12; 32]);
+        other.dialect = second.into();
+        other.plan_json = json!({"v":1,"document_id":f.document,"chunks":[{"id":f.chunk}],"submit_state":{"named_records":[]},"finished_report_json":null}).to_string();
+        other.named_edges = vec![(
+            f.chunk.to_string(),
+            f.record.to_string(),
+            "EVIDENCE_FOR".into(),
+        )];
+        f.store.job_open(&other).unwrap();
+        f.job = other;
+        let report = finish(&f, 100);
+        assert_eq!(report["deleted"], 4, "{second} after {first}: {report}");
+        let last = all_edges(&f);
+        assert_eq!(
+            last.get(&mine),
+            after.get(&mine),
+            "{second} finish kept {first}'s row byte for byte"
+        );
+        assert!(last.contains_key(&key(&f.chunk, &f.record, "EVIDENCE_FOR")));
+        for k in &their_keys[..3] {
+            assert!(
+                !last.contains_key(k),
+                "{second}'s omitted row {k:?} is gone"
+            );
+        }
+        assert!(!last.contains_key(&their_keys[4]));
+    }
 }

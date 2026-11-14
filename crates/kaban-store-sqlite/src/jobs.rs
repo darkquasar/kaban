@@ -579,8 +579,10 @@ const FINISH_SCOPE: &str = "WITH records(rid) AS (
 
 type FinishEdge = (i64, i64, String, String, String);
 
-/// Bounded complete population, collected before any retirement or edge deletion.
+/// Bounded complete population, collected before any retirement or edge deletion. Its edges
+/// are the job's own producer's: shared scope discovery grants no shared deletion (PC-20 (2)).
 pub(crate) struct FinishPopulation {
+    pub(crate) producer: kaban_core::Producer,
     pub(crate) edges: Vec<FinishEdge>,
     pub(crate) skipped_cap: bool,
 }
@@ -597,6 +599,7 @@ pub(crate) fn finish_population(
             .cloned()
             .unwrap_or_else(|| serde_json::json!([])),
     )?;
+    let producer = layer(&job.dialect)?;
     let limit = i64::from(request.finish_cap) + 1;
     let args = params![
         request.document.as_str(),
@@ -607,10 +610,16 @@ pub(crate) fn finish_population(
     let edges = conn.prepare(&format!("{FINISH_SCOPE}
         SELECT e.src,e.dst,e.rel,s.id,d.id FROM edge e JOIN node s ON s.rid=e.src JOIN node d ON d.rid=e.dst
         WHERE e.workspace_id=?2 AND s.workspace_id=?2 AND d.workspace_id=?2
-        AND e.layer LIKE 'extractor:%'
+        AND e.layer=?5
         AND (e.source_id IS NULL OR e.source_id=?3)
         AND (e.src IN records OR (e.rel='EVIDENCE_FOR' AND e.src IN chunks))
-        ORDER BY s.id,d.id,e.rel LIMIT ?4")).sql()?.query_map(args, |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).sql()?.collect::<rusqlite::Result<Vec<FinishEdge>>>().sql()?;
+        ORDER BY s.id,d.id,e.rel LIMIT ?4")).sql()?.query_map(params![
+        request.document.as_str(),
+        job.workspace.as_str(),
+        job.source_id,
+        limit,
+        producer.as_str()
+    ], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).sql()?.collect::<rusqlite::Result<Vec<FinishEdge>>>().sql()?;
     let scoped_records = conn
         .prepare(&format!(
             "{FINISH_SCOPE}
@@ -636,5 +645,9 @@ pub(crate) fn finish_population(
     all_records.extend(scoped_records);
     let skipped_cap = plan["submit_state"]["overflow"].as_bool().unwrap_or(false)
         || names.len().saturating_add(all_records.len()) > request.finish_cap as usize;
-    Ok(FinishPopulation { edges, skipped_cap })
+    Ok(FinishPopulation {
+        producer,
+        edges,
+        skipped_cap,
+    })
 }
