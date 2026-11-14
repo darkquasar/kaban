@@ -471,9 +471,7 @@ kinds:
   Runbook:
     description: "An operational runbook."
     props_schema: {type: object, additionalProperties: false, properties: {owner: {type: string}}}
-    governed: {acceptance: human, serialize: {dir: runbooks, format: md-frontmatter},
-               export: {digest: true, marker: false, heading: Runbooks}, display: {label: Runbook, plural: Runbooks},
-               governs_paths: true, dedup: none}
+    rules: {display: {label: Runbook, plural: Runbooks}, dedup: title+scope}
   Service:
     description: "A deployed service."
 rels:
@@ -488,7 +486,7 @@ rels:
     ont_file("ops.yaml", ONT_YAML)
     r = in_tmp("ontology", "load", "ops.yaml")
     v = one_json(r) or {}
-    check(r.returncode == 0 and (v.get("ns"), v.get("version"), v.get("kinds"), v.get("rels"), v.get("changed")) == ("ops", 1, 2, 1, True) and len(v.get("hash", "")) == 64, f"e1: ontology load of a user file (one governed kind, one plain kind, one rel) writes the namespace: {v}")
+    check(r.returncode == 0 and (v.get("ns"), v.get("version"), v.get("kinds"), v.get("rels"), v.get("changed")) == ("ops", 1, 2, 1, True) and len(v.get("hash", "")) == 64, f"e1: ontology load of a user file (one kind with rules, one plain kind, one rel) writes the namespace: {v}")
     # the same bytes under `.kaban/ontology/` so every later process in the repository starts with the namespace (EN-F2)
     os.makedirs(os.path.join(kdir, "ontology"), exist_ok=True)
     shutil.copyfile(os.path.join(tmp, "ops.yaml"), os.path.join(kdir, "ontology", "ops.yaml"))
@@ -532,7 +530,7 @@ rels:
     labels = {l["name"]: l for l in sd.get("labels", [])}
     rels = {x["name"]: x for x in sd.get("relationships", [])}
     runbook = labels.get("ops:Runbook", {}); service = labels.get("ops:Service", {})
-    check(not e and runbook.get("ns") == "ops" and runbook.get("builtin") is False and runbook.get("governed", {}).get("acceptance") == "human" and runbook.get("governed", {}).get("serialize") == {"dir": "runbooks", "format": "md-frontmatter"} and runbook.get("display", {}).get("label") == "Runbook" and service.get("ns") == "ops" and "governed" not in service, f"e1: schema_describe lists the loaded kinds with ns and the declaration columns (E1.8 R2): {runbook.get('ns')}, {sorted(runbook.get('governed', {}))}")
+    check(not e and runbook.get("ns") == "ops" and runbook.get("builtin") is False and runbook.get("rules", {}).get("dedup") == "title+scope" and runbook.get("display", {}).get("label") == "Runbook" and service.get("ns") == "ops" and "rules" not in service, f"e1: schema_describe lists the loaded kinds with ns and the declaration columns (E1.8 R2): {runbook.get('ns')}, {sorted(runbook.get('rules', {}))}")
     check(rels.get("ops:OPERATES", {}).get("ns") == "ops" and rels.get("ops:OPERATES", {}).get("from_kinds") == ["ops:Service"] and rels.get("ops:OPERATES", {}).get("to_kinds") == ["ops:Runbook"], "e1: schema_describe lists the loaded rel with its endpoints")
     check(not any(n.startswith("canary:") for n in labels) and "Secret" not in labels, "e1: schema_type is unchanged by the refused canary file")
     # docs-ingest DI2.2: the PDF ingested in the CLI docs section above, seen through `index_status`
