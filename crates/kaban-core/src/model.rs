@@ -273,7 +273,7 @@ pub struct Node {
     pub repo: Option<String>,
     /// Commit the record was made at, if known.
     pub commit_sha: Option<String>,
-    /// Commit at acceptance (governed kinds, F4).
+    /// Acceptance commit of the retired acceptance step (the column goes with the v14 format).
     pub accepted_commit: Option<String>,
     /// JSON properties (`{}` when none).
     pub props: Value,
@@ -641,7 +641,7 @@ impl TraverseDirection {
 /// list or `None` filters nothing.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 pub struct EdgeFilter {
-    /// Keep only edges whose `score` (the winning claim's raw score) is at least this.
+    /// Keep only edges whose `score` is at least this.
     #[serde(default)]
     pub min_score: Option<Fixed>,
     /// Keep only edges of these producers (empty = any).

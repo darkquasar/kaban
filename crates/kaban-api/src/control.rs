@@ -301,7 +301,7 @@ pub const RESOURCE_ONLY: &[&str] = &["code_index"];
 pub const RESERVED: &[&str] = &["embed_submit"];
 
 /// Entries of [`tool_schemas`] that are CLI verbs going through the seam (`run_tool`) and are
-/// not MCP tools (E2.10 boundary review BR-8): machine layer maintenance is CLI-only.
+/// not MCP tools (E2.10 boundary review BR-8): index maintenance is CLI-only.
 /// Subtracted by `crates/kaban/tests/mcp_control.rs` like [`RESOURCE_ONLY`].
 pub const CLI_ONLY: &[&str] = &[];
 

@@ -799,8 +799,7 @@ impl SqliteStore {
     }
     /// The declaration of `rel` applied to an edge between a node of `skind` and one of
     /// `dkind` (`UnknownRel`, `EndpointNotAllowed`); the one judgement every edge write
-    /// shares: `link`, the inline links of `remember`, a batch's structural edges and the
-    /// `edge` claims of a batch (E1.7a RE2-8).
+    /// shares: `link`, the inline links of `remember` and a batch's edges (E1.7a RE2-8).
     pub(crate) fn edge_rule(conn: &Connection, rel: &str, skind: &str, dkind: &str) -> Result<()> {
         let def =
             Self::rel_def(conn, rel)?.ok_or_else(|| StoreError::UnknownRel(rel.to_string()))?;

@@ -1,8 +1,7 @@
 //! SQLite implementation of [`kaban_core::GraphStore`] (rusqlite bundled).
 //!
 //! Nodes and edges live in plain tables; labels and relationship types are data in
-//! `schema_type`; `audit` is the append-only HMAC chain written in the same transactions as
-//! the gated writes (core-spec S3). Recall's text seeds come from the store's own text index
+//! `schema_type`. Recall's text seeds come from the store's own text index
 //! (the Tantivy adapter it opens, admits or rebuilds at open and projects every commit into,
 //! spec 05 SS-07 and OWN-M; `tantivy`); an open that attaches none has no text index and
 //! refuses what needs one. Every open runs the forward-only [`Migrator`] (core-spec §7):

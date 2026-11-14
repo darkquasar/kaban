@@ -1,5 +1,5 @@
 //! The memory tools' control rows and schemas (`remember`, `link`, `recall`, `traverse`,
-//! `schema_*`, `forget`, `stats`) and the CLI-only layer maintenance verbs.
+//! `schema_*`, `forget`, `stats`).
 
 use super::{ControlEntry, Direction, Empty, SNAPSHOT_COMMIT, Shape, ToolSchemas, entry};
 use crate::types::{

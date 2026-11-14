@@ -19,7 +19,7 @@
 //! write at all (`no such function: kaban_writer`): nothing is written unstamped or under
 //! another actor's stamp. The record copy is a stamp-only update: the `changes` triggers name
 //! the canonical columns only (ident.rs for `node`, 0009 for `edge` and `events`), so it emits
-//! no second change row. The audit chain is untouched.
+//! no second change row.
 
 use crate::sql_error::SqlResultExt;
 use kaban_core::{ActorId, Result, new_id};

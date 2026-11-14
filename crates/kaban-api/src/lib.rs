@@ -3,8 +3,7 @@
 //!
 //! Every string that enters or leaves the service passes through the denylist gate
 //! ([`KabanApi::sanitize`]); writes are rejected or redacted before anything is stored and
-//! outgoing text is re-scanned when `scan_on_read` is set. Verdicts are recorded in the
-//! store's append-only audit chain inside the same transaction as the write (core-spec S3).
+//! outgoing text is re-scanned when `scan_on_read` is set.
 //! Adapters call exactly two seam entries around a tool call: [`KabanApi::prepare_args`] on the
 //! raw arguments and [`KabanApi::gate_response`] on the serialized result; the [`control`]
 //! registry decides which string leaves are kaban-shaped control values (validated, not scanned).

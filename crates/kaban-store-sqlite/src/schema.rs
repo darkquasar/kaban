@@ -213,7 +213,7 @@ impl Migrator {
 
     /// Read the schema version of an existing database without creating anything: the one
     /// version this binary serves, or the refusal. Used by the opens that must not mutate
-    /// the database (`kaban verify-audit`, MD-28; `doctor`; the hook; a pack source).
+    /// the database (`doctor`; the hook).
     ///
     /// # Errors
     /// `StoreError::SchemaUnsupported` for any version but [`LATEST_SCHEMA_VERSION`] (a

@@ -69,7 +69,7 @@ impl std::fmt::Display for WorkspaceId {
     }
 }
 
-/// Who performed a write (agent via MCP, human via CLI). Carried for later governance work;
+/// Who performed a write (agent via MCP, human via CLI). Carried on the write context;
 /// never logged with argument values.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]

@@ -92,9 +92,9 @@ pub enum StoreError {
         /// Kind the batch asked for.
         requested: String,
     },
-    /// An ingestion batch names a workspace other than its write context's: the audit rows
-    /// would be attributed to a tenant other than the mutated rows (R2-1), so the batch is
-    /// refused before any write.
+    /// An ingestion batch names a workspace other than its write context's: its rows would be
+    /// attributed to a tenant other than the context's (R2-1), so the batch is refused before
+    /// any write.
     #[error("batch workspace '{batch}' differs from the write context's workspace '{ctx}'")]
     WorkspaceMismatch {
         /// Workspace of the write context.
@@ -120,9 +120,9 @@ pub enum StoreError {
     /// JSON (de)serialization of props/tags failed.
     #[error(transparent)]
     Json(#[from] serde_json::Error),
-    /// The audit chain could not be initialised (key file missing, unreadable or malformed).
-    /// Writes must not proceed without it (core-spec S3).
-    #[error("audit chain unavailable")]
+    /// The database identity or its HMAC key could not be read (key file missing, unreadable
+    /// or malformed). Writes must not proceed without it (core-spec S3).
+    #[error("database key unavailable")]
     Audit(#[source] Box<dyn std::error::Error + Send + Sync>),
     /// The database file (or a `-wal`/`-shm` sidecar) could not be created or restricted to
     /// owner-only permissions (core-spec S5). The store refuses to open rather than leave a
@@ -161,7 +161,7 @@ pub enum StoreError {
     /// was attached (spec 05 SS-25). The text is the fixed class: no commit, no path.
     #[error("snapshot_mismatch")]
     SnapshotMismatch,
-    /// A lifecycle or governance transition the spec does not allow (core-spec §4).
+    /// A lifecycle transition the spec does not allow (core-spec §4).
     #[error(transparent)]
     InvalidTransition(#[from] crate::lifecycle::InvalidTransition),
     /// A string that is not a node id.

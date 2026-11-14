@@ -34,15 +34,12 @@ pub struct DoctorContext {
 /// counts, the engine's findings or the reason the check could not run).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DoctorCheck {
-    /// Fixed name: `db_modes`, `integrity`, `fts_integrity`, `schema_version`, `changes_lag`
-    /// (and its deprecated alias row `outbox_lag`, EN-E10b, removed in 3.2), `conflicts`,
-    /// `consumer_lag` (spec 05 SS-21: the retention lag of each registered consumer),
-    /// `text_index` (SS-21: `in-database FTS5`, or `tantivy` followed by
+    /// Fixed name: `db_modes`, `integrity`, `fts_integrity`, `claim_exhausted`,
+    /// `stale_artifacts`, `schema_version`, `text_index` (SS-21: `tantivy` followed by
     /// `text_index_watermark`, the payload watermark, and `text_index_lag`, the canonical
-    /// head minus it), `ident_terms_version`, `key_file`, `audit`, `unstamped` (OWN-65: `unstamped` events per reason),
-    /// `unresolved` (EN-F12b: the groups only a human action resolves), `stale_anchors`
-    /// (E3.11: `CodeRef`s whose symbol the current snapshot lacks), `priors` (EN-F16, under
-    /// `--priors`), `vacuum`.
+    /// head minus it), `ident_terms_version`, one `producer_<producer>` row per producer
+    /// (PC-16), `stale_anchors` (E3.11: `CodeRef`s whose symbol the current snapshot lacks),
+    /// `vacuum` and `optimize` when asked.
     pub name: String,
     /// Whether the check passed.
     pub ok: bool,
@@ -109,12 +106,12 @@ impl KabanApi {
         Ok(report)
     }
     /// Run every doctor check and report (core-spec §7): the pre-open file modes, the engine's
-    /// structural check, the FTS index check, the schema version against the binary's, the
-    /// `ChangeLog` lag and open conflicts from `stats`, the audit key file's presence and mode, the
-    /// audit chain, and `VACUUM` when asked. Infallible by design: a failing check is a line of
-    /// the report. A check is not ok on damage or a security finding (loose modes, a broken
-    /// index or chain, a check that could not run); the schema version, lag and conflict
-    /// counts are reported as facts.
+    /// structural check, the FTS index check, exhausted ingest claims, stale derived artifacts,
+    /// the schema version against the binary's, the text index and its lag, the producer rows,
+    /// stale code anchors, and `VACUUM` when asked. Infallible by design: a failing check is a
+    /// line of the report. A check is not ok on damage or a security finding (loose modes, a
+    /// broken index, a check that could not run); the schema version and lag are reported as
+    /// facts.
     pub fn doctor(&self, ctx: &DoctorContext) -> DoctorReport {
         let mut report = DoctorReport {
             ok: true,

@@ -55,7 +55,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Report counters, policy and the default layer matrix (same response as MCP stats)
+    /// Report counters, policy and the producer rows (same response as MCP stats)
     Stats(cli::stats::Flags),
     /// Recompute derived indexes from this database; canonical records are never changed
     Reindex {
@@ -105,9 +105,9 @@ enum Cmd {
     /// 0 ok, 2 rejected by policy, 3 not found, 4 invalid request, 5 store error
     Forget(cli::forget::Flags),
     /// Check the database as it is on disk (never created, migrated or tightened): file
-    /// modes, integrity, text index, schema version, outbox lag, conflicts, audit key file,
-    /// audit chain and the unresolved conflict groups. Exit 0 when every check passes, 5
-    /// otherwise or when the database cannot be opened
+    /// modes, integrity, text index, schema version, stale artifacts, producers and stale code
+    /// anchors. Exit 0 when every check passes, 5 otherwise or when the database cannot be
+    /// opened
     Doctor {
         /// Explicitly optimize full-text index segments once (never runs automatically)
         #[arg(long)]

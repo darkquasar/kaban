@@ -111,7 +111,7 @@ const ALLOWED_PREFIXES: [(&str, &str); 2] = [
 const CITATIONS: [&str; 3] = ["F11", "EN-E10b", "OWN-53"];
 
 /// Rule 5: description lines pinned by goldens that must not move in E2.0, matched by text.
-const ALLOWED_LINES: [(&str, &str); 4] = [
+const ALLOWED_LINES: [(&str, &str); 3] = [
     (
         "/// Outbox rows written.",
         "the schema description of ingest's `outbox_rows` (IngestReport, kaban-api types/ingest.rs), pinned by tools_list.snap: E2.11",
@@ -123,10 +123,6 @@ const ALLOWED_LINES: [(&str, &str); 4] = [
     (
         "last run, outbox lag, pipeline version",
         "the index_status tool description (ingest's IndexStatus.outbox_lag; kaban/src/mcp/mod.rs), pinned by tools_list.snap: E2.11",
-    ),
-    (
-        "schema version, outbox lag, conflicts",
-        "the `kaban doctor --help` text (clap doc comment, kaban/src/main.rs, cli_skeleton golden): E2.11",
     ),
 ];
 

@@ -37,11 +37,11 @@ pub struct ApiConfig {
     /// `workspace_id` land here, reads stay inside it unless the request names another
     /// workspace or the `"*"` selector.
     pub workspace: WorkspaceId,
-    /// Root of the git repository this process runs in, if any (M3-23): `accept` stamps
-    /// `accepted_commit` from `git rev-parse HEAD` there.
+    /// Root of the git repository this process runs in, if any (M3-23): the code side resolves
+    /// the head and its snapshot there.
     pub repo_root: Option<std::path::PathBuf>,
     /// Repository identity (the root directory's name, the same rule as the default
-    /// workspace, M3-23): stamped on records this process creates or accepts.
+    /// workspace, M3-23): stamped on records this process creates.
     pub repo: Option<String>,
     /// The engine configuration (engine-spec §15.1; engine-plan E1.1, SO-11): loaded once at
     /// startup from `<KABAN_HOME>/config.yaml`, the register defaults otherwise. Every

@@ -18,7 +18,7 @@ use thiserror::Error;
 /// owner [`reconciliation_transition`] reactivates for.
 pub const INGEST_OWNER: &str = "kaban-ingest";
 
-/// The non-governed kinds the docs-ingest pipeline owns, the only kinds the reconciliation
+/// The kinds the docs-ingest pipeline owns, the only kinds the reconciliation
 /// transition may bring back from `tombstoned` (docs-ingest-spec D5, DI1.8).
 const INGEST_RECONCILED_KINDS: [&str; 3] = ["Document", "Section", "Chunk"];
 
@@ -242,7 +242,7 @@ pub enum InvalidTransition {
 
 /// DI1.8 (RD2-5): the ingestion reconciliation transition, the single narrow exception to
 /// core-spec F5 ("tombstones are terminal"): a node the docs-ingest pipeline owns
-/// (`owner == Some(INGEST_OWNER)`) of a non-governed kind it writes (Document, Section,
+/// (`owner == Some(INGEST_OWNER)`) of a kind it writes (Document, Section,
 /// Chunk) whose deterministic id re-appears in a later preparation of the same source may
 /// go `tombstoned -> active`. Source reconciliation is distinct from user forget: a human
 /// or agent tombstone on any other kind or owner stays terminal.
@@ -314,7 +314,7 @@ mod tests {
 
     /// DI1.8 (RD2-5): the single, narrow exception to "tombstones are terminal" (core F5):
     /// `Tombstoned -> Active` for an ingest-owned (`props.owner == INGEST_OWNER`) node of a
-    /// non-governed kind the pipeline writes (Document, Section, Chunk). Every other
+    /// kind the pipeline writes (Document, Section, Chunk). Every other
     /// `(lifecycle, kind, owner)` combination is refused with a fixed class.
     #[test]
     fn reconciliation_table_is_the_narrow_ingest_exception_only() {

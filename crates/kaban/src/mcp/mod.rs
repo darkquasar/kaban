@@ -9,8 +9,7 @@
 //! scanned by the denylist before typed deserialization (core-spec S1, `KabanApi::prepare_args`):
 //! a serde error can never echo a secret, and the span records only a tool name the router
 //! knows (never argument values, never an unrecognized name). The typed handlers gate every
-//! string field they use (so redactions are reported and audited inside the write's
-//! transaction), and every content, error and resource string leaving the adapter passes the
+//! string field they use (so redactions are reported inside the write's transaction), and every content, error and resource string leaving the adapter passes the
 //! response gate (`KabanApi::gate_response` through [`gate_reply`], its plain-string form
 //! `KabanApi::gate_response_text` through [`gate_text`]; review R1-3), and a gated result that
 //! no longer has its declared shape is withheld (review R3-9). Errors for an unknown
@@ -24,7 +23,7 @@
 //! [`gate_reply`]: the handlers never return rmcp's typed JSON wrapper (`wrapper::Json`), which
 //! would serialize the ungated value (M3-16). Errors stay text-only.
 //!
-//! Every [`KabanApi`] call (SQLite, audit chain, denylist) is synchronous and may block, for
+//! Every [`KabanApi`] call (SQLite, text index, denylist) is synchronous and may block, for
 //! example in SQLite's `busy_timeout`, so each one runs on `tokio::task::spawn_blocking` through
 //! [`KabanServer::blocking`] (core-spec E2, N4; review R0-1). Nothing is held across an `.await`:
 //! the closure owns its request and an `Arc` of the API.
@@ -137,7 +136,7 @@ fn gate_text(api: &KabanApi, text: &str) -> String {
 /// serialized, its text content (`CallToolResult::structured`), so the two never differ
 /// (M3-16); a withheld or failed result is a text-only error. A redaction that leaves the value
 /// outside the declared response type `T` withholds the result too (R3-9, [`gate_value`]).
-/// Runs on the blocking pool (a verdict may write an audit row).
+/// Runs on the blocking pool (the denylist scan is synchronous).
 fn gate_reply<T: Serialize + DeserializeOwned>(
     api: &KabanApi,
     tool: &str,
@@ -475,7 +474,7 @@ impl KabanServer {
         }
     }
 
-    /// [`gate_text`] on the blocking pool (the denylist check may write an audit row).
+    /// [`gate_text`] on the blocking pool (the denylist check is synchronous).
     async fn gate_error_text(&self, text: String) -> String {
         match self.blocking(move |api| gate_text(api, &text)).await {
             Ok(safe) => safe,
@@ -651,7 +650,7 @@ impl ServerHandler for KabanServer {
         tracing::Span::current().record("tool", tracing::field::display(known.name.as_ref()));
         if let Some(args) = request.arguments.take() {
             let tool = request.name.to_string();
-            // a rejection writes an audit row inside the store: blocking pool. The arguments
+            // the denylist scan is synchronous: blocking pool. The arguments
             // move through the scan and come back for the typed parse (no clone, review R3-2)
             let scanned = self.blocking(move |api| prescan(api, &tool, args)).await;
             match scanned {

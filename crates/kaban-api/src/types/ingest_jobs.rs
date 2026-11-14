@@ -228,7 +228,7 @@ pub struct IngestSubmitReport {
     pub skipped: Vec<IngestSkipped>,
     /// Evidence references discarded independently of record placement.
     pub evidence_dropped: Vec<IngestEvidenceDropped>,
-    /// Successful redactions audited atomically with this submit.
+    /// Redactions applied atomically with this submit.
     pub redactions: u64,
     /// Actual new records.
     pub created: u32,
@@ -629,7 +629,7 @@ pub struct HandlingPlan {
     pub submit: String,
     /// Published byte/record ceilings.
     pub limits: IngestLimits,
-    /// Current-policy-gated dialect and governance instructions.
+    /// Current-policy-gated dialect and write-contract instructions.
     pub instructions: Vec<String>,
 }
 

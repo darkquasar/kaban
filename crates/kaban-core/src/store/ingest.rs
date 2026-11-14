@@ -82,7 +82,7 @@ pub trait IngestStore: Send + Sync {
         let _ = (workspace, attempts);
         Ok(0)
     }
-    /// Atomically retire omitted scoped claims/edges and retain the gated canonical report.
+    /// Atomically retire omitted scoped edges and retain the gated canonical report.
     /// Callback cannot lock the store or await; errors roll back the complete transaction.
     /// # Errors
     /// Revoked, stale, expired source preparation or backend/gate failure.

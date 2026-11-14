@@ -1,7 +1,6 @@
-//! The `apply_batch` transaction (`apply_batch_impl`): node ops in order, the batch's claims,
-//! the structural edges and the edge diff (`DeletesUnnamed`), the end-of-batch reconciliation
-//! pass with its deferred lifecycle effects, and the pre-transaction `check_layer_edges`
-//! refusal (EN-F9). Split out of `sqlite.rs` (OWN-79).
+//! The `apply_batch` transaction (`apply_batch_impl`): node ops in order, the edges under the
+//! first-writer rule, the edge diff (`DeletesUnnamed`) and the deferred lifecycle effects, and
+//! the structured-job submit and finish transactions. Split out of `sqlite.rs` (OWN-79).
 
 use crate::anchors;
 use crate::edge_write::{self, EdgeWrite, now_unix};
@@ -184,7 +183,7 @@ impl SqliteStore {
         batch: WriteBatch,
         ctx: &WriteCtx,
     ) -> Result<BatchReport> {
-        // the audit rows (D-17) and every row the batch touches must belong to one tenant
+        // every row the batch touches must belong to one tenant
         // (R2-1): refused before the transaction opens
         if ctx.workspace_id != batch.workspace_id {
             return Err(StoreError::WorkspaceMismatch {

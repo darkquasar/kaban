@@ -4365,7 +4365,7 @@ expression: tools
               "type": "string"
             },
             "instructions": {
-              "description": "Current-policy-gated dialect and governance instructions.",
+              "description": "Current-policy-gated dialect and write-contract instructions.",
               "items": {
                 "type": "string"
               },
@@ -5101,7 +5101,7 @@ expression: tools
               "type": "string"
             },
             "instructions": {
-              "description": "Current-policy-gated dialect and governance instructions.",
+              "description": "Current-policy-gated dialect and write-contract instructions.",
               "items": {
                 "type": "string"
               },
@@ -6727,7 +6727,7 @@ expression: tools
           "type": "array"
         },
         "redactions": {
-          "description": "Successful redactions audited atomically with this submit.",
+          "description": "Redactions applied atomically with this submit.",
           "format": "uint64",
           "minimum": 0,
           "type": "integer"

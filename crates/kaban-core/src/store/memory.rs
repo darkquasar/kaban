@@ -133,7 +133,7 @@ pub trait MemoryStore: Send + Sync {
     fn chunk_covering(&self, workspace: &str, path: &str, offset: u64) -> Result<Option<Node>>;
     /// Tombstone (default), invalidate, archive or purge a node (which the
     /// caller fills with the `Forget`/`Purge` entry). Lifecycle follows the spec §4 table;
-    /// `Invalidate` also moves governance and writes an `invalidated` event.
+    /// `Invalidate` has the same effect as `Tombstone`.
     ///
     /// # Errors
     /// `NotFound` (unknown or purged id), `InvalidTransition` or a backend error.
