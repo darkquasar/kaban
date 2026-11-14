@@ -350,13 +350,11 @@ else:
     # payload watermark, index lag and registered-consumer lag (cli_doctor.rs).
     expected_checks = [
         "db_modes", "integrity", "fts_integrity", "claim_exhausted", "stale_artifacts",
-        "retired_producers", "reconcile_cursor_lag", "schema_version", "changes_lag",
-        "outbox_lag", "conflicts", "consumer_lag", "text_index", "text_index_watermark",
+        "retired_producers", "schema_version", "text_index", "text_index_watermark",
         "text_index_lag", "ident_terms_version", "layer_fts", "layer_gazetteer",
-        "layer_embed", "layer_extractors", "key_file", "audit", "discovered", "unstamped",
-        "unresolved", "stale_anchors",
+        "layer_embed", "layer_extractors", "stale_anchors",
     ]
-    check(r.returncode == 0 and v.get("ok") is True and names == expected_checks and all(c["ok"] for c in v["checks"]), f"cli doctor ok with the twenty-six checks: {names}")
+    check(r.returncode == 0 and v.get("ok") is True and names == expected_checks and all(c["ok"] for c in v["checks"]), f"cli doctor ok with the sixteen checks: {names}")
     r = cli("bogus-subcommand", CANARY)
     check(r.returncode == 4 and r.stdout == "" and CANARY not in r.stderr and "Sup3r" not in r.stderr and r.stderr.startswith("error: "), f"clap error exits 4 with a fixed text, the argument never echoed (exit {r.returncode})")
     # hook section: the Claude Code variant over minimal envelopes (hooks/README.md contract)

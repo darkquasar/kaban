@@ -387,7 +387,8 @@ impl SqliteStore {
                         src: srid,
                         dst: drid,
                         rel,
-                        confidence: None,
+                        // a producer edge's confidence is its own score (no prior applies)
+                        confidence: scored.score,
                         props: &props,
                         layer: scored.layer,
                         method: scored.method,

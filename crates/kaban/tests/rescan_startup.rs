@@ -18,8 +18,8 @@ use std::time::{Duration, Instant};
 /// build (observed several seconds; the handshake takes well under one).
 const STALE_NODES: usize = 20_000;
 
-/// Seed `n` nodes stamped with the policy version `stale` through the store (no policy gate),
-/// with the key under the scratch's `$KABAN_HOME` so the server reuses it.
+/// Seed `n` nodes through the store (no policy gate and no policy marker, so the next start
+/// rescans them all), with the key under the scratch's `$KABAN_HOME` so the server reuses it.
 fn seed_stale(s: &Scratch, n: usize) -> Arc<SqliteStore> {
     let store = Arc::new(SqliteStore::open(&s.db(), &s.home().join("keys")).unwrap());
     let ctx = WriteCtx::new(WorkspaceId::default(), Actor::Agent);
@@ -40,15 +40,17 @@ fn seed_stale(s: &Scratch, n: usize) -> Arc<SqliteStore> {
     store
 }
 
-fn stale_count(s: &Scratch) -> usize {
+/// Whether the rescan finished: nodes carry no policy stamp, so the marker the final batch
+/// records is the only progress a reader can see.
+fn marker_recorded(s: &Scratch) -> bool {
     let conn = rusqlite::Connection::open(s.db()).unwrap();
     conn.query_row(
-        "SELECT count(*) FROM node WHERE policy_version = 'stale'",
-        [],
+        "SELECT count(*) FROM index_meta WHERE key = ?1",
+        [IndexMeta::POLICY_HASH],
         |r| r.get::<_, i64>(0),
     )
-    .map(|n| usize::try_from(n).unwrap())
     .unwrap()
+        > 0
 }
 
 #[test]
@@ -68,21 +70,17 @@ fn initialize_is_answered_while_the_startup_rescan_runs_and_shutdown_cancels_it(
     // Act: start the server (one worker thread); the handshake must not wait for the job
     let t_start = Instant::now();
     let (srv, init_took) = Server::start_with(&s, &[], Duration::from_secs(3));
-    let stale_at_init = stale_count(&s);
+    let finished_at_init = marker_recorded(&s);
     let elapsed_at_init = t_start.elapsed();
 
-    // Assert: answered promptly while the job was still running (stale rows left)
+    // Assert: answered promptly while the job was still running (no marker yet)
     assert!(
         init_took < Duration::from_secs(2),
         "initialize took {init_took:?} with a rescan of {STALE_NODES} nodes pending"
     );
     assert!(
-        stale_at_init > 0,
+        !finished_at_init,
         "the rescan had already finished {STALE_NODES} nodes when initialize was answered ({elapsed_at_init:?}); the test cannot witness concurrency"
-    );
-    assert!(
-        stale_at_init < STALE_NODES || elapsed_at_init < Duration::from_millis(1500),
-        "no batch committed after {elapsed_at_init:?}: is the job running? stale={stale_at_init}"
     );
 
     // Act: the client leaves; the job is cancelled between batches
@@ -95,23 +93,12 @@ fn initialize_is_answered_while_the_startup_rescan_runs_and_shutdown_cancels_it(
         shutdown_took < Duration::from_secs(10),
         "shutdown waited {shutdown_took:?} for the rescan"
     );
-    let stale_after = stale_count(&s);
-    assert!(stale_after < STALE_NODES, "no batch committed at all");
-    assert!(
-        stale_after.is_multiple_of(500),
-        "whole batches only: {stale_after} stale rows left"
-    );
-    let store = SqliteStore::open(&s.db(), &s.home().join("keys")).unwrap();
-    let hash = store.index_meta().unwrap();
-    if stale_after == 0 {
-        assert!(hash.get(IndexMeta::POLICY_HASH).is_some());
-    } else {
-        assert!(hash.get(IndexMeta::POLICY_HASH).is_none(), "{hash:?}");
-    }
+    // a cancelled run leaves the marker unrecorded; a run that got to the end recorded it
+    let finished = marker_recorded(&s);
     #[allow(clippy::print_stderr)] // test evidence for the log
     {
         eprintln!(
-            "initialize {init_took:?}; stale at initialize {stale_at_init}; shutdown {shutdown_took:?}; stale after {stale_after}"
+            "initialize {init_took:?}; shutdown {shutdown_took:?}; finished before shutdown {finished}"
         );
     }
 }
@@ -155,7 +142,7 @@ fn kaban_rescan_runs_the_job_in_the_foreground_and_reports_it() {
     assert_eq!(report["scanned"], serde_json::json!(701), "{report}");
     assert_eq!(report["batches"], serde_json::json!(2), "{report}");
     assert_eq!(report["rejected"], serde_json::json!(1), "{report}");
-    assert_eq!(stale_count(&s), 0);
+    assert!(marker_recorded(&s));
 
     // a second run has nothing to do
     let second = run(&["rescan"]);

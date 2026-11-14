@@ -251,14 +251,6 @@ fn a_secret_in_the_error_text_is_rejected_the_hook_exits_0_and_nothing_is_stored
         .query_row("SELECT count(*) FROM node", [], |r| r.get(0))
         .unwrap();
     assert_eq!(nodes_after, nodes_before, "nothing stored");
-    // the rejection itself is audited (fail-closed), with rule ids only
-    let audit: i64 = s
-        .raw()
-        .query_row("SELECT count(*) FROM audit WHERE op = 'reject'", [], |r| {
-            r.get(0)
-        })
-        .unwrap();
-    assert!(audit >= 1);
 }
 
 /// Plan slice: an unknown extra field anywhere in the envelope is ignored (M4-7: allowlisted

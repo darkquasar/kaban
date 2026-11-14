@@ -349,8 +349,24 @@ pub async fn submit(api: &KabanApi, root: &Path, raw: Value) -> Result<Value, Jo
     for _ in &ret.pair_judgements {
         skip(&mut skipped, "", "not_requested", None);
     }
+    // every edge of the submission names its producer layer (by dialect) and method, which the
+    // store moves to the `layer` and `method` columns (EN-F22)
+    let layer = match row.dialect.as_str() {
+        "llm" => "llm",
+        "gliner" => "gliner",
+        _ => "script",
+    };
     let mut named_edges = BTreeSet::new();
-    for edge in pending_edges {
+    for mut edge in pending_edges {
+        if let Op::UpsertEdge {
+            props: Some(Value::Object(map)),
+            ..
+        } = &mut edge
+        {
+            map.insert("layer".into(), json!(layer));
+            map.insert("method".into(), json!("ingest_submit"));
+            map.insert("source_id".into(), json!(row.source_id));
+        }
         let edge = gate.edge(edge)?;
         if let Op::UpsertEdge { src, rel, dst, .. } = &edge
             && !named_edges.insert((

@@ -3408,7 +3408,7 @@ expression: tools
       "readOnlyHint": false,
       "title": "Forget"
     },
-    "description": "Forget a node: tombstone (default; keeps history, hidden from every read, never re-proposed as a duplicate), invalidate (tombstone plus governance invalidated with an event), archive (reachable by id and graph expansion only), or purge (destructive; removes text, index entries and edges, the id never reappears).",
+    "description": "Forget a node: tombstone (default; keeps history, hidden from every read, never re-proposed as a duplicate), invalidate (the same effect as tombstone), archive (reachable by id and graph expansion only), or purge (destructive; removes text, index entries and edges, the id never reappears).",
     "inputSchema": {
       "$defs": {
         "ForgetMode": {
@@ -3416,12 +3416,12 @@ expression: tools
           "oneOf": [
             {
               "const": "tombstone",
-              "description": "Keep history, hide from every default read, never re-propose as a duplicate (default).\nLifecycle only: governance is untouched and no event is written.",
+              "description": "Keep history, hide from every default read, never re-propose as a duplicate (default).",
               "type": "string"
             },
             {
               "const": "invalidate",
-              "description": "Tombstone and, for governed kinds, mark the record `invalidated` with an event (OD-4:\nnon-governed kinds get the event too).",
+              "description": "The same lifecycle effect as `Tombstone`: the record is hidden from default reads.",
               "type": "string"
             },
             {
@@ -3452,7 +3452,7 @@ expression: tools
               "type": "null"
             }
           ],
-          "description": "tombstone (default: hidden, never re-proposed) | invalidate (tombstone plus governance\n`invalidated` with an event) | archive | purge (destructive: removes text, index entries\nand edges; the id never reappears)"
+          "description": "tombstone (default: hidden, never re-proposed) | invalidate (the same effect as\ntombstone) | archive | purge (destructive: removes text, index entries and edges; the id\nnever reappears)"
         }
       },
       "required": [
@@ -3468,12 +3468,12 @@ expression: tools
           "oneOf": [
             {
               "const": "tombstone",
-              "description": "Keep history, hide from every default read, never re-propose as a duplicate (default).\nLifecycle only: governance is untouched and no event is written.",
+              "description": "Keep history, hide from every default read, never re-propose as a duplicate (default).",
               "type": "string"
             },
             {
               "const": "invalidate",
-              "description": "Tombstone and, for governed kinds, mark the record `invalidated` with an event (OD-4:\nnon-governed kinds get the event too).",
+              "description": "The same lifecycle effect as `Tombstone`: the record is hidden from default reads.",
               "type": "string"
             },
             {
@@ -5863,12 +5863,6 @@ expression: tools
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
       "properties": {
-        "assertions": {
-          "description": "Accumulated newly inserted assertions.",
-          "format": "uint64",
-          "minimum": 0,
-          "type": "integer"
-        },
         "changes": {
           "$ref": "#/$defs/IngestChanges",
           "description": "Actual first/last graph sequence across successful submits and reconciliation."
@@ -5911,12 +5905,6 @@ expression: tools
           },
           "type": "array"
         },
-        "predecessor_terminal": {
-          "description": "Revisions of terminal predecessors.",
-          "format": "uint64",
-          "minimum": 0,
-          "type": "integer"
-        },
         "receipt": {
           "anyOf": [
             {
@@ -5940,12 +5928,6 @@ expression: tools
         },
         "retired_assertions": {
           "description": "Machine claims permanently retired.",
-          "format": "uint64",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "revision_candidates": {
-          "description": "Proposed revisions, never acceptance.",
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
@@ -5991,9 +5973,6 @@ expression: tools
         "unchanged",
         "redactions",
         "edges",
-        "assertions",
-        "revision_candidates",
-        "predecessor_terminal",
         "skipped",
         "evidence_dropped",
         "reconcile",
@@ -6595,7 +6574,7 @@ expression: tools
           "type": "object"
         },
         "IngestRecordOutcome": {
-          "description": "Fixed placement outcomes; governed revisions are candidates, never acceptance.",
+          "description": "Fixed placement outcomes.",
           "oneOf": [
             {
               "const": "created",
@@ -6604,17 +6583,12 @@ expression: tools
             },
             {
               "const": "updated",
-              "description": "Proposed record content changed.",
+              "description": "Record content changed in place.",
               "type": "string"
             },
             {
               "const": "unchanged",
               "description": "Identical content wrote no graph change.",
-              "type": "string"
-            },
-            {
-              "const": "revision_candidate",
-              "description": "New proposed content for an immutable predecessor.",
               "type": "string"
             }
           ]
@@ -6643,30 +6617,6 @@ expression: tools
               "type": "string"
             }
           ]
-        },
-        "IngestRevisionCandidate": {
-          "additionalProperties": false,
-          "description": "Acceptance-safe candidate and its immutable predecessor.",
-          "properties": {
-            "id": {
-              "description": "New proposed record identity.",
-              "type": "string"
-            },
-            "local_id": {
-              "description": "Gated extractor-local key.",
-              "type": "string"
-            },
-            "of": {
-              "description": "Accepted, superseded or invalidated predecessor identity.",
-              "type": "string"
-            }
-          },
-          "required": [
-            "local_id",
-            "id",
-            "of"
-          ],
-          "type": "object"
         },
         "IngestSkipReason": {
           "description": "Closed report skip vocabulary. References never convey foreign target information.",
@@ -6758,12 +6708,6 @@ expression: tools
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
       "properties": {
-        "assertions": {
-          "description": "Actual newly inserted assertion rows.",
-          "format": "uint32",
-          "minimum": 0,
-          "type": "integer"
-        },
         "changes": {
           "$ref": "#/$defs/IngestChanges",
           "description": "Actual graph sequence range."
@@ -6800,12 +6744,6 @@ expression: tools
           "description": "Workspace-scoped persistent job handle.",
           "type": "string"
         },
-        "predecessor_terminal": {
-          "description": "Candidates whose predecessor was superseded or invalidated.",
-          "format": "uint64",
-          "minimum": 0,
-          "type": "integer"
-        },
         "records": {
           "description": "Committed records and actual outcomes.",
           "items": {
@@ -6818,13 +6756,6 @@ expression: tools
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
-        },
-        "revision_candidates": {
-          "description": "Proposed revisions of immutable predecessors.",
-          "items": {
-            "$ref": "#/$defs/IngestRevisionCandidate"
-          },
-          "type": "array"
         },
         "skipped": {
           "description": "Fixed conversion refusals.",
@@ -6855,8 +6786,6 @@ expression: tools
         "status",
         "chunk",
         "records",
-        "revision_candidates",
-        "predecessor_terminal",
         "skipped",
         "evidence_dropped",
         "redactions",
@@ -6864,7 +6793,6 @@ expression: tools
         "updated",
         "unchanged",
         "edges",
-        "assertions",
         "changes"
       ],
       "type": "object"
@@ -7115,7 +7043,7 @@ expression: tools
         },
         "include_candidates": {
           "default": false,
-          "description": "Also return candidate records (an `x:` record still under review, a record a\nreconciliation left for review); default false: a candidate neither seeds the result\nnor joins it through graph expansion. `kaban review` and `explain` list them either way.",
+          "description": "Also return candidate records (an `x:` record of an undeclared label); default false: a\ncandidate neither seeds the result nor joins it through graph expansion.",
           "type": "boolean"
         },
         "include_superseded": {
@@ -9018,7 +8946,7 @@ expression: tools
         },
         "include_candidates": {
           "default": false,
-          "description": "Also return candidate records (an `x:` record still under review, a record a\nreconciliation left for review); default false: candidates are absent from the nodes,\nthe edges and the start ids alike. `kaban review` and `explain` list them either way.",
+          "description": "Also return candidate records (an `x:` record of an undeclared label); default false:\ncandidates are absent from the nodes, the edges and the start ids alike.",
           "type": "boolean"
         },
         "kind_set": {

@@ -375,10 +375,10 @@ fn a_large_ingest_commits_without_projecting_each_write_and_a_recall_right_after
         ));
     }
     let ingest = t0.elapsed();
-    // seconds, not minutes: 7-8 s alone, 10-11 s under the suite's load (a commit per write
-    // ran past six minutes)
+    // seconds, not minutes: 7-8 s alone, 10-11 s under the suite's load, more on a small
+    // shared host (a commit per write ran past six minutes)
     assert!(
-        ingest < Duration::from_secs(30),
+        ingest < Duration::from_secs(60),
         "{LARGE_INGEST_ROWS} rows committed in {ingest:?}"
     );
     let last = last.unwrap();

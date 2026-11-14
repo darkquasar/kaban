@@ -2,7 +2,7 @@
 //! binary: every producer 3.0.0 ships writes through its public interface (plain `ingest` = L0,
 //! the `fuzzy` recall layer, `ingest --link gazetteer`, one structured `script` submit, one
 //! `ingest_claim` submit, one MCP `link` = human), then the stored `(layer, method)` columns of
-//! `edge` and `assertion` are read back from the database file. L2 (`embed`) rows are absent by
+//! `edge` are read back from the database file. L2 (`embed`) rows are absent by
 //! design (OWN-93/94: no embedding producer in 3.0.0).
 #![cfg(feature = "ingest")]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // test code: failures are the assertion
@@ -184,15 +184,6 @@ fn read_only(s: &Scratch) -> Connection {
     Connection::open_with_flags(s.db(), OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap()
 }
 
-fn null_rows(conn: &Connection, table: &str) -> i64 {
-    conn.query_row(
-        &format!("SELECT count(*) FROM {table} WHERE layer IS NULL OR method IS NULL"),
-        [],
-        |r| r.get(0),
-    )
-    .unwrap()
-}
-
 fn pairs(conn: &Connection, table: &str) -> BTreeSet<Pair> {
     conn.prepare(&format!("SELECT DISTINCT layer, method FROM {table}"))
         .unwrap()
@@ -211,9 +202,6 @@ fn full_layer_run_stores_only_closed_vocabulary_pairs() {
     let s = Scratch::new("kaban-e312-coverage", "pairs");
     full_layer_run(&s);
     let conn = read_only(&s);
-    assert_eq!(null_rows(&conn, "assertion"), 0);
-    let assertions = pairs(&conn, "assertion");
-    assert_eq!(outside_enums(&assertions), Vec::<Pair>::new());
     let edges = pairs(&conn, "edge");
     let labelled: Vec<&Pair> = edges
         .iter()
@@ -227,19 +215,12 @@ fn full_layer_run_stores_only_closed_vocabulary_pairs() {
         pair("gliner", "ingest_submit"),
         pair("human", "link"),
     ] {
-        assert!(
-            assertions.contains(&expected),
-            "{expected:?} in {assertions:?}"
-        );
-    }
-    for expected in [pair("gazetteer", "exact"), pair("human", "link")] {
         assert!(edges.contains(&expected), "{expected:?} in {edges:?}");
     }
 }
 
-/// EN-F22 for edges: every claim-projected edge carries `layer` and `method`. A producer's
-/// structural row (the L0 `PART_OF` hierarchy, owner-tagged) carries neither by design: the
-/// store tells it apart from a projection by `layer IS NULL` (`reconcile/project.rs`), so a
+/// EN-F22 for edges: every producer edge carries `layer` and `method`. A producer's
+/// structural row (the L0 `PART_OF` hierarchy, owner-tagged) carries neither by design, so a
 /// half-labelled or untagged row is the only failure.
 #[test]
 fn full_layer_run_leaves_no_edge_without_layer_or_method() {
@@ -258,7 +239,6 @@ fn full_layer_run_leaves_no_edge_without_layer_or_method() {
         .collect::<rusqlite::Result<_>>()
         .unwrap();
     assert_eq!(unlabelled, Vec::<(String, String)>::new());
-    assert_eq!(null_rows(&conn, "assertion"), 0);
 }
 
 #[test]

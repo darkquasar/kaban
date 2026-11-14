@@ -53,7 +53,7 @@ answers within 2 s.
 | Event | Fields kaban reads | Output |
 |---|---|---|
 | `SessionStart` | `session_id` | `hookSpecificOutput.additionalContext` (briefing, at most 5 items) |
-| `PreToolUse` (`apply_patch`) | `session_id`, `tool_name`, the `*** Add File:` / `*** Update File:` headers of `tool_input.command`; `tool_input.file_path` if an `Edit`/`Write` tool ever exposes one (**unverified**: the model used `apply_patch` in every session) | `hookSpecificOutput.additionalContext` (`why` for each path, 3 records per path) or `{}` |
+| `PreToolUse` (`apply_patch`) | `session_id`, `tool_name`, the `*** Add File:` / `*** Update File:` headers of `tool_input.command`; `tool_input.file_path` if an `Edit`/`Write` tool ever exposes one (**unverified**: the model used `apply_patch` in every session) | `{}` |
 | `PostToolUse` (`Bash`) | `session_id`, `tool_input.command`, `tool_response` (a plain **string**) | `{}` |
 | `SubagentStop` | `session_id`, `last_assistant_message` (**unverified**) | `{}` |
 | `Stop` | `session_id`, `stop_hook_active` | `{"decision":"block","reason":…}` once per session when the session has a pending Failure, else `{}` |

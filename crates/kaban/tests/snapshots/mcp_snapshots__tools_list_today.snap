@@ -11,7 +11,7 @@ expression: today
       "readOnlyHint": false,
       "title": "Forget"
     },
-    "description": "Forget a node: tombstone (default; keeps history, hidden from every read, never re-proposed as a duplicate), invalidate (tombstone plus governance invalidated with an event), archive (reachable by id and graph expansion only), or purge (destructive; removes text, index entries and edges, the id never reappears).",
+    "description": "Forget a node: tombstone (default; keeps history, hidden from every read, never re-proposed as a duplicate), invalidate (the same effect as tombstone), archive (reachable by id and graph expansion only), or purge (destructive; removes text, index entries and edges, the id never reappears).",
     "inputSchema": {
       "$defs": {
         "ForgetMode": {
@@ -19,12 +19,12 @@ expression: today
           "oneOf": [
             {
               "const": "tombstone",
-              "description": "Keep history, hide from every default read, never re-propose as a duplicate (default).\nLifecycle only: governance is untouched and no event is written.",
+              "description": "Keep history, hide from every default read, never re-propose as a duplicate (default).",
               "type": "string"
             },
             {
               "const": "invalidate",
-              "description": "Tombstone and, for governed kinds, mark the record `invalidated` with an event (OD-4:\nnon-governed kinds get the event too).",
+              "description": "The same lifecycle effect as `Tombstone`: the record is hidden from default reads.",
               "type": "string"
             },
             {
@@ -55,7 +55,7 @@ expression: today
               "type": "null"
             }
           ],
-          "description": "tombstone (default: hidden, never re-proposed) | invalidate (tombstone plus governance\n`invalidated` with an event) | archive | purge (destructive: removes text, index entries\nand edges; the id never reappears)"
+          "description": "tombstone (default: hidden, never re-proposed) | invalidate (the same effect as\ntombstone) | archive | purge (destructive: removes text, index entries and edges; the id\nnever reappears)"
         }
       },
       "required": [
@@ -71,12 +71,12 @@ expression: today
           "oneOf": [
             {
               "const": "tombstone",
-              "description": "Keep history, hide from every default read, never re-propose as a duplicate (default).\nLifecycle only: governance is untouched and no event is written.",
+              "description": "Keep history, hide from every default read, never re-propose as a duplicate (default).",
               "type": "string"
             },
             {
               "const": "invalidate",
-              "description": "Tombstone and, for governed kinds, mark the record `invalidated` with an event (OD-4:\nnon-governed kinds get the event too).",
+              "description": "The same lifecycle effect as `Tombstone`: the record is hidden from default reads.",
               "type": "string"
             },
             {
@@ -460,7 +460,7 @@ expression: today
         },
         "include_candidates": {
           "default": false,
-          "description": "Also return candidate records (an `x:` record still under review, a record a\nreconciliation left for review); default false: a candidate neither seeds the result\nnor joins it through graph expansion. `kaban review` and `explain` list them either way.",
+          "description": "Also return candidate records (an `x:` record of an undeclared label); default false: a\ncandidate neither seeds the result nor joins it through graph expansion.",
           "type": "boolean"
         },
         "include_superseded": {
@@ -2363,7 +2363,7 @@ expression: today
         },
         "include_candidates": {
           "default": false,
-          "description": "Also return candidate records (an `x:` record still under review, a record a\nreconciliation left for review); default false: candidates are absent from the nodes,\nthe edges and the start ids alike. `kaban review` and `explain` list them either way.",
+          "description": "Also return candidate records (an `x:` record of an undeclared label); default false:\ncandidates are absent from the nodes, the edges and the start ids alike.",
           "type": "boolean"
         },
         "kind_set": {
