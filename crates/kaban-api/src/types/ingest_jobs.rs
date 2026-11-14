@@ -202,12 +202,8 @@ pub struct IngestFinishReport {
     pub evidence_dropped: BTreeMap<String, u64>,
     /// Final reconciliation outcome.
     pub reconcile: IngestReconcileOutcome,
-    /// Machine claims permanently retired.
-    pub retired_assertions: u64,
     /// Omitted owned graph edges deleted.
     pub deleted_edges: u64,
-    /// Proposed omitted records; informational, never tombstoned.
-    pub orphans: Vec<String>,
     /// Actual first/last graph sequence across successful submits and reconciliation.
     pub changes: IngestChanges,
     /// The finish's receipt (spec 05 SS-10), with `changes.last_seq` as its position; absent

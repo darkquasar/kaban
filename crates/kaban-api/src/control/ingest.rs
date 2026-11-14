@@ -248,12 +248,6 @@ pub(super) const ROWS: &[ControlEntry] = &[
         "reconcile",
         Shape::Enum(&["complete", "skipped_cap"]),
     ),
-    entry(
-        "ingest_finish",
-        Direction::Response,
-        "orphans[]",
-        Shape::NodeId,
-    ),
     // spec 05 SS-10: the finish's receipt (identities are UUIDs, SS-27)
     entry(
         "ingest_finish",

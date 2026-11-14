@@ -5898,13 +5898,6 @@ expression: tools
           "description": "Persistent scoped handle.",
           "type": "string"
         },
-        "orphans": {
-          "description": "Proposed omitted records; informational, never tombstoned.",
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
         "receipt": {
           "anyOf": [
             {
@@ -5922,12 +5915,6 @@ expression: tools
         },
         "redactions": {
           "description": "Accumulated successful redactions.",
-          "format": "uint64",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "retired_assertions": {
-          "description": "Machine claims permanently retired.",
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
@@ -5976,9 +5963,7 @@ expression: tools
         "skipped",
         "evidence_dropped",
         "reconcile",
-        "retired_assertions",
         "deleted_edges",
-        "orphans",
         "changes"
       ],
       "type": "object"

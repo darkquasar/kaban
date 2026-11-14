@@ -120,7 +120,6 @@ impl SqliteStore {
         if current.status == kaban_core::JobStatus::Open {
             let population = crate::jobs::finish_population(&tx, &current, request)?;
             outcome.skipped_cap = population.skipped_cap;
-            outcome.orphans = population.orphans;
             if !outcome.skipped_cap {
                 let before: i64 = tx
                     .query_row("SELECT COALESCE(max(seq),0) FROM changes", [], |r| r.get(0))

@@ -61,7 +61,7 @@ fn ingest_finish_control_ids_and_closed_values_are_registered() {
     api.prepare_args("ingest_finish", &json!({"job":"a".repeat(64)}))
         .unwrap();
     let report = json!({"job":"a".repeat(64),"status":"finished",
-        "reconcile":"complete","orphans":[id]});
+        "reconcile":"complete","receipt":{"instance_id":id}});
     assert_eq!(api.gate_response("ingest_finish", &report).unwrap(), report);
     assert!(
         api.prepare_args("ingest_finish", &json!({"job":CANARY}))
@@ -70,7 +70,7 @@ fn ingest_finish_control_ids_and_closed_values_are_registered() {
     assert!(
         api.gate_response(
             "ingest_finish",
-            &json!({"orphans":[format!("invalid-{id}")]})
+            &json!({"receipt":{"instance_id":format!("invalid-{id}")}})
         )
         .is_err()
     );

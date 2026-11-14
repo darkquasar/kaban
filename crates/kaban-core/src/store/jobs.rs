@@ -348,17 +348,14 @@ pub struct JobFinishRequest {
     pub retention_days: u32,
 }
 
-/// Transaction-local reconciliation outcomes; orphan identities are informational only.
+/// Transaction-local reconciliation outcomes. Records the run no longer names stay active and
+/// are not listed.
 #[derive(Debug, Default)]
 pub struct JobFinishOutcome {
     /// Cap or accumulator overflow prevented all retirement.
     pub skipped_cap: bool,
-    /// Retired machine claims.
-    pub retired_assertions: u64,
     /// Deleted owned graph edges.
     pub deleted_edges: u64,
-    /// Proposed omitted records, never tombstoned.
-    pub orphans: Vec<crate::NodeId>,
     /// Actual reconciliation graph changes.
     pub first_seq: Option<u64>,
     /// Last reconciliation sequence.

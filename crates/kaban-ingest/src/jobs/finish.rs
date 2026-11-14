@@ -76,9 +76,7 @@ pub async fn finish_fenced(
                 } else {
                     IngestReconcileOutcome::Complete
                 },
-                retired_assertions: outcome.retired_assertions,
                 deleted_edges: outcome.deleted_edges,
-                orphans: outcome.orphans.iter().map(ToString::to_string).collect(),
                 changes: IngestChanges {
                     first_seq: state.first_seq.or(outcome.first_seq),
                     last_seq: outcome.last_seq.or(state.last_seq),

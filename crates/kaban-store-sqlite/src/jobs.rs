@@ -584,7 +584,6 @@ type FinishEdge = (i64, i64, String, String, String);
 /// Bounded complete population, collected before any retirement or edge deletion.
 pub(crate) struct FinishPopulation {
     pub(crate) edges: Vec<FinishEdge>,
-    pub(crate) orphans: Vec<kaban_core::NodeId>,
     pub(crate) skipped_cap: bool,
 }
 
@@ -617,13 +616,11 @@ pub(crate) fn finish_population(
     let scoped_records = conn
         .prepare(&format!(
             "{FINISH_SCOPE}
-        SELECT n.id,n.governance FROM node n WHERE n.rid IN records AND n.workspace_id=?2
+        SELECT n.id FROM node n WHERE n.rid IN records AND n.workspace_id=?2
         ORDER BY n.id LIMIT ?4"
         ))
         .sql()?
-        .query_map(args, |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-        })
+        .query_map(args, |r| r.get::<_, String>(0))
         .sql()?
         .collect::<rusqlite::Result<Vec<_>>>()
         .sql()?;
@@ -638,24 +635,8 @@ pub(crate) fn finish_population(
         )
         .collect();
     let mut all_records = records.clone();
-    all_records.extend(scoped_records.iter().map(|(id, _)| id.clone()));
+    all_records.extend(scoped_records);
     let skipped_cap = plan["submit_state"]["overflow"].as_bool().unwrap_or(false)
         || names.len().saturating_add(all_records.len()) > request.finish_cap as usize;
-    let orphans = if skipped_cap {
-        Vec::new()
-    } else {
-        scoped_records
-            .into_iter()
-            .filter(|(id, governance)| governance == "proposed" && !records.contains(id))
-            .map(|(id, _)| {
-                kaban_core::NodeId::parse(&id)
-                    .map_err(|_| StoreError::InvalidName("job".into(), "stale"))
-            })
-            .collect::<Result<_>>()?
-    };
-    Ok(FinishPopulation {
-        edges,
-        orphans,
-        skipped_cap,
-    })
+    Ok(FinishPopulation { edges, skipped_cap })
 }

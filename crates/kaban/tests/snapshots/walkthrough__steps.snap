@@ -1314,7 +1314,6 @@ expression: a
       "edges": 6,
       "evidence_dropped": {},
       "job": "0b884f8559317a5be0c51730253116fc0ceddf8e76a2eed08fd24f03d30f146d",
-      "orphans": [],
       "receipt": {
         "instance_id": "@7",
         "outcome": "committed",
@@ -1323,7 +1322,6 @@ expression: a
       },
       "reconcile": "complete",
       "redactions": 0,
-      "retired_assertions": 0,
       "skipped": {
         "edge_not_allowed": 2
       },
@@ -2452,7 +2450,6 @@ expression: a
       "edges": 2,
       "evidence_dropped": {},
       "job": "ab9820ef3c82062552290711d3fd8b37f85a55d00e2a33716718cf193f31e8f2",
-      "orphans": [],
       "receipt": {
         "instance_id": "@7",
         "outcome": "committed",
@@ -2461,7 +2458,6 @@ expression: a
       },
       "reconcile": "complete",
       "redactions": 0,
-      "retired_assertions": 0,
       "skipped": {},
       "status": "finished",
       "submits": 1,
