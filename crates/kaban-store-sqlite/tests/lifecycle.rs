@@ -51,7 +51,11 @@ fn fts_holds_active_rows_only_after_tombstone_and_archive() {
     let fact = created(&store, "Fact", "quokkas live on rottnest island");
     let decision = created(&store, "Decision", "we deploy quokka builds on fridays");
     assert_eq!(fact.lifecycle, Lifecycle::Active);
-    assert_eq!(decision.lifecycle, Lifecycle::Active, "every write is active (REC-08)");
+    assert_eq!(
+        decision.lifecycle,
+        Lifecycle::Active,
+        "every write is active (REC-08)"
+    );
     assert_eq!(fact.workspace_id, "default");
     assert!(found(&store, "quokkas rottnest", &fact.id));
     assert!(found(&store, "quokka fridays", &decision.id));

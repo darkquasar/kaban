@@ -106,7 +106,6 @@ pub(crate) fn run(
             repo_root,
             repo,
             engine,
-            ..ApiConfig::default()
         },
     );
     let api = match wiring {

@@ -292,11 +292,8 @@ fn offline_artifact_diagnostics_report_stale_counts_without_writes() {
         kaban_core::ArtifactDiagnostics::default()
     );
     let conn = rusqlite::Connection::open(scratch.db()).unwrap();
-    conn.execute(
-        "UPDATE derived_artifact SET source_rev='malformed'",
-        [],
-    )
-    .unwrap();
+    conn.execute("UPDATE derived_artifact SET source_rev='malformed'", [])
+        .unwrap();
     let before: i64 = conn
         .query_row("SELECT max(seq) FROM changes", [], |r| r.get(0))
         .unwrap();

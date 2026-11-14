@@ -73,7 +73,6 @@ fn fixed_runs_round_trip_without_changing_counters() {
     assert_eq!(store.stats(None).unwrap(), before);
 }
 
-
 #[test]
 fn malformed_and_negative_runs_are_ignored_without_writes() {
     let store = SqliteStore::open_memory().unwrap();

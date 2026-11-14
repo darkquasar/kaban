@@ -31,8 +31,8 @@ pub mod text_index;
 mod validator;
 
 pub use artifact::{
-    ArtifactDiagnostics, ArtifactKey, ArtifactSource, BuiltinProducer,
-    DerivedArtifact, GazetteerClaimSet, SourceRev, artifact_key,
+    ArtifactDiagnostics, ArtifactKey, ArtifactSource, BuiltinProducer, DerivedArtifact,
+    GazetteerClaimSet, SourceRev, artifact_key,
 };
 pub use audit::{
     Actor, ActorId, AuditEntry, AuditOp, Durability, InvalidActorId, WorkspaceId, WriteCtx,

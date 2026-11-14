@@ -547,7 +547,6 @@ pub(super) fn run(
             workspace: WorkspaceId::new("ws1"),
             repo_root: Some(fixture),
             repo: Some("bench-fixture-repo".into()),
-            ..Default::default()
         },
     ));
     let map = materialize(

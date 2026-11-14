@@ -1,8 +1,6 @@
 //! Public static dialect contract and unknown-selector refusal coverage.
 #![allow(clippy::unwrap_used)] // fixture failures are test failures
-use kaban_ingest::extract::structured_prep::dialect::{
-    DUPLICATE_AVOIDANCE, Dialect, instructions,
-};
+use kaban_ingest::extract::structured_prep::dialect::{DUPLICATE_AVOIDANCE, Dialect, instructions};
 
 /// Words of the removed review and audit states (REC-08): the extractor contract names none.
 const REMOVED_STATE_WORDS: [&str; 8] = [
