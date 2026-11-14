@@ -1079,8 +1079,9 @@ impl<F: FnMut(&Node) -> RescanAction> RescanJudge for F {
 
 /// Where a rescan resumes. A full walk visits every node, then every edge, then catches the
 /// change log up; once the walk completed (the `policy_hash` marker matches) a run starts at
-/// the change log directly. The change-log position itself is persisted by the store
-/// ([`IndexMeta::POLICY_SCAN_SEQ`]), so it survives a cancelled or crashed run.
+/// the change log directly. The change-log position itself is persisted by the store (a
+/// walk's own position, then [`IndexMeta::POLICY_SCAN_SEQ`] once the walk completes), so it
+/// survives a cancelled or crashed run.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 pub enum RescanCursor {
     /// Before the first batch of a run: the store picks the full walk or the change log.
@@ -1133,8 +1134,10 @@ impl IndexMeta {
     /// Key of the `effective_hash()` of the policy the whole database was last rescanned
     /// against (MD-19).
     pub const POLICY_HASH: &'static str = "policy_hash";
-    /// Key of the change-log watermark of the policy rescan: every node and edge change with a
-    /// `seq` at or below it has been judged by the policy the rescan last ran under. A
+    /// Key of the change-log watermark the [`Self::POLICY_HASH`] policy is certified to: every
+    /// node and edge change with a `seq` at or below it has been judged by that policy. It
+    /// moves with the marker, at a complete walk or in a run of the same policy, never in a
+    /// walk under another policy (a walk keeps its own position until it completes). A
     /// mutation freshness signal independent of the rows (no per-record policy stamp,
     /// REC-08): rows written later, by any process under any policy, are judged by the next
     /// run.

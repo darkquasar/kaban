@@ -654,3 +654,71 @@ fn link_properties_a_newer_policy_forbids_are_masked_or_dropped_by_the_rescan() 
         .unwrap();
     assert_eq!(again.status, RescanStatus::UpToDate, "{again:?}");
 }
+
+/// Policy v3: a different reject term (a policy other than v2).
+const V3: &str = "words:\n  - { term: albatross, action: reject, id: bird }\n";
+
+/// END review: an interrupted rescan under another policy never certifies freshness for the
+/// policy that completed before it. v2 completes; another process writes a row v2 rejects,
+/// past the first batch; a v3 run is cancelled after one batch; v2 starts again and must judge
+/// that row.
+#[test]
+fn an_interrupted_rescan_under_another_policy_leaves_the_completed_policy_unfresh() {
+    let s = Scratch::new("kaban-api-rescan", "interrupted-other-policy");
+    let store = s.store();
+    let ops = (0..RESCAN_BATCH + 10)
+        .map(|i| kaban_core::Op::UpsertNode {
+            id: NodeId::new(),
+            node: kaban_core::NewNode {
+                kind: "Fact".into(),
+                text: format!("note {i} about cargo and tokio"),
+                ..Default::default()
+            },
+        })
+        .collect();
+    store
+        .apply_batch(
+            kaban_core::WriteBatch::new(kaban_core::WorkspaceId::default(), ops),
+            &kaban_core::WriteCtx::new(
+                kaban_core::WorkspaceId::default(),
+                kaban_core::Actor::Agent,
+            ),
+        )
+        .unwrap();
+    let v2 = api_with(&store, V2);
+    let done = v2
+        .rescan_if_policy_changed(&CancellationToken::new())
+        .unwrap();
+    assert_eq!(done.status, RescanStatus::Completed, "{done:?}");
+
+    // another process under v1 writes a row v2 rejects; its row id is past the first batch
+    let other = s.store();
+    let stale = api_with(&other, V1)
+        .remember(fact("the nightjar codename written by an old process"))
+        .unwrap();
+    drop(other);
+
+    // a v3 run judges one batch and is cancelled before it reaches that row
+    let v3 = api_with(&store, V3);
+    assert_ne!(v3.policy_version(), v2.policy_version());
+    let cancelled = CancellationToken::new();
+    cancelled.cancel();
+    let partial = v3.rescan_if_policy_changed(&cancelled).unwrap();
+    assert_eq!(partial.status, RescanStatus::Cancelled, "{partial:?}");
+    assert_eq!(partial.scanned, RESCAN_BATCH as u64, "{partial:?}");
+
+    // v2 starts again: the row was never judged under v2
+    let again = v2
+        .rescan_if_policy_changed(&CancellationToken::new())
+        .unwrap();
+    assert_eq!(again.status, RescanStatus::Completed, "{again:?}");
+    assert!(again.rejected >= 1, "{again:?}");
+    assert!(
+        store.get(&nid(&stale.id), false).unwrap().is_none(),
+        "the row v2 rejects is hidden"
+    );
+    let idle = v2
+        .rescan_if_policy_changed(&CancellationToken::new())
+        .unwrap();
+    assert_eq!(idle.status, RescanStatus::UpToDate, "{idle:?}");
+}

@@ -122,3 +122,52 @@ fn a_changed_policy_walks_every_row_again() {
     }
     assert_eq!(seen, 3, "a new policy version re-judges every node");
 }
+
+/// A policy that rejects nothing but counts what it judges.
+fn keep_all(n: &Node) -> RescanAction {
+    let _ = n;
+    RescanAction::Keep
+}
+
+/// Two walks under different policies interleave batch by batch: a row rewritten behind the
+/// v2 walk's cursor before a v3 walk starts is still judged by v2 before v2 reports done (the
+/// v3 start must not move v2's position in the change log).
+#[test]
+fn interleaved_walks_under_different_policies_each_judge_their_own_backlog() {
+    let store = SqliteStore::open_memory().unwrap();
+    let ids: Vec<NodeId> = (0..3).map(|_| NodeId::new()).collect();
+    for (i, id) in ids.iter().enumerate() {
+        upsert(&store, id, &format!("clean note {i}"));
+    }
+
+    // v2 walks the first node; another writer then rewrites it behind v2's cursor
+    let mut v2_at = store
+        .rescan("v2", RescanCursor::Start, 1, &mut judge)
+        .unwrap()
+        .cursor;
+    assert!(matches!(v2_at, RescanCursor::Nodes(_)), "{v2_at:?}");
+    upsert(&store, &ids[0], "now naming the nightjar codename");
+
+    // a v3 walk starts and the two alternate batch by batch until both are done
+    let mut v3_at = RescanCursor::Start;
+    let mut v2_rejected = 0;
+    while v2_at != RescanCursor::Done || v3_at != RescanCursor::Done {
+        if v3_at != RescanCursor::Done {
+            v3_at = store.rescan("v3", v3_at, 1, &mut keep_all).unwrap().cursor;
+        }
+        if v2_at != RescanCursor::Done {
+            let report = store.rescan("v2", v2_at, 1, &mut judge).unwrap();
+            v2_rejected += report.rejected;
+            v2_at = report.cursor;
+        }
+    }
+
+    // v2 judged the rewrite before it reported done
+    assert!(v2_rejected >= 1, "v2 rejected {v2_rejected}");
+    let hidden = store.get(&ids[0], true).unwrap().unwrap();
+    assert_eq!(hidden.lifecycle, Lifecycle::Tombstoned);
+
+    // a v2 run from the start, then nothing is left for v2 until the next write
+    run_from(&store, RescanCursor::Start, 100);
+    assert_eq!(run_from(&store, RescanCursor::Start, 100).scanned, 0);
+}
