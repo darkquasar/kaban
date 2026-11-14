@@ -310,7 +310,6 @@ kinds:
                governs_paths: true, dedup: title+scope}
     rank: {boost: 1.2, expand_rels: [CAUSED_BY, FIXED_BY, SUPERSEDES], expand_depth: 2}
     fts_fields: [props.rationale]
-    min_confidence: 0.6
   Convention:
     description: "A rule the project follows."
     mixins: [incidents:Governed]
@@ -323,7 +322,7 @@ kinds:
     mixins: [incidents:Governed]
     props_schema: {type: object, additionalProperties: false, properties: {error_text: {type: string}}}
 rels:
-  SUPERSEDES: {from: [incidents:Decision], to: [incidents:Decision], directed: true, description: "Newer replaces older.", on_link: archive_target, confidence_required: 0.95, governed_semantics: true}
+  SUPERSEDES: {from: [incidents:Decision], to: [incidents:Decision], directed: true, description: "Newer replaces older.", on_link: archive_target, governed_semantics: true}
   CONTRADICTS: {from: [], to: [], directed: false, description: "Two memories conflict."}
   INVALIDATES: {from: [], to: [], directed: true, description: "Target no longer valid."}
   DEPENDS_ON: {from: [], to: [], directed: true, description: "Dependency."}

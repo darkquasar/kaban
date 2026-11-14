@@ -3,9 +3,8 @@
 //! and the loading order: the E1.1 validator against the embedded `ontology-meta.yaml` first,
 //! then the typed parse. A file-form failure is reported as `schema_invalid:file:<path>` with the
 //! dotted path of the offending key (never a value); a name failing its regex is
-//! `invalid_identifier`. The keys of the removed governance pipeline ([`IGNORED_FIELDS`]) are
-//! accepted and ignored with one [`OntologyWarning`] each, so an older file still loads (the
-//! PC-5 rule for removed config sections).
+//! `invalid_identifier`. The keys of the removed governance pipeline (`priors`,
+//! `confidence_required`, `min_confidence`) are unknown keys like any other.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -230,9 +229,6 @@ pub struct KindBody {
     /// Extraction hints (EN-F25, EN-F36).
     #[serde(default)]
     pub extract: Option<Extract>,
-    /// EN-F12 winner gate.
-    #[serde(default)]
-    pub min_confidence: Option<f64>,
     /// Indexing meta-config (engine-spec §3.1 `index`; OWN-65, AMD-14).
     #[serde(default)]
     pub index: Option<Index>,
@@ -601,74 +597,17 @@ fn file_error(path: &str) -> OntologyError {
     }
 }
 
-/// The keys of the removed governance pipeline that a file may still carry: the top-level
-/// `priors` (claim priors) and a rel's `confidence_required` (the auto-edge claim gate). Each is
-/// accepted, dropped before validation and reported as [`OntologyWarning::IgnoredField`].
-pub const IGNORED_FIELDS: [&str; 2] = ["priors", "rels.*.confidence_required"];
-
-/// An ontology file loaded, but part of it was ignored. Content-free: a fixed field name.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum OntologyWarning {
-    /// A key of a removed feature ([`IGNORED_FIELDS`]) was ignored.
-    #[error("ontology field {field} is no longer used and is ignored")]
-    IgnoredField {
-        /// The field, one of [`IGNORED_FIELDS`].
-        field: &'static str,
-    },
-}
-
-/// Drop the [`IGNORED_FIELDS`] from the raw file data, one warning per field present.
-fn strip_ignored(data: &mut Value) -> Vec<OntologyWarning> {
-    let mut warnings = Vec::new();
-    let Some(file) = data.as_object_mut() else {
-        return warnings;
-    };
-    if file.remove("priors").is_some() {
-        warnings.push(OntologyWarning::IgnoredField {
-            field: IGNORED_FIELDS[0],
-        });
-    }
-    let mut gated = false;
-    if let Some(rels) = file.get_mut("rels").and_then(Value::as_object_mut) {
-        for body in rels.values_mut().filter_map(Value::as_object_mut) {
-            gated |= body.remove("confidence_required").is_some();
-        }
-    }
-    if gated {
-        warnings.push(OntologyWarning::IgnoredField {
-            field: IGNORED_FIELDS[1],
-        });
-    }
-    warnings
-}
-
 impl OntologyFile {
     /// Load one ontology file from its YAML text: the E1.1 validator against the meta-schema
-    /// first (top-level shape and `discovered`), identifiers next, then the typed parse. Each
-    /// [`OntologyWarning`] of [`OntologyFile::from_yaml_reporting`] is logged once at WARN.
+    /// first (top-level shape and `discovered`), identifiers next, then the typed parse.
     ///
     /// # Errors
     /// [`OntologyError::SchemaInvalid`] `file:<path>` for a malformed document, an unknown key
-    /// at any depth, a wrong type or a missing required key; [`OntologyError::InvalidIdentifier`]
-    /// for a namespace, kind or rel name failing its regex.
+    /// at any depth (the removed governance keys `priors`, `confidence_required` and
+    /// `min_confidence` included), a wrong type or a missing required key;
+    /// [`OntologyError::InvalidIdentifier`] for a namespace, kind or rel name failing its regex.
     pub fn from_yaml(text: &str) -> Result<OntologyFile, OntologyError> {
-        let (file, warnings) = Self::from_yaml_reporting(text)?;
-        for warning in &warnings {
-            tracing::warn!("{warning}");
-        }
-        Ok(file)
-    }
-
-    /// [`OntologyFile::from_yaml`] without logging: the file and the [`IGNORED_FIELDS`] it
-    /// carried, in [`IGNORED_FIELDS`] order.
-    ///
-    /// # Errors
-    /// As [`OntologyFile::from_yaml`].
-    pub fn from_yaml_reporting(
-        text: &str,
-    ) -> Result<(OntologyFile, Vec<OntologyWarning>), OntologyError> {
-        let mut data: Value = yaml_serde::from_str(text).map_err(|_| file_error(""))?;
-        let warnings = strip_ignored(&mut data);
+        let data: Value = yaml_serde::from_str(text).map_err(|_| file_error(""))?;
         let errors = validate(meta_schema(), &data);
         if let Some(text) = first_error_text(&errors) {
             // `invalid_props props.discovered.cap` -> `discovered.cap`
@@ -679,27 +618,18 @@ impl OntologyFile {
             return Err(file_error(path));
         }
         check_identifiers(&data)?;
-        match serde_json::from_value::<OntologyFile>(data.clone()) {
-            Ok(file) => Ok((file, warnings)),
-            Err(_) => Err(file_error(&locate_in_file(&data))),
-        }
+        serde_json::from_value::<OntologyFile>(data.clone())
+            .map_err(|_| file_error(&locate_in_file(&data)))
     }
 }
 
 /// The engine-spec §3.1 admission ranges of one file (E1.3a RE1-4), checked by the resolver
-/// before anything is merged: `version >= 1`; `rank.expand_depth <= 4`; question `depth <= 3`;
-/// `min_confidence` in `[0, 1]`.
+/// before anything is merged: `version >= 1`; `rank.expand_depth <= 4`; question `depth <= 3`.
 ///
 /// # Errors
 /// [`OntologyError::OutOfRange`] with the dotted path of the first offending field.
 pub fn check_ranges(file: &OntologyFile) -> Result<(), OntologyError> {
     let out_of_range = |path: String| OntologyError::OutOfRange { path };
-    let probability = |value: Option<f64>, path: String| -> Result<(), OntologyError> {
-        match value {
-            Some(p) if !(0.0..=1.0).contains(&p) => Err(out_of_range(path)),
-            _ => Ok(()),
-        }
-    };
     if file.version < 1 {
         return Err(out_of_range("version".to_owned()));
     }
@@ -713,10 +643,6 @@ pub fn check_ranges(file: &OntologyFile) -> Result<(), OntologyError> {
             {
                 return Err(out_of_range(format!("{block}.{name}.rank.expand_depth")));
             }
-            probability(
-                body.min_confidence,
-                format!("{block}.{name}.min_confidence"),
-            )?;
         }
     }
     for (name, template) in &file.questions {
@@ -794,10 +720,6 @@ fn locate_in_file(data: &Value) -> String {
             "prefixes" => bodies
                 .iter()
                 .find(|(_, v)| !v.is_string())
-                .map(|(k, _)| format!("{block}.{k}")),
-            "priors" => bodies
-                .iter()
-                .find(|(_, v)| !v.is_number())
                 .map(|(k, _)| format!("{block}.{k}")),
             _ => None,
         };

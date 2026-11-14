@@ -34,7 +34,6 @@ kinds:
     rank: {boost: 1.2, expand_rels: [CAUSED_BY, FIXED_BY, SUPERSEDES], expand_depth: 2}
     fts_fields: [props.rationale]
     extract: {enabled: true, labels: ["architecture decision", "design decision"], gazetteer: [summary, props.aliases]}
-    min_confidence: 0.6
   Convention:
     description: "A rule the project follows, with its rationale (governed)."
     mixins: [Governed]

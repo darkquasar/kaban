@@ -52,8 +52,8 @@ and do not remove usable sibling-layer statistics.
 ## Remaining defaults register
 
 These are configuration defaults, not claims that every reserved capability ships.
-The sections of removed features, `reconcile`, `er`, `why` and `briefing`, are accepted and
-ignored: a file that still spells one loads, with one warning naming each section.
+The sections of removed features, `reconcile`, `er`, `why` and `briefing`, are removed: a file
+that still spells one is refused like any unknown key, naming the section.
 Use quality/latency measurements from your own workload before changing a knob.
 
 | Key | Default | Measurement or trigger |

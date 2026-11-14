@@ -97,7 +97,6 @@ pub(crate) struct TypeRow {
     pub(crate) mixins: String,
     pub(crate) fts_fields: Option<String>,
     pub(crate) ident_fields: Option<String>,
-    pub(crate) min_confidence: Option<f64>,
     /// The five JSON declaration columns as canonical JSON text (E1.7 R2, landed in E1.8).
     pub(crate) declaration: [Option<String>; 5],
 }
@@ -171,7 +170,6 @@ pub(crate) fn builtin_rows() -> Result<&'static [TypeRow]> {
                 .to_string(),
                 fts_fields: json_strings(&k.fts_fields),
                 ident_fields: json_strings(&k.ident_fields),
-                min_confidence: k.min_confidence,
                 declaration: TypeDeclaration::of(k).texts(),
             })
             .chain(ontology.rels.values().map(|r| TypeRow {
@@ -187,7 +185,6 @@ pub(crate) fn builtin_rows() -> Result<&'static [TypeRow]> {
                 mixins: "[]".to_owned(),
                 fts_fields: None,
                 ident_fields: None,
-                min_confidence: None,
                 declaration: Default::default(),
             }))
             .collect();
@@ -236,8 +233,10 @@ pub(crate) fn seed(conn: &Connection, now: &str) -> Result<()> {
 }
 
 /// The declaration columns of a builtin row on the 0004 shape, in [`builtin_values`] order.
-const BUILTIN_COLS: &str = "ns, kind, name, description, is_a, mixins, fts_fields, ident_fields, min_confidence, from_kinds, to_kinds, directed, props_schema, governed, rank, column_weights, extract, display";
-const BUILTIN_BINDS: &str = "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?";
+/// The schema's `min_confidence` column (the removed governance winner gate) is no longer
+/// written and stays `NULL` until the v14 schema drops it (T4).
+const BUILTIN_COLS: &str = "ns, kind, name, description, is_a, mixins, fts_fields, ident_fields, from_kinds, to_kinds, directed, props_schema, governed, rank, column_weights, extract, display";
+const BUILTIN_BINDS: &str = "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?";
 
 fn builtin_values(row: &TypeRow) -> Vec<rusqlite::types::Value> {
     use rusqlite::types::Value;
@@ -252,7 +251,6 @@ fn builtin_values(row: &TypeRow) -> Vec<rusqlite::types::Value> {
         text(&row.mixins),
         opt(&row.fts_fields),
         opt(&row.ident_fields),
-        row.min_confidence.map_or(Value::Null, Value::Real),
         text(&row.declared_from),
         text(&row.declared_to),
         Value::Integer(i64::from(row.declared_directed)),

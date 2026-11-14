@@ -484,3 +484,27 @@ fn index_keys_load_strictly_with_the_plan_defaults_and_show_as_overrides() {
         }
     );
 }
+
+/// The sections of removed features (`[reconcile]`, `[er]`, `[why]`, `[briefing]`) are
+/// refused like any other unknown key: the error names the section, never a value.
+#[test]
+fn a_removed_feature_section_is_refused_naming_the_section() {
+    for section in ["reconcile", "er", "why", "briefing"] {
+        let path = std::env::temp_dir().join(format!(
+            "kaban-config-removed-{}-{section}.yaml",
+            std::process::id()
+        ));
+        std::fs::write(
+            &path,
+            format!("{section}:\n  secret_value_x: 0.3\nlink:\n  default: none\n"),
+        )
+        .unwrap();
+        let err = load(&path).unwrap_err();
+        assert!(
+            matches!(&err, ConfigError::Parse { path } if path == section),
+            "{section}: {err:?}"
+        );
+        assert!(!err.to_string().contains("secret_value_x"), "{err}");
+        std::fs::remove_file(path).unwrap();
+    }
+}

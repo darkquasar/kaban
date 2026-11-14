@@ -34,7 +34,6 @@ kinds:
     rank: {boost: 1.2, expand_rels: [CAUSED_BY, FIXED_BY, SUPERSEDES], expand_depth: 2}
     fts_fields: [props.rationale]
     extract: {enabled: true, labels: ["architecture decision", "design decision"], gazetteer: [summary, props.aliases]}
-    min_confidence: 0.6
   Convention:
     description: "A rule the project follows, with its rationale (governed)."
     mixins: [Governed]
@@ -50,7 +49,7 @@ kinds:
                export: {digest: false, marker: false}, display: {label: Failure, plural: Failures},
                governs_paths: false, dedup: none}
 rels:
-  SUPERSEDES: {from: [Decision], to: [Decision], directed: true, description: "Newer memory replaces the older one.", on_link: archive_target, confidence_required: 0.95, governed_semantics: true}
+  SUPERSEDES: {from: [Decision], to: [Decision], directed: true, description: "Newer memory replaces the older one.", on_link: archive_target, governed_semantics: true}
   CONTRADICTS: {from: [], to: [], directed: false, description: "Two memories conflict."}
   INVALIDATES: {from: [], to: [], directed: true, description: "Source shows the target is no longer valid."}
   DEPENDS_ON: {from: [], to: [], directed: true, description: "Dependency."}

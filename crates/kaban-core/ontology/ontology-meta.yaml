@@ -11,8 +11,8 @@
 # E2.5g): who accepts an EN-F5a candidate or EN-F13 `proposed` record of that ungoverned kind
 # (`agent` when absent; refused beside the `governed` mixin, whose own `acceptance` is the
 # tier). The same key under `discovered` is the tier of undeclared (`x:`) labels. The removed
-# governance keys (top-level `priors`, a rel's `confidence_required`) are dropped with one warning
-# each before this schema runs, so they are not listed here.
+# governance keys (top-level `priors`, a rel's `confidence_required`, a kind's `min_confidence`)
+# are not listed: a file carrying one is refused like any unknown key.
 type: object
 additionalProperties: false
 required: [ontology, version, kinds, rels]

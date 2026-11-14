@@ -145,8 +145,6 @@ pub struct ResolvedKind {
     pub column_weights: Option<ColumnWeights>,
     /// Extraction hints (inherited, overridden).
     pub extract: Option<Extract>,
-    /// Winner gate (inherited, overridden).
-    pub min_confidence: Option<f64>,
     /// Indexing meta-config (inherited, overridden; engine-spec §3.1 `index`, OWN-65).
     pub index: Option<Index>,
 }
@@ -674,7 +672,6 @@ fn resolve_kind(
         ident_fields: Vec::new(),
         column_weights: None,
         extract: None,
-        min_confidence: None,
         index: None,
     };
     // is_a: the parent's merged schema and hints
@@ -695,7 +692,6 @@ fn resolve_kind(
         resolved.ident_fields.clone_from(&parent.ident_fields);
         resolved.column_weights.clone_from(&parent.column_weights);
         resolved.extract.clone_from(&parent.extract);
-        resolved.min_confidence = parent.min_confidence;
         resolved.index = parent.index;
     }
     // mixins in list order; a key declared by two mixins is a conflict, whatever the values
@@ -754,10 +750,6 @@ fn resolve_kind(
             claim("extract")?;
             resolved.extract = Some(extract.clone());
         }
-        if let Some(min) = mixin.min_confidence {
-            claim("min_confidence")?;
-            resolved.min_confidence = Some(min);
-        }
         if let Some(index) = mixin.index {
             claim("index")?;
             resolved.index = Some(index);
@@ -797,9 +789,6 @@ fn resolve_kind(
     }
     if let Some(extract) = &body.extract {
         resolved.extract = Some(extract.clone());
-    }
-    if let Some(min) = body.min_confidence {
-        resolved.min_confidence = Some(min);
     }
     if let Some(index) = body.index {
         resolved.index = Some(index);

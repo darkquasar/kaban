@@ -4,10 +4,9 @@
 //! (`KABAN_HOME`). Fields are plain serde data (`f64`, `u32`, `bool`, `String`, `BTreeMap`,
 //! `Option`); the typed forms (`Fixed`, `Fusion`, `ModelIdentity`, `LinkMode`) are
 //! built once at the consuming seam by the task that owns them, so this module depends on
-//! nothing defined later. Unknown keys fail at every depth with the field path (never the value);
-//! an opt-in budget of 0 fails [`ConfigError::Range`]. The sections of removed features
-//! ([`REMOVED_SECTIONS`]) are the one exception: they are accepted and ignored with one
-//! [`ConfigWarning`] each, so an older file does not refuse every verb.
+//! nothing defined later. Unknown keys fail at every depth with the field path (never the value),
+//! the sections of removed features (`reconcile`, `er`, `why`, `briefing`) included; an opt-in
+//! budget of 0 fails [`ConfigError::Range`].
 //!
 //! `[index]` carries, since v4 CG4.2, the `kaban-index` keys
 //! (`isolation`, `container_image`, `container_cli`, `deadline_secs`, `quota.*`,
@@ -498,23 +497,6 @@ pub struct EngineConfig {
     pub bench: Bench,
 }
 
-/// Top-level sections of features that no longer exist: governance reconciliation
-/// (`[reconcile]`), entity resolution (`[er]`), the `why` prefilter (`[why]`) and the session
-/// briefing (`[briefing]`). A file that still spells one loads; the section is ignored with one
-/// [`ConfigWarning::RemovedSection`].
-pub const REMOVED_SECTIONS: [&str; 4] = ["reconcile", "er", "why", "briefing"];
-
-/// A configuration file loaded, but part of it was ignored. Content-free: a fixed section name.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum ConfigWarning {
-    /// A top-level section of a removed feature ([`REMOVED_SECTIONS`]) was ignored.
-    #[error("config section [{section}] is no longer used and is ignored")]
-    RemovedSection {
-        /// The section name, one of [`REMOVED_SECTIONS`].
-        section: &'static str,
-    },
-}
-
 /// Why a configuration file failed to load. Content-free: an I/O class, a field path.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ConfigError {
@@ -563,29 +545,15 @@ const BUDGETS: [&str; 11] = [
 
 /// Load `path`: an absent file is the register `Default`; any other read failure is
 /// [`ConfigError::Io`]; an unknown key at any depth or a wrong type is [`ConfigError::Parse`]
-/// with the field path; an opt-in budget of 0 is [`ConfigError::Range`]. Each
-/// [`ConfigWarning`] of [`load_reporting`] is logged once at WARN.
+/// with the field path; an opt-in budget of 0 is [`ConfigError::Range`].
 ///
 /// # Errors
 /// As listed above.
 pub fn load(path: &Path) -> Result<EngineConfig, ConfigError> {
-    let (cfg, warnings) = load_reporting(path)?;
-    for warning in &warnings {
-        tracing::warn!("{warning}");
-    }
-    Ok(cfg)
-}
-
-/// [`load`] without logging: the configuration and the parts of the file that were ignored, in
-/// [`REMOVED_SECTIONS`] order.
-///
-/// # Errors
-/// As [`load`].
-pub fn load_reporting(path: &Path) -> Result<(EngineConfig, Vec<ConfigWarning>), ConfigError> {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            return Ok((EngineConfig::default(), Vec::new()));
+            return Ok(EngineConfig::default());
         }
         Err(e) => {
             return Err(ConfigError::Io {
@@ -596,23 +564,15 @@ pub fn load_reporting(path: &Path) -> Result<(EngineConfig, Vec<ConfigWarning>),
     parse(&text)
 }
 
-/// Parse the YAML text of a configuration file (the file-less half of [`load_reporting`]).
-fn parse(text: &str) -> Result<(EngineConfig, Vec<ConfigWarning>), ConfigError> {
+/// Parse the YAML text of a configuration file (the file-less half of [`load`]).
+fn parse(text: &str) -> Result<EngineConfig, ConfigError> {
     // one generic parse into JSON data first: the field paths of the errors below are found by
     // narrowing on this tree, never by quoting the YAML
-    let mut data: Value = yaml_serde::from_str(text).map_err(|_| ConfigError::Parse {
+    let data: Value = yaml_serde::from_str(text).map_err(|_| ConfigError::Parse {
         path: String::new(),
     })?;
     if data.is_null() {
-        return Ok((EngineConfig::default(), Vec::new()));
-    }
-    let mut warnings = Vec::new();
-    if let Some(object) = data.as_object_mut() {
-        for section in REMOVED_SECTIONS {
-            if object.remove(section).is_some() {
-                warnings.push(ConfigWarning::RemovedSection { section });
-            }
-        }
+        return Ok(EngineConfig::default());
     }
     let cfg: EngineConfig = match serde_json::from_value(data.clone()) {
         Ok(cfg) => cfg,
@@ -651,7 +611,7 @@ fn parse(text: &str) -> Result<(EngineConfig, Vec<ConfigWarning>), ConfigError> 
             });
         }
     }
-    Ok((cfg, warnings))
+    Ok(cfg)
 }
 
 /// The dotted path of the node that makes `data` fail to deserialize: the subtree under each
