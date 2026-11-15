@@ -6,14 +6,20 @@
 //! walk fails closed; M4-3). The code-graph provider is wired as `serve` wires it (read-only:
 //! the codegraph key is read, never created) so `stale_anchors` sees the current snapshot.
 //! Exit 0 when every check passes, 5 when one fails or the database cannot be opened; a
-//! withheld report is 2 like every other withheld result.
+//! withheld report is 2 like every other withheld result. A database whose format the open
+//! refuses (spec 11 CMP-01: another schema version, or no kaban project) is reported, not
+//! failed: the report's one row is the failed `schema_version` check, printed directly (its
+//! only string is the refusal's fixed text and two versions), and the exit is 0.
 
 use crate::Cli;
-use crate::cli::output::{EXIT_INVALID, EXIT_STORE_ERROR, Format, print_failure, store_exit_code};
+use crate::cli::output::{
+    EXIT_INVALID, EXIT_STORE_ERROR, Format, SERIALIZATION_FAILED, print_error, print_failure,
+    print_json, store_exit_code,
+};
 use crate::cli::seam;
 use crate::codegraph;
 use kaban_api::{ApiConfig, DoctorContext, DoctorReport, GitRunner, KabanApi};
-use kaban_core::WorkspaceId;
+use kaban_core::{StoreError, WorkspaceId};
 use kaban_store_sqlite::SqliteStore;
 use serde::Deserialize;
 use serde_json::json;
@@ -55,6 +61,13 @@ pub(crate) fn run(
     }
     let (store, files) = match SqliteStore::open_diagnostic(&cli.db, keys_dir, &cli.actor_id) {
         Ok(opened) => opened,
+        Err(e @ (StoreError::SchemaUnsupported { .. } | StoreError::NotAKabanProject { .. })) => {
+            if print_json(&DoctorReport::refused_format(&e), format).is_err() {
+                print_error(SERIALIZATION_FAILED);
+                return ExitCode::from(EXIT_STORE_ERROR);
+            }
+            return ExitCode::SUCCESS;
+        }
         Err(e) => {
             print_failure(&format_args!(
                 "opening database {} for diagnosis: {e}",

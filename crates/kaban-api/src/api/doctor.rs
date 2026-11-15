@@ -60,6 +60,21 @@ pub struct DoctorReport {
 }
 
 impl DoctorReport {
+    /// The report on a database whose format the diagnostic open refused (spec 11 CMP-01:
+    /// another schema version, or no kaban project): nothing else can be checked, so its one
+    /// row is a failed `schema_version` check whose detail is the refusal's content-free
+    /// `Display` (both versions and the way out).
+    #[must_use]
+    pub fn refused_format(refusal: &StoreError) -> Self {
+        let mut report = Self {
+            ok: true,
+            checks: Vec::new(),
+            budgets: Vec::new(),
+        };
+        report.push("schema_version", false, refusal.to_string());
+        report
+    }
+
     fn push(&mut self, name: &str, ok: bool, detail: impl Into<String>) {
         self.ok &= ok;
         self.checks.push(DoctorCheck {

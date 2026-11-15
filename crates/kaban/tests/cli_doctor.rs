@@ -286,11 +286,11 @@ fn a_healthy_database_passes_and_a_corrupted_fts_shadow_table_fails_deterministi
     assert_eq!(check(&healthy, "text_index")["detail"], "tantivy");
 }
 
-/// OWN-P: doctor on a database at another schema version prints the refusal with its
-/// guidance and exits 4 (request-shaped: the file is the wrong input for this kaban); no
-/// report document, nothing modified.
+/// OWN-P, spec 11 CMP-01: doctor on a database at another schema version reports the refusal
+/// without failing (exit 0): the report's `schema_version` check fails with the refusal's
+/// text, naming both versions and the way out; nothing is modified.
 #[test]
-fn doctor_on_a_database_at_another_schema_version_prints_the_refusal_and_exits_4() {
+fn doctor_on_a_database_at_another_schema_version_reports_the_refusal_and_exits_0() {
     let s = Scratch::new("kaban-doctor", "other-schema");
     seed(&s, &["a note of the last ladder release"]);
     let older = kaban_store_sqlite::LATEST_SCHEMA_VERSION - 1;
@@ -302,17 +302,18 @@ fn doctor_on_a_database_at_another_schema_version_prints_the_refusal_and_exits_4
         )
         .unwrap();
     let out = doctor(&s, &s.db(), &[]);
-    assert_eq!(out.status.code(), Some(4), "{out:?}");
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let refused = report(&out);
+    assert_eq!(refused["ok"], false, "{refused}");
+    let row = check(&refused, "schema_version");
+    assert_eq!(row["ok"], false, "{row}");
+    let detail = row["detail"].as_str().unwrap();
     assert!(
-        out.stdout.is_empty(),
-        "no report on a refused open: {out:?}"
-    );
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains(&format!("schema version {older}"))
-            && stderr.contains("re-ingest")
-            && !stderr.contains("retired"),
-        "the refusal names the version and the way out: {stderr}"
+        detail.contains(&format!("schema version {older}"))
+            && detail.contains(&kaban_store_sqlite::LATEST_SCHEMA_VERSION.to_string())
+            && detail.contains("no upgrade path exists; create a fresh project and re-ingest")
+            && !detail.contains("retired"),
+        "the refusal names both versions and the way out: {detail}"
     );
     let version: String = rusqlite::Connection::open(s.db())
         .unwrap()
