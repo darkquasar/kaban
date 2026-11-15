@@ -304,3 +304,38 @@ fn default_pending_scan_is_path_ordered_bounded_at_one_thousand_and_keeps_exhaus
         "bounded scan never claimed the available 1001st document"
     );
 }
+
+/// A document whose claim attempts reached the cap is not exhausted once its job finished: the
+/// finish marker (stored under the job's extractor producer, PC-16) is matched to the attempt
+/// lease of the same dialect.
+#[test]
+fn a_finished_document_at_the_attempt_cap_is_not_counted_as_exhausted() {
+    let store = SqliteStore::open_memory().unwrap();
+    let workspace = WorkspaceId::default();
+    let job = document(&store, "finished.md", &workspace);
+    let lease = claim(&store, &job).unwrap();
+    assert_eq!(
+        store.jobs_exhausted(&workspace, 1).unwrap(),
+        1,
+        "one attempt, no finish marker yet"
+    );
+    store
+        .job_holder(&job.job, &job.workspace, Some(lease.fence), false)
+        .unwrap();
+    store
+        .job_finish(
+            finish_request(&store, &job, lease.fence),
+            &ctx(),
+            &mut |_, _| {
+                Ok(JobFinishStateUpdate {
+                    report_json: "{}".into(),
+                })
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        store.jobs_exhausted(&workspace, 1).unwrap(),
+        0,
+        "the finish marker answers the attempts"
+    );
+}
