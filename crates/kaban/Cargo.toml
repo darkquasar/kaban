@@ -53,6 +53,7 @@ zeroize.workspace = true      # the codegraph key bytes read by `serve` are zero
 
 [dev-dependencies]
 rusqlite.workspace = true
+sha2.workspace = true        # the byte-for-byte compare of the older-format fixtures (CMP-01)
 tracing-log.workspace = true  # install the `log` bridge explicitly in the RD-1 regression
 insta.workspace = true        # `tools/list` input-schema snapshot (C3.1)
 kaban-index.workspace = true  # publishes the fixture snapshots for `tests/acceptance_north_star.rs` (CG10.2 stop 1 grant)
