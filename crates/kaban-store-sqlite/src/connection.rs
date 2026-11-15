@@ -667,7 +667,56 @@ fn file_ident(meta: &std::fs::Metadata) -> FileIdent {
 /// `StoreError::NotAKabanProject` for a main file without a kaban schema beside a non-empty
 /// `-wal`; `StoreError::FileMode` when the `-wal` is a symlink or not a regular file; SQLite
 /// errors reading the main file.
+///
+/// Two outcomes may be another process's work in progress rather than the file's state, and
+/// are read again every [`PROBE_RETRY_INTERVAL`] until [`PROBE_RETRY_WINDOW`] has passed (with
+/// the main file `stat`ed anew each time): no kaban schema beside a non-empty `-wal` (a
+/// creator between its DDL and its TRUNCATE checkpoint) and a [`transient_read_failure`]. The
+/// last outcome is then returned as it is. A readable schema at another version is refused at
+/// once. The callers hold the in-process registry lock across the probe, so on those two
+/// outcomes another open in this process waits for the window too.
 fn probe_version(path: &Path, meta: Option<&std::fs::Metadata>) -> Result<()> {
+    let deadline = std::time::Instant::now() + PROBE_RETRY_WINDOW;
+    let mut meta = meta.cloned();
+    loop {
+        let outcome = probe_once(path, meta.as_ref());
+        let pending = match &outcome {
+            Err(StoreError::NotAKabanProject { .. }) => true,
+            Err(e) => transient_read_failure(e),
+            Ok(()) => false,
+        };
+        let now = std::time::Instant::now();
+        if !pending || now >= deadline {
+            return outcome;
+        }
+        std::thread::sleep(PROBE_RETRY_INTERVAL.min(deadline - now));
+        meta = regular_file_metadata(path).map_err(StoreError::FileMode)?;
+    }
+}
+
+/// Whether `e` is an SQLite failure that an immutable read of a main file can meet while
+/// another process checkpoints into it (a torn read): busy or locked, an I/O error, "not a
+/// database" or corrupt. Everything else, a refusal included, is the file's state.
+fn transient_read_failure(e: &StoreError) -> bool {
+    use rusqlite::ErrorCode;
+    let StoreError::Backend { source } = e else {
+        return false;
+    };
+    matches!(
+        source.driver().downcast_ref::<rusqlite::Error>(),
+        Some(rusqlite::Error::SqliteFailure(failure, _)) if matches!(
+            failure.code,
+            ErrorCode::DatabaseBusy
+                | ErrorCode::DatabaseLocked
+                | ErrorCode::SystemIoFailure
+                | ErrorCode::NotADatabase
+                | ErrorCode::DatabaseCorrupt
+        )
+    )
+}
+
+/// One read of [`probe_version`]: its rule, without the retry.
+fn probe_once(path: &Path, meta: Option<&std::fs::Metadata>) -> Result<()> {
     use crate::schema::{LATEST_SCHEMA_VERSION, Migrator};
     let found = match meta {
         Some(meta) if meta.len() > 0 => {
@@ -696,6 +745,17 @@ fn probe_version(path: &Path, meta: Option<&std::fs::Metadata>) -> Result<()> {
         other => Err(Migrator::unsupported(other)),
     }
 }
+
+/// How long [`probe_version`] keeps re-reading a main file whose outcome another process may
+/// still be changing (spec 11 CMP-01): no kaban schema beside a non-empty `-wal` (a creator
+/// that has its DDL in the log and has not yet run its TRUNCATE checkpoint), or a transient
+/// SQLite failure of the immutable read (a busy, I/O, "not a database" or corrupt read under
+/// a concurrent checkpoint). A creator finishes well inside it; a static file is refused or
+/// failed once it has passed.
+pub(crate) const PROBE_RETRY_WINDOW: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// The pause between two reads of the probe inside [`PROBE_RETRY_WINDOW`].
+pub(crate) const PROBE_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_millis(25);
 
 /// `path` as the path part of an SQLite `file:` URI: every byte outside the unreserved set
 /// (`A-Z a-z 0-9 - . _ ~`) but `/` is percent-encoded, so `?`, `#`, `%`, spaces and

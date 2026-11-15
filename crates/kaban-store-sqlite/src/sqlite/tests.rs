@@ -639,3 +639,159 @@ fn a_v14_project_with_a_leftover_wal_opens_and_recovers() {
     let recovered = reopened.get(&nid(&node.id), false).unwrap();
     assert!(recovered.is_some(), "the logged write is recovered");
 }
+
+/// When the helper of the probe-retry tests turns a pending shape into a v14 project: well
+/// inside the probe's retry window.
+const RESOLVES_AFTER: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// A created and closed v14 project: its main file holds the whole schema, no log beside it.
+fn closed_v14_project(name: &str) -> Scratch {
+    let d = Scratch::new(name);
+    drop(SqliteStore::open(&d.db(), &d.keys()).unwrap());
+    d
+}
+
+/// Another process finishing its creation of `to` [`RESOLVES_AFTER`] from now: the v14 main
+/// file of `from` is renamed into place, then the log is truncated (the creator's TRUNCATE
+/// checkpoint).
+fn resolve_into_v14_later(
+    from: &Scratch,
+    to: &Scratch,
+) -> std::thread::JoinHandle<std::time::Instant> {
+    let (main, staged, wal) = (from.db(), to.0.join("staged.db"), to.0.join("kaban.db-wal"));
+    let target = to.db();
+    std::thread::spawn(move || {
+        std::thread::sleep(RESOLVES_AFTER);
+        std::fs::copy(main, &staged).unwrap();
+        std::fs::rename(&staged, target).unwrap();
+        if wal.exists() {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(wal)
+                .unwrap()
+                .set_len(0)
+                .unwrap();
+        }
+        std::time::Instant::now()
+    })
+}
+
+/// Spec 11 CMP-01, the pending creator: a main file without a kaban schema beside a non-empty
+/// `-wal` may be another process's creation between its DDL and its TRUNCATE checkpoint. The
+/// probe reads it again inside its retry window, so once the creator's v14 main file is in
+/// place the open succeeds on that project (opened, not created).
+#[test]
+fn a_pending_creation_beside_its_log_opens_once_the_main_file_holds_v14() {
+    let project = closed_v14_project("pending-source");
+    let d = Scratch::new("pending-creation");
+    std::fs::File::create(d.db()).unwrap();
+    // the log's content is never read by the probe; these bytes are no valid WAL, so nothing
+    // could be replayed from them
+    std::fs::write(
+        d.0.join("kaban.db-wal"),
+        b"a creator's log, not yet checkpointed",
+    )
+    .unwrap();
+    let started = std::time::Instant::now();
+    let creator = resolve_into_v14_later(&project, &d);
+    let store = SqliteStore::open(&d.db(), &project.keys()).unwrap();
+    let resolved = creator.join().unwrap();
+    assert!(
+        resolved > started + RESOLVES_AFTER,
+        "the shape was pending at the first read"
+    );
+    assert_eq!(
+        *store.migration(),
+        MigrationReport::unchanged(crate::LATEST_SCHEMA_VERSION),
+        "the creator's project, opened"
+    );
+}
+
+/// Spec 11 CMP-01, a torn read: an immutable read of a main file under another process's
+/// checkpoint may fail as "not a database" (or busy, I/O, corrupt). The probe reads it again
+/// inside its retry window, so once the main file is whole the open succeeds.
+#[test]
+fn a_main_file_unreadable_for_a_moment_opens_once_it_reads_as_v14() {
+    let project = closed_v14_project("torn-source");
+    let d = Scratch::new("torn-read");
+    std::fs::write(d.db(), vec![0xA5_u8; 4096]).unwrap();
+    let creator = resolve_into_v14_later(&project, &d);
+    let store = SqliteStore::open(&d.db(), &project.keys()).unwrap();
+    creator.join().unwrap();
+    assert_eq!(
+        *store.migration(),
+        MigrationReport::unchanged(crate::LATEST_SCHEMA_VERSION),
+        "the whole main file, opened"
+    );
+}
+
+/// Spec 11 CMP-01, the static shapes: a foreign main file beside a non-empty `-wal` that no
+/// creator ever resolves is still refused as no kaban project, and a main file that never
+/// reads as a database still fails, each only after the whole retry window and with nothing
+/// created or written.
+#[test]
+fn a_shape_that_never_resolves_is_refused_after_the_retry_window() {
+    let writer = Scratch::new("static-foreign-writer");
+    let raw = Connection::open(writer.db()).unwrap();
+    raw.execute_batch(
+        "CREATE TABLE other(x); INSERT INTO other VALUES (1);
+         PRAGMA journal_mode = WAL; PRAGMA wal_autocheckpoint = 0;
+         CREATE TABLE logged(y); INSERT INTO logged VALUES (2);",
+    )
+    .unwrap();
+    let foreign = Scratch::new("static-foreign");
+    copy_as_killed(&writer, &foreign);
+    drop(raw);
+    let garbage = Scratch::new("static-garbage");
+    std::fs::write(garbage.db(), vec![0xA5_u8; 4096]).unwrap();
+    for (case, d) in [
+        ("foreign beside a log", &foreign),
+        ("not a database", &garbage),
+    ] {
+        let before = dir_bytes(&d.0);
+        let started = std::time::Instant::now();
+        let err = SqliteStore::open(&d.db(), &d.keys()).map(drop).unwrap_err();
+        let waited = started.elapsed();
+        match case {
+            "foreign beside a log" => assert!(
+                matches!(err, StoreError::NotAKabanProject { .. }),
+                "{case}: {err:?}"
+            ),
+            _ => assert!(matches!(err, StoreError::Backend { .. }), "{case}: {err:?}"),
+        }
+        assert!(
+            waited >= crate::connection::PROBE_RETRY_WINDOW,
+            "{case}: refused after {waited:?}, inside the retry window"
+        );
+        assert_eq!(
+            dir_bytes(&d.0),
+            before,
+            "{case}: nothing created or written"
+        );
+    }
+}
+
+/// Spec 11 CMP-01: a readable kaban schema at another version is a deterministic refusal,
+/// returned at once, never retried.
+#[test]
+fn a_readable_older_schema_is_refused_without_waiting() {
+    let d = closed_v14_project("older-at-once");
+    let raw = Connection::open(d.db()).unwrap();
+    raw.execute(
+        "UPDATE index_meta SET value = '13' WHERE key = 'schema_version'",
+        [],
+    )
+    .unwrap();
+    drop(raw);
+    let started = std::time::Instant::now();
+    let err = SqliteStore::open(&d.db(), &d.keys()).map(drop).unwrap_err();
+    let waited = started.elapsed();
+    assert!(
+        matches!(err, StoreError::SchemaUnsupported { found: 13, .. }),
+        "{err:?}"
+    );
+    assert!(
+        waited < crate::connection::PROBE_RETRY_WINDOW / 2,
+        "refused after {waited:?}"
+    );
+}
