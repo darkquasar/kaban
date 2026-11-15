@@ -363,7 +363,7 @@ fn judge_node(
             let hash = redacted_content_hash(&node.id, &strings);
             let bodies = crate::body_codec::Writer::for_connection(conn)?;
             conn.execute(
-                "UPDATE node SET text=?1, summary=?2, tags=?3, props=?4, path_scope=?5, session_id=?6, agent_id=?7, repo=?8, commit_sha=?9, accepted_commit=?10, dup_key=?11, content_hash=?12, updated_at=?13, rev=rev+1 WHERE rid=?14",
+                "UPDATE node SET text=?1, summary=?2, tags=?3, props=?4, path_scope=?5, session_id=?6, agent_id=?7, repo=?8, commit_sha=?9, dup_key=?10, content_hash=?11, updated_at=?12, rev=rev+1 WHERE rid=?13",
                 params![
                     bodies.stored(&strings.text),
                     strings.summary,
@@ -374,7 +374,6 @@ fn judge_node(
                     strings.agent_id,
                     strings.repo,
                     strings.commit_sha,
-                    strings.accepted_commit,
                     strings.dup_key,
                     hash,
                     now,

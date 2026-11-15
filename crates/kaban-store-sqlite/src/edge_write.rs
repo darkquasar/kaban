@@ -1,7 +1,6 @@
 //! The one `edge` row writer (the `INSERT ... ON CONFLICT(src,dst,rel) DO UPDATE` statement
 //! lives here and nowhere else), the first-writer rule and the clock the job and batch paths
-//! share. Every edge carries one producer identity, stored in the `layer` column until T4
-//! renames it (PC-16).
+//! share. Every edge carries one producer identity, its `producer` column (PC-16).
 
 use crate::ontology::TypeTable;
 use crate::sql_error::SqlResultExt;
@@ -9,7 +8,7 @@ use kaban_core::{Method, Producer, Result, new_id, now_iso};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::Value;
 
-/// Whether the connection carries the 0004 scoring columns of `edge` (`layer`, `method`,
+/// Whether the connection carries the 0004 scoring columns of `edge` (`producer`, `method`,
 /// `score`, the span): a store opened at an older schema (fixtures, benches) has none.
 pub(crate) fn scoring_columns(conn: &Connection) -> Result<bool> {
     Ok(TypeTable::of(conn)? == TypeTable::Qualified)
@@ -85,7 +84,7 @@ pub(crate) fn write_edge(conn: &Connection, e: &EdgeWrite<'_>) -> Result<Written
     }
     let stored: Option<Stored> = conn
         .query_row(
-            "SELECT confidence, props, layer, method, score, source_id, offset, len
+            "SELECT confidence, props, producer, method, score, source_id, offset, len
              FROM edge WHERE src=?1 AND dst=?2 AND rel=?3",
             params![e.src, e.dst, e.rel],
             |r| {
@@ -124,10 +123,10 @@ pub(crate) fn write_edge(conn: &Connection, e: &EdgeWrite<'_>) -> Result<Written
     }
     // the edge is tenant-scoped like its source node (F17)
     conn.execute(
-        "INSERT INTO edge(id,src,dst,rel,confidence,created_at,props,workspace_id,layer,method,score,source_id,offset,len)
+        "INSERT INTO edge(id,src,dst,rel,confidence,created_at,props,workspace_id,producer,method,score,source_id,offset,len)
          VALUES (?1,?2,?3,?4,?5,?6,?7,(SELECT workspace_id FROM node WHERE rid=?2),?8,?9,?10,?11,?12,?13)
          ON CONFLICT(src,dst,rel) DO UPDATE SET confidence=excluded.confidence, props=excluded.props,
-             layer=excluded.layer, method=excluded.method, score=excluded.score,
+             producer=excluded.producer, method=excluded.method, score=excluded.score,
              source_id=excluded.source_id, offset=excluded.offset, len=excluded.len",
         params![
             new_id(),

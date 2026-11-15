@@ -1,5 +1,5 @@
-//! The committed identifier and projection field maps and the audit trigger over the canonical
-//! columns (OWN-92/95; spec 05 OWN-M).
+//! The committed identifier and projection field maps and the change-log trigger over the
+//! canonical columns (OWN-92/95; spec 05 OWN-M).
 //!
 //! The maps (`ident_fields_resolved`, `fts_fields_resolved`) and the projection signature are
 //! the identity the Tantivy projection is bound to: `index_rows.rs` derives the identifier
@@ -148,13 +148,13 @@ fn deploy_fields(
         .map(|name| format!("\"{}\"", name.replace('"', "\"\"")))
         .collect::<Vec<_>>()
         .join(",");
-    let audit_sql = format!(
+    let changes_sql = format!(
         "CREATE TRIGGER node_changes_au AFTER UPDATE OF {columns} ON node WHEN new.lifecycle <> 'purged' BEGIN
           INSERT INTO changes(entity,op,id,workspace_id) VALUES('node','update',new.id,new.workspace_id);
          END;"
     );
     let signature = kaban_policy::sha256_hex(
-        format!("{IDENT_TERMS_VERSION}\n{fields}\n{projection}\n{audit_sql}").as_bytes(),
+        format!("{IDENT_TERMS_VERSION}\n{fields}\n{projection}\n{changes_sql}").as_bytes(),
     );
     let current: Option<String> = conn
         .query_row(
@@ -189,7 +189,7 @@ fn deploy_fields(
     }
     conn.execute_batch("DROP TRIGGER IF EXISTS node_changes_au;")
         .sql()?;
-    conn.execute_batch(&audit_sql).sql()?;
+    conn.execute_batch(&changes_sql).sql()?;
     for (key, value) in [
         (FIELDS, fields.as_str()),
         (FTS_FIELDS, projection_fields.as_str()),

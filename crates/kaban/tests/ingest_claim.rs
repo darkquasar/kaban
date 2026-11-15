@@ -236,7 +236,7 @@ fn workflow(mcp: bool) {
     assert_eq!(d.call("ingest_finish", &current).unwrap(), report);
     let marker: i64 = db(&s)
         .query_row(
-            "SELECT count(*) FROM derived_artifact WHERE layer='extractor:gliner'",
+            "SELECT count(*) FROM derived_artifact WHERE producer='extractor:gliner'",
             [],
             |r| r.get(0),
         )

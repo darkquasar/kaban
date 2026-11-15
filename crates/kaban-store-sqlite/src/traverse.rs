@@ -31,7 +31,7 @@ fn with_rels_and_hub_cut(select: &str, rels: usize, edge_filter: Option<&EdgeFil
     };
     let mut filter = in_list("rel", rels);
     if let Some(f) = edge_filter {
-        filter.push_str(&in_list("layer", f.producers.len()));
+        filter.push_str(&in_list("producer", f.producers.len()));
         filter.push_str(&in_list("method", f.methods.len()));
         if f.min_score.is_some() {
             filter.push_str(" AND e.score >= ?");

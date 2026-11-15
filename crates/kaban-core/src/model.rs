@@ -251,8 +251,6 @@ pub struct Node {
     pub path_scope: Vec<String>,
     /// Monotonic revision, bumped on every change (F13).
     pub rev: i64,
-    /// Revision last written to the `.kaban/*.md` serialization (F13).
-    pub serialized_rev: Option<i64>,
     /// Near-duplicate key for Decisions (F1).
     pub dup_key: Option<String>,
     /// Creation time (RFC 3339).
@@ -273,14 +271,10 @@ pub struct Node {
     pub repo: Option<String>,
     /// Commit the record was made at, if known.
     pub commit_sha: Option<String>,
-    /// Acceptance commit of the retired acceptance step (the column goes with the v14 format).
-    pub accepted_commit: Option<String>,
     /// JSON properties (`{}` when none).
     pub props: Value,
     /// Dedup hash over (workspace, kind, trimmed text).
     pub content_hash: String,
-    /// Denylist policy version that gated the write.
-    pub policy_version: String,
 }
 
 /// A stored typed edge.
@@ -1001,8 +995,6 @@ pub struct RedactedStrings {
     pub repo: Option<String>,
     /// Masked commit.
     pub commit_sha: Option<String>,
-    /// Masked accepted commit.
-    pub accepted_commit: Option<String>,
     /// Masked duplicate key.
     pub dup_key: Option<String>,
 }
@@ -1020,7 +1012,6 @@ impl RedactedStrings {
             || self.agent_id != n.agent_id
             || self.repo != n.repo
             || self.commit_sha != n.commit_sha
-            || self.accepted_commit != n.accepted_commit
             || self.dup_key != n.dup_key
     }
 }

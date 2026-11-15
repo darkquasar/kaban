@@ -283,7 +283,7 @@ fn one_thousand_records_through_ontology_structured_claim_gazetteer_and_er() {
     // every record's first line is in its own document: the gazetteer linked each at least once
     let mentioned = count(
         &conn,
-        "SELECT count(DISTINCT dst) FROM edge WHERE rel = 'MENTIONS' AND layer = 'gazetteer'",
+        "SELECT count(DISTINCT dst) FROM edge WHERE rel = 'MENTIONS' AND producer = 'gazetteer'",
         &[],
     );
     assert!(mentioned >= RECORDS, "{mentioned} records mentioned");

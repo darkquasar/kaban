@@ -354,11 +354,11 @@ fn a_reject_hit_confined_to_session_id_hides_the_node_on_the_read_path() {
     );
 }
 
-/// Every TEXT value of the `events`, `changes` and `audit` tables (what the bookkeeping keeps).
+/// Every TEXT value of the `changes` table (what the bookkeeping keeps).
 fn bookkeeping_text(s: &Scratch) -> Vec<String> {
     let conn = rusqlite::Connection::open(s.db()).unwrap();
     let mut out = Vec::new();
-    for table in ["events", "changes", "audit"] {
+    for table in ["changes"] {
         let mut st = conn.prepare(&format!("SELECT * FROM {table}")).unwrap();
         let n = st.column_count();
         let rows = st
@@ -642,7 +642,7 @@ fn link_properties_a_newer_policy_forbids_are_masked_or_dropped_by_the_rescan() 
     let producer: String = rusqlite::Connection::open(s.db())
         .unwrap()
         .query_row(
-            "SELECT e.layer FROM edge e JOIN node d ON d.rid = e.dst WHERE d.id = ?1",
+            "SELECT e.producer FROM edge e JOIN node d ON d.rid = e.dst WHERE d.id = ?1",
             [&b],
             |r| r.get(0),
         )

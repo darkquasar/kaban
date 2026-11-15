@@ -18,10 +18,6 @@ use serde_json::json;
 
 use super::{SqliteStore, Tenant};
 
-/// What every new row writes into the retired `node.governance` column: nothing reads it, and
-/// the v14 format drops it.
-const RETIRED_GOVERNANCE: &str = "none";
-
 /// Dedup identity of a note (F1): sha256 over `workspace \u{1} kind \u{1} trimmed text`. The
 /// migrator recomputes it for rows that predate bound workspaces (MD-8).
 pub(crate) fn content_hash(workspace_id: &str, kind: &str, text: &str) -> String {
@@ -137,12 +133,11 @@ impl SqliteStore {
         let tags = serde_json::to_string(&n.tags)?;
         let props = serde_json::to_string(n.props.as_ref().unwrap_or(&json!({})))?;
         let path_scope = serde_json::to_string(&n.path_scope)?;
-        let governance = RETIRED_GOVERNANCE;
         let bodies = crate::body_codec::Writer::for_connection(conn)?;
         conn.execute(
-            "INSERT INTO node(id,kind,text,summary,tags,confidence,importance,lifecycle,governance,store_scope,path_scope,dup_key,repo,created_at,updated_at,valid_from,session_id,agent_id,workspace_id,props,content_hash,policy_version)
-             VALUES (?,?,?,?,?,?,?,'active',?,?,?,?,?,?,?,?,?,?,?,?,?,'')",
-            params![id, stored_kind, bodies.stored(&n.text), n.summary, tags, n.confidence, n.importance, governance, n.store_scope.as_str(), path_scope, n.dup_key, n.repo, now, now, n.valid_from, n.session_id, n.agent_id, tenant.ws, props, hash],
+            "INSERT INTO node(id,kind,text,summary,tags,confidence,importance,lifecycle,store_scope,path_scope,dup_key,repo,created_at,updated_at,valid_from,session_id,agent_id,workspace_id,props,content_hash)
+             VALUES (?,?,?,?,?,?,?,'active',?,?,?,?,?,?,?,?,?,?,?,?)",
+            params![id, stored_kind, bodies.stored(&n.text), n.summary, tags, n.confidence, n.importance, n.store_scope.as_str(), path_scope, n.dup_key, n.repo, now, now, n.valid_from, n.session_id, n.agent_id, tenant.ws, props, hash],
         ).sql()?;
         let rid = conn.last_insert_rowid();
         Self::maintain_anchors(conn, tenant, rid, stored_kind, n)?;
@@ -281,14 +276,13 @@ impl SqliteStore {
                 rid
             }
             None => {
-                let governance = RETIRED_GOVERNANCE;
                 let bodies = crate::body_codec::Writer::for_connection(conn)?;
                 // EN-E3: `store_scope`, `path_scope`, `dup_key` and `repo` are persisted on
                 // insert and update (before E2.2 the batch path dropped them)
                 conn.execute(
-                    "INSERT INTO node(id,kind,text,summary,tags,confidence,importance,lifecycle,governance,store_scope,path_scope,dup_key,repo,created_at,updated_at,valid_from,session_id,agent_id,workspace_id,props,content_hash,policy_version)
-                     VALUES (?,?,?,?,?,?,?,'active',?,?,?,?,?,?,?,?,?,?,?,?,?,'')",
-                    params![id.as_str(), stored_kind, bodies.stored(&n.text), n.summary, tags, n.confidence, n.importance, governance, n.store_scope.as_str(), path_scope, n.dup_key, n.repo, now, now, n.valid_from, n.session_id, n.agent_id, ws, props, hash],
+                    "INSERT INTO node(id,kind,text,summary,tags,confidence,importance,lifecycle,store_scope,path_scope,dup_key,repo,created_at,updated_at,valid_from,session_id,agent_id,workspace_id,props,content_hash)
+                     VALUES (?,?,?,?,?,?,?,'active',?,?,?,?,?,?,?,?,?,?,?,?)",
+                    params![id.as_str(), stored_kind, bodies.stored(&n.text), n.summary, tags, n.confidence, n.importance, n.store_scope.as_str(), path_scope, n.dup_key, n.repo, now, now, n.valid_from, n.session_id, n.agent_id, ws, props, hash],
                 ).sql()?;
                 let rid = conn.last_insert_rowid();
                 report.record(id, stored_kind, OutcomeKind::Inserted);
@@ -401,7 +395,6 @@ pub(super) fn redacted_content_hash(id: &str, s: &RedactedStrings) -> String {
         &s.agent_id,
         &s.repo,
         &s.commit_sha,
-        &s.accepted_commit,
         &s.dup_key,
     ] {
         put_opt(f.as_deref());

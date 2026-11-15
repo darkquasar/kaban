@@ -420,3 +420,81 @@ fn a_purge_report_without_physical_cleanup_is_incomplete_whatever_the_hygiene_sa
         Some("busy; free-page residue until VACUUM")
     );
 }
+
+/// Private scratch directory (database and keys), removed on drop.
+struct Scratch(std::path::PathBuf);
+
+impl Scratch {
+    fn new(name: &str) -> Self {
+        let d = std::env::temp_dir().join(format!("kaban-v14-open-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        Self(d)
+    }
+    fn db(&self) -> std::path::PathBuf {
+        self.0.join("kaban.db")
+    }
+    fn keys(&self) -> std::path::PathBuf {
+        self.0.join("keys")
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Spec 11 CMP-01/KER-05: creating a project ends with its version in the main database file
+/// (a reader of the main file alone, as the refusal probe is, sees v14 while the store is
+/// still open), and the file was created in incremental auto-vacuum mode.
+#[test]
+fn a_created_project_holds_its_version_in_the_main_file() {
+    let d = Scratch::new("main-file");
+    let store = SqliteStore::open(&d.db(), &d.keys()).unwrap();
+    let uri = format!("file:{}?mode=ro&immutable=1", d.db().display());
+    let probe = Connection::open_with_flags(
+        &uri,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+    )
+    .unwrap();
+    let version: String = probe
+        .query_row(
+            "SELECT value FROM index_meta WHERE key = 'schema_version'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(version, crate::LATEST_SCHEMA_VERSION.to_string());
+    let auto_vacuum: i64 = probe
+        .query_row("PRAGMA auto_vacuum", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(auto_vacuum, 2, "incremental");
+    drop(store);
+}
+
+/// The per-database key is created with a new project and required of an existing one: a
+/// reopen signs with the same key, and a project whose key was lost is refused rather than
+/// given a fresh key (that would silently change every keyed identity it stores).
+#[test]
+fn an_existing_project_requires_its_key_and_never_gets_a_fresh_one() {
+    let d = Scratch::new("key");
+    let (db_id, signed) = {
+        let store = SqliteStore::open(&d.db(), &d.keys()).unwrap();
+        (store.db_id().to_owned(), store.signer().hmac_hex(b"probe"))
+    };
+    let key = kaban_policy::key_path(&d.keys(), &db_id);
+    assert!(key.is_file(), "a new project creates its key");
+    {
+        let store = SqliteStore::open(&d.db(), &d.keys()).unwrap();
+        assert_eq!(
+            store.signer().hmac_hex(b"probe"),
+            signed,
+            "same key on reopen"
+        );
+    }
+    std::fs::remove_file(&key).unwrap();
+    let err = SqliteStore::open(&d.db(), &d.keys()).unwrap_err();
+    assert!(matches!(err, StoreError::Audit(_)), "{err:?}");
+    assert!(!key.exists(), "no fresh key for an existing project");
+}

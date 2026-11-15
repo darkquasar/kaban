@@ -308,11 +308,11 @@ fn invalid_text(r: Result<kaban_api::RememberResponse, ApiError>) -> String {
     }
 }
 
-/// Every column of every audit row, rendered as text (blobs as hex), for a leak scan.
-fn audit_rows(s: &Scratch) -> Vec<String> {
+/// Every column of every change row, rendered as text (blobs as hex), for a leak scan.
+fn change_rows(s: &Scratch) -> Vec<String> {
     use std::fmt::Write as _;
     let raw = rusqlite::Connection::open(s.db()).unwrap();
-    let mut st = raw.prepare("SELECT * FROM audit ORDER BY seq").unwrap();
+    let mut st = raw.prepare("SELECT * FROM changes ORDER BY seq").unwrap();
     let n = st.column_count();
     st.query_map([], |r| {
         let mut row = String::new();
@@ -544,8 +544,8 @@ fn remember_symbol_derived_key_gated() {
         other => panic!("expected the gate's rejection of the derived key, got {other:?}"),
     }
     assert_eq!(store.stats(None).unwrap()["nodes"], json!(0));
-    for row in audit_rows(&s) {
-        assert!(!row.contains(&canary), "an audit row holds the term");
+    for row in change_rows(&s) {
+        assert!(!row.contains(&canary), "a change row holds the term");
     }
     drop(api);
     drop(store);

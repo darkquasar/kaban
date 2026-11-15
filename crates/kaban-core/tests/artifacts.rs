@@ -1,4 +1,4 @@
-//! Derived artifact identity is stable, boundary-safe, and policy/source-sensitive.
+//! Derived artifact identity is stable, boundary-safe, and source/producer-sensitive.
 #![allow(clippy::unwrap_used)]
 
 use kaban_core::{ExtractorKind, Producer, SourceRev, WorkspaceId, WriteBatch, artifact_key};
@@ -13,23 +13,17 @@ fn shipped_gazetteer_descriptor_has_a_stable_identity() {
 }
 
 #[test]
-fn artifact_identity_separates_fields_source_layer_and_policy() {
+fn artifact_identity_separates_fields_source_and_producer() {
     let source = SourceRev {
         content_hash: "source".into(),
         rev: 7,
     };
-    let key = artifact_key(&source, Producer::Gazetteer, "ab", "c", "policy");
-    assert_eq!(
-        key,
-        artifact_key(&source, Producer::Gazetteer, "ab", "c", "policy")
-    );
+    let key = artifact_key(&source, Producer::Gazetteer, "ab", "c");
+    assert_eq!(key, artifact_key(&source, Producer::Gazetteer, "ab", "c"));
+    assert_ne!(key, artifact_key(&source, Producer::Gazetteer, "a", "bc"));
     assert_ne!(
         key,
-        artifact_key(&source, Producer::Gazetteer, "a", "bc", "policy")
-    );
-    assert_ne!(
-        key,
-        artifact_key(&source, Producer::Gazetteer, "ab", "c", "other-policy")
+        artifact_key(&source, Producer::Gazetteer, "ab", "other-config")
     );
     assert_ne!(
         key,
@@ -40,8 +34,7 @@ fn artifact_identity_separates_fields_source_layer_and_policy() {
             },
             Producer::Gazetteer,
             "ab",
-            "c",
-            "policy"
+            "c"
         )
     );
     assert_ne!(
@@ -50,8 +43,7 @@ fn artifact_identity_separates_fields_source_layer_and_policy() {
             &source,
             Producer::Extractor(ExtractorKind::Script),
             "ab",
-            "c",
-            "policy"
+            "c"
         )
     );
     assert_eq!(key.as_str().len(), 64);

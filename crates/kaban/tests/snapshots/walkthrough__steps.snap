@@ -2201,7 +2201,7 @@ expression: a
           "ok": true
         },
         {
-          "detail": "13",
+          "detail": "14",
           "name": "schema_version",
           "ok": true
         },

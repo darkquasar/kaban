@@ -485,9 +485,9 @@ fn doctor_in(s: &Scratch, cwd: &Path) -> Value {
 }
 
 /// Rows of the tables a write would touch.
-fn write_counts(db: &Path) -> [i64; 3] {
+fn write_counts(db: &Path) -> [i64; 1] {
     let conn = rusqlite::Connection::open(db).unwrap();
-    ["changes", "events", "audit"].map(|t| {
+    ["changes"].map(|t| {
         conn.query_row(&format!("SELECT count(*) FROM {t}"), [], |r| r.get(0))
             .unwrap()
     })

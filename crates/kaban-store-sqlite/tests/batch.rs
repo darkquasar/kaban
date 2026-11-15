@@ -1321,7 +1321,7 @@ fn out_producers(
     let conn = rusqlite::Connection::open(db).unwrap();
     let mut st = conn
         .prepare(
-            "SELECT d.id, e.layer FROM edge e JOIN node s ON s.rid = e.src
+            "SELECT d.id, e.producer FROM edge e JOIN node s ON s.rid = e.src
              JOIN node d ON d.rid = e.dst WHERE s.id = ?1",
         )
         .unwrap();
@@ -1376,16 +1376,16 @@ fn a_link_on_the_current_schema_carries_the_authored_producer_and_survives_compl
     store
         .link(&chunk, &human_target, "RELATES_TO", None, None, &ctx())
         .unwrap();
-    let layer: Option<String> = rusqlite::Connection::open(s.db())
+    let producer: Option<String> = rusqlite::Connection::open(s.db())
         .unwrap()
         .query_row(
-            "SELECT e.layer FROM edge e JOIN node d ON d.rid = e.dst WHERE d.id = ?1",
+            "SELECT e.producer FROM edge e JOIN node d ON d.rid = e.dst WHERE d.id = ?1",
             [human_target.as_str()],
             |r| r.get(0),
         )
         .unwrap();
     assert_eq!(
-        layer.as_deref(),
+        producer.as_deref(),
         Some("authored"),
         "the authored producer at rest"
     );

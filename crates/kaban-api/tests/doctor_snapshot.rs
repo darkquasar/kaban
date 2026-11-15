@@ -86,9 +86,9 @@ fn stale_check(api: &KabanApi, s: &Scratch) -> DoctorCheck {
 }
 
 /// Rows of the tables a write would touch.
-fn write_counts(s: &Scratch) -> [i64; 3] {
+fn write_counts(s: &Scratch) -> [i64; 1] {
     let conn = rusqlite::Connection::open(s.db()).unwrap();
-    ["changes", "events", "audit"].map(|t| {
+    ["changes"].map(|t| {
         conn.query_row(&format!("SELECT count(*) FROM {t}"), [], |r| r.get(0))
             .unwrap()
     })

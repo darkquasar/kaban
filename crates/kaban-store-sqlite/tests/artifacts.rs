@@ -227,14 +227,14 @@ fn complete_set_publishes_canonical_artifact_and_empty_set_cleans_only_its_sourc
         count, 1,
         "real complete-set publication must persist canonical producer identity"
     );
-    let row: (String,String,String) = conn.query_row("SELECT d.source_rev,d.config_hash,d.policy_version FROM derived_artifact d JOIN node n ON n.rid=d.source_rid WHERE n.id=?1", [document.as_str()], |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
+    let row: (String,String) = conn.query_row("SELECT d.source_rev,d.config_hash FROM derived_artifact d JOIN node n ON n.rid=d.source_rid WHERE n.id=?1", [document.as_str()], |r|Ok((r.get(0)?,r.get(1)?))).unwrap();
     assert_eq!(
         serde_json::from_str::<SourceRev>(&row.0).unwrap(),
         SourceRev::from(&store.get(&document, false).unwrap().unwrap())
     );
     assert_eq!(row.1, "on");
-    conn.execute("INSERT INTO derived_artifact SELECT artifact_key||':other-layer',workspace_id,'script','script:fixture',source_rid,source_rev,config_hash,policy_version,published_at FROM derived_artifact WHERE producer_id='gazetteer@1'",[]).unwrap();
-    conn.execute("INSERT INTO derived_artifact SELECT artifact_key||':foreign','foreign',layer,producer_id,source_rid,source_rev,config_hash,policy_version,published_at FROM derived_artifact WHERE producer_id='gazetteer@1' AND workspace_id='default'",[]).unwrap();
+    conn.execute("INSERT INTO derived_artifact SELECT artifact_key||':other-layer',workspace_id,'script','script:fixture',source_rid,source_rev,config_hash,published_at FROM derived_artifact WHERE producer_id='gazetteer@1'",[]).unwrap();
+    conn.execute("INSERT INTO derived_artifact SELECT artifact_key||':foreign','foreign',producer,producer_id,source_rid,source_rev,config_hash,published_at FROM derived_artifact WHERE producer_id='gazetteer@1' AND workspace_id='default'",[]).unwrap();
     let replay = complete(&store, &document, vec![claim(&chunk, &target)], true);
     let before: i64 = conn
         .query_row("SELECT max(seq) FROM changes", [], |r| r.get(0))
@@ -591,7 +591,7 @@ fn stale_source_artifact_batch_writes_no_sentinel() {
         producer: Producer::DocumentIngest,
     })
     .unwrap();
-    payload["artifacts"] = json!([{"key":"0".repeat(64), "workspace_id": WorkspaceId::default(), "layer":"gazetteer", "producer_id":"gazetteer:1", "source_rid":source_rid, "source_rev":{"content_hash":original.content_hash,"rev":original.rev}, "config_hash":"fixture", "policy_version":"v1", "published_at":0}]);
+    payload["artifacts"] = json!([{"key":"0".repeat(64), "workspace_id": WorkspaceId::default(), "producer":"gazetteer", "producer_id":"gazetteer:1", "source_rid":source_rid, "source_rev":{"content_hash":original.content_hash,"rev":original.rev}, "config_hash":"fixture", "published_at":0}]);
     store
         .apply_batch(serde_json::from_value(payload).unwrap(), &ctx())
         .unwrap();
@@ -779,7 +779,7 @@ fn source_edit_invalidates_existing_artifact_in_same_transaction() {
             r.get(0)
         })
         .unwrap();
-    conn.execute("INSERT INTO derived_artifact(artifact_key,workspace_id,layer,producer_id,source_rid,source_rev,config_hash,policy_version,published_at) VALUES('fixture',?1,'gazetteer','gazetteer:1',?2,'{}','fixture','v1',0)",rusqlite::params![WorkspaceId::default().as_str(),rid]).unwrap();
+    conn.execute("INSERT INTO derived_artifact(artifact_key,workspace_id,producer,producer_id,source_rid,source_rev,config_hash,published_at) VALUES('fixture',?1,'gazetteer','gazetteer:1',?2,'{}','fixture',0)",rusqlite::params![WorkspaceId::default().as_str(),rid]).unwrap();
     let mut failed = WriteBatch::new(
         WorkspaceId::default(),
         vec![node(&source, "Fact", "Uncommitted edit", json!({}))],
@@ -856,15 +856,13 @@ fn parse_artifact_publication_is_idempotent_and_refuses_owner_or_foreign_key_col
             Producer::Extractor(kaban_core::ExtractorKind::Script),
             "script:1",
             "config",
-            "v1",
         ),
         workspace_id: WorkspaceId::default(),
-        layer: Producer::Extractor(kaban_core::ExtractorKind::Script),
+        producer: Producer::Extractor(kaban_core::ExtractorKind::Script),
         producer_id: "script:1".into(),
         source_rid,
         source_rev,
         config_hash: "config".into(),
-        policy_version: "v1".into(),
         published_at: 0,
     };
     let mut batch = WriteBatch::new(WorkspaceId::default(), vec![]);
@@ -909,7 +907,6 @@ fn parse_artifact_publication_is_idempotent_and_refuses_owner_or_foreign_key_col
                 Producer::Extractor(kaban_core::ExtractorKind::Script),
                 "script:1",
                 "config",
-                "v1",
             ),
             workspace_id: workspace,
             source_rid: other_rid,
@@ -981,20 +978,20 @@ fn artifact_retirement_queries_use_existing_edge_and_source_indexes() {
         )
         .unwrap();
     for i in 0..128 {
-        conn.execute("INSERT INTO derived_artifact VALUES(?1,'default','gazetteer','retired-fixture',?2,'{}','fixture','v1',0)",rusqlite::params![format!("{i:064x}"),rid]).unwrap();
+        conn.execute("INSERT INTO derived_artifact VALUES(?1,'default','gazetteer','retired-fixture',?2,'{}','fixture',0)",rusqlite::params![format!("{i:064x}"),rid]).unwrap();
     }
     for (sql, index) in [
         (
-            "EXPLAIN QUERY PLAN SELECT src,dst,rel FROM edge WHERE workspace_id='default' AND rel='MENTIONS' AND layer='gazetteer' AND source_id='doc-fixture'",
-            "edge_rel_layer",
+            "EXPLAIN QUERY PLAN SELECT src,dst,rel FROM edge WHERE workspace_id='default' AND rel='MENTIONS' AND producer='gazetteer' AND source_id='doc-fixture'",
+            "edge_rel_producer",
         ),
         (
-            "EXPLAIN QUERY PLAN DELETE FROM derived_artifact WHERE source_rid=1 AND (source_rev <> '{}' OR policy_version <> 'v1')",
+            "EXPLAIN QUERY PLAN DELETE FROM derived_artifact WHERE source_rid=1 AND (source_rev <> '{}' OR 'active' <> 'active')",
             "derived_artifact_source",
         ),
         (
-            "EXPLAIN QUERY PLAN SELECT artifact_key FROM derived_artifact WHERE workspace_id='default' AND layer='gazetteer' AND producer_id='retired-fixture' LIMIT 3",
-            "derived_artifact_layer",
+            "EXPLAIN QUERY PLAN SELECT artifact_key FROM derived_artifact WHERE workspace_id='default' AND producer='gazetteer' AND producer_id='retired-fixture' LIMIT 3",
+            "derived_artifact_producer",
         ),
     ] {
         let details: Vec<String> = conn

@@ -33,9 +33,7 @@ pub(crate) struct PurgeCleanup {
 impl SqliteStore {
     /// The purge of one row inside the caller's transaction (core-spec F5, S5; MD-24): the id
     /// row stays as a `purged` ghost so the id never reappears, while text, index entry (the
-    /// `node_au` trigger drops it), dedup identity and edges go. `rev` becomes `rev + 1`, or
-    /// `rev_floor` when that is higher (a tombstone imported at a higher file rev, M5-8);
-    /// `serialized_rev` follows `rev_floor` when one is given (the tombstone is the file). The
+    /// `node_au` trigger drops it), dedup identity and edges go. `rev` becomes `rev + 1`. The
     /// node update trigger skips purged rows; the one explicit `op='purge'` row and one
     /// `delete` row per removed edge are the `ChangeLog` record. Returns the row's new `rev`.
     pub(crate) fn purge_in_place(
@@ -44,16 +42,13 @@ impl SqliteStore {
         id: &str,
         workspace_id: &str,
         now: &str,
-        rev_floor: Option<i64>,
     ) -> Result<i64> {
         crate::jobs::revoke_document(tx, id, workspace_id)?;
         tx.execute(
             "UPDATE node SET lifecycle='purged', text='', summary=NULL, tags='[]', props='{}',
-                 content_hash='', dup_key=NULL, valid_to=?1, updated_at=?1,
-                 rev=max(rev+1, COALESCE(?3, 0)),
-                 serialized_rev=CASE WHEN ?3 IS NULL THEN serialized_rev ELSE max(rev+1, ?3) END
+                 content_hash='', dup_key=NULL, valid_to=?1, updated_at=?1, rev=rev+1
              WHERE rid=?2",
-            params![now, rid, rev_floor],
+            params![now, rid],
         )
         .sql()?;
         tx.execute("DELETE FROM edge WHERE src=?1 OR dst=?1", [rid])
@@ -218,7 +213,7 @@ impl SqliteStore {
             // update trigger skips purged rows; the one explicit `op='purge'` row and one
             // `delete` row per removed edge are the `ChangeLog` record (MD-24).
             ForgetMode::Purge => {
-                Self::purge_in_place(&tx, rid, id, &st.workspace_id, &now, None)?;
+                Self::purge_in_place(&tx, rid, id, &st.workspace_id, &now)?;
             }
         }
         let lifecycle: String = tx

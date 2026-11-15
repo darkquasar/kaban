@@ -66,7 +66,7 @@ impl SqliteStore {
                     if !named.contains(&(src_id, dst_id, rel.clone())) {
                         // Delete only the job's own producer's remainder, never another's row.
                         tx.execute(
-                            "DELETE FROM edge WHERE src=?1 AND dst=?2 AND rel=?3 AND layer=?4",
+                            "DELETE FROM edge WHERE src=?1 AND dst=?2 AND rel=?3 AND producer=?4",
                             params![src, dst, rel, population.producer.as_str()],
                         )
                         .sql()?;
@@ -348,7 +348,9 @@ impl SqliteStore {
             for rid in upserted {
                 let outgoing: Vec<(i64, i64, String)> = {
                     let mut st = tx
-                        .prepare_cached("SELECT src, dst, rel FROM edge WHERE src=?1 AND layer=?2")
+                        .prepare_cached(
+                            "SELECT src, dst, rel FROM edge WHERE src=?1 AND producer=?2",
+                        )
                         .sql()?;
                     let rows = st
                         .query_map(params![rid, deleting.as_str()], |r| {
@@ -384,7 +386,7 @@ impl SqliteStore {
 
 /// The producer and scoring columns of a batch edge, read from its props: `producer` (an
 /// edge naming its own producer at the trusted batch boundary, else the batch's) is moved
-/// out of the props into the `layer` column; `method`, `score` (fixed point, `/ 10000`),
+/// out of the props into the `producer` column; `method`, `score` (fixed point, `/ 10000`),
 /// `source_id`, `offset` and `len` stay in the props as written.
 struct Scored {
     producer: kaban_core::Producer,

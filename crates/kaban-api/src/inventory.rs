@@ -9,7 +9,7 @@
 //!   | text, summary, tags, props,   -> scanned and, on a redact hit, rewritten in    |
 //!   | path_scope, session_id,          place by the rescan (RedactedStrings)         |
 //!   | agent_id, repo, commit_sha,                                                    |
-//!   | accepted_commit, dup_key                                                       |
+//!   | dup_key                                                                        |
 //!   +-------------------------------------------------------------------------------+
 //! ```
 //!
@@ -51,7 +51,6 @@ impl KabanApi {
             store_scope: _,
             path_scope,
             rev: _,
-            serialized_rev: _,
             dup_key,
             created_at: _,
             updated_at: _,
@@ -62,10 +61,8 @@ impl KabanApi {
             workspace_id,
             repo,
             commit_sha,
-            accepted_commit,
             props,
             content_hash: _,
-            policy_version: _,
         } = n;
         let kind = self.scan_str(tool, "kind", kind, red)?;
         let workspace_id = self.scan_str(tool, "workspace_id", workspace_id, red)?;
@@ -84,8 +81,6 @@ impl KabanApi {
         let agent_id = self.scan_opt(tool, "agent_id", agent_id.as_deref(), red)?;
         let repo = self.scan_opt(tool, "repo", repo.as_deref(), red)?;
         let commit_sha = self.scan_opt(tool, "commit_sha", commit_sha.as_deref(), red)?;
-        let accepted_commit =
-            self.scan_opt(tool, "accepted_commit", accepted_commit.as_deref(), red)?;
         let dup_key = self.scan_opt(tool, "dup_key", dup_key.as_deref(), red)?;
         Ok(MaskedNode {
             kind,
@@ -100,7 +95,6 @@ impl KabanApi {
                 agent_id,
                 repo,
                 commit_sha,
-                accepted_commit,
                 dup_key,
             },
         })

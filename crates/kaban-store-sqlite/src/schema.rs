@@ -34,12 +34,14 @@ PRAGMA secure_delete = FAST;";
 pub(crate) const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Apply the per-connection settings on every open, before anything else: the busy timeout,
-/// then WAL (with the retry SQLite omits, see [`ensure_wal`]), then [`CONNECTION_PRAGMAS`].
+/// then incremental auto-vacuum on a fresh file ([`set_fresh_auto_vacuum`]), then WAL (with
+/// the retry SQLite omits, see [`ensure_wal`]), then [`CONNECTION_PRAGMAS`].
 ///
 /// # Errors
 /// SQLite errors; `SQLITE_BUSY` only after [`BUSY_TIMEOUT`] of retrying the WAL conversion.
 pub(crate) fn configure_connection(conn: &Connection) -> Result<()> {
     conn.busy_timeout(BUSY_TIMEOUT).sql()?;
+    set_fresh_auto_vacuum(conn)?;
     ensure_wal(conn)?;
     conn.execute_batch(CONNECTION_PRAGMAS).sql()?;
     crate::body_codec::register(conn)?;
@@ -51,6 +53,21 @@ pub(crate) fn configure_connection(conn: &Connection) -> Result<()> {
         return Err(StoreError::Backend {
             source: kaban_core::BackendSource::new(ForeignKeysOff),
         });
+    }
+    Ok(())
+}
+
+/// Put a fresh database (no page written yet) in incremental auto-vacuum mode (spec 11
+/// KER-05), so ordinary maintenance can release wholly free pages. The mode is fixed by the
+/// first page SQLite writes, and the WAL conversion writes it: this runs before
+/// [`ensure_wal`]. An existing database keeps the mode it was created with.
+fn set_fresh_auto_vacuum(conn: &Connection) -> Result<()> {
+    let pages: i64 = conn
+        .query_row("PRAGMA page_count", [], |r| r.get(0))
+        .sql()?;
+    if pages == 0 {
+        conn.execute_batch("PRAGMA auto_vacuum = INCREMENTAL;")
+            .sql()?;
     }
     Ok(())
 }
@@ -111,9 +128,10 @@ pub(crate) fn is_busy(e: &rusqlite::Error) -> bool {
 
 /// The one schema version this binary serves: created on a fresh database, required of an
 /// existing one (spec 05 OWN-P). The number continues the former ladder (13: the Tantivy
-/// index beside the database is the only text index and every body is encoded, OWN-M) so a
-/// database of the last ladder release is told apart from a spike file by its version.
-pub const LATEST_SCHEMA_VERSION: u32 = 13;
+/// index beside the database is the only text index and every body is encoded, OWN-M; 14:
+/// the unified format of spec 11, without governance tables, with producer columns and
+/// never-reused rids) so a database of an older release is told apart by its version.
+pub const LATEST_SCHEMA_VERSION: u32 = 14;
 
 /// The `index_meta.schema_version` as recorded, 0 when the key is absent (a fresh or spike
 /// database): the cheap read of code that behaves by version on a live connection.
@@ -306,6 +324,35 @@ mod tests {
             MigrationReport::unchanged(LATEST_SCHEMA_VERSION)
         );
         assert_eq!(Migrator::check(&conn).unwrap(), LATEST_SCHEMA_VERSION);
+    }
+
+    /// PC-1: `node.rid` is the graph's local id, so a deleted highest rid is never handed to
+    /// the next row (stale layer entries would alias it).
+    #[test]
+    fn a_deleted_highest_rid_is_never_reused() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        configure_connection(&conn).unwrap();
+        crate::stamp::bind(&conn, &kaban_core::ActorId::default()).unwrap();
+        Migrator::ensure_current(&mut conn).unwrap();
+        conn.execute(
+            "INSERT INTO index_meta(key, value) VALUES ('db_id', 'd')",
+            [],
+        )
+        .unwrap();
+        let insert = |id: &str| -> i64 {
+            conn.execute(
+                "INSERT INTO node(id, kind, text, created_at, updated_at, workspace_id, content_hash)
+                 VALUES (?1, 'Fact', x'00', '', '', 'default', ?1)",
+                [id],
+            )
+            .unwrap();
+            conn.last_insert_rowid()
+        };
+        insert("a");
+        let highest = insert("b");
+        conn.execute("DELETE FROM node WHERE rid = ?1", [highest])
+            .unwrap();
+        assert!(insert("c") > highest, "rid {highest} reused");
     }
 
     /// OWN-P: a database at another version, older or newer, and an unversioned spike file

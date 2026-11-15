@@ -192,7 +192,7 @@ fn read_only(s: &Scratch) -> Connection {
 }
 
 fn pairs(conn: &Connection, table: &str) -> BTreeSet<Pair> {
-    conn.prepare(&format!("SELECT DISTINCT layer, method FROM {table}"))
+    conn.prepare(&format!("SELECT DISTINCT producer, method FROM {table}"))
         .unwrap()
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
         .unwrap()
@@ -236,9 +236,9 @@ fn full_layer_run_leaves_no_edge_without_a_producer_or_method() {
     let conn = read_only(&s);
     let unlabelled: Vec<(String, String)> = conn
         .prepare(
-            "SELECT rel, coalesce(layer, '') FROM edge \
-             WHERE layer IS NULL OR (method IS NULL \
-             AND NOT (rel = 'PART_OF' AND layer = 'document_ingest'))",
+            "SELECT rel, coalesce(producer, '') FROM edge \
+             WHERE producer IS NULL OR (method IS NULL \
+             AND NOT (rel = 'PART_OF' AND producer = 'document_ingest'))",
         )
         .unwrap()
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))

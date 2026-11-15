@@ -51,7 +51,7 @@ fn graph_rows(s: &Scratch) -> Value {
     kaban_store_sqlite::register_body_reader(&conn).unwrap();
     let nodes = conn
         .prepare(
-            "SELECT id,kind,kaban_body(text),props,governance,lifecycle,content_hash FROM node ORDER BY id",
+            "SELECT id,kind,kaban_body(text),props,lifecycle,content_hash FROM node ORDER BY id",
         )
         .unwrap()
         .query_map([], |r| {
@@ -61,28 +61,14 @@ fn graph_rows(s: &Scratch) -> Value {
                 r.get::<_, String>(2)?,
                 r.get::<_, String>(3)?,
                 r.get::<_, String>(4)?,
-                r.get::<_, String>(5)?,
-                r.get::<_, String>(6)?
+                r.get::<_, String>(5)?
             ]))
         })
         .unwrap()
         .collect::<rusqlite::Result<Vec<_>>>()
         .unwrap();
-    let claims = conn
-        .prepare("SELECT key,rank,rank_reason FROM assertion ORDER BY key")
-        .unwrap()
-        .query_map([], |r| {
-            Ok(json!([
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, Option<String>>(2)?
-            ]))
-        })
-        .unwrap()
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .unwrap();
-    let edges=conn.prepare("SELECT s.id,d.id,e.rel,e.props,e.layer,e.method,e.score,e.source_id FROM edge e JOIN node s ON s.rid=e.src JOIN node d ON d.rid=e.dst ORDER BY s.id,d.id,e.rel").unwrap().query_map([],|r|Ok(json!([r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?,r.get::<_,Option<String>>(4)?,r.get::<_,Option<String>>(5)?,r.get::<_,Option<f64>>(6)?,r.get::<_,Option<String>>(7)?]))).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
-    json!({"nodes":nodes,"claims":claims,"edges":edges})
+    let edges=conn.prepare("SELECT s.id,d.id,e.rel,e.props,e.producer,e.method,e.score,e.source_id FROM edge e JOIN node s ON s.rid=e.src JOIN node d ON d.rid=e.dst ORDER BY s.id,d.id,e.rel").unwrap().query_map([],|r|Ok(json!([r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?,r.get::<_,Option<String>>(4)?,r.get::<_,Option<String>>(5)?,r.get::<_,Option<f64>>(6)?,r.get::<_,Option<String>>(7)?]))).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+    json!({"nodes":nodes,"edges":edges})
 }
 
 #[test]

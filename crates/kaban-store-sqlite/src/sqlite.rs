@@ -69,6 +69,9 @@ fn shipped_ontology() -> Arc<Ontology> {
 /// unlike the server's 5 s.
 const HOOK_BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
 
+/// The `index_meta` key written once the project's HMAC key file exists ([`SqliteStore::open_as`]).
+const KEY_RECORDED: &str = "hmac_key";
+
 /// The rel whose edge invalidates (tombstones) its target (OD-4). The ontology's `on_link`
 /// vocabulary has `archive_target` only (engine-spec §3.1), so this side effect is still keyed
 /// by name; [`RuleSet::archives_on_link`] decides the archive side effect.
@@ -328,7 +331,7 @@ impl SqliteStore {
     }
 
     /// Stable database identity (`UUIDv7` in `index_meta`, created at first open); names the
-    /// audit key file.
+    /// HMAC key file.
     pub fn db_id(&self) -> &str {
         &self.db_id
     }
@@ -344,7 +347,7 @@ impl SqliteStore {
         crate::stamp::bind(conn, actor)
     }
 
-    /// The signer behind this database's audit chain (also used for `input_hmac` stubs).
+    /// The signer over this database's HMAC key (keyed identities and `input_hmac` stubs).
     pub fn signer(&self) -> Arc<dyn AuditSigner> {
         Arc::clone(&self.signer)
     }
@@ -391,13 +394,14 @@ impl SqliteStore {
 }
 
 impl SqliteStore {
-    /// Open (creating if missing) the database at `path`, apply the baseline schema and open or
-    /// create the audit key `keys_dir/<db-id>.key` (0600, `O_EXCL`; concurrent openers reuse).
-    /// The writer is the default `local`; a production open is [`Self::open_as`].
+    /// Open (creating if missing) the database at `path`, apply the baseline schema and open
+    /// the HMAC key `keys_dir/<db-id>.key`, created with the project (0600, `O_EXCL`;
+    /// concurrent first openers reuse) and required of it afterwards. The writer is the
+    /// default `local`; a production open is [`Self::open_as`].
     ///
     /// # Errors
     /// SQLite open/DDL errors, or `StoreError::Audit` when the key cannot be read or created
-    /// (including a key file of the wrong length).
+    /// (including a key file of the wrong length, and a missing key of an existing project).
     pub fn open(path: &Path, keys_dir: &Path) -> Result<Self> {
         Self::open_as(path, keys_dir, &ActorId::default())
     }
@@ -410,17 +414,7 @@ impl SqliteStore {
     /// As [`Self::open`].
     pub fn open_as(path: &Path, keys_dir: &Path, actor: &ActorId) -> Result<Self> {
         let (conn, db_id, report, live) = Self::open_file(path, actor, Self::CAPABILITIES)?;
-        let has_chain: bool = conn
-            .query_row("SELECT EXISTS(SELECT 1 FROM audit)", [], |r| r.get(0))
-            .sql()?;
-        // a database that already carries a chain must never get a fresh key: that would fork
-        // the chain silently, so a lost key is a startup error, not a new beginning
-        let signer = if has_chain {
-            KeySigner::open_existing(keys_dir, &db_id)
-        } else {
-            KeySigner::open_or_create(keys_dir, &db_id)
-        }
-        .map_err(|e| StoreError::Audit(Box::new(e)))?;
+        let signer = Self::project_key(&conn, keys_dir, &db_id)?;
         Self::assemble(
             conn,
             db_id,
@@ -430,6 +424,33 @@ impl SqliteStore {
             Some(path),
         )
         .with_index_attached(Attach::Own)
+    }
+    /// The database's HMAC key: created with the project, required ever after. A project
+    /// that has recorded its key (`index_meta` `KEY_RECORDED`) must never get a fresh one:
+    /// that would silently change every keyed identity it stores, so a lost key is a startup
+    /// error. Until the record exists the key is opened or created (`O_EXCL`; concurrent first
+    /// openers reuse the winner's), and the record is written only once the key file is in
+    /// place, so a crash or a racing opener in between never leaves a project without a key.
+    fn project_key(conn: &Connection, keys_dir: &Path, db_id: &str) -> Result<KeySigner> {
+        let recorded: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM index_meta WHERE key = ?1)",
+                [KEY_RECORDED],
+                |r| r.get(0),
+            )
+            .sql()?;
+        if recorded {
+            return KeySigner::open_existing(keys_dir, db_id)
+                .map_err(|e| StoreError::Audit(Box::new(e)));
+        }
+        let signer = KeySigner::open_or_create(keys_dir, db_id)
+            .map_err(|e| StoreError::Audit(Box::new(e)))?;
+        conn.execute(
+            "INSERT OR IGNORE INTO index_meta(key, value) VALUES (?1, 'created')",
+            [KEY_RECORDED],
+        )
+        .sql()?;
+        Ok(signer)
     }
     /// Open for verification: the key must already exist (never created here) and the
     /// database is read as it is: no migration, no backup, no seeding (MD-28). A file from a
@@ -474,9 +495,9 @@ impl SqliteStore {
     /// Open for `kaban doctor` (core-spec §7; M4-19): the database is read as it is, so the
     /// report describes what is on disk. Nothing is created (a missing file is an error, not a
     /// new database), no file mode is tightened (the modes are `stat`ed first and returned
-    /// with the store), no migration, backup or seed runs, and the audit key is never created:
-    /// it must already exist, like [`Self::open_existing_key`] (a fresh key would let a gated
-    /// rejection during the report write a row the real key cannot verify). A file from a
+    /// with the store), no migration, backup or seed runs, and the HMAC key is never created:
+    /// it must already exist, like [`Self::open_existing_key`] (a fresh key would change the
+    /// keyed identities the report computes). A file from a
     /// newer kaban is refused. The store's `migration()` reports the version found. `actor`
     /// is the writer, as for every open ([`Self::open_as`]).
     ///
@@ -608,7 +629,7 @@ impl SqliteStore {
         Self::assemble(conn, db_id, signer, report, Some(live), Some(path))
             .with_index_attached(Attach::Own)
     }
-    /// An in-memory store with an ephemeral random audit key (tests); the writer is `local`.
+    /// An in-memory store with an ephemeral random HMAC key (tests); the writer is `local`.
     ///
     /// # Errors
     /// SQLite DDL errors or a failing OS random source.
@@ -719,6 +740,12 @@ impl SqliteStore {
             )
             .sql()?;
         tx.commit().sql()?;
+        if report.from == 0 {
+            // a created project ends with its version in the main file (spec 11 CMP-01): a
+            // reader of the main file alone (the refusal probe) never mistakes it for empty
+            conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
+                .sql()?;
+        }
         Ok((db_id, report))
     }
 

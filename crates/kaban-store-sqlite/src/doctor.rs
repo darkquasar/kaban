@@ -66,7 +66,7 @@ pub(crate) fn artifact_diagnostics(
     workspace: &kaban_core::WorkspaceId,
 ) -> Result<kaban_core::ArtifactDiagnostics> {
     use crate::sql_error::SqlResultExt;
-    let stale_artifacts=conn.query_row("SELECT count(*) FROM derived_artifact d LEFT JOIN node n ON n.rid=d.source_rid WHERE d.workspace_id=?1 AND (n.rid IS NULL OR n.workspace_id<>d.workspace_id OR n.lifecycle<>'active' OR d.policy_version<>n.policy_version OR CASE WHEN json_valid(d.source_rev) THEN json_extract(d.source_rev,'$.content_hash') IS NOT n.content_hash OR json_extract(d.source_rev,'$.rev') IS NOT n.rev ELSE 1 END)",[workspace.as_str()],|row|row.get::<_,i64>(0)).sql()?;
+    let stale_artifacts=conn.query_row("SELECT count(*) FROM derived_artifact d LEFT JOIN node n ON n.rid=d.source_rid WHERE d.workspace_id=?1 AND (n.rid IS NULL OR n.workspace_id<>d.workspace_id OR n.lifecycle<>'active' OR CASE WHEN json_valid(d.source_rev) THEN json_extract(d.source_rev,'$.content_hash') IS NOT n.content_hash OR json_extract(d.source_rev,'$.rev') IS NOT n.rev ELSE 1 END)",[workspace.as_str()],|row|row.get::<_,i64>(0)).sql()?;
     Ok(kaban_core::ArtifactDiagnostics {
         stale_artifacts: u64::try_from(stale_artifacts)
             .map_err(|_| backend_error(rusqlite::Error::InvalidQuery))?,

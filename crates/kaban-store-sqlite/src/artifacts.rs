@@ -14,7 +14,6 @@ struct ProducerState {
     generation: u64,
     fingerprint: String,
     source_rev: Option<SourceRev>,
-    policy_version: Option<String>,
 }
 
 /// Source-indexed invalidation after a canonical source write, in that write's transaction.
@@ -50,7 +49,6 @@ fn state_key(document: &NodeId, workspace: &WorkspaceId) -> String {
             Producer::Gazetteer,
             "kaban-ingest:complete-set:1",
             workspace.as_str(),
-            "state:1"
         )
         .as_str()
     )
@@ -82,7 +80,6 @@ fn state(conn: &Connection, document: &NodeId, workspace: &WorkspaceId) -> Resul
                     .filter(|value| !value.is_null())
                     .map(|value| serde_json::from_value(value.clone()))
                     .transpose()?,
-                policy_version: value["policy_version"].as_str().map(str::to_owned),
             })
         },
     )
@@ -130,23 +127,14 @@ pub(super) fn generation(conn: &Connection, id: &NodeId, workspace: &WorkspaceId
     Ok(state(conn, id, workspace)?.generation)
 }
 
-/// A completed private set must still bind the current canonical source and policy. Older
-/// unbound state is unknown, not fresh; reset clears its fingerprint without changing nodes.
+/// A completed private set must still bind the current canonical source. Older unbound state
+/// is unknown, not fresh; reset clears its fingerprint without changing nodes.
 pub(super) fn set_fresh(conn: &Connection, id: &NodeId, workspace: &WorkspaceId) -> Result<bool> {
     let Some((revision, _)) = document(conn, id, workspace, false)? else {
         return Ok(false);
     };
     let state = state(conn, id, workspace)?;
-    let policy: String = conn
-        .query_row(
-            "SELECT policy_version FROM node WHERE id=?1 AND workspace_id=?2",
-            params![id.as_str(), workspace.as_str()],
-            |row| row.get(0),
-        )
-        .sql()?;
-    Ok(!state.fingerprint.is_empty()
-        && state.source_rev.as_ref() == Some(&revision)
-        && state.policy_version.as_deref() == Some(policy.as_str()))
+    Ok(!state.fingerprint.is_empty() && state.source_rev.as_ref() == Some(&revision))
 }
 
 /// All optimistic guards run before any batch write.
@@ -161,7 +149,7 @@ pub(super) fn stale_sources(conn: &Connection, batch: &WriteBatch) -> Result<u32
     for artifact in &batch.artifacts {
         // the batch that publishes an artifact is the producer pipeline that derives it: the
         // document ingest for Gazetteer and SCIP publications, the extractor for its own
-        let allowed = match (artifact.layer, batch.edge_diff.producer()) {
+        let allowed = match (artifact.producer, batch.edge_diff.producer()) {
             (Producer::Gazetteer | Producer::ScipImport, Producer::DocumentIngest) => true,
             (Producer::Extractor(kind), Producer::Extractor(batch_kind)) => kind == batch_kind,
             _ => false,
@@ -186,10 +174,9 @@ pub(super) fn stale_sources(conn: &Connection, batch: &WriteBatch) -> Result<u32
         } else if artifact.key
             != artifact_key(
                 &artifact.source_rev,
-                artifact.layer,
+                artifact.producer,
                 &artifact.producer_id,
                 &artifact.config_hash,
-                &artifact.policy_version,
             )
         {
             return Err(StoreError::EdgeSetRefused);
@@ -289,7 +276,6 @@ pub(super) fn prepare_sets(
             Producer::Gazetteer,
             "kaban-ingest:set-fingerprint:1",
             "",
-            "",
         )
         .as_str()
         .to_owned();
@@ -302,39 +288,32 @@ pub(super) fn prepare_sets(
                 .checked_add(1)
                 .ok_or(StoreError::EdgeSetRefused)?
         };
-        let (rid, policy): (i64, String) = conn
+        let rid: i64 = conn
             .query_row(
-                "SELECT rid,policy_version FROM node WHERE id=?1 AND workspace_id=?2",
+                "SELECT rid FROM node WHERE id=?1 AND workspace_id=?2",
                 params![set.document.as_str(), batch.workspace_id.as_str()],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| row.get(0),
             )
             .sql()?;
         let encoded = serde_json::to_string(
-            &json!({"generation":generation,"fingerprint":fingerprint,"source_rev":revision,"policy_version":policy}),
+            &json!({"generation":generation,"fingerprint":fingerprint,"source_rev":revision}),
         )?;
         if nonempty {
             let producer = BuiltinProducer::Gazetteer.producer_id();
-            let key = artifact_key(
-                &revision,
-                Producer::Gazetteer,
-                producer,
-                &set.config_hash,
-                &policy,
-            );
-            conn.execute("DELETE FROM derived_artifact WHERE source_rid=?1 AND layer='gazetteer' AND workspace_id=?2 AND producer_id=?3 AND artifact_key<>?4", params![rid,batch.workspace_id.as_str(),producer,key.as_str()]).sql()?;
+            let key = artifact_key(&revision, Producer::Gazetteer, producer, &set.config_hash);
+            conn.execute("DELETE FROM derived_artifact WHERE source_rid=?1 AND producer='gazetteer' AND workspace_id=?2 AND producer_id=?3 AND artifact_key<>?4", params![rid,batch.workspace_id.as_str(),producer,key.as_str()]).sql()?;
             batch.artifacts.push(DerivedArtifact {
                 key,
                 workspace_id: batch.workspace_id.clone(),
-                layer: Producer::Gazetteer,
+                producer: Producer::Gazetteer,
                 producer_id: producer.to_owned(),
                 source_rid: rid,
                 source_rev: revision,
                 config_hash: set.config_hash.clone(),
-                policy_version: policy,
                 published_at: crate::edge_write::now_unix(),
             });
         } else {
-            conn.execute("DELETE FROM derived_artifact WHERE source_rid=?1 AND layer='gazetteer' AND workspace_id=?2",params![rid,batch.workspace_id.as_str()]).sql()?;
+            conn.execute("DELETE FROM derived_artifact WHERE source_rid=?1 AND producer='gazetteer' AND workspace_id=?2",params![rid,batch.workspace_id.as_str()]).sql()?;
         }
         prepared.push((set.clone(), encoded));
     }
@@ -350,7 +329,7 @@ pub(super) fn record_sets(
     kept: &[(i64, i64, String)],
 ) -> Result<()> {
     for (set, encoded) in prepared {
-        let rows: Vec<(i64, i64, String)> = conn.prepare_cached("SELECT src,dst,rel FROM edge WHERE workspace_id=?1 AND rel='MENTIONS' AND layer='gazetteer' AND source_id=?2").sql()?.query_map(params![workspace.as_str(), set.source_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).sql()?.collect::<rusqlite::Result<_>>().sql()?;
+        let rows: Vec<(i64, i64, String)> = conn.prepare_cached("SELECT src,dst,rel FROM edge WHERE workspace_id=?1 AND rel='MENTIONS' AND producer='gazetteer' AND source_id=?2").sql()?.query_map(params![workspace.as_str(), set.source_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).sql()?.collect::<rusqlite::Result<_>>().sql()?;
         for row in rows {
             if kept.contains(&row) {
                 continue;
@@ -380,15 +359,14 @@ fn props_chunk(props: &Value, chunk: &NodeId) -> bool {
 
 pub(super) fn publish(conn: &Connection, artifacts: &[DerivedArtifact]) -> Result<()> {
     for a in artifacts {
-        let existing: Option<(String,String,String,i64,String,String,String)> = conn.query_row("SELECT workspace_id,layer,producer_id,source_rid,source_rev,config_hash,policy_version FROM derived_artifact WHERE artifact_key=?1",[a.key.as_str()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?))).optional().sql()?;
-        if let Some((workspace, layer, producer, rid, revision, config, policy)) = existing {
+        let existing: Option<(String,String,String,i64,String,String)> = conn.query_row("SELECT workspace_id,producer,producer_id,source_rid,source_rev,config_hash FROM derived_artifact WHERE artifact_key=?1",[a.key.as_str()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?))).optional().sql()?;
+        if let Some((workspace, producer, producer_id, rid, revision, config)) = existing {
             if workspace != a.workspace_id.as_str()
-                || layer != a.layer.as_str()
-                || producer != a.producer_id
+                || producer != a.producer.as_str()
+                || producer_id != a.producer_id
                 || rid != a.source_rid
                 || serde_json::from_str::<SourceRev>(&revision)? != a.source_rev
                 || config != a.config_hash
-                || policy != a.policy_version
             {
                 return Err(StoreError::EdgeSetRefused);
             }
@@ -398,7 +376,7 @@ pub(super) fn publish(conn: &Connection, artifacts: &[DerivedArtifact]) -> Resul
         if current != Some((a.source_rev.content_hash.clone(), a.source_rev.rev)) {
             return Err(StoreError::EdgeSetRefused);
         }
-        conn.execute("INSERT INTO derived_artifact(artifact_key,workspace_id,layer,producer_id,source_rid,source_rev,config_hash,policy_version,published_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9) ON CONFLICT(artifact_key) DO NOTHING", params![a.key.as_str(),a.workspace_id.as_str(),a.layer.as_str(),a.producer_id,a.source_rid,serde_json::to_string(&a.source_rev)?,a.config_hash,a.policy_version,a.published_at]).sql()?;
+        conn.execute("INSERT INTO derived_artifact(artifact_key,workspace_id,producer,producer_id,source_rid,source_rev,config_hash,published_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8) ON CONFLICT(artifact_key) DO NOTHING", params![a.key.as_str(),a.workspace_id.as_str(),a.producer.as_str(),a.producer_id,a.source_rid,serde_json::to_string(&a.source_rev)?,a.config_hash,a.published_at]).sql()?;
     }
     Ok(())
 }

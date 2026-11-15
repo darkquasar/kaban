@@ -7,7 +7,7 @@ use serde_json::Value;
 
 /// Columns read into a [`Node`], in [`row_node`] order. `status` and `source_session` are frozen
 /// legacy columns (MD-9) and are neither read nor written.
-pub(crate) const NODE_COLS: &str = "id,kind,text,summary,tags,confidence,importance,lifecycle,governance,store_scope,path_scope,rev,serialized_rev,dup_key,created_at,updated_at,valid_from,valid_to,session_id,agent_id,workspace_id,repo,commit_sha,accepted_commit,props,content_hash,policy_version";
+pub(crate) const NODE_COLS: &str = "id,kind,text,summary,tags,confidence,importance,lifecycle,store_scope,path_scope,rev,dup_key,created_at,updated_at,valid_from,valid_to,session_id,agent_id,workspace_id,repo,commit_sha,props,content_hash";
 
 /// A persisted JSON column that no longer parses (RB-5): a read error with the
 /// `serde_json::Error` as its source, never silently a default value, because the caller must
@@ -44,9 +44,9 @@ pub(crate) fn row_node(r: &rusqlite::Row<'_>) -> rusqlite::Result<Node> {
 pub(crate) fn row_node_at(r: &rusqlite::Row<'_>, at: usize) -> rusqlite::Result<Node> {
     let tags: String = r.get(at + 4)?;
     let lifecycle: String = r.get(at + 7)?;
-    let store_scope: String = r.get(at + 9)?;
-    let path_scope: String = r.get(at + 10)?;
-    let props: String = r.get(at + 24)?;
+    let store_scope: String = r.get(at + 8)?;
+    let path_scope: String = r.get(at + 9)?;
+    let props: String = r.get(at + 21)?;
     Ok(Node {
         id: r.get(at)?,
         kind: r.get(at + 1)?,
@@ -56,26 +56,22 @@ pub(crate) fn row_node_at(r: &rusqlite::Row<'_>, at: usize) -> rusqlite::Result<
         confidence: r.get(at + 5)?,
         importance: r.get(at + 6)?,
         lifecycle: Lifecycle::parse(&lifecycle).ok_or_else(|| bad_enum(at + 7, &lifecycle))?,
-        // column `at + 8` is the retired `governance` column: written `none`, read by nothing
         store_scope: StoreScope::parse(&store_scope)
-            .ok_or_else(|| bad_enum(at + 9, &store_scope))?,
-        path_scope: decode_json_strings(at + 10, &path_scope)?,
-        rev: r.get(at + 11)?,
-        serialized_rev: r.get(at + 12)?,
-        dup_key: r.get(at + 13)?,
-        created_at: r.get(at + 14)?,
-        updated_at: r.get(at + 15)?,
-        valid_from: r.get(at + 16)?,
-        valid_to: r.get(at + 17)?,
-        session_id: r.get(at + 18)?,
-        agent_id: r.get(at + 19)?,
-        workspace_id: r.get(at + 20)?,
-        repo: r.get(at + 21)?,
-        commit_sha: r.get(at + 22)?,
-        accepted_commit: r.get(at + 23)?,
-        props: decode_json_value(at + 24, &props)?,
-        content_hash: r.get(at + 25)?,
-        policy_version: r.get(at + 26)?,
+            .ok_or_else(|| bad_enum(at + 8, &store_scope))?,
+        path_scope: decode_json_strings(at + 9, &path_scope)?,
+        rev: r.get(at + 10)?,
+        dup_key: r.get(at + 11)?,
+        created_at: r.get(at + 12)?,
+        updated_at: r.get(at + 13)?,
+        valid_from: r.get(at + 14)?,
+        valid_to: r.get(at + 15)?,
+        session_id: r.get(at + 16)?,
+        agent_id: r.get(at + 17)?,
+        workspace_id: r.get(at + 18)?,
+        repo: r.get(at + 19)?,
+        commit_sha: r.get(at + 20)?,
+        props: decode_json_value(at + 21, &props)?,
+        content_hash: r.get(at + 22)?,
     })
 }
 /// Decode a `schema_type` row in the [`crate::ontology::TypeTable::columns`] projection: on
@@ -111,7 +107,6 @@ pub(crate) fn row_typedef(r: &rusqlite::Row<'_>) -> rusqlite::Result<TypeDef> {
         props_schema: ps.map(|s| decode_json_value(6, &s)).transpose()?,
         builtin: r.get::<_, i64>(7)? != 0,
         declaration: kaban_core::TypeDeclaration {
-            // the `rules` block, in the `governed` column until the v14 format
             rules: json_col(r, 9)?,
             rank: json_col(r, 10)?,
             column_weights: json_col(r, 11)?,

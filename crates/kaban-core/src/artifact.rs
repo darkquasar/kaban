@@ -34,7 +34,7 @@ impl BuiltinProducer {
 /// Content-free offline findings about derived publication freshness.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ArtifactDiagnostics {
-    /// Tenant artifacts whose source revision, policy or active lifecycle no longer matches.
+    /// Tenant artifacts whose source revision or active lifecycle no longer matches.
     pub stale_artifacts: u64,
 }
 
@@ -82,19 +82,17 @@ impl From<&Node> for SourceRev {
 #[must_use]
 pub fn artifact_key(
     source_rev: &SourceRev,
-    layer: Producer,
+    producer: Producer,
     producer_id: &str,
     config_hash: &str,
-    policy_version: &str,
 ) -> ArtifactKey {
     let mut hash = blake3::Hasher::new_derive_key("kaban.derived-artifact.v1");
     for field in [
         source_rev.content_hash.as_bytes(),
         &source_rev.rev.to_be_bytes(),
-        layer.as_str().as_bytes(),
+        producer.as_str().as_bytes(),
         producer_id.as_bytes(),
         config_hash.as_bytes(),
-        policy_version.as_bytes(),
     ] {
         hash.update(&(field.len() as u64).to_be_bytes());
         hash.update(field);
@@ -109,9 +107,8 @@ pub struct DerivedArtifact {
     pub key: ArtifactKey,
     /// Publication tenant.
     pub workspace_id: WorkspaceId,
-    /// The producer of the publication (stored in the `layer` column until T4); authored
-    /// publications are refused.
-    pub layer: Producer,
+    /// The producer of the publication; authored publications are refused.
+    pub producer: Producer,
     /// Versioned producer identifier.
     pub producer_id: String,
     /// Source storage coordinate, checked inside the transaction.
@@ -120,8 +117,6 @@ pub struct DerivedArtifact {
     pub source_rev: SourceRev,
     /// Effective producer configuration hash.
     pub config_hash: String,
-    /// Existing policy hash, not a numeric policy version.
-    pub policy_version: String,
     /// Publication timestamp in Unix seconds.
     pub published_at: i64,
 }

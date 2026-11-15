@@ -7,7 +7,7 @@ use kaban_core::{BackendSource, IngestJob, JobId, JobStatus, Result, StoreError,
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
 /// The extractor producer of a job's dialect (PC-16).
-pub(crate) fn layer(dialect: &str) -> Result<kaban_core::Producer> {
+pub(crate) fn dialect_producer(dialect: &str) -> Result<kaban_core::Producer> {
     use kaban_core::{ExtractorKind, Producer};
     match dialect {
         "llm" => Ok(Producer::Extractor(ExtractorKind::Llm)),
@@ -55,15 +55,15 @@ pub(crate) fn pending(
     prefix: Option<&str>,
     limit: u32,
 ) -> Result<Vec<kaban_core::PendingJob>> {
-    let layer = layer(dialect)?;
+    let producer = dialect_producer(dialect)?;
     let rows = conn.prepare("SELECT n.id,json_extract(n.props,'$.path'),n.content_hash,n.rev FROM node n
         WHERE n.workspace_id=?1 AND n.kind='Document' AND n.lifecycle='active'
         AND json_extract(n.props,'$.owner')='kaban-ingest' AND json_type(n.props,'$.path')='text'
         AND (?3 IS NULL OR substr(json_extract(n.props,'$.path'),1,length(?3))=?3)
-        AND NOT EXISTS(SELECT 1 FROM derived_artifact a WHERE a.source_rid=n.rid AND a.workspace_id=?1 AND a.layer=?2
+        AND NOT EXISTS(SELECT 1 FROM derived_artifact a WHERE a.source_rid=n.rid AND a.workspace_id=?1 AND a.producer=?2
           AND json_extract(a.source_rev,'$.content_hash')=n.content_hash)
         ORDER BY json_extract(n.props,'$.path'),n.id LIMIT ?4").sql()?
-        .query_map(params![workspace.as_str(),layer.as_str(),prefix,limit], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,i64>(3)?)))
+        .query_map(params![workspace.as_str(),producer.as_str(),prefix,limit], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,i64>(3)?)))
         .sql()?.collect::<rusqlite::Result<Vec<_>>>().sql()?;
     rows.into_iter()
         .map(|(id, path, content_hash, rev)| {
@@ -160,7 +160,7 @@ pub(crate) fn claim(
     let document_id = kaban_core::NodeId::parse(&document)
         .map_err(|_| StoreError::InvalidName("job".into(), "stale"))?;
     check_source(conn, &job, &document_id, &request.source_rev, &chunks)?;
-    let marked: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM derived_artifact a JOIN node n ON n.rid=a.source_rid WHERE n.id=?1 AND a.workspace_id=?2 AND a.layer=?3 AND json_extract(a.source_rev,'$.content_hash')=n.content_hash)",params![document,job.workspace.as_str(),layer(&job.dialect)?.as_str()],|r|r.get(0)).sql()?;
+    let marked: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM derived_artifact a JOIN node n ON n.rid=a.source_rid WHERE n.id=?1 AND a.workspace_id=?2 AND a.producer=?3 AND json_extract(a.source_rev,'$.content_hash')=n.content_hash)",params![document,job.workspace.as_str(),dialect_producer(&job.dialect)?.as_str()],|r|r.get(0)).sql()?;
     if marked {
         return Ok(None);
     }
@@ -234,33 +234,25 @@ pub(crate) fn done_artifact(
     job: &IngestJob,
     request: &kaban_core::JobFinishRequest,
 ) -> Result<kaban_core::DerivedArtifact> {
-    let layer = layer(&job.dialect)?;
-    // the marker records the source's stored policy column, as the gazetteer's does
-    let (source_rid, policy_version): (i64, String) = conn
+    let producer = dialect_producer(&job.dialect)?;
+    let source_rid: i64 = conn
         .query_row(
-            "SELECT rid,policy_version FROM node WHERE id=?1 AND workspace_id=?2",
+            "SELECT rid FROM node WHERE id=?1 AND workspace_id=?2",
             params![request.document.as_str(), job.workspace.as_str()],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| r.get(0),
         )
         .sql()?;
     // The shipped job protocol, never a worker-supplied producer descriptor, owns this marker.
-    let producer = format!("kaban-parse:{}@1", job.dialect);
+    let producer_id = format!("kaban-parse:{}@1", job.dialect);
     let config_hash = job.marker_config_hash();
     let artifact = kaban_core::DerivedArtifact {
-        key: kaban_core::artifact_key(
-            &request.source_rev,
-            layer,
-            &producer,
-            &config_hash,
-            &policy_version,
-        ),
+        key: kaban_core::artifact_key(&request.source_rev, producer, &producer_id, &config_hash),
         workspace_id: job.workspace.clone(),
-        layer,
-        producer_id: producer,
+        producer,
+        producer_id,
         source_rid,
         source_rev: request.source_rev.clone(),
         config_hash,
-        policy_version,
         published_at: crate::edge_write::now_unix(),
     };
     Ok(artifact)
@@ -315,7 +307,7 @@ pub(crate) fn prune(
 }
 
 pub(crate) fn exhausted(conn: &Connection, workspace: &WorkspaceId, attempts: u32) -> Result<u64> {
-    let value: i64 = conn.query_row("SELECT count(*) FROM node n JOIN leases l ON l.name IN ('attempt:ingest:'||?1||':llm:'||n.id||'@'||json_extract(n.props,'$.content_hash'),'attempt:ingest:'||?1||':gliner:'||n.id||'@'||json_extract(n.props,'$.content_hash'),'attempt:ingest:'||?1||':none:'||n.id||'@'||json_extract(n.props,'$.content_hash')) WHERE n.workspace_id=?1 AND n.kind='Document' AND n.lifecycle='active' AND l.fence>=?2 AND NOT EXISTS(SELECT 1 FROM derived_artifact a WHERE a.workspace_id=?1 AND a.source_rid=n.rid AND json_extract(a.source_rev,'$.content_hash')=n.content_hash AND l.name='attempt:ingest:'||?1||':'||CASE a.layer WHEN 'script' THEN 'none' ELSE a.layer END||':'||n.id||'@'||json_extract(n.props,'$.content_hash'))",params![workspace.as_str(),attempts],|r|r.get(0)).sql()?;
+    let value: i64 = conn.query_row("SELECT count(*) FROM node n JOIN leases l ON l.name IN ('attempt:ingest:'||?1||':llm:'||n.id||'@'||json_extract(n.props,'$.content_hash'),'attempt:ingest:'||?1||':gliner:'||n.id||'@'||json_extract(n.props,'$.content_hash'),'attempt:ingest:'||?1||':none:'||n.id||'@'||json_extract(n.props,'$.content_hash')) WHERE n.workspace_id=?1 AND n.kind='Document' AND n.lifecycle='active' AND l.fence>=?2 AND NOT EXISTS(SELECT 1 FROM derived_artifact a WHERE a.workspace_id=?1 AND a.source_rid=n.rid AND json_extract(a.source_rev,'$.content_hash')=n.content_hash AND l.name='attempt:ingest:'||?1||':'||CASE a.producer WHEN 'extractor:script' THEN 'none' ELSE substr(a.producer,length('extractor:')+1) END||':'||n.id||'@'||json_extract(n.props,'$.content_hash'))",params![workspace.as_str(),attempts],|r|r.get(0)).sql()?;
     u64::try_from(value).map_err(|_| StoreError::InvalidName("claim".into(), "invalid_count"))
 }
 
@@ -566,14 +558,14 @@ pub(crate) fn record_submit(
 const FINISH_SCOPE: &str = "WITH records(rid) AS (
  SELECT e.src FROM edge e JOIN node d ON d.rid=e.dst
  WHERE d.id=?1 AND d.workspace_id=?2 AND e.workspace_id=?2 AND e.rel='DERIVED_FROM'
- AND e.layer LIKE 'extractor:%'
+ AND e.producer LIKE 'extractor:%'
 ), chunks(rid) AS (
  SELECT c.rid FROM node c JOIN edge cs ON cs.src=c.rid JOIN node s ON s.rid=cs.dst
  JOIN edge sd ON sd.src=s.rid JOIN node d ON d.rid=sd.dst
  WHERE c.kind='Chunk' AND c.workspace_id=?2 AND s.kind='Section' AND s.workspace_id=?2
  AND d.id=?1 AND d.workspace_id=?2 AND cs.rel='PART_OF' AND sd.rel='PART_OF'
  AND cs.workspace_id=?2 AND sd.workspace_id=?2
- AND cs.layer='document_ingest' AND sd.layer='document_ingest'
+ AND cs.producer='document_ingest' AND sd.producer='document_ingest'
  UNION SELECT c.rid FROM ingest_jobs j, json_each(j.plan,'$.chunks') p JOIN node c ON c.id=json_extract(p.value,'$.id')
  WHERE j.workspace_id=?2 AND j.source_id=?3 AND json_extract(j.plan,'$.document_id')=?1
  AND c.workspace_id=?2 AND c.kind='Chunk'
@@ -601,7 +593,7 @@ pub(crate) fn finish_population(
             .cloned()
             .unwrap_or_else(|| serde_json::json!([])),
     )?;
-    let producer = layer(&job.dialect)?;
+    let producer = dialect_producer(&job.dialect)?;
     let limit = i64::from(request.finish_cap) + 1;
     let args = params![
         request.document.as_str(),
@@ -612,7 +604,7 @@ pub(crate) fn finish_population(
     let edges = conn.prepare(&format!("{FINISH_SCOPE}
         SELECT e.src,e.dst,e.rel,s.id,d.id FROM edge e JOIN node s ON s.rid=e.src JOIN node d ON d.rid=e.dst
         WHERE e.workspace_id=?2 AND s.workspace_id=?2 AND d.workspace_id=?2
-        AND e.layer=?5
+        AND e.producer=?5
         AND (e.source_id IS NULL OR e.source_id=?3)
         AND (e.src IN records OR (e.rel='EVIDENCE_FOR' AND e.src IN chunks)
          OR (e.rel='ABOUT' AND s.id=?1))

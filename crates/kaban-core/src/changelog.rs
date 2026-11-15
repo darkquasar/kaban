@@ -13,11 +13,6 @@ pub enum ChangeEntity {
     Node,
     /// An `edge` row.
     Edge,
-    /// An `events` row (the id is the event's `seq`).
-    Event,
-    /// An `assertion` row (the id is the claim's storage `id` as text; engine-spec EN-F8,
-    /// migration 0004: `assertion_ai`, `assertion_status_au`, `assertion_ad`).
-    Assertion,
 }
 
 impl ChangeEntity {
@@ -26,8 +21,6 @@ impl ChangeEntity {
         match self {
             Self::Node => "node",
             Self::Edge => "edge",
-            Self::Event => "event",
-            Self::Assertion => "assertion",
         }
     }
     /// Parse a column value.
@@ -35,8 +28,6 @@ impl ChangeEntity {
         match s {
             "node" => Some(Self::Node),
             "edge" => Some(Self::Edge),
-            "event" => Some(Self::Event),
-            "assertion" => Some(Self::Assertion),
             _ => None,
         }
     }
@@ -55,9 +46,6 @@ pub enum ChangeOp {
     Delete,
     /// Node purged: content erased, edges deleted, the id row kept (F5).
     Purge,
-    /// An assertion's `assertion_status.disposition` changed (EN-F8; the
-    /// `assertion_status_au` trigger of 0004, one row per change).
-    Status,
 }
 
 impl ChangeOp {
@@ -68,7 +56,6 @@ impl ChangeOp {
             Self::Update => "update",
             Self::Delete => "delete",
             Self::Purge => "purge",
-            Self::Status => "status",
         }
     }
     /// Parse a column value.
@@ -78,7 +65,6 @@ impl ChangeOp {
             "update" => Some(Self::Update),
             "delete" => Some(Self::Delete),
             "purge" => Some(Self::Purge),
-            "status" => Some(Self::Status),
             _ => None,
         }
     }
@@ -93,7 +79,7 @@ pub struct Change {
     pub entity: ChangeEntity,
     /// What happened.
     pub op: ChangeOp,
-    /// Row id (node or edge `UUIDv7`, event `seq` as text).
+    /// Row id (node or edge `UUIDv7`).
     pub id: String,
     /// Workspace of the row (F17 tenant key).
     pub workspace_id: String,

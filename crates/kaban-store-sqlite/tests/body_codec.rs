@@ -476,7 +476,6 @@ fn a_rescan_redaction_rewrites_the_body_encoded_and_reads_back_masked() {
                             agent_id: n.agent_id.clone(),
                             repo: n.repo.clone(),
                             commit_sha: n.commit_sha.clone(),
-                            accepted_commit: n.accepted_commit.clone(),
                             dup_key: n.dup_key.clone(),
                         }),
                     }
