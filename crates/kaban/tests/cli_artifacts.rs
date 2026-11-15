@@ -98,7 +98,7 @@ fn a_later_producer_keeps_the_first_writers_edges_and_a_settled_ingest_changes_n
             .map(|e| {
                 let producer: String = conn
                     .query_row(
-                        "SELECT layer FROM edge WHERE id=?1",
+                        "SELECT producer FROM edge WHERE id=?1",
                         [e["id"].as_str().unwrap()],
                         |r| r.get(0),
                     )
