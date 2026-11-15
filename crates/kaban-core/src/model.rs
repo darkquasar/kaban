@@ -329,9 +329,9 @@ pub struct TypeDef {
     /// Builtin entries cannot be changed.
     #[serde(default)]
     pub builtin: bool,
-    /// The declaration columns migration 0004 added (`rules`, stored in the `governed` column
-    /// until the v14 format; `rank`, `column_weights`, `extract`, `display`), flattened into the entry; empty for rels and for a kind that
-    /// declares none (engine-plan E1.8, E1.7 R2).
+    /// The declaration columns (`rules`, `rank`, `column_weights`, `extract`, `display`),
+    /// flattened into the entry; empty for rels and for a kind that declares none (engine-plan
+    /// E1.8, E1.7 R2).
     #[serde(default, flatten)]
     pub declaration: TypeDeclaration,
 }

@@ -323,7 +323,7 @@ pub struct JobSubmitStateUpdate {
 /// Committed publication and transaction-current accumulated registry row.
 #[derive(Debug)]
 pub struct JobSubmitReceipt {
-    /// Actual node/assertion outcomes and graph sequence range.
+    /// Actual node outcomes and graph sequence range.
     pub batch: crate::BatchReport,
     /// Updated row from the same transaction.
     pub job: IngestJob,

@@ -446,8 +446,8 @@ impl TantivyIndex {
 
     /// Stage one chunk of committed changes through `writer` (SS-09), nothing committed: every
     /// node id of the chunk is deleted (deduplicated before the rows are fetched), its current
-    /// active row (read now; a state at least as new as the change) re-added, edge, event and
-    /// assertion rows consumed with nothing to apply. Returns the chunk's last sequence and
+    /// active row (read now; a state at least as new as the change) re-added, edge rows consumed
+    /// with nothing to apply. Returns the chunk's last sequence and
     /// the decoded indexed bytes staged.
     pub(crate) fn stage(
         &self,

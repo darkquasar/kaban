@@ -2,7 +2,7 @@
 //! a rename the resolved snapshot no longer holds a `CodeRef`'s `symbol`, and the report names
 //! that anchor with `code: snapshot_mismatch`. An intact symbol, a `CodeRef` of another
 //! workspace and one of another repository are not listed; without a snapshot the check says
-//! it cannot inspect and names nothing; the report writes no `changes`, `events` or `audit` row.
+//! it cannot inspect and names nothing; the report writes no `changes` row.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // test code: failures are the assertion
 

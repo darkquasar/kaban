@@ -22,12 +22,9 @@ fn ops_after(store: &SqliteStore, after: u64) -> Vec<(ChangeEntity, ChangeOp)> {
         .collect()
 }
 
-/// C2.4 slice 1 (F11, MD-24): every node, edge and event write produces exactly one `changes`
-/// row, read back in `seq` order with the row's id and workspace; `remember` + two
-/// non-mutating links = the node row plus, per link, the human claim's row, its status
-/// (`pending -> winner`) and the edge (engine-spec EN-F8/EN-F9, E2.2: a link is a human
-/// assertion projected to one edge) = 7 rows; accepting a Decision = its node update + its
-/// event + the human `kind_of_record` claim's row and its status (EN-F12c, E2.3a) = 4 rows.
+/// C2.4 slice 1 (F11, MD-24): every node and edge write produces exactly one `changes` row,
+/// read back in `seq` order with the row's id and workspace; `remember` + two non-mutating
+/// links = the node row plus one row per edge = 3 rows.
 #[test]
 fn every_write_produces_exactly_one_changes_row() {
     let store = SqliteStore::open_memory().unwrap();
