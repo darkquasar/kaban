@@ -34,14 +34,14 @@ SQLite holds records, typed edges and the change log. The text index beside it
 (Tantivy) is derived retrieval state, projected from the records; SQLite stays
 authoritative. Recall can combine lexical matches, the index's
 fuzzy (typo-tolerant) matching and bounded graph expansion; embeddings are
-unavailable. There is one storage model (spec 05 OWN-M): opening a store brings the
-database to the current schema in one migration (the in-database FTS5 index, its optional
-trigram table and the cutover marker of earlier releases are dropped, every body is stored
-as an encoded BLOB) and yields a store whose text index exists, admitted as it stands or
-rebuilt from SQLite before the open returns. That migration runs only with the database to
-one process: an open that finds another kaban process using the old-schema database
-refuses with "close the other kaban processes and retry"; concurrent openers of the same
-old database wait for the one that migrates. Older binaries refuse the new schema.
+unavailable. There is one storage model (spec 05 OWN-M) and one schema version (14):
+opening a store creates that schema on a fresh database and yields a store whose text
+index exists, admitted as it stands or rebuilt from SQLite before the open returns. A
+fresh database is created in SQLite's incremental auto-vacuum mode. A database of any
+other version, older or newer, is refused before kaban
+writes anything to it or its directory: the error names the version found and the version
+served and says that no upgrade path exists (create a fresh project and re-ingest). There
+is no migration.
 
 Records carry a lifecycle (active, archived, tombstoned, purged) and the
 producer of every edge. A write is active at once: there is no proposed or review

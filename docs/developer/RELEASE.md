@@ -142,9 +142,10 @@ artifact download/install evidence and browser-quarantined behavior are distinct
 For updates, stop active MCP/CLI users and retain protected backups of databases
 and their matching keys/config/policy, including any database outside KABAN_HOME.
 Verify the replacement archive and replace **both binaries together**. Preserve data
-and trust directories. Opening a newer binary can migrate a database; replacing
-executables with older ones does not authorize a schema downgrade. Restore a
-compatible protected backup if a rollback requires it.
+and trust directories. A newer binary refuses a database of an older schema version
+and leaves its files unchanged: no upgrade path exists, so users create a fresh project
+and re-ingest. Replacing executables with older ones does not authorize a schema
+downgrade. Restore a compatible protected backup if a rollback requires it.
 
 ## Build and publication authorization
 

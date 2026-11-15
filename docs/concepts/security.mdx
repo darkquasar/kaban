@@ -29,10 +29,10 @@ phrases, regular expressions, and narrowly scoped allow rules.
 flowchart LR
   I[Agent requests and source documents] --> G[Input content gate]
   G -->|admitted or masked| D[(Local SQLite store)]
-  G -->|rejected| A[Audit metadata]
+  G -->|rejected| R[Refused, nothing stored]
   D --> O[Output content gate]
   O --> C[Agent or local export]
-  K[Local audit key] --> A
+  K[Local audit key] --> D
 ```
 
 The diagram describes application boundaries, not an OS sandbox. A process with
@@ -44,15 +44,17 @@ Policy is selected separately from engine configuration. See
 
 ## Audit and keys
 
-The authoritative audit chain lives in the database's `audit` table. It uses
-HMAC-SHA256 and a 32-byte key under `KABAN_HOME/keys/<db-id>.key`, created with mode
-`0600`. Audit metadata uses rule identifiers and keyed hashes rather than storing
-the rejected payload as an audit message.
+The database keeps no audit table: a rejected request is refused with its rule
+identifiers and nothing of it is stored. The key is a 32-byte HMAC-SHA256 key under
+`KABAN_HOME/keys/<db-id>.key`, created with mode `0600`. Kaban uses it for keyed
+identifiers, such as document path ids and content fingerprints, so the hashed text
+is not stored.
 
 Use the same `KABAN_HOME` as the process that created the database. Do not delete
-or replace the key: a fresh key cannot verify the existing chain. Keep keys with the protected backup set, not in Git.
-The chain is not protection against an attacker who controls both the database
-and its signing key.
+or replace the key: a database that records its key refuses to open without it, and
+a fresh key cannot reproduce the existing keyed identifiers. Keep keys with the
+protected backup set, not in Git. Keyed identifiers are not protection against an
+attacker who controls both the database and its key.
 
 ## Workspaces and host access
 

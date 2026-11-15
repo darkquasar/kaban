@@ -78,7 +78,7 @@ for feature-specific obligations.
 
 The denylist gates writes and rechecks reads under current policy; it is not a
 guarantee that every possible secret will be detected. Existing database copies,
-migration backups and filesystem snapshots remain separate sensitive copies.
+backups and filesystem snapshots remain separate sensitive copies.
 A purge cannot erase those copies or guarantee physical erasure of SQLite free
 pages; see `kaban doctor --vacuum`.
 

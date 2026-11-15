@@ -104,9 +104,14 @@ using `--include-forgotten`, changes that behavior.
 
 ## Stale derived state or sync conflicts
 
-An open that fails with "another session holds the database; the schema migration needs it
-to itself" found another kaban process using a database still on the previous schema: close
-the other kaban processes and retry (spec 05 OWN-M: the migration runs once, exclusively).
+An open that fails with "database schema version N is not the version 14 this kaban
+serves: no upgrade path exists; create a fresh project and re-ingest" found a database of
+another schema version. There is no migration: every verb, `serve` and the library refuse
+it with a non-zero exit, and its files and directory stay unchanged. Point kaban at a fresh
+database and re-ingest. "the database is not a kaban v14 project" means the main file
+records no kaban schema while a non-empty `-wal` lies beside it; move both aside or create
+a fresh project. `doctor` reports either refusal as a failed `schema_version` check and
+exits `0`; a hook prints `{}`, notes the refusal on stderr and exits `0`.
 
 Use `doctor` to distinguish a text index problem from a stale code snapshot or a record
 conflict. `reindex text` rebuilds the Tantivy text index from the database; it does not run

@@ -9,8 +9,8 @@
 //! - **the 1.8 s watchdog** (M4-9): a thread that prints `{}` and exits 0 if the handler has
 //!   not printed by then, so the host's `timeout: 2` is never reached and a missing GNU
 //!   `timeout` in the wrapper does not matter;
-//! - **the hook open** (M4-6): `SqliteStore::open_for_hook` refuses a missing or unmigrated
-//!   database (a hook never creates or migrates one) and waits at most 1 s for a lock;
+//! - **the hook open** (M4-6): `SqliteStore::open_for_hook` refuses a missing database or one
+//!   of another schema version (a hook never creates or migrates one) and waits at most 1 s for a lock;
 //! - **the bounded envelope read** (M4-4): the same 1 MiB reader as `--stdin-json`, whose
 //!   failures here are `{}` and exit 0;
 //! - **the workspace** (M4-32): bound exactly like the MCP server (`--workspace`,

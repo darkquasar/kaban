@@ -80,8 +80,8 @@ enum Cmd {
         /// feature)
         #[arg(long, default_value_t = 0)]
         chunks: usize,
-        /// Schema version the corpus is built at (default: the latest); below the latest the
-        /// run reads the corpus, migrates it with a plain open (timed) and reads it again
+        /// Schema version the corpus is built at (default: the latest, the only one this kaban
+        /// serves; any other value is refused, there is no migration)
         #[arg(long, default_value_t = kaban_store_sqlite::LATEST_SCHEMA_VERSION)]
         schema_version: u32,
         /// The code-graph bench (`bench cg gen|run`, stage1-plan §18); needs a build with the

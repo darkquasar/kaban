@@ -19,8 +19,11 @@ Ordinary `doctor` diagnoses the database as it exists: it does not create,
 migrate, seed, tighten file modes, or automatically optimize it. Checks include
 database integrity, schema, file modes, the text index's position, and producer state.
 It returns `0` when all checks pass and `5` for a failed check or open failure;
-content gates can withhold its report. Policy-gate auditing can still record a
-rejection, so this is not a forensic promise of zero writes to the file.
+content gates can withhold its report. A database of another schema version is the
+exception: `doctor` prints a report whose `schema_version` check fails with the
+refusal text ("no upgrade path exists; create a fresh project and re-ingest") and
+exits `0`, leaving the files unchanged. This is not a forensic promise of zero
+writes to a database that opens.
 
 `stats` reports counters, policy information, and the producers with their budgets. It
 uses the normal service open path, so do not substitute it for diagnostic opening
@@ -94,8 +97,9 @@ procedure, not a live copy of just `kaban.db`:
 
 Losing the audit key is not fixed by generating another one. Restore the matching
 key from your protected backup or preserve the failure evidence for recovery.
-Normal service opening may migrate an older database; diagnose it before doing
-that when you need to preserve its original state.
+A restored database of an older schema version cannot be served: every open
+refuses it and leaves its files unchanged, and no upgrade path exists. Keep it as
+an archive and create a fresh project to re-ingest into.
 
 ## Destructive operations
 
