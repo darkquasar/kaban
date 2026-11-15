@@ -498,3 +498,144 @@ fn an_existing_project_requires_its_key_and_never_gets_a_fresh_one() {
     assert!(matches!(err, StoreError::Audit(_)), "{err:?}");
     assert!(!key.exists(), "no fresh key for an existing project");
 }
+
+/// Every entry of `dir` by name with its bytes (a directory as `None`): the probe's
+/// "nothing created, nothing written" oracle.
+fn dir_bytes(dir: &std::path::Path) -> std::collections::BTreeMap<String, Option<Vec<u8>>> {
+    std::fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| {
+            let entry = entry.unwrap();
+            let bytes = if entry.file_type().unwrap().is_dir() {
+                None
+            } else {
+                Some(std::fs::read(entry.path()).unwrap())
+            };
+            (entry.file_name().into_string().unwrap(), bytes)
+        })
+        .collect()
+}
+
+/// Copy `kaban.db` and `kaban.db-wal` of `from` into `to` while `from`'s writer is still open:
+/// the files a killed writer leaves (no `-shm`, the log not checkpointed).
+fn copy_as_killed(from: &Scratch, to: &Scratch) {
+    for name in ["kaban.db", "kaban.db-wal"] {
+        std::fs::copy(from.0.join(name), to.0.join(name)).unwrap();
+    }
+}
+
+/// Spec 11 CMP-01: a main file without a kaban schema beside a non-empty `-wal` (an unknown
+/// writer's log) is refused as no kaban project, by the ordinary, diagnostic and hook opens,
+/// and neither file is replayed, written or joined by a `-shm` or `.owner`. Both shapes: a
+/// main file holding another program's table, and an empty main file beside the log.
+#[test]
+fn a_foreign_file_beside_a_non_empty_wal_is_refused_untouched() {
+    for (case, foreign_main) in [("empty-main", false), ("foreign", true)] {
+        let writer = Scratch::new(&format!("foreign-writer-{case}"));
+        let raw = Connection::open(writer.db()).unwrap();
+        if foreign_main {
+            raw.execute_batch("CREATE TABLE other(x); INSERT INTO other VALUES (1);")
+                .unwrap();
+        }
+        raw.execute_batch(
+            "PRAGMA journal_mode = WAL; PRAGMA wal_autocheckpoint = 0;
+             CREATE TABLE logged(y); INSERT INTO logged VALUES (2);",
+        )
+        .unwrap();
+        let d = Scratch::new(&format!("foreign-{case}"));
+        copy_as_killed(&writer, &d);
+        drop(raw);
+        if !foreign_main {
+            // the WAL conversion wrote the header page; the log alone is left
+            std::fs::File::create(d.db()).unwrap();
+        }
+        let before = dir_bytes(&d.0);
+        assert!(
+            before["kaban.db-wal"]
+                .as_ref()
+                .is_some_and(|wal| !wal.is_empty()),
+            "{case}: the log is not empty"
+        );
+        assert_eq!(
+            before["kaban.db"].as_ref().is_some_and(Vec::is_empty),
+            !foreign_main,
+            "{case}: the main file's shape"
+        );
+        let actor = ActorId::default();
+        let refusals = [
+            SqliteStore::open(&d.db(), &d.keys()).map(drop),
+            SqliteStore::open_diagnostic(&d.db(), &d.keys(), &actor).map(drop),
+            SqliteStore::open_for_hook(&d.db(), &d.keys(), &actor).map(drop),
+        ];
+        for refused in refusals {
+            let err = refused.unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    StoreError::NotAKabanProject {
+                        supported: crate::LATEST_SCHEMA_VERSION
+                    }
+                ),
+                "{case}: {err:?}"
+            );
+            assert!(
+                err.to_string().contains("not a kaban v14 project"),
+                "{case}: {err}"
+            );
+        }
+        assert_eq!(
+            dir_bytes(&d.0),
+            before,
+            "{case}: nothing created or written"
+        );
+    }
+}
+
+/// The probe's fresh branch (spec 11 CMP-01): an empty main file, alone or with an empty
+/// `-wal`, is a fresh project; the open creates the v14 schema in it.
+#[test]
+fn an_empty_main_file_is_a_fresh_project() {
+    for (case, empty_wal) in [("alone", false), ("empty-wal", true)] {
+        let d = Scratch::new(&format!("empty-main-{case}"));
+        std::fs::File::create(d.db()).unwrap();
+        if empty_wal {
+            std::fs::File::create(d.0.join("kaban.db-wal")).unwrap();
+        }
+        let store = SqliteStore::open(&d.db(), &d.keys()).unwrap();
+        assert_eq!(
+            (store.migration().from, store.migration().to),
+            (0, crate::LATEST_SCHEMA_VERSION),
+            "{case}: created at the latest version"
+        );
+    }
+}
+
+/// The probe's normal branch (spec 11 CMP-01): a v14 project left by a killed writer (its
+/// last write only in the `-wal`) opens normally and recovers that write.
+#[test]
+fn a_v14_project_with_a_leftover_wal_opens_and_recovers() {
+    let writer = Scratch::new("v14-killed-writer");
+    let store = SqliteStore::open(&writer.db(), &writer.keys()).unwrap();
+    let node = match store
+        .remember(mk("Fact", "written just before the crash"), &[], &ctx())
+        .unwrap()
+    {
+        RememberOutcome::Created(n) => n,
+        RememberOutcome::Existing { .. } => panic!("a fresh project has no such node"),
+    };
+    let d = Scratch::new("v14-leftover-wal");
+    copy_as_killed(&writer, &d);
+    drop(store);
+    assert!(
+        std::fs::metadata(d.0.join("kaban.db-wal")).unwrap().len() > 0,
+        "the write is in the log"
+    );
+    let reopened = SqliteStore::open(&d.db(), &writer.keys()).unwrap();
+    assert_eq!(
+        reopened.migration().from,
+        crate::LATEST_SCHEMA_VERSION,
+        "opened, not created"
+    );
+    let recovered = reopened.get(&nid(&node.id), false).unwrap();
+    assert!(recovered.is_some(), "the logged write is recovered");
+}

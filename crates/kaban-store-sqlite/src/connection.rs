@@ -647,6 +647,73 @@ fn file_ident(meta: &std::fs::Metadata) -> FileIdent {
     (meta.dev(), meta.ino())
 }
 
+/// The version probe every file open runs first (spec 11 CMP-01, PR-04; unified-db-plan
+/// Task 4), before anything is created, tightened, locked or written: the main file alone is
+/// read through `file:<db>?mode=ro&immutable=1`, which takes no lock and creates no `-wal` or
+/// `-shm`, and the `-wal` is only `stat`ed. `meta` is the main file's
+/// [`regular_file_metadata`], `None` when it is absent. A main file at
+/// [`LATEST_SCHEMA_VERSION`] opens normally (a leftover `-wal` is then ordinary recovery);
+/// one at any other kaban version is refused untouched; a main file with no kaban schema
+/// (absent, empty or without the `node` table) is a fresh project unless a non-empty `-wal`
+/// lies beside it, which is never replayed. The version is read as [`Migrator::detect`]
+/// reads it. The callers skip a file a store of this process already holds: its first opener
+/// probed it, and no descriptor may be opened on it ([`tighten_regular_file`] says why).
+///
+/// [`LATEST_SCHEMA_VERSION`]: crate::LATEST_SCHEMA_VERSION
+/// [`Migrator::detect`]: crate::schema::Migrator::detect
+///
+/// # Errors
+/// `StoreError::SchemaUnsupported` for a main file at another version;
+/// `StoreError::NotAKabanProject` for a main file without a kaban schema beside a non-empty
+/// `-wal`; `StoreError::FileMode` when the `-wal` is a symlink or not a regular file; SQLite
+/// errors reading the main file.
+fn probe_version(path: &Path, meta: Option<&std::fs::Metadata>) -> Result<()> {
+    use crate::schema::{LATEST_SCHEMA_VERSION, Migrator};
+    let found = match meta {
+        Some(meta) if meta.len() > 0 => {
+            let flags = OpenFlags::SQLITE_OPEN_READ_ONLY
+                | OpenFlags::SQLITE_OPEN_URI
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+            let uri = format!("file:{}?mode=ro&immutable=1", percent_encode(path));
+            let conn = Connection::open_with_flags(uri, flags).sql()?;
+            Migrator::detect(&conn)?
+        }
+        // absent or empty: nothing recorded
+        _ => Some(0),
+    };
+    match found {
+        Some(LATEST_SCHEMA_VERSION) => Ok(()),
+        Some(0) => {
+            let mut wal = path.as_os_str().to_owned();
+            wal.push("-wal");
+            match regular_file_metadata(Path::new(&wal)).map_err(StoreError::FileMode)? {
+                Some(wal) if wal.len() > 0 => Err(StoreError::NotAKabanProject {
+                    supported: LATEST_SCHEMA_VERSION,
+                }),
+                _ => Ok(()),
+            }
+        }
+        other => Err(Migrator::unsupported(other)),
+    }
+}
+
+/// `path` as the path part of an SQLite `file:` URI: every byte outside the unreserved set
+/// (`A-Z a-z 0-9 - . _ ~`) but `/` is percent-encoded, so `?`, `#`, `%`, spaces and
+/// non-ASCII bytes in a file name cannot end the path or be read as parameters.
+fn percent_encode(path: &Path) -> String {
+    use std::fmt::Write as _;
+    use std::os::unix::ffi::OsStrExt;
+    let mut out = String::new();
+    for &b in path.as_os_str().as_bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~' | b'/') {
+            out.push(char::from(b));
+        } else {
+            let _ = write!(out, "%{b:02X}");
+        }
+    }
+    out
+}
+
 /// Make an existing regular file owner-only (0600) with `fchmod` on an opened descriptor (plan
 /// C1.6). A file that is already owner-only is not opened at all: closing any descriptor to a
 /// database file would release every POSIX record lock this process holds on it (SQLite's
@@ -672,8 +739,9 @@ fn tighten_regular_file(path: &Path, meta: &std::fs::Metadata) -> std::io::Resul
 /// process already holds the same database file open, nothing is tightened at all: the first
 /// opener did that, and an opened descriptor would release the live store's locks (C2.5b, P-1).
 /// The decision and the open run under the registry lock so two openers in one process cannot
-/// interleave. The open is admitted by [`admit_open`] (SS-23) once the file exists and before
-/// the connection is opened: a refusal opens nothing.
+/// interleave. Before any of it, [`probe_version`] reads the version of an existing main file
+/// without writing (CMP-01). The open is admitted by [`admit_open`] (SS-23) once the file
+/// exists and before the connection is opened: a refusal opens nothing.
 ///
 /// Permissions are checked and set by path in sequence, so this relies on a trusted parent
 /// directory (not writable by other users): a path that is a symlink or not a regular file is
@@ -691,6 +759,11 @@ pub(crate) fn prepare_database_files(
         live.iter().any(|entry| entry.ident == file_ident(meta))
     };
     let meta = regular_file_metadata(path).map_err(StoreError::FileMode)?;
+    // the version probe first (CMP-01): an older file is refused before it is created,
+    // tightened, admitted or opened
+    if !meta.as_ref().is_some_and(|meta| known_live(meta, &live)) {
+        probe_version(path, meta.as_ref())?;
+    }
     let already_live = match meta {
         Some(ref meta) if known_live(meta, &live) => true,
         Some(ref meta) => {
@@ -785,13 +858,14 @@ pub(crate) fn database_file_modes(path: &Path) -> Result<DatabaseFileModes> {
 /// file, and so must an existing `-wal` or `-shm` sidecar (RL-4): the same `symlink_metadata`
 /// refusal [`prepare_database_files`] applies, checked before SQLite opens anything, so a
 /// symlinked sidecar is never read as a WAL or written through the link. A missing sidecar is
-/// fine (SQLite creates its own). The open is read-write, so it is admitted by [`admit_open`]
+/// fine (SQLite creates its own). [`probe_version`] runs before the admission (CMP-01). The
+/// open is read-write, so it is admitted by [`admit_open`]
 /// (SS-23) like the ordinary open, and the connection is registered as live like every other.
 ///
 /// # Errors
 /// `StoreError::FileMode` when the file is absent, a symlink or not a regular file, or when an
-/// existing sidecar is a symlink or not a regular file; `StoreError::SharedOpenUnsupported`
-/// when the open is not admitted; SQLite open errors.
+/// existing sidecar is a symlink or not a regular file; the refusals of [`probe_version`];
+/// `StoreError::SharedOpenUnsupported` when the open is not admitted; SQLite open errors.
 pub(crate) fn open_existing_as_is(
     path: &Path,
     capabilities: StoreCapabilities,
@@ -813,6 +887,11 @@ pub(crate) fn open_existing_as_is(
         regular_file_metadata(Path::new(&sidecar)).map_err(StoreError::FileMode)?;
     }
     let ident = file_ident(&meta);
+    // the version probe before the admission and the open (CMP-01), as in
+    // [`prepare_database_files`]
+    if !live.iter().any(|entry| entry.ident == ident) {
+        probe_version(path, Some(&meta))?;
+    }
     let owner = admit_open(&live, ident, path, capabilities)?;
     let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
         | OpenFlags::SQLITE_OPEN_NO_MUTEX

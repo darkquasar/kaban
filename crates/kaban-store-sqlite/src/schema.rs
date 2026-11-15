@@ -5,8 +5,11 @@
 //! the whole DDL of `schema.sql` (embedded with `include_str!`) in one transaction, with the
 //! version record and the body codec record beside it; a database already at that version is
 //! served as it is; a database at any other version, older or newer, is refused at open with
-//! [`StoreError::SchemaUnsupported`] and the way out (export with the kaban that wrote it and
-//! re-ingest, or start a new database). No backup, no upgrade step, no exclusive admission
+//! [`StoreError::SchemaUnsupported`] and the way out (no upgrade path exists: create a fresh
+//! project and re-ingest; spec 11 CMP-01, OD-1). The refusal comes first from the read-only
+//! probe every file open runs before it creates or writes anything
+//! (`connection::probe_version`, reading the version as [`Migrator`] does); the checks here
+//! stand behind it. No backup, no upgrade step, no exclusive admission
 //! for a migration: a breaking schema change is a breaking release. The schema version is
 //! `index_meta(key='schema_version')`; a database with the `node` table and no such key is an
 //! unversioned spike file, refused like any other version. Connection PRAGMAs are not part of
@@ -179,7 +182,7 @@ impl Migrator {
     /// Detect the schema version of the database behind `conn`: `None` when the key is
     /// absent but the spike `node` table exists (an unversioned spike file), `Some(0)` for a
     /// fresh database, `Some(v)` when `index_meta.schema_version` is recorded.
-    fn detect(conn: &Connection) -> Result<Option<u32>> {
+    pub(crate) fn detect(conn: &Connection) -> Result<Option<u32>> {
         let has = |name: &str| -> Result<bool> {
             Ok(conn
                 .query_row(
@@ -219,7 +222,7 @@ impl Migrator {
     }
 
     /// The refusal of a database at `found` (an unversioned spike file is reported as 1).
-    const fn unsupported(found: Option<u32>) -> StoreError {
+    pub(crate) const fn unsupported(found: Option<u32>) -> StoreError {
         StoreError::SchemaUnsupported {
             found: match found {
                 Some(v) => v,

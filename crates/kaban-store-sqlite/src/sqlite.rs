@@ -400,8 +400,11 @@ impl SqliteStore {
     /// default `local`; a production open is [`Self::open_as`].
     ///
     /// # Errors
-    /// SQLite open/DDL errors, or `StoreError::Audit` when the key cannot be read or created
-    /// (including a key file of the wrong length, and a missing key of an existing project).
+    /// `StoreError::SchemaUnsupported` for a file of another kaban version and
+    /// `StoreError::NotAKabanProject` for a file with no kaban schema beside a non-empty `-wal`
+    /// (spec 11 CMP-01: refused before anything is created or written), SQLite open/DDL
+    /// errors, or `StoreError::Audit` when the key cannot be read or created (including a key
+    /// file of the wrong length, and a missing key of an existing project).
     pub fn open(path: &Path, keys_dir: &Path) -> Result<Self> {
         Self::open_as(path, keys_dir, &ActorId::default())
     }

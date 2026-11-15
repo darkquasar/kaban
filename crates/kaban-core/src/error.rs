@@ -131,13 +131,23 @@ pub enum StoreError {
     FileMode(#[source] std::io::Error),
     /// The database is at another schema version than the one this kaban serves (spec 05
     /// OWN-P: one schema, no migrations; an older and a newer file alike). It is left
-    /// untouched.
+    /// untouched: no upgrade path exists (spec 11 CMP-01, OD-1).
     #[error(
-        "database schema version {found} is not the version {supported} this kaban serves: the database was created by another kaban version; export it with that version and re-ingest here, or start a new database"
+        "database schema version {found} is not the version {supported} this kaban serves: no upgrade path exists; create a fresh project and re-ingest"
     )]
     SchemaUnsupported {
         /// Version recorded in the database (1 for an unversioned spike file).
         found: u32,
+        /// The one version this binary serves.
+        supported: u32,
+    },
+    /// The database file records no kaban schema while a non-empty `-wal` lies beside it
+    /// (spec 11 CMP-01): an unknown writer's log, never replayed. Both files are left
+    /// untouched.
+    #[error(
+        "the database is not a kaban v{supported} project: its main file records no kaban schema and a non-empty -wal lies beside it; move both aside or create a fresh project"
+    )]
+    NotAKabanProject {
         /// The one version this binary serves.
         supported: u32,
     },
@@ -257,6 +267,10 @@ impl std::fmt::Debug for StoreError {
             Self::SchemaUnsupported { found, supported } => f
                 .debug_struct("SchemaUnsupported")
                 .field("found", found)
+                .field("supported", supported)
+                .finish(),
+            Self::NotAKabanProject { supported } => f
+                .debug_struct("NotAKabanProject")
                 .field("supported", supported)
                 .finish(),
             Self::SharedOpenUnsupported => f.write_str("SharedOpenUnsupported"),

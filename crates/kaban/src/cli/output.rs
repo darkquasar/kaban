@@ -129,8 +129,10 @@ pub(crate) fn store_exit_code(e: &StoreError) -> u8 {
         | StoreError::InvalidId(_)
         // EN-F7: an ontology error at the record seam is request-shaped like the kind errors
         | StoreError::Ontology(_)
-        // OWN-P: a database of another schema version is refused with guidance, request-shaped
-        | StoreError::SchemaUnsupported { .. } => EXIT_INVALID,
+        // OWN-P, spec 11 CMP-01: a database of another schema version, or a file that is no
+        // kaban project, is refused with guidance, request-shaped
+        | StoreError::SchemaUnsupported { .. }
+        | StoreError::NotAKabanProject { .. } => EXIT_INVALID,
         StoreError::NotFound(_) => EXIT_NOT_FOUND,
         _ => EXIT_STORE_ERROR,
     }

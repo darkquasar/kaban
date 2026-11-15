@@ -146,8 +146,7 @@ fn a_database_at_another_schema_version_is_refused_untouched_with_guidance() {
             assert!(
                 msg.contains(&found.to_string())
                     && msg.contains(&LATEST_SCHEMA_VERSION.to_string())
-                    && msg.contains("re-ingest")
-                    && msg.contains("new database"),
+                    && msg.contains("no upgrade path exists; create a fresh project and re-ingest"),
                 "{constructor}: the refusal names both versions and the way out: {msg}"
             );
         }
