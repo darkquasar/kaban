@@ -1,33 +1,49 @@
-//! The one schema (spec 05 OWN-P; formerly the forward-only migrations of core-spec §7): a
-//! fresh database is created whole at `LATEST_SCHEMA_VERSION` with no backup; a database at
-//! any other version, older, newer or an unversioned spike file, is refused at the open with
-//! a typed error and the way out, and nothing in it is touched; the tenant-scoped tables of
-//! the created schema carry `workspace_id NOT NULL` (F17).
+//! The one schema, v14 (spec 05 OWN-P; spec 11 CMP-01, KER-05, PC-1): an empty directory
+//! opens as a v14 project whose version is in the main file as soon as it is created, in
+//! incremental auto-vacuum mode, with a `node.rid` that is never handed out twice; a database
+//! at any other version, older, newer or an unversioned spike file, is refused at the open
+//! with a typed error and the way out, and nothing in it is touched (there is no migration);
+//! the tenant-scoped tables of the created schema carry `workspace_id NOT NULL` (F17).
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // test code: failures are the assertion
 
 mod common;
 
-use common::Scratch;
-use kaban_core::{ActorId, StoreError};
-use kaban_store_sqlite::{LATEST_SCHEMA_VERSION, SqliteStore};
-use std::path::{Path, PathBuf};
+use common::{Scratch, created, ctx, nid};
+use kaban_core::{ActorId, ForgetMode, MemoryStore, StoreError};
+use kaban_store_sqlite::{LATEST_SCHEMA_VERSION, MigrationReport, SqliteStore};
+use std::path::Path;
 
-/// Every `kaban.db.bak-*` file in the scratch directory (the former migrator's backups).
-fn backups(s: &Scratch) -> Vec<PathBuf> {
-    let mut v: Vec<PathBuf> = std::fs::read_dir(&s.0)
-        .unwrap()
-        .map(|e| e.unwrap().path())
-        .filter(|p| {
-            p.file_name()
-                .and_then(|n| n.to_str())
-                .is_some_and(|n| n.starts_with("kaban.db.bak-"))
-        })
-        .collect();
-    v.sort();
-    v
+/// A read of the main database file alone, as the open's refusal probe reads it: an immutable
+/// read-only connection takes no lock, creates no `-wal` or `-shm` and never sees the log.
+fn main_file(db: &Path) -> rusqlite::Connection {
+    let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI;
+    rusqlite::Connection::open_with_flags(
+        format!("file:{}?mode=ro&immutable=1", db.display()),
+        flags,
+    )
+    .unwrap()
 }
 
+/// `index_meta.schema_version` as the main file records it.
+fn main_file_version(db: &Path) -> Option<String> {
+    main_file(db)
+        .query_row(
+            "SELECT value FROM index_meta WHERE key = 'schema_version'",
+            [],
+            |r| r.get(0),
+        )
+        .ok()
+}
+
+/// `PRAGMA auto_vacuum` as the main file's header records it (2 = incremental).
+fn main_file_auto_vacuum(db: &Path) -> i64 {
+    main_file(db)
+        .query_row("PRAGMA auto_vacuum", [], |r| r.get(0))
+        .unwrap()
+}
+
+/// The schema version as an ordinary connection reads it (main file and log).
 fn schema_version(db: &Path) -> Option<String> {
     let conn = rusqlite::Connection::open(db).unwrap();
     conn.query_row(
@@ -38,10 +54,16 @@ fn schema_version(db: &Path) -> Option<String> {
     .ok()
 }
 
+/// The `rid` of the row with node id `id`.
+fn rid_of(db: &Path, id: &str) -> i64 {
+    rusqlite::Connection::open(db)
+        .unwrap()
+        .query_row("SELECT rid FROM node WHERE id = ?1", [id], |r| r.get(0))
+        .unwrap()
+}
+
 /// What a refused open must leave as it found it: every object of `sqlite_master` with its
-/// DDL, and every row of `node` and of `index_meta` (when the table exists). The file header
-/// itself is not compared: the connection settings put a file in WAL mode before the schema
-/// is read, the one change an open makes to a file it then refuses.
+/// DDL, and every row of `node` and of `index_meta` (when the table exists).
 type Content = (Vec<(String, String, Option<String>)>, Vec<String>);
 
 fn content(db: &Path) -> Content {
@@ -72,34 +94,88 @@ fn content(db: &Path) -> Content {
     (objects, rows)
 }
 
+/// CMP-01: an empty directory opens as a v14 project, and the version is in the main file
+/// while the creating store is still open (the open ends with a TRUNCATE checkpoint), so a
+/// second opener's probe, which reads the main file alone, always sees it.
 #[test]
-fn fresh_database_opens_at_the_latest_schema_version_without_a_backup() {
+fn an_empty_directory_opens_as_a_v14_project_recorded_in_the_main_file() {
     let s = Scratch::new("kaban-migrate", "fresh");
-    {
-        let store = SqliteStore::open(&s.db(), &s.keys()).unwrap();
-        let report = store.migration();
-        assert_eq!((report.from, report.to), (0, LATEST_SCHEMA_VERSION));
-    }
+    let store = SqliteStore::open(&s.db(), &s.keys()).unwrap();
+    assert_eq!(LATEST_SCHEMA_VERSION, 14);
     assert_eq!(
-        schema_version(&s.db()).as_deref(),
-        Some(LATEST_SCHEMA_VERSION.to_string().as_str()),
-        "a fresh database records the one version"
+        (store.migration().from, store.migration().to),
+        (0, 14),
+        "created at v14 from nothing"
     );
-    assert!(
-        backups(&s).is_empty(),
-        "nothing to back up on a fresh database: {:?}",
-        backups(&s)
+    assert_eq!(
+        main_file_version(&s.db()).as_deref(),
+        Some("14"),
+        "the main file holds the version right after creation"
     );
+    drop(store);
     let reopened = SqliteStore::open(&s.db(), &s.keys()).unwrap();
-    assert_eq!(
-        *reopened.migration(),
-        kaban_store_sqlite::MigrationReport::unchanged(LATEST_SCHEMA_VERSION)
-    );
+    assert_eq!(*reopened.migration(), MigrationReport::unchanged(14));
 }
 
-/// OWN-P: a database at another schema version, older (the last ladder release) or newer, is
-/// refused by every open that reaches the schema, with the way out named, and the file is
-/// left byte for byte as it was: no migration, no backup, no re-encode.
+/// KER-05: a fresh project is created in incremental auto-vacuum mode, so an ordinary compact
+/// can release wholly free pages, and the mode survives a close and a reopen.
+#[test]
+fn a_fresh_project_reports_incremental_auto_vacuum_before_and_after_reopen() {
+    let s = Scratch::new("kaban-migrate", "auto-vacuum");
+    {
+        let _store = SqliteStore::open(&s.db(), &s.keys()).unwrap();
+        assert_eq!(main_file_auto_vacuum(&s.db()), 2, "fresh: incremental");
+    }
+    let _reopened = SqliteStore::open(&s.db(), &s.keys()).unwrap();
+    assert_eq!(main_file_auto_vacuum(&s.db()), 2, "reopened: incremental");
+}
+
+/// PC-1: `node.rid` is the graph's local id, so the rid of a purged highest row is never
+/// handed to a later insert. A purge leaves the row as a ghost, which alone keeps its rid
+/// taken; the ghost row is then removed outright, so only the schema (AUTOINCREMENT) stands
+/// between the next insert and the old rid.
+#[test]
+fn a_purged_highest_rid_is_never_reused() {
+    let s = Scratch::new("kaban-migrate", "rid");
+    let purged = {
+        let store = SqliteStore::open(&s.db(), &s.keys()).unwrap();
+        created(&store, "Fact", "the first row");
+        let highest = created(&store, "Fact", "the highest row, purged");
+        store
+            .forget(&nid(&highest.id), ForgetMode::Purge, &ctx())
+            .unwrap();
+        let after_ghost = created(&store, "Fact", "inserted beside the ghost");
+        drop(store);
+        let purged = rid_of(&s.db(), &highest.id);
+        assert!(rid_of(&s.db(), &after_ghost.id) > purged);
+        purged
+    };
+    {
+        let raw = rusqlite::Connection::open(s.db()).unwrap();
+        // the change-log triggers stamp every node write with the connection's writer
+        raw.create_scalar_function(
+            "kaban_writer",
+            0,
+            rusqlite::functions::FunctionFlags::SQLITE_UTF8,
+            |_| Ok(ActorId::default().as_str().to_owned()),
+        )
+        .unwrap();
+        // the later row first, so the purged row is the table's highest when it leaves
+        raw.execute("DELETE FROM node WHERE rid > ?1", [purged])
+            .unwrap();
+        raw.execute("DELETE FROM node WHERE rid = ?1", [purged])
+            .unwrap();
+    }
+    let store = SqliteStore::open(&s.db(), &s.keys()).unwrap();
+    let next = created(&store, "Fact", "inserted after the purged row left");
+    drop(store);
+    let next = rid_of(&s.db(), &next.id);
+    assert!(next > purged, "rid {purged} reused as {next}");
+}
+
+/// OWN-P, CMP-01: a database at another schema version, older (the last ladder release) or
+/// newer, is refused by every open that reaches the schema, with both versions and the way
+/// out named, and every object and row of the file is left as it was.
 #[test]
 fn a_database_at_another_schema_version_is_refused_untouched_with_guidance() {
     for found in [LATEST_SCHEMA_VERSION - 1, 999] {
@@ -160,7 +236,6 @@ fn a_database_at_another_schema_version_is_refused_untouched_with_guidance() {
             before,
             "version {found}: every object and row is as it was"
         );
-        assert!(backups(&s).is_empty(), "no backup of a refused database");
     }
 }
 
@@ -190,7 +265,6 @@ fn an_unversioned_spike_file_is_refused_and_left_alone() {
         "{err:?}"
     );
     assert_eq!(content(&s.db()), before, "nothing created, the row intact");
-    assert!(backups(&s).is_empty(), "no backup: {:?}", backups(&s));
 }
 
 /// Tables whose `workspace_id` column is `NOT NULL`, and tables that have no such column.
@@ -207,8 +281,8 @@ fn workspace_columns(conn: &rusqlite::Connection) -> (Vec<String>, Vec<String>) 
     let mut absent = Vec::new();
     for t in tables {
         let mut cols = conn.prepare(&format!("PRAGMA table_info({t})")).unwrap();
-        // `(notnull, pk)`: a `workspace_id` that is the table's PRIMARY KEY
-        // (`discovered_overflow`, engine-spec §3.2 verbatim) is the tenant key by construction
+        // `(notnull, pk)`: a `workspace_id` that is the table's PRIMARY KEY is the tenant key
+        // by construction
         let ws: Option<(i64, i64)> = cols
             .query_map([], |r| {
                 Ok((
@@ -230,6 +304,7 @@ fn workspace_columns(conn: &rusqlite::Connection) -> (Vec<String>, Vec<String>) 
     (not_null, absent)
 }
 
+/// F17 over the v14 table set (`schema.sql`): every table but SQLite's own, listed exactly.
 #[test]
 fn workspace_id_is_not_null_on_exactly_the_tenant_scoped_tables() {
     let s = Scratch::new("kaban-migrate", "f17");
@@ -241,36 +316,25 @@ fn workspace_id_is_not_null_on_exactly_the_tenant_scoped_tables() {
     assert_eq!(
         not_null,
         [
-            "assertion",
-            "audit",
             "changes",
             "derived_artifact",
-            "discovered_overflow",
             "edge",
-            "events",
             "ingest_jobs",
             "kind_stats",
             "node",
-            "node_anchor",
-            "node_candidate",
-            "pruning_protection"
+            "node_anchor"
         ],
         "F17: tenant-scoped tables (engine-spec §3.2)"
     );
     assert_eq!(
         absent,
         [
-            "assertion_status",
-            "confirmations",
-            "conflicts",
             "index_meta",
             "leases",
-            "node_identity",
             "projections",
-            "read_audit_seen",
             "schema_type",
             "session_edits"
         ],
-        "F17 (PR-6): DB-scoped bookkeeping tables and per-row child tables carry no workspace column"
+        "F17 (PR-6): DB-scoped bookkeeping tables carry no workspace column"
     );
 }
