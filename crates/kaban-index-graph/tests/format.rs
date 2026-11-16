@@ -32,7 +32,7 @@ fn open_base(bytes: Vec<u8>) -> Base {
 /// seeds use a small id domain (dense presence indexes), odd seeds a large one (sparse).
 fn fixture(seed: u64) -> Fixture {
     let mut rng = Rng::new(seed);
-    let domain = if seed % 2 == 0 { 200 } else { 20_000 };
+    let domain = if seed.is_multiple_of(2) { 200 } else { 20_000 };
     let base_recs = random_records(&mut rng, IDS, 400, 5);
     let layer_recs = [
         random_records(&mut rng, IDS, 150, 30),
@@ -76,12 +76,20 @@ fn selections() -> Vec<RelSelection> {
 
 /// Every probe of `view` equals `oracle`, for ids past the generated range too.
 fn assert_view_matches(view: &View<'_>, oracle: &Oracle, ctx: &str) {
-    assert_eq!(view.nodes().collect::<Vec<_>>(), oracle.nodes(), "{ctx}: nodes");
+    assert_eq!(
+        view.nodes().collect::<Vec<_>>(),
+        oracle.nodes(),
+        "{ctx}: nodes"
+    );
     for id in 0..IDS + 3 {
         let n = LocalId(id);
         assert_eq!(view.contains(n), oracle.contains(n), "{ctx}: contains {id}");
         for key in 0..5 {
-            assert_eq!(view.fact(n, key), oracle.fact(n, key), "{ctx}: fact {id}/{key}");
+            assert_eq!(
+                view.fact(n, key),
+                oracle.fact(n, key),
+                "{ctx}: fact {id}/{key}"
+            );
         }
         for rels in &selections() {
             for dir in [Direction::Out, Direction::In, Direction::Both] {
@@ -141,7 +149,11 @@ fn busiest(oracle: &Oracle) -> LocalId {
     oracle
         .nodes()
         .into_iter()
-        .max_by_key(|&n| oracle.neighbours(n, &RelSelection::All, Direction::Both).len())
+        .max_by_key(|&n| {
+            oracle
+                .neighbours(n, &RelSelection::All, Direction::Both)
+                .len()
+        })
         .expect("fixture has present nodes")
 }
 
@@ -217,11 +229,17 @@ fn truncated_or_padded_bytes_are_corrupt() {
     let f = fixture(2);
     let blob = f.all[1].encode();
     for len in 0..blob.len() {
-        assert!(is_corrupt(&Records::decode(&blob[..len])), "records prefix {len}");
+        assert!(
+            is_corrupt(&Records::decode(&blob[..len])),
+            "records prefix {len}"
+        );
     }
     let mut padded = blob.clone();
     padded.push(0);
-    assert!(is_corrupt(&Records::decode(&padded)), "records trailing byte");
+    assert!(
+        is_corrupt(&Records::decode(&padded)),
+        "records trailing byte"
+    );
 
     let base_bytes = build_base(&f.all[0], 200);
     let layer_bytes = seal(&View::new(Some(&f.base), &[], &[]), &f.all[1]);
@@ -253,4 +271,49 @@ fn truncated_or_padded_bytes_are_corrupt() {
         is_corrupt(&Base::open(OwnedBytes::new(layer_bytes)).map(|_| ())),
         "a layer is not a base"
     );
+}
+
+/// Drop section `tag` from extent bytes, following the documented layout: a 24-byte header with
+/// the section count at offset 20, then 12-byte table entries (tag `u32`, length `u64`), then
+/// the sections in table order.
+fn without_section(bytes: &[u8], tag: u32) -> Vec<u8> {
+    let count = u32::from_le_bytes(bytes[20..24].try_into().unwrap()) as usize;
+    let table: Vec<(u32, usize)> = (0..count)
+        .map(|i| {
+            let at = 24 + 12 * i;
+            let t = u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
+            let len = u64::from_le_bytes(bytes[at + 4..at + 12].try_into().unwrap());
+            (t, usize::try_from(len).unwrap())
+        })
+        .collect();
+    let mut out = bytes[..20].to_vec();
+    let kept = table.iter().filter(|&&(t, _)| t != tag).count();
+    out.extend_from_slice(&u32::try_from(kept).unwrap().to_le_bytes());
+    for &(t, len) in table.iter().filter(|&&(t, _)| t != tag) {
+        out.extend_from_slice(&t.to_le_bytes());
+        out.extend_from_slice(&(len as u64).to_le_bytes());
+    }
+    let mut at = 24 + 12 * count;
+    for &(t, len) in &table {
+        if t != tag {
+            out.extend_from_slice(&bytes[at..at + len]);
+        }
+        at += len;
+    }
+    out
+}
+
+#[test]
+fn an_extent_without_presence_is_corrupt() {
+    let f = fixture(4);
+    let base_bytes = build_base(&f.all[0], 200);
+    let layer_bytes = seal(&View::new(Some(&f.base), &[], &[]), &f.all[1]);
+    // Sanity: dropping nothing keeps the bytes valid.
+    assert!(Base::open(OwnedBytes::new(without_section(&base_bytes, 99))).is_ok());
+    assert!(Layer::open(OwnedBytes::new(without_section(&layer_bytes, 99))).is_ok());
+    let presence = 1;
+    let base = Base::open(OwnedBytes::new(without_section(&base_bytes, presence)));
+    assert!(is_corrupt(&base.map(|_| ())), "base without presence");
+    let layer = Layer::open(OwnedBytes::new(without_section(&layer_bytes, presence)));
+    assert!(is_corrupt(&layer.map(|_| ())), "layer without presence");
 }

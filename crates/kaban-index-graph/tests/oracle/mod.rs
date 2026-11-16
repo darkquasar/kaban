@@ -10,7 +10,7 @@ use kaban_index_graph::{
 
 /// The merged state of base, layer and sediment records applied in order.
 #[derive(Debug, Clone, Default)]
-pub struct Oracle {
+pub(crate) struct Oracle {
     nodes: BTreeSet<u32>,
     edges: BTreeMap<(u32, u16, u32), Attr>,
     facts: BTreeMap<(u32, u8), Vec<u8>>,
@@ -18,7 +18,7 @@ pub struct Oracle {
 
 impl Oracle {
     /// Apply `r`: edges, nodes and facts in order; the newest record wins.
-    pub fn apply(&mut self, r: &Records) {
+    pub(crate) fn apply(&mut self, r: &Records) {
         for e in &r.edges {
             let key = (e.src.0, e.rel.0, e.dst.0);
             match e.kind {
@@ -54,21 +54,21 @@ impl Oracle {
     }
 
     /// Drop `n`, its edges and its facts (what a fold with `omit: [n]` keeps).
-    pub fn purge(&mut self, n: LocalId) {
+    pub(crate) fn purge(&mut self, n: LocalId) {
         self.nodes.remove(&n.0);
         self.edges.retain(|&(s, _, d), _| s != n.0 && d != n.0);
         self.facts.retain(|&(m, _), _| m != n.0);
     }
 
-    pub fn contains(&self, n: LocalId) -> bool {
+    pub(crate) fn contains(&self, n: LocalId) -> bool {
         self.nodes.contains(&n.0)
     }
 
-    pub fn nodes(&self) -> Vec<LocalId> {
+    pub(crate) fn nodes(&self) -> Vec<LocalId> {
         self.nodes.iter().map(|&n| LocalId(n)).collect()
     }
 
-    pub fn fact(&self, n: LocalId, key: u8) -> Option<&[u8]> {
+    pub(crate) fn fact(&self, n: LocalId, key: u8) -> Option<&[u8]> {
         if !self.contains(n) {
             return None;
         }
@@ -77,7 +77,7 @@ impl Oracle {
 
     /// Neighbours of a present `n` whose other endpoint is present, ordered by (neighbour,
     /// relation, outgoing first).
-    pub fn neighbours(
+    pub(crate) fn neighbours(
         &self,
         n: LocalId,
         rels: &RelSelection,
@@ -109,14 +109,14 @@ impl Oracle {
 
 /// splitmix64: a seeded, dependency-free generator for test fixtures.
 #[derive(Debug, Clone)]
-pub struct Rng(u64);
+pub(crate) struct Rng(u64);
 
 impl Rng {
-    pub fn new(seed: u64) -> Self {
+    pub(crate) fn new(seed: u64) -> Self {
         Self(seed)
     }
 
-    pub fn next_u64(&mut self) -> u64 {
+    pub(crate) fn next_u64(&mut self) -> u64 {
         self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
         let mut z = self.0;
         z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
@@ -125,21 +125,21 @@ impl Rng {
     }
 
     /// Uniform in `0..n` (n > 0).
-    pub fn below(&mut self, n: u64) -> u64 {
+    pub(crate) fn below(&mut self, n: u64) -> u64 {
         self.next_u64() % n
     }
 
-    pub fn chance(&mut self, percent: u64) -> bool {
+    pub(crate) fn chance(&mut self, percent: u64) -> bool {
         self.below(100) < percent
     }
 }
 
 /// Relation ids used by fixtures, including high values so membership is not a bit shift.
-pub const RELS: [u16; 4] = [0, 1, 7, 40_000];
+pub(crate) const RELS: [u16; 4] = [0, 1, 7, 40_000];
 
 /// Random records over ids `0..ids`: `ops` edge ops, about a third as many node and fact ops.
 /// `remove_percent` of ops are removes.
-pub fn random_records(rng: &mut Rng, ids: u32, ops: usize, remove_percent: u64) -> Records {
+pub(crate) fn random_records(rng: &mut Rng, ids: u32, ops: usize, remove_percent: u64) -> Records {
     let id = |rng: &mut Rng| LocalId(u32::try_from(rng.below(u64::from(ids))).unwrap_or(0));
     let kind = |rng: &mut Rng| {
         if rng.chance(remove_percent) {
