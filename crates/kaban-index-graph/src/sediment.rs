@@ -114,6 +114,51 @@ fn compact<T: Clone, K: PartialEq>(
     Ok(kept)
 }
 
+/// Merge two sorted, key-unique runs: per key the `new` element wins; every emitted element
+/// that `keep` accepts goes to `emit` with whether it came from `new`. One unit per element.
+fn merge_newest<T, K: Ord>(
+    old: &[T],
+    new: &[T],
+    key: impl Fn(&T) -> K,
+    keep: impl Fn(&T) -> bool,
+    mut emit: impl FnMut(&T, bool) -> Result<(), GraphError>,
+    t: &Ticker<'_>,
+) -> Result<(), GraphError> {
+    let (mut at_old, mut at_new) = (0, 0);
+    loop {
+        t.tick()?;
+        let (item, fresh) = match (old.get(at_old), new.get(at_new)) {
+            (Some(older), Some(newer)) => match key(older).cmp(&key(newer)) {
+                std::cmp::Ordering::Less => {
+                    at_old += 1;
+                    (older, false)
+                }
+                std::cmp::Ordering::Equal => {
+                    at_old += 1;
+                    at_new += 1;
+                    (newer, true)
+                }
+                std::cmp::Ordering::Greater => {
+                    at_new += 1;
+                    (newer, true)
+                }
+            },
+            (Some(older), None) => {
+                at_old += 1;
+                (older, false)
+            }
+            (None, Some(newer)) => {
+                at_new += 1;
+                (newer, true)
+            }
+            (None, None) => return Ok(()),
+        };
+        if keep(item) {
+            emit(item, fresh)?;
+        }
+    }
+}
+
 /// The barrier batch of `id` in `nodes` (sorted by id).
 fn barrier_of(nodes: &[SedNode], id: u32) -> Option<usize> {
     nodes
@@ -303,7 +348,83 @@ impl PreparedSediment {
         batches: &[R],
         budget: &QueryBudget,
     ) -> Result<Self, GraphError> {
-        Self::prepare_from(batches, self.batches, budget)
+        let new = Self::prepare_from(batches, self.batches, budget)?;
+        self.merge(&new, budget)
+    }
+
+    /// `self` followed by `new` (prepared from the batches after `self`'s).
+    fn merge(&self, new: &Self, budget: &QueryBudget) -> Result<Self, GraphError> {
+        let mut charge = Charge::new(budget)?;
+        let t = Ticker::new(budget);
+
+        let mut nodes: Vec<SedNode> = charge.vec(self.nodes.len() + new.nodes.len())?;
+        let mut barriers = false;
+        merge_newest(
+            &self.nodes,
+            &new.nodes,
+            |n| n.id,
+            |_| true,
+            |n, fresh| {
+                let barrier = if fresh {
+                    n.barrier.or_else(|| barrier_of(&self.nodes, n.id))
+                } else {
+                    n.barrier
+                };
+                barriers |= barrier.is_some();
+                nodes.push(SedNode { barrier, ..*n });
+                Ok(())
+            },
+            &t,
+        )?;
+
+        let edges = |old: &[SedEdge], fresh: &[SedEdge], charge: &mut Charge| {
+            let mut merged: Vec<SedEdge> = charge.vec(old.len() + fresh.len())?;
+            merge_newest(
+                old,
+                fresh,
+                |e| e.key,
+                |e| survives(&nodes, e.order.0, &[e.key.0, e.key.1]),
+                |e, _| {
+                    merged.push(*e);
+                    Ok(())
+                },
+                &t,
+            )?;
+            Ok::<_, GraphError>(merged)
+        };
+        let out = edges(&self.out, &new.out, &mut charge)?;
+        let inc = edges(&self.inc, &new.inc, &mut charge)?;
+
+        let mut arena: Vec<u8> = charge.vec(self.arena.len() + new.arena.len())?;
+        let mut facts: Vec<SedFact> = charge.vec(self.facts.len() + new.facts.len())?;
+        merge_newest(
+            &self.facts,
+            &new.facts,
+            |f| f.key,
+            |f| survives(&nodes, f.order.0, &[f.key.0]),
+            |f, fresh| {
+                let from = if fresh { new } else { self };
+                let bytes = from.arena.get(f.payload.clone()).unwrap_or_default();
+                let payload = copy_payload(&mut arena, bytes, &t)?;
+                facts.push(SedFact {
+                    payload,
+                    ..f.clone()
+                });
+                Ok(())
+            },
+            &t,
+        )?;
+
+        Ok(Self {
+            nodes,
+            out,
+            inc,
+            facts,
+            arena,
+            batches: new.batches,
+            barriers,
+            _lease: Some(charge.into_lease()),
+        })
     }
 
     /// Batches applied so far.

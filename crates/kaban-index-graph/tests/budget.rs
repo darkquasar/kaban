@@ -957,6 +957,15 @@ fn cancellation_stops_extending_prepared_sediment_within_the_interval() {
         edges: vec![edge(PHASE + 5, 3, OpKind::Add)],
         ..Records::default()
     }];
-    cancel_in_phase("extend", 0, 1, |b| prepared.extend(&batch, b));
+    let extend = cancel_in_phase("extend", 0, 1, |b| prepared.extend(&batch, b));
     assert!(free.live_bytes() > 0, "the prepared sediment stays charged");
+    // A linear merge, not a re-sort of what was prepared: well under preparing from scratch.
+    let before = work_units();
+    let scratch = PreparedSediment::prepare(&[descending(PHASE), batch[0].clone()], &free);
+    assert!(scratch.is_ok());
+    let scratch = work_units() - before;
+    assert!(
+        2 * extend < scratch,
+        "extend {extend} units, prepare from scratch {scratch}"
+    );
 }

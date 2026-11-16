@@ -4,9 +4,9 @@
 //! records it decides. Every source list is sorted, so lists merge linearly with no sort.
 //!
 //! Query-side work is charged and checked against the caller's [`QueryBudget`] (PC-17):
-//! preparing the sediment reserves its vectors before allocating them and holds the charge
-//! while the view lives; each [`View::neighbours`] and [`View::nodes`] iterator reserves its
-//! cursors and holds that charge while it lives. Every unit of work beneath the iterator is
+//! the borrowed [`crate::PreparedSediment`] holds the charge of its vectors while it lives;
+//! each [`View::neighbours`] and [`View::nodes`] iterator reserves its cursors and holds that
+//! charge while it lives. Every unit of work beneath the iterator is
 //! metered, not only the merged rows: preparing a cursor, comparing a source in the merge,
 //! advancing a source by one entry and visiting one bitvector word are one unit each. The budget
 //! is checked before the first unit and after every [`BUDGET_CHECK_INTERVAL`] units, whether or
