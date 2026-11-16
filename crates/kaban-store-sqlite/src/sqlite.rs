@@ -115,8 +115,9 @@ impl LinkEffect {
     }
 }
 
-/// SQLite graph store. One connection guarded by a mutex (single writer per process). Audit
-/// rows are chained with `signer` inside the same transactions as the writes. Recall's seeds
+/// SQLite graph store. One connection guarded by a mutex (single writer per process). Each
+/// write commits its rows and their change-log entries in one transaction; `signer` holds the
+/// database's HMAC key (keyed identities and `input_hmac` stubs). Recall's seeds
 /// come from the store's own text index (the Tantivy adapter it opens, admits or rebuilds at
 /// its open and projects its commits into, spec 05 OWN-M; `crate::tantivy`) or, for an open
 /// that attaches none and a database below the FTS5 retirement (spec 05 SS-16), from the

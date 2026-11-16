@@ -1178,7 +1178,7 @@ pub enum ExtractorKind {
 
 /// Who produced an edge or a derived artifact, named for the source its records come from
 /// (PC-16; who acted stays in the actor fields). One identity per row, stored in the
-/// `edge.layer` and `derived_artifact.layer` columns until T4 renames them `producer`. A
+/// `edge.producer` and `derived_artifact.producer` columns. A
 /// producer rerun deletes only the rows it wrote, and the first producer to write a
 /// `(src, dst, rel)` triple keeps the row (owner decision 2026-11-14).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]

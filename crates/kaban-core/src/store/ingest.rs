@@ -144,7 +144,8 @@ pub trait IngestStore: Send + Sync {
     /// # Errors
     /// Backend failures; `false` means unresolved without disclosing another tenant's row.
     fn job_mark_stale(&self, job: &crate::JobId, workspace: &WorkspaceId) -> Result<bool>;
-    /// Publish gated L3 graph/assertions/audit and successful accumulation atomically.
+    /// Publish the gated batch (its nodes, edges and their change-log entries, active at
+    /// once) and the job's successful accumulation in one transaction.
     /// The callback sees the transaction-current row and actual outcomes; it must not
     /// acquire the store or await. Any callback error rolls back the entire publication.
     /// Source/contract races and stale batches never count as successful submits.

@@ -1,6 +1,6 @@
 //! The state of a node (core-spec §4, SR-4): `lifecycle` is storage visibility for every kind
-//! (the retired `node.governance` column is written `none` and read by nothing until the v14
-//! format drops it). [`RuleSet`] holds the live ontology rules the store and the service
+//! and the only state a node row carries (the v14 format has no governance column).
+//! [`RuleSet`] holds the live ontology rules the store and the service
 //! decide writes by, read from a resolved ontology by stored kind name: each kind's `rules:`
 //! block (display labels, the near-duplicate key; engine-spec EN-F4) and the rels whose
 //! `on_link` archives the target. The transition tables are the spec's, exactly; anything
