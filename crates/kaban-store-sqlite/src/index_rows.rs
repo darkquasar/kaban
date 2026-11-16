@@ -46,7 +46,8 @@ impl IndexRows {
         let flags = OpenFlags::SQLITE_OPEN_READ_ONLY
             | OpenFlags::SQLITE_OPEN_URI
             | OpenFlags::SQLITE_OPEN_NO_MUTEX;
-        let conn = Connection::open_with_flags(db, flags).sql()?;
+        // the file the probe read, by its URI (`connection::sqlite_uri`)
+        let conn = Connection::open_with_flags(crate::connection::sqlite_uri(db), flags).sql()?;
         conn.busy_timeout(BUSY_TIMEOUT).sql()?;
         // the bodies this connection reads may be encoded (spec 05 SS-17), and are served
         // only under the dictionary the database records (T7 review t7-4)

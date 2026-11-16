@@ -29,7 +29,8 @@ const READ_BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5)
 
 impl CgRead {
     /// Open the read connection on the memory database at `path` (`READ_ONLY | URI |
-    /// NO_MUTEX`; the URI flag is what lets `ATTACH` take the `file:` form). Nothing is
+    /// NO_MUTEX`; the URI flag is what lets `ATTACH` take the `file:` form), named by its
+    /// [`sqlite_uri`] like every connection of this crate. Nothing is
     /// attached yet. The path is the store's own file, already a regular file this process
     /// holds open, so no mode is tightened and no descriptor other than SQLite's is opened
     /// (C2.5a). Read-only: not an open the shared-open admission (SS-23) covers.
@@ -37,7 +38,7 @@ impl CgRead {
         let flags = OpenFlags::SQLITE_OPEN_READ_ONLY
             | OpenFlags::SQLITE_OPEN_URI
             | OpenFlags::SQLITE_OPEN_NO_MUTEX;
-        let conn = Connection::open_with_flags(path, flags).sql()?;
+        let conn = Connection::open_with_flags(sqlite_uri(path), flags).sql()?;
         conn.busy_timeout(READ_BUSY_TIMEOUT).sql()?;
         Ok(Self {
             conn,
@@ -752,7 +753,7 @@ fn probe_once(path: &Path, meta: Option<&std::fs::Metadata>) -> Result<()> {
             let flags = OpenFlags::SQLITE_OPEN_READ_ONLY
                 | OpenFlags::SQLITE_OPEN_URI
                 | OpenFlags::SQLITE_OPEN_NO_MUTEX;
-            let uri = format!("file:{}?mode=ro&immutable=1", percent_encode(path));
+            let uri = format!("{}?mode=ro&immutable=1", sqlite_uri(path));
             let conn = Connection::open_with_flags(uri, flags).sql()?;
             Migrator::detect(&conn)?
         }
@@ -786,13 +787,24 @@ pub(crate) const PROBE_RETRY_WINDOW: std::time::Duration = std::time::Duration::
 /// The pause between two reads of the probe inside [`PROBE_RETRY_WINDOW`].
 pub(crate) const PROBE_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_millis(25);
 
-/// `path` as the path part of an SQLite `file:` URI: every byte outside the unreserved set
-/// (`A-Z a-z 0-9 - . _ ~`) but `/` is percent-encoded, so `?`, `#`, `%`, spaces and
-/// non-ASCII bytes in a file name cannot end the path or be read as parameters.
-fn percent_encode(path: &Path) -> String {
+/// `path` as an SQLite `file:` URI naming exactly that filesystem path, the one form every
+/// connection of this crate is opened with (the probe adds its `?mode=ro&immutable=1`).
+/// SQLite reads a name starting with `file:` as a URI whatever the open flags say (the bundled
+/// library is built with `SQLITE_USE_URI`), so a plain relative name `file:x.db` would open
+/// `x.db` while every `stat`, the owner file and the probe act on the literal `file:x.db`. As
+/// a full URI the name means one file to all of them: every byte outside the unreserved set
+/// (`A-Z a-z 0-9 - . _ ~`) but `/` is percent-encoded, so `?`, `#`, `%`, `:`, spaces and
+/// non-UTF-8 bytes cannot end the path, start parameters or be decoded into another name, and
+/// an absolute path is written after an empty authority (`file://` + path), so a path that
+/// itself starts with `//` is never read as a host.
+pub(crate) fn sqlite_uri(path: &Path) -> String {
     use std::fmt::Write as _;
     use std::os::unix::ffi::OsStrExt;
-    let mut out = String::new();
+    let mut out = String::from(if path.is_absolute() {
+        "file://"
+    } else {
+        "file:"
+    });
     for &b in path.as_os_str().as_bytes() {
         if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~' | b'/') {
             out.push(char::from(b));
@@ -899,7 +911,13 @@ pub(crate) fn prepare_database_files(
         })
         .map(|meta| file_ident(&meta))?;
     let owner = admit_open(&live, ident, path, capabilities)?;
-    let conn = Connection::open(path).sql()?;
+    // the file checked above, by its URI (see [`sqlite_uri`]): never another file of a
+    // similar name
+    let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
+        | OpenFlags::SQLITE_OPEN_CREATE
+        | OpenFlags::SQLITE_OPEN_URI
+        | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    let conn = Connection::open_with_flags(sqlite_uri(path), flags).sql()?;
     let guard = LiveGuard::register(&mut live, ident, owner)?;
     drop(live);
     Ok((conn, guard))
@@ -985,7 +1003,7 @@ pub(crate) fn open_existing_as_is(
     let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
         | OpenFlags::SQLITE_OPEN_NO_MUTEX
         | OpenFlags::SQLITE_OPEN_URI;
-    let conn = Connection::open_with_flags(path, flags).sql()?;
+    let conn = Connection::open_with_flags(sqlite_uri(path), flags).sql()?;
     let guard = LiveGuard::register(&mut live, ident, owner)?;
     drop(live);
     Ok((conn, guard))

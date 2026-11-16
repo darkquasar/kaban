@@ -372,6 +372,55 @@ fn index_reader(fixture: &str, files: &[(&str, &str)]) {
     project.assert_unchanged();
 }
 
+/// `kaban --db <name> stats` run from inside the project directory, so `name` is relative.
+fn run_relative(project: &Project, name: &str) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_kaban"))
+        .current_dir(project.dir())
+        .env("KABAN_HOME", project.home())
+        .env("KABAN_WORKSPACE", "fixture")
+        .env_remove("RUST_LOG")
+        .args(["--json", "--db", name, "stats"])
+        .output()
+        .unwrap()
+}
+
+/// A relative `--db` name is one file to every check and every connection: `file:kaban.db` is
+/// the file of that literal name (absent here, so a fresh project is created under it), never
+/// read by SQLite as a URI naming the older `kaban.db` beside it; the fixture's files are
+/// untouched and nothing is created for them. The plain relative name is the fixture itself
+/// and is refused untouched.
+fn relative_names(fixture: &str, files: &[(&str, &str)]) {
+    let project = Project::copy(fixture, files, "relative");
+    let literal = run_relative(&project, "file:kaban.db");
+    let after = listing(&project.dir());
+    for (name, sha) in &project.before {
+        assert_eq!(
+            after.get(name),
+            Some(sha),
+            "the older-format {name} was changed through the name file:kaban.db"
+        );
+    }
+    for sidecar in ["kaban.db-wal", "kaban.db-shm", "kaban.db.owner"] {
+        if !project.before.contains_key(sidecar) {
+            assert!(
+                !after.contains_key(sidecar),
+                "{sidecar} was created for the older-format kaban.db: {after:?}"
+            );
+        }
+    }
+    assert!(
+        literal.status.success(),
+        "the literal file:kaban.db is a fresh project of its own: {literal:?}"
+    );
+    assert!(
+        after.contains_key("file:kaban.db"),
+        "the project was created under its literal name: {after:?}"
+    );
+    let fresh = Project::copy(fixture, files, "relative-plain");
+    assert_refused(&run_relative(&fresh, "kaban.db"));
+    fresh.assert_unchanged();
+}
+
 /// `doctor` reports the refusal as a failed `schema_version` check and exits 0.
 fn doctor(fixture: &str, files: &[(&str, &str)]) {
     let project = Project::copy(fixture, files, "doctor");
@@ -476,4 +525,14 @@ fn the_index_reader_refuses_a_clean_v3_project() {
 #[test]
 fn the_index_reader_refuses_a_killed_writer_v3_project() {
     index_reader("v3.0.0-wal", WAL);
+}
+
+#[test]
+fn a_relative_file_name_never_reaches_a_clean_v3_project() {
+    relative_names("v3.0.0", CLEAN);
+}
+
+#[test]
+fn a_relative_file_name_never_reaches_a_killed_writer_v3_project() {
+    relative_names("v3.0.0-wal", WAL);
 }

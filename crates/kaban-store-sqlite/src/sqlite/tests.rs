@@ -795,3 +795,95 @@ fn a_readable_older_schema_is_refused_without_waiting() {
         "refused after {waited:?}"
     );
 }
+
+/// Every entry of `dir` by its raw name (non-UTF-8 names included) with its bytes.
+fn raw_dir_bytes(dir: &std::path::Path) -> std::collections::BTreeMap<std::ffi::OsString, Vec<u8>> {
+    std::fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| {
+            let entry = entry.unwrap();
+            let bytes = if entry.file_type().unwrap().is_dir() {
+                Vec::new()
+            } else {
+                std::fs::read(entry.path()).unwrap()
+            };
+            (entry.file_name(), bytes)
+        })
+        .collect()
+}
+
+/// Spec 11 CMP-01: the checked file is the opened file whatever its name. For names holding a
+/// space, `%`, `#`, `?`, `:` or a non-UTF-8 byte, a v3.0.0 file (the killed-writer fixture)
+/// is refused with its bytes and directory unchanged, and a fresh project is created, read
+/// back by the immutable probe form and reopened under exactly that name, with nothing
+/// created under another one.
+#[test]
+fn a_database_name_with_uri_characters_is_one_file_to_the_probe_and_the_open() {
+    use std::os::unix::ffi::OsStrExt;
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/v3.0.0-wal");
+    let names: [&[u8]; 6] = [
+        b"with space.db",
+        b"pct%41.db",
+        b"hash#x.db",
+        b"query?mode=memory.db",
+        b"file:colon.db",
+        b"bad\xff.db",
+    ];
+    for (i, name) in names.into_iter().enumerate() {
+        let name = std::ffi::OsStr::from_bytes(name);
+        let older = Scratch::new(&format!("uri-older-{i}"));
+        let db = older.0.join(name);
+        let mut wal = db.as_os_str().to_owned();
+        wal.push("-wal");
+        std::fs::copy(fixture.join("kaban.db"), &db).unwrap();
+        std::fs::copy(fixture.join("kaban.db-wal"), &wal).unwrap();
+        let before = raw_dir_bytes(&older.0);
+        let err = SqliteStore::open(&db, &older.keys()).map(drop).unwrap_err();
+        assert!(
+            matches!(err, StoreError::SchemaUnsupported { found: 13, .. }),
+            "{name:?}: {err:?}"
+        );
+        assert_eq!(raw_dir_bytes(&older.0), before, "{name:?}: nothing written");
+
+        let fresh = Scratch::new(&format!("uri-fresh-{i}"));
+        let db = fresh.0.join(name);
+        let created = SqliteStore::open(&db, &fresh.keys()).unwrap();
+        assert_eq!(created.migration().from, 0, "{name:?}: created");
+        drop(created);
+        let probe = Connection::open_with_flags(
+            format!("{}?mode=ro&immutable=1", crate::connection::sqlite_uri(&db)),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+        )
+        .unwrap();
+        let version: String = probe
+            .query_row(
+                "SELECT value FROM index_meta WHERE key = 'schema_version'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        drop(probe);
+        assert_eq!(
+            version,
+            crate::LATEST_SCHEMA_VERSION.to_string(),
+            "{name:?}"
+        );
+        let reopened = SqliteStore::open(&db, &fresh.keys()).unwrap();
+        assert_eq!(
+            reopened.migration().from,
+            crate::LATEST_SCHEMA_VERSION,
+            "{name:?}: reopened, not created again"
+        );
+        drop(reopened);
+        let databases: Vec<_> = raw_dir_bytes(&fresh.0)
+            .into_iter()
+            .filter(|(_, bytes)| bytes.starts_with(b"SQLite format 3\0"))
+            .map(|(entry, _)| entry)
+            .collect();
+        assert_eq!(
+            databases,
+            [name.to_owned()],
+            "{name:?}: one database, under its name"
+        );
+    }
+}
