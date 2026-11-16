@@ -75,7 +75,7 @@ of project and personal memory, and `--global-db` is unavailable.
 
 - Pattern matching can miss secrets and can flag harmless examples. Never use a
   clean verdict as proof that content contains no sensitive information.
-- SQLite data, serialized Markdown, and audit keys are not encrypted by Kaban.
+- SQLite data and audit keys are not encrypted by Kaban.
   Use appropriate host permissions, disk encryption, and backup controls.
 - Source documents, terminal history, agent transcripts, debug logs, and old Git
   commits are outside the content gate's control. Avoid verbose logging with

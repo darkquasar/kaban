@@ -1,6 +1,6 @@
 ---
 title: "Maintenance and recovery"
-description: "Diagnose existing stores, maintain derived indexes, sync records, and protect recoverable backups."
+description: "Diagnose existing stores, maintain derived indexes, and protect recoverable backups."
 ---
 
 Run maintenance with the same `KABAN_HOME`, database, policy, and workspace as
@@ -80,7 +80,7 @@ export can emit a clean result.
 There is no full-store `kaban backup` command. Use a SQLite-consistent backup
 procedure, not a live copy of just `kaban.db`:
 
-1. For a cold backup, stop all server, CLI, hook-sync, and other processes that
+1. For a cold backup, stop all server, CLI, hook, and other processes that
    can access the store. Prevent new hook jobs while making the copy. If you
    cannot quiesce them, use SQLite's supported online backup mechanism instead.
 2. Preserve the database and any remaining `-wal`/`-shm` sidecars together from
@@ -106,8 +106,9 @@ an archive and create a fresh project to re-ingest into.
 **Do not use purge or file deletion as generic troubleshooting.**
 
 `kaban forget RECORD_ID --mode purge` removes the record's content, index entries,
-and edges while retaining a purged identity. A later sync writes a tombstone that
-can propagate the purge to other clones. There is no ordinary undo operation.
+and edges while retaining a purged identity. The purge is local to this database:
+copies, backups and other clones keep their own data and are not told about it.
+There is no ordinary undo operation.
 
 Purge does not remove old Git commits, prior backups, caches, or agent transcripts.
 If a live credential was exposed, rotate it through its issuing system; removing

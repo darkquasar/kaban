@@ -1,6 +1,6 @@
 ---
 title: "Quickstart"
-description: "Install both binaries, configure a workspace, and remember an accepted Decision."
+description: "Install both binaries, configure a workspace, and remember a Decision."
 ---
 
 The commands below are instructions, not a recorded execution. Use a trusted
@@ -71,7 +71,7 @@ CLI results are JSON. A policy refusal is not a stored record; inspect the resul
 instead of assuming the write succeeded. Keep the returned record IDs for later
 links or inspection. Search is lexical/graph retrieval, not embedding similarity.
 
-## 4. Propose a scoped Decision, then accept it as a person
+## 4. Remember a scoped Decision
 
 ```sh
 kaban remember Decision "Use SQLite for integration storage" \
@@ -80,7 +80,8 @@ kaban remember Decision "Use SQLite for integration storage" \
   --path-scope 'src/storage/**'
 ```
 
-Quoted globs are passed to Kaban rather than expanded by your shell. Recall the
+The Decision is active as soon as it is stored: there is no proposal or acceptance
+step. Quoted globs are passed to Kaban rather than expanded by your shell. Recall the
 Decision by its text with `kaban recall`.
 
 ## 5. Register the stdio server

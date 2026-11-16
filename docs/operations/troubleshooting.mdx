@@ -102,7 +102,7 @@ For a document explicitly forgotten earlier, an ordinary directory scan may
 skip it. Re-admission is a deliberate choice: naming that file explicitly, or
 using `--include-forgotten`, changes that behavior.
 
-## Stale derived state or sync conflicts
+## Stale derived state or a refused database
 
 An open that fails with "database schema version N is not the version 14 this kaban
 serves: no upgrade path exists; create a fresh project and re-ingest" found a database of
@@ -113,14 +113,11 @@ records no kaban schema while a non-empty `-wal` lies beside it; move both aside
 a fresh project. `doctor` reports either refusal as a failed `schema_version` check and
 exits `0`; a hook prints `{}`, notes the refusal on stderr and exits `0`.
 
-Use `doctor` to distinguish a text index problem from a stale code snapshot or a record
-conflict. `reindex text` rebuilds the Tantivy text index from the database; it does not run
+Use `doctor` to distinguish a text index problem from a stale code snapshot. `reindex text` rebuilds the Tantivy text index from the database; it does not run
 `kaban-index`, and it does not fetch or re-ingest documents.
 
-For an equal-revision record conflict, inspect both representations and follow
-[conflict resolution](maintenance.mdx#resolve-conflicts-deliberately).
-If a sync report says `deferred`, another process may hold the repository lock;
-let it finish before retrying. Do not delete `.kaban/` or lock-related state.
+Do not delete `.kaban/` or lock-related state to clear an error; another process may
+still hold the database.
 
 ## MCP protocol errors on startup
 

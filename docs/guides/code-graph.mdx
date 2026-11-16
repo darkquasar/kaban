@@ -6,7 +6,7 @@ description: "Index a Go, TypeScript or Rust repository into a per-commit snapsh
 The code graph is a derived snapshot, separate from the memory database. The
 `kaban-index` binary runs an external SCIP indexer on one checked-out commit and
 writes `<commit40>.cg.db`; `kaban serve` only reads the result through the `code_*`
-tools (default build; `--no-default-features` leaves them out). Hooks, sync and
+tools (default build; `--no-default-features` leaves them out). Hooks and
 ordinary memory calls never rebuild it in the background.
 
 ```mermaid
