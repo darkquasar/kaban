@@ -13,7 +13,7 @@ use std::ops::Range;
 
 use kaban_index_graph::{
     Attr, Base, Direction, EdgeOp, FactOp, GraphError, Layer, LocalId, NodeOp, OpKind, Records,
-    RelId, RelSelection, build_base, seal,
+    RelId, RelSelection, View, build_base, seal,
 };
 use oracle::{nodes, rows, view};
 use tantivy::directory::OwnedBytes;
@@ -467,4 +467,97 @@ fn the_largest_id_round_trips_through_a_base() {
         vec![LocalId(0); 2]
     );
     assert_eq!(v.fact(LocalId(max), 255), Some(&b"top"[..]));
+}
+
+const UNION_IN: u32 = 6;
+
+/// Clear bit `id` of the union bitvector section `tag` of layer `bytes` (lengths unchanged).
+fn clear_union_bit(bytes: &mut [u8], tag: u32, id: u32) {
+    let words = section(bytes, tag).start + 8; // after the bit count
+    let at = words + 8 * (id / 64) as usize;
+    let word = get_u64(bytes, at) & !(1u64 << (id % 64));
+    put_u64(bytes, at, word);
+}
+
+/// The view over `base` and `layers`, or the answer it gives: a view that prepares must read
+/// node `n`'s list in `dir` as the oracle does (no edge); a view that refuses must say Corrupt.
+fn assert_safe(base: &Base, layers: &[Layer], n: u32, dir: Direction, what: &str) {
+    match View::new::<Records>(Some(base), layers, &[], &oracle::budget()) {
+        Err(GraphError::Corrupt(_)) => {}
+        Err(e) => panic!("{what}: expected Corrupt, got {e:?}"),
+        Ok(v) => assert_eq!(
+            rows(&v, LocalId(n), &RelSelection::All, dir),
+            Vec::new(),
+            "{what}: a missing union bit turned a tombstone into a stale edge"
+        ),
+    }
+}
+
+/// END-MED-01: a union bitvector that misses a touched node of its own layer or of an ancestor
+/// layer is never trusted.
+#[test]
+fn a_union_missing_a_touched_node_is_never_trusted() {
+    let base = open_base(&build_base(
+        &Records {
+            nodes: vec![
+                node(1, OpKind::Add),
+                node(2, OpKind::Add),
+                node(3, OpKind::Add),
+            ],
+            edges: vec![edge(1, 0, 2)],
+            ..Records::default()
+        },
+        0,
+    ))
+    .unwrap();
+    // Layer 1 removes 1 > 2; layer 2 adds an unrelated edge 3 > 3.
+    let remove = Records {
+        edges: vec![EdgeOp {
+            kind: OpKind::Remove,
+            ..edge(1, 0, 2)
+        }],
+        ..Records::default()
+    };
+    let l1 = seal(&view::<Records>(Some(&base), &[], &[]), &remove);
+    let first = [open_layer(&l1).unwrap()];
+    let l2 = seal(
+        &view::<Records>(Some(&base), &first, &[]),
+        &Records {
+            edges: vec![edge(3, 0, 3)],
+            ..Records::default()
+        },
+    );
+    // Sanity: the intact chains hide the removed edge.
+    for layers in [
+        vec![open_layer(&l1).unwrap()],
+        vec![open_layer(&l1).unwrap(), open_layer(&l2).unwrap()],
+    ] {
+        let v = view::<Records>(Some(&base), &layers, &[]);
+        assert!(rows(&v, LocalId(1), &RelSelection::All, Direction::Out).is_empty());
+        assert!(rows(&v, LocalId(2), &RelSelection::All, Direction::In).is_empty());
+    }
+    for (tag, n, dir) in [(UNION_OUT, 1, Direction::Out), (UNION_IN, 2, Direction::In)] {
+        // The current layer's own change.
+        let mut bad = l1.clone();
+        clear_union_bit(&mut bad, tag, n);
+        match open_layer(&bad) {
+            Err(GraphError::Corrupt(_)) => {}
+            Err(e) => panic!("own change {tag}: expected Corrupt, got {e:?}"),
+            Ok(layer) => assert_safe(&base, &[layer], n, dir, &format!("own change {tag}")),
+        }
+        // An ancestor layer's change, missing from the newest union.
+        let mut bad = l2.clone();
+        clear_union_bit(&mut bad, tag, n);
+        match open_layer(&bad) {
+            Err(GraphError::Corrupt(_)) => {}
+            Err(e) => panic!("ancestor change {tag}: expected Corrupt, got {e:?}"),
+            Ok(layer) => assert_safe(
+                &base,
+                &[open_layer(&l1).unwrap(), layer],
+                n,
+                dir,
+                &format!("ancestor change {tag}"),
+            ),
+        }
+    }
 }
