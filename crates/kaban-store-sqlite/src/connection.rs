@@ -799,6 +799,12 @@ fn probe_version(path: &Path, meta: Option<&std::fs::Metadata>) -> Result<Probed
     let mut meta = meta.cloned();
     loop {
         let outcome = probe_once(path, meta.as_ref());
+        #[cfg(test)]
+        PROBE_ATTEMPT.with(|seam| {
+            if let Some(seam) = seam.borrow_mut().as_mut() {
+                seam();
+            }
+        });
         let pending = match &outcome {
             Err(StoreError::NotAKabanProject { .. }) => true,
             Err(e) => transient_read_failure(e),
@@ -834,6 +840,15 @@ pub(crate) fn probe_unregistered(path: &Path) -> Result<()> {
         return Ok(());
     }
     probe_version(path, meta.as_ref()).map(drop)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A test's look at each read of [`probe_version`] on this thread, called once the read's
+    /// outcome is known (the probe-retry tests count the reads and resolve a pending shape
+    /// only after the first one has seen it).
+    pub(crate) static PROBE_ATTEMPT: std::cell::RefCell<Option<Box<dyn FnMut()>>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 /// Whether `e` is an SQLite failure that an immutable read of a main file can meet while

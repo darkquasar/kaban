@@ -640,10 +640,6 @@ fn a_v14_project_with_a_leftover_wal_opens_and_recovers() {
     assert!(recovered.is_some(), "the logged write is recovered");
 }
 
-/// When the helper of the probe-retry tests turns a pending shape into a v14 project: well
-/// inside the probe's retry window.
-const RESOLVES_AFTER: std::time::Duration = std::time::Duration::from_millis(200);
-
 /// A created and closed v14 project: its main file holds the whole schema, no log beside it.
 fn closed_v14_project(name: &str) -> Scratch {
     let d = Scratch::new(name);
@@ -651,17 +647,45 @@ fn closed_v14_project(name: &str) -> Scratch {
     d
 }
 
-/// Another process finishing its creation of `to` [`RESOLVES_AFTER`] from now: the v14 main
-/// file of `from` is renamed into place, then the log is truncated (the creator's TRUNCATE
-/// checkpoint).
-fn resolve_into_v14_later(
+/// Count the probe's reads on this thread from now on; the first read also sends on
+/// `first`, if given, once its outcome is known.
+fn count_probe_reads(
+    first: Option<std::sync::mpsc::Sender<()>>,
+) -> std::rc::Rc<std::cell::Cell<usize>> {
+    let reads = std::rc::Rc::new(std::cell::Cell::new(0));
+    let counted = std::rc::Rc::clone(&reads);
+    crate::connection::PROBE_ATTEMPT.with(|seam| {
+        *seam.borrow_mut() = Some(Box::new(move || {
+            counted.set(counted.get() + 1);
+            if counted.get() == 1
+                && let Some(first) = &first
+            {
+                let _ = first.send(());
+            }
+        }));
+    });
+    reads
+}
+
+/// Stop counting the probe's reads on this thread.
+fn stop_counting_probe_reads() {
+    crate::connection::PROBE_ATTEMPT.with(|seam| *seam.borrow_mut() = None);
+}
+
+/// Another process finishing its creation of `to` once the probe's first read has seen the
+/// pending shape (`first_read`): the v14 main file of `from` is renamed into place, then the
+/// log is truncated (the creator's TRUNCATE checkpoint).
+fn resolve_into_v14_after(
     from: &Scratch,
     to: &Scratch,
-) -> std::thread::JoinHandle<std::time::Instant> {
+    first_read: std::sync::mpsc::Receiver<()>,
+) -> std::thread::JoinHandle<()> {
     let (main, staged, wal) = (from.db(), to.0.join("staged.db"), to.0.join("kaban.db-wal"));
     let target = to.db();
     std::thread::spawn(move || {
-        std::thread::sleep(RESOLVES_AFTER);
+        first_read
+            .recv_timeout(std::time::Duration::from_secs(20))
+            .expect("the probe read the pending shape");
         std::fs::copy(main, &staged).unwrap();
         std::fs::rename(&staged, target).unwrap();
         if wal.exists() {
@@ -672,7 +696,6 @@ fn resolve_into_v14_later(
                 .set_len(0)
                 .unwrap();
         }
-        std::time::Instant::now()
     })
 }
 
@@ -692,13 +715,16 @@ fn a_pending_creation_beside_its_log_opens_once_the_main_file_holds_v14() {
         b"a creator's log, not yet checkpointed",
     )
     .unwrap();
-    let started = std::time::Instant::now();
-    let creator = resolve_into_v14_later(&project, &d);
+    let (first, first_read) = std::sync::mpsc::channel();
+    let creator = resolve_into_v14_after(&project, &d, first_read);
+    let reads = count_probe_reads(Some(first));
     let store = SqliteStore::open(&d.db(), &project.keys()).unwrap();
-    let resolved = creator.join().unwrap();
+    stop_counting_probe_reads();
+    creator.join().unwrap();
     assert!(
-        resolved > started + RESOLVES_AFTER,
-        "the shape was pending at the first read"
+        reads.get() > 1,
+        "the first read saw the pending shape and was retried ({} reads)",
+        reads.get()
     );
     assert_eq!(
         *store.migration(),
@@ -715,9 +741,17 @@ fn a_main_file_unreadable_for_a_moment_opens_once_it_reads_as_v14() {
     let project = closed_v14_project("torn-source");
     let d = Scratch::new("torn-read");
     std::fs::write(d.db(), vec![0xA5_u8; 4096]).unwrap();
-    let creator = resolve_into_v14_later(&project, &d);
+    let (first, first_read) = std::sync::mpsc::channel();
+    let creator = resolve_into_v14_after(&project, &d, first_read);
+    let reads = count_probe_reads(Some(first));
     let store = SqliteStore::open(&d.db(), &project.keys()).unwrap();
+    stop_counting_probe_reads();
     creator.join().unwrap();
+    assert!(
+        reads.get() > 1,
+        "the first read failed and was retried ({} reads)",
+        reads.get()
+    );
     assert_eq!(
         *store.migration(),
         MigrationReport::unchanged(crate::LATEST_SCHEMA_VERSION),
@@ -727,8 +761,8 @@ fn a_main_file_unreadable_for_a_moment_opens_once_it_reads_as_v14() {
 
 /// Spec 11 CMP-01, the static shapes: a foreign main file beside a non-empty `-wal` that no
 /// creator ever resolves is still refused as no kaban project, and a main file that never
-/// reads as a database still fails, each only after the whole retry window and with nothing
-/// created or written.
+/// reads as a database still fails, each after more than one read and not before the retry
+/// window has passed (a lower bound only), with nothing created or written.
 #[test]
 fn a_shape_that_never_resolves_is_refused_after_the_retry_window() {
     let writer = Scratch::new("static-foreign-writer");
@@ -749,9 +783,16 @@ fn a_shape_that_never_resolves_is_refused_after_the_retry_window() {
         ("not a database", &garbage),
     ] {
         let before = dir_bytes(&d.0);
+        let reads = count_probe_reads(None);
         let started = std::time::Instant::now();
         let err = SqliteStore::open(&d.db(), &d.keys()).map(drop).unwrap_err();
         let waited = started.elapsed();
+        stop_counting_probe_reads();
+        assert!(
+            reads.get() > 1,
+            "{case}: read again inside the window ({} reads)",
+            reads.get()
+        );
         match case {
             "foreign beside a log" => assert!(
                 matches!(err, StoreError::NotAKabanProject { .. }),
@@ -772,7 +813,7 @@ fn a_shape_that_never_resolves_is_refused_after_the_retry_window() {
 }
 
 /// Spec 11 CMP-01: a readable kaban schema at another version is a deterministic refusal,
-/// returned at once, never retried.
+/// returned on the probe's first read, never retried.
 #[test]
 fn a_readable_older_schema_is_refused_without_waiting() {
     let d = closed_v14_project("older-at-once");
@@ -783,17 +824,14 @@ fn a_readable_older_schema_is_refused_without_waiting() {
     )
     .unwrap();
     drop(raw);
-    let started = std::time::Instant::now();
+    let reads = count_probe_reads(None);
     let err = SqliteStore::open(&d.db(), &d.keys()).map(drop).unwrap_err();
-    let waited = started.elapsed();
+    stop_counting_probe_reads();
     assert!(
         matches!(err, StoreError::SchemaUnsupported { found: 13, .. }),
         "{err:?}"
     );
-    assert!(
-        waited < crate::connection::PROBE_RETRY_WINDOW / 2,
-        "refused after {waited:?}"
-    );
+    assert_eq!(reads.get(), 1, "refused on the first read, never retried");
 }
 
 /// Every entry of `dir` by its raw name (non-UTF-8 names included) with its bytes.
