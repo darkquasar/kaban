@@ -220,7 +220,8 @@ impl Graph {
     }
 
     /// The set a topological order covers: the present `nodes` and what they reach within the
-    /// caps; `None` when the rows cap cuts it.
+    /// caps; `None` when the rows cap cuts the search or the complete set, sources included, has
+    /// more than `rows` nodes (`rows` bounds the result).
     pub(crate) fn topo_set(
         &self,
         nodes: &[LocalId],
@@ -228,10 +229,11 @@ impl Graph {
         rows: u32,
     ) -> Option<BTreeSet<u32>> {
         let e = self.expand(nodes, Direction::Out, depth, rows);
-        if e.truncated {
+        let set: BTreeSet<u32> = e.depth.keys().copied().collect();
+        if e.truncated || set.len() > rows as usize {
             return None;
         }
-        Some(e.depth.keys().copied().collect())
+        Some(set)
     }
 
     /// Whether `order` lists exactly `set`, every edge inside `set` going forward.

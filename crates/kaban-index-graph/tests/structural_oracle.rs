@@ -347,12 +347,19 @@ fn meet_equals_the_oracle() {
         for (rels, g) in &graphs(&f) {
             for c in cap_grid() {
                 for (x, y) in pairs(&mut rng, 15) {
-                    let got = meet(&v, LocalId(x), LocalId(y), rels, c, &b).unwrap();
-                    assert_eq!(
-                        *got,
-                        g.meet(x, y, c.depth, c.rows),
-                        "seed {seed} {rels:?} {c:?} meet {x} {y}"
-                    );
+                    let got = meet(&v, LocalId(x), LocalId(y), rels, c, &b);
+                    let want = g.meet(x, y, c.depth, c.rows);
+                    let ctx = format!("seed {seed} {rels:?} {c:?} meet {x} {y}");
+                    if want.len() > c.rows as usize {
+                        assert!(
+                            matches!(got, Err(GraphError::CapExceeded { limit: "rows", .. })),
+                            "{ctx}: more minima than rows are refused: {got:?}"
+                        );
+                        continue;
+                    }
+                    let got = got.unwrap();
+                    assert!(got.len() <= c.rows as usize, "{ctx}: the result is capped");
+                    assert_eq!(*got, want, "{ctx}");
                 }
             }
         }
@@ -396,6 +403,7 @@ fn check_topo(f: &Fixture, ctx: &str, b: &kaban_core::query_budget::QueryBudget)
                     cycles += 1;
                 } else {
                     let got = got.unwrap();
+                    assert!(got.len() <= c.rows as usize, "{ctx}: the result is capped");
                     assert!(g.is_topo_order(&set, &got), "{ctx}: {:?}", *got);
                     ordered += 1;
                 }
@@ -608,4 +616,66 @@ fn structural_functions_hold_no_budget_after_returning_unless_the_result_lives()
     assert!(b.live_bytes() > 0, "the hold keeps the charge");
     drop(hold);
     assert_eq!(b.live_bytes(), 0);
+}
+
+/// END-MED-02: `rows` bounds the result of `topo_order` (sources included) and of `meet` (the
+/// equal minima), checked directly rather than through the search oracle.
+#[test]
+fn rows_bounds_the_results_of_topo_order_and_meet() {
+    let b = budget();
+    let isolated = [Records {
+        nodes: (1..=3).map(node).collect(),
+        ..Records::default()
+    }];
+    let v = view(None, &[], &isolated);
+    let all = RelSelection::All;
+    let three: Vec<LocalId> = (1..=3).map(LocalId).collect();
+    let got = topo_order(&v, &three, &all, caps(1, 1), &b);
+    assert!(
+        matches!(
+            got,
+            Err(GraphError::CapExceeded {
+                limit: "rows",
+                max: 1
+            })
+        ),
+        "three isolated sources, rows 1: {got:?}"
+    );
+    let got = topo_order(&v, &three, &all, caps(1, 3), &b).unwrap();
+    assert_eq!(*got, three, "exactly rows is not a cut");
+
+    // Oversized source sets: five present sources (and absent ones, which are ignored).
+    let five = [Records {
+        nodes: (1..=5).map(node).collect(),
+        ..Records::default()
+    }];
+    let v = view(None, &[], &five);
+    let src: Vec<LocalId> = (1..=8).map(LocalId).collect();
+    let got = topo_order(&v, &src, &all, caps(2, 4), &b);
+    assert!(
+        matches!(got, Err(GraphError::CapExceeded { limit: "rows", .. })),
+        "five present sources, rows 4: {got:?}"
+    );
+    assert_eq!(topo_order(&v, &src, &all, caps(2, 5), &b).unwrap().len(), 5);
+
+    // Reciprocal A <-> B: both meet at summed depth one.
+    let pair = [Records {
+        nodes: vec![node(1), node(2)],
+        edges: vec![edge(1, 0, 2), edge(2, 0, 1)],
+        ..Records::default()
+    }];
+    let v = view(None, &[], &pair);
+    let got = meet(&v, LocalId(1), LocalId(2), &all, caps(1, 1), &b);
+    assert!(
+        matches!(
+            got,
+            Err(GraphError::CapExceeded {
+                limit: "rows",
+                max: 1
+            })
+        ),
+        "two equal minima, rows 1: {got:?}"
+    );
+    let got = meet(&v, LocalId(1), LocalId(2), &all, caps(1, 2), &b).unwrap();
+    assert_eq!(*got, vec![LocalId(1), LocalId(2)]);
 }
