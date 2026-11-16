@@ -329,6 +329,12 @@ fn workspace_id_is_not_null_on_exactly_the_tenant_scoped_tables() {
     assert_eq!(
         absent,
         [
+            "cat_claim",
+            "cat_extent",
+            "cat_generation",
+            "cat_meta",
+            "cat_sediment",
+            "cat_view",
             "index_meta",
             "leases",
             "projections",
