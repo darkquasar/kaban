@@ -17,6 +17,7 @@ mod traverse;
 mod view;
 
 pub use base::{Base, build_base, fold};
+pub use charge::{Charged, Hold};
 pub use error::GraphError;
 pub use id::{Direction, LocalId, RelId, RelSelection, StableOrder, TieRank};
 pub use layer::{Layer, seal};

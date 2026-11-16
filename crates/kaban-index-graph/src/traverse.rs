@@ -2,6 +2,7 @@
 
 use kaban_core::query_budget::QueryBudget;
 
+use crate::charge::Charged;
 use crate::error::GraphError;
 use crate::id::{Direction, LocalId, RelId, RelSelection};
 use crate::view::View;
@@ -42,9 +43,9 @@ pub fn expand(
     dir: Direction,
     caps: Caps,
     budget: &QueryBudget,
-) -> Result<Reached, GraphError> {
+) -> Result<Charged<Reached>, GraphError> {
     let _ = (v, src, rels, dir, caps, budget);
-    Ok(Reached::default())
+    Charged::empty(budget)
 }
 
 /// [`expand`] along outgoing edges.
@@ -57,9 +58,9 @@ pub fn closure(
     rels: &RelSelection,
     caps: Caps,
     budget: &QueryBudget,
-) -> Result<Reached, GraphError> {
+) -> Result<Charged<Reached>, GraphError> {
     let _ = (v, src, rels, caps, budget);
-    Ok(Reached::default())
+    Charged::empty(budget)
 }
 
 /// [`expand`] along incoming edges.
@@ -72,9 +73,9 @@ pub fn reverse_closure(
     rels: &RelSelection,
     caps: Caps,
     budget: &QueryBudget,
-) -> Result<Reached, GraphError> {
+) -> Result<Charged<Reached>, GraphError> {
     let _ = (v, src, rels, caps, budget);
-    Ok(Reached::default())
+    Charged::empty(budget)
 }
 
 /// Whether `dst` is reachable from `src` along outgoing `rels` within `caps`.

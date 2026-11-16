@@ -2,6 +2,7 @@
 
 use kaban_core::query_budget::QueryBudget;
 
+use crate::charge::Charged;
 use crate::error::GraphError;
 use crate::id::{LocalId, RelSelection};
 use crate::traverse::Caps;
@@ -18,7 +19,7 @@ pub fn shortest_path(
     rels: &RelSelection,
     caps: Caps,
     budget: &QueryBudget,
-) -> Result<Option<Vec<LocalId>>, GraphError> {
+) -> Result<Option<Charged<Vec<LocalId>>>, GraphError> {
     let _ = (v, src, dst, rels, caps, budget);
     Ok(None)
 }
@@ -34,7 +35,7 @@ pub fn meet(
     rels: &RelSelection,
     caps: Caps,
     budget: &QueryBudget,
-) -> Result<Vec<LocalId>, GraphError> {
+) -> Result<Charged<Vec<LocalId>>, GraphError> {
     let _ = (v, a, b, rels, caps, budget);
-    Ok(Vec::new())
+    Charged::empty(budget)
 }

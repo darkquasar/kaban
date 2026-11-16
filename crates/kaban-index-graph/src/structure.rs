@@ -2,6 +2,7 @@
 
 use kaban_core::query_budget::QueryBudget;
 
+use crate::charge::Charged;
 use crate::error::GraphError;
 use crate::id::{Direction, LocalId, RelSelection};
 use crate::traverse::{Caps, RowCap};
@@ -32,9 +33,9 @@ pub fn common_neighbours(
     b: LocalId,
     rels: &RelSelection,
     budget: &QueryBudget,
-) -> Result<Vec<LocalId>, GraphError> {
+) -> Result<Charged<Vec<LocalId>>, GraphError> {
     let _ = (v, a, b, rels, budget);
-    Ok(Vec::new())
+    Charged::empty(budget)
 }
 
 /// A topological order of `nodes` along outgoing `rels`.
@@ -47,9 +48,9 @@ pub fn topo_order(
     rels: &RelSelection,
     caps: Caps,
     budget: &QueryBudget,
-) -> Result<Vec<LocalId>, GraphError> {
+) -> Result<Charged<Vec<LocalId>>, GraphError> {
     let _ = (v, nodes, rels, caps, budget);
-    Ok(Vec::new())
+    Charged::empty(budget)
 }
 
 /// Weakly connected components as (node, component), the component id being its lowest member.
@@ -61,9 +62,9 @@ pub fn wcc(
     rels: &RelSelection,
     cap: RowCap,
     budget: &QueryBudget,
-) -> Result<Vec<(LocalId, LocalId)>, GraphError> {
+) -> Result<Charged<Vec<(LocalId, LocalId)>>, GraphError> {
     let _ = (v, rels, cap, budget);
-    Ok(Vec::new())
+    Charged::empty(budget)
 }
 
 /// The refusal for a function that is not planned (`betweenness`, `louvain`, `all_paths`,

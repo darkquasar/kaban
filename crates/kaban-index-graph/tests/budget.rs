@@ -1,7 +1,8 @@
 //! Query budgets reach the graph engine (T9 midpoint MAJ-02, MAJ-03; PC-17): decoding and
 //! sediment preparation reserve before allocating and hold their charge while the data lives;
 //! accessor iterators charge their cursors while alive; a cancelled or expired budget stops a
-//! filtered scan within [`BUDGET_CHECK_INTERVAL`] raw reads, even when no row is produced.
+//! filtered scan within [`BUDGET_CHECK_INTERVAL`] raw reads, even when no row is produced. The
+//! structural functions share that budget for their working sets and results (Step 3).
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // test code: failures are the assertion
 
@@ -12,8 +13,9 @@ use std::time::{Duration, Instant};
 
 use kaban_core::query_budget::QueryBudget;
 use kaban_index_graph::{
-    Attr, BUDGET_CHECK_INTERVAL, Base, Direction, EdgeOp, FactOp, GraphError, Layer, LocalId,
-    NodeOp, OpKind, Records, RelId, RelSelection, View, build_base, seal,
+    Attr, BUDGET_CHECK_INTERVAL, Base, Caps, Direction, EdgeOp, FactOp, GraphError, Layer,
+    LocalId, NodeOp, OpKind, Records, RelId, RelSelection, RowCap, View, build_base, expand, seal,
+    wcc,
 };
 use oracle::view;
 use tantivy::directory::OwnedBytes;
@@ -377,4 +379,100 @@ fn cancellation_stops_a_scan_over_removed_nodes_within_the_interval() {
     let (seen, end, rows, _) = cancel_mid_scan(&v, start, |b| drain(v.nodes(b)));
     assert_eq!(rows, 0);
     assert!(end <= seen + BUDGET_CHECK_INTERVAL, "{} past", end - seen);
+}
+
+// ---- Structural functions (Step 3) ---------------------------------------------------------
+
+const CAPS: Caps = Caps {
+    depth: 4,
+    rows: 100_000,
+};
+
+/// A present chain 0 > 1 > ... > n with a fan of `n` extra edges from 0.
+fn wide(n: u32) -> Vec<Records> {
+    vec![Records {
+        nodes: (0..=2 * n).map(|m| node(m, OpKind::Add)).collect(),
+        edges: (1..=n)
+            .map(|m| edge(m - 1, m, OpKind::Add))
+            .chain((n + 1..=2 * n).map(|m| edge(0, m, OpKind::Add)))
+            .collect(),
+        ..Records::default()
+    }]
+}
+
+#[test]
+fn a_memory_limit_below_the_working_set_refuses_and_releases() {
+    let rs = wide(5_000);
+    let v = view(None, &[], &rs);
+    let all = RelSelection::All;
+    let free = QueryBudget::new(u64::MAX, None);
+    let full = expand(&v, &[LocalId(0)], &all, Direction::Out, CAPS, &free).unwrap();
+    assert!(full.nodes.len() > 5_000);
+    drop(full);
+    let small = QueryBudget::new(16 * 1024, None);
+    let got = expand(&v, &[LocalId(0)], &all, Direction::Out, CAPS, &small);
+    assert!(got.as_ref().is_err_and(is_memory), "{:?}", got.map(|_| ()));
+    assert_eq!(small.live_bytes(), 0, "nothing stays charged after a refusal");
+    let got = wcc(&v, &all, RowCap(100_000), &small);
+    assert!(got.as_ref().is_err_and(is_memory), "{:?}", got.map(|_| ()));
+    assert_eq!(small.live_bytes(), 0);
+}
+
+#[test]
+fn a_recorded_memory_breach_stops_a_later_structural_call() {
+    let rs = wide(10);
+    let v = view(None, &[], &rs);
+    let budget = QueryBudget::new(1024, None);
+    assert!(budget.reserve(4096).is_err(), "records a memory breach");
+    let got = expand(
+        &v,
+        &[LocalId(0)],
+        &RelSelection::All,
+        Direction::Out,
+        CAPS,
+        &budget,
+    );
+    assert!(got.as_ref().is_err_and(is_memory), "{:?}", got.map(|_| ()));
+    assert_eq!(budget.live_bytes(), 0);
+}
+
+#[test]
+fn cancellation_stops_a_low_output_traversal_within_the_interval() {
+    // The hub's 20,000 edges all filter out: expand and wcc read them all and produce nothing.
+    let (base, layers) = hub();
+    let v = view::<Records>(Some(&base), &layers, &[]);
+    let all = RelSelection::All;
+    let free = QueryBudget::new(u64::MAX, None);
+    let none = expand(&v, &[LocalId(0)], &all, Direction::Out, CAPS, &free).unwrap();
+    assert!(none.nodes.is_empty());
+    drop(none);
+    let start = v.raw_reads() + 3 * BUDGET_CHECK_INTERVAL;
+    let (seen, end, rows, err) = cancel_mid_scan(&v, start, |b| {
+        match expand(&v, &[LocalId(0)], &all, Direction::Out, CAPS, b) {
+            Ok(r) => (r.nodes.len(), None),
+            Err(e) => (0, Some(e)),
+        }
+    });
+    assert_eq!(rows, 0);
+    assert!(matches!(err, GraphError::BudgetExceeded { limit: "cancelled", .. }), "{err:?}");
+    assert!(end <= seen + BUDGET_CHECK_INTERVAL, "expand: {} past", end - seen);
+
+    let start = v.raw_reads() + 3 * BUDGET_CHECK_INTERVAL;
+    let (seen, end, _, err) = cancel_mid_scan(&v, start, |b| match wcc(&v, &all, RowCap(10), b) {
+        Ok(r) => (r.len(), None),
+        Err(e) => (0, Some(e)),
+    });
+    assert!(matches!(err, GraphError::BudgetExceeded { limit: "cancelled", .. }), "{err:?}");
+    assert!(end <= seen + BUDGET_CHECK_INTERVAL, "wcc: {} past", end - seen);
+}
+
+#[test]
+fn an_expired_budget_stops_a_traversal_before_it_reads() {
+    let rs = wide(100);
+    let v = view(None, &[], &rs);
+    let expired = QueryBudget::new(u64::MAX, Some(Duration::ZERO));
+    std::thread::sleep(Duration::from_millis(2));
+    let got = expand(&v, &[LocalId(0)], &RelSelection::All, Direction::Out, CAPS, &expired);
+    assert!(matches!(got, Err(GraphError::BudgetExceeded { limit: "time", .. })));
+    assert_eq!(v.raw_reads(), 0);
 }

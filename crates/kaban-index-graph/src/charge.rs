@@ -51,3 +51,79 @@ impl Charge {
         self.lease
     }
 }
+
+/// A function result together with the budget charge of the memory it owns (PC-17).
+///
+/// The charge stays live while the `Charged` value (or the [`Hold`] taken from it with
+/// [`Charged::into_parts`]) lives, and is released when it is dropped. Callers that convert the
+/// rows keep the hold alive until the converted output is released, and reserve their own
+/// conversions on the same budget.
+#[derive(Debug)]
+pub struct Charged<T> {
+    value: T,
+    hold: Hold,
+}
+
+/// The budget charge of a [`Charged`] value; dropping it releases the bytes.
+#[derive(Debug)]
+pub struct Hold {
+    leases: [Option<BudgetLease>; 2],
+}
+
+impl Hold {
+    pub(crate) fn new(first: BudgetLease, second: Option<BudgetLease>) -> Self {
+        Self {
+            leases: [Some(first), second],
+        }
+    }
+
+    /// The bytes this hold keeps charged.
+    #[must_use]
+    pub fn bytes(&self) -> u64 {
+        self.leases
+            .iter()
+            .flatten()
+            .map(BudgetLease::bytes)
+            .fold(0, u64::saturating_add)
+    }
+}
+
+impl<T> Charged<T> {
+    pub(crate) fn new(value: T, hold: Hold) -> Self {
+        Self { value, hold }
+    }
+
+    /// The result.
+    #[must_use]
+    pub fn value(&self) -> &T {
+        &self.value
+    }
+
+    /// The bytes charged for the result.
+    #[must_use]
+    pub fn bytes(&self) -> u64 {
+        self.hold.bytes()
+    }
+
+    /// The result and its charge, to be kept alive while the result (or a copy made from it)
+    /// is in use.
+    #[must_use]
+    pub fn into_parts(self) -> (T, Hold) {
+        (self.value, self.hold)
+    }
+}
+
+impl<T> std::ops::Deref for Charged<T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        &self.value
+    }
+}
+
+impl<T: Default> Charged<T> {
+    /// An empty result holding no bytes.
+    pub(crate) fn empty(budget: &QueryBudget) -> Result<Self, GraphError> {
+        Ok(Self::new(T::default(), Hold::new(budget.reserve(0)?, None)))
+    }
+}
