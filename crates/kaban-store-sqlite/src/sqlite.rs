@@ -19,6 +19,7 @@ mod nodes;
 mod rescan;
 
 use crate::anchors;
+use crate::catalog::{Catalog, capture};
 use crate::changelog;
 use crate::connection::{CgRead, LiveGuard, NoFileBacking, prepare_database_files};
 use crate::connection::{database_file_modes, open_existing_as_is};
@@ -139,6 +140,9 @@ pub struct SqliteStore {
     /// Shared with the in-memory adapter's `Rows` (`crate::tantivy`), never lent across an
     /// adapter call: the lock order is this lock, then the adapter.
     conn: SharedConnection,
+    /// The catalog of the database (spec 11 KER-07): every writer transaction of the store
+    /// opens in its commit entry, whose capture triggers live on `conn`.
+    catalog: Catalog,
     db_id: String,
     signer: Arc<dyn AuditSigner>,
     migration: MigrationReport,
@@ -221,6 +225,11 @@ impl SqliteStore {
     /// The connection as the in-memory adapter shares it (`crate::tantivy`).
     pub(crate) fn connection(&self) -> &SharedConnection {
         &self.conn
+    }
+
+    /// The database's catalog (spec 11 KER-07).
+    pub(crate) fn catalog(&self) -> &Catalog {
+        &self.catalog
     }
 
     /// The seed index behind the text-search seam, when one is attached.
@@ -427,14 +436,16 @@ impl SqliteStore {
     pub fn open_as(path: &Path, keys_dir: &Path, actor: &ActorId) -> Result<Self> {
         let (conn, db_id, report, live) = Self::open_file(path, actor, Self::CAPABILITIES)?;
         let signer = Self::project_key(&conn, keys_dir, &db_id)?;
+        let catalog = Catalog::open(path, &conn)?;
         Self::assemble(
             conn,
+            catalog,
             db_id,
             Arc::new(signer),
             report,
             Some(live),
             Some(path),
-        )
+        )?
         .with_index_attached(Attach::Own)
     }
     /// The database's HMAC key: created with the project, required ever after. A project
@@ -496,14 +507,16 @@ impl SqliteStore {
         let signer = KeySigner::open_existing(keys_dir, &db_id)
             .map_err(|e| StoreError::Audit(Box::new(e)))?;
         let report = MigrationReport::unchanged(version);
+        let catalog = Catalog::open_as_is(path, &conn)?;
         Self::assemble(
             conn,
+            catalog,
             db_id,
             Arc::new(signer),
             report,
             Some(live),
             Some(path),
-        )
+        )?
         .with_index_attached(Attach::Existing)
     }
     /// Open for `kaban doctor` (core-spec §7; M4-19): the database is read as it is, so the
@@ -559,14 +572,16 @@ impl SqliteStore {
         let signer = KeySigner::open_existing(keys_dir, &db_id)
             .map_err(|e| StoreError::Audit(Box::new(e)))?;
         let report = MigrationReport::unchanged(version);
+        let catalog = Catalog::open_as_is(path, &conn)?;
         let store = Self::assemble(
             conn,
+            catalog,
             db_id,
             Arc::new(signer),
             report,
             Some(live),
             Some(path),
-        )
+        )?
         .with_index_attached(Attach::Existing)?;
         Ok((store, modes))
     }
@@ -626,14 +641,16 @@ impl SqliteStore {
         let signer = KeySigner::open_existing(keys_dir, &db_id)
             .map_err(|e| StoreError::Audit(Box::new(e)))?;
         let report = MigrationReport::unchanged(version);
+        let catalog = Catalog::open_as_is(path, &conn)?;
         let mut store = Self::assemble(
             conn,
+            catalog,
             db_id,
             Arc::new(signer),
             report,
             Some(live),
             Some(path),
-        );
+        )?;
         // a hook's write publishes its own page within its watchdog's share, or leaves the
         // receipt pending (spec 05 SS-10)
         store.publish_budget = tantivy::HOOK_PUBLISH_BUDGET;
@@ -646,7 +663,8 @@ impl SqliteStore {
     pub fn open_with_signer(path: &Path, signer: Arc<dyn AuditSigner>) -> Result<Self> {
         let (conn, db_id, report, live) =
             Self::open_file(path, &ActorId::default(), Self::CAPABILITIES)?;
-        Self::assemble(conn, db_id, signer, report, Some(live), Some(path))
+        let catalog = Catalog::open(path, &conn)?;
+        Self::assemble(conn, catalog, db_id, signer, report, Some(live), Some(path))?
             .with_index_attached(Attach::Own)
     }
     /// An in-memory store with an ephemeral random HMAC key (tests); the writer is `local`.
@@ -664,7 +682,8 @@ impl SqliteStore {
         let mut conn = Connection::open_in_memory().sql()?;
         let (db_id, report) = Self::init_schema(&mut conn, actor)?;
         let signer = KeySigner::ephemeral().map_err(|e| StoreError::Audit(Box::new(e)))?;
-        Self::assemble(conn, db_id, Arc::new(signer), report, None, None)
+        let catalog = Catalog::in_memory(&conn)?;
+        Self::assemble(conn, catalog, db_id, Arc::new(signer), report, None, None)?
             .with_index_attached(Attach::Own)
     }
     /// Open the database file with owner-only permissions (core-spec S5; see
@@ -688,17 +707,24 @@ impl SqliteStore {
         live.publish(&conn)?;
         Ok((conn, db_id, report, live))
     }
-    /// The store over a configured connection whose writer is bound.
+    /// The store over a configured connection whose writer is bound, admitted and published,
+    /// and its catalog: the connection gets the catalog's capture triggers here.
+    ///
+    /// # Errors
+    /// SQLite errors of the capture triggers.
     pub(crate) fn assemble(
         conn: Connection,
+        catalog: Catalog,
         db_id: String,
         signer: Arc<dyn AuditSigner>,
         migration: MigrationReport,
         live: Option<LiveGuard>,
         path: Option<&Path>,
-    ) -> Self {
-        Self {
+    ) -> Result<Self> {
+        capture::install(&conn)?;
+        Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
+            catalog,
             db_id,
             signer,
             migration,
@@ -713,7 +739,7 @@ impl SqliteStore {
             receipt: std::sync::atomic::AtomicU64::new(0),
             path: path.map(Path::to_path_buf),
             _live: live,
-        }
+        })
     }
     /// The assembled store with its text index (spec 05 OWN-M; `crate::tantivy`): a file
     /// store's index beside the database, admitted or rebuilt as `attach` says, then caught
@@ -1029,22 +1055,20 @@ impl MemoryStore for SqliteStore {
         ctx: &WriteCtx,
     ) -> Result<Edge> {
         let mut conn = self.write();
-        let tx = conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .sql()?;
-        let (e, _) = Self::link_in(
-            &tx,
-            &self.tenant(ctx.workspace_id.as_str()),
-            src.as_str(),
-            dst.as_str(),
-            rel,
-            confidence,
-            props,
-            Method::Link,
-        )?;
-        changelog::record_terminal(&tx, ctx)?;
-        tx.commit().sql()?;
-        Ok(e)
+        self.catalog.commit(&mut conn, ctx.durability, |txn| {
+            let (e, _) = Self::link_in(
+                txn.conn(),
+                &self.tenant(ctx.workspace_id.as_str()),
+                src.as_str(),
+                dst.as_str(),
+                rel,
+                confidence,
+                props,
+                Method::Link,
+            )?;
+            changelog::record_terminal(txn.conn(), ctx)?;
+            Ok(e)
+        })
     }
     fn recall(&self, q: &RecallQuery) -> Result<Vec<Hit>> {
         self.recall_eligible(q, &|_| true)

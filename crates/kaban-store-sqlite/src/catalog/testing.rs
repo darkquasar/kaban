@@ -5,6 +5,7 @@
 use std::sync::{Arc, Mutex, PoisonError};
 
 use kaban_core::Result;
+use kaban_core::query_budget::QueryBudget;
 use rusqlite::Connection;
 
 use super::Catalog;
@@ -94,11 +95,9 @@ impl Observed {
 /// handle on the change sets it sees.
 pub fn install_edge_sediment_class(store: &SqliteStore) -> Observed {
     let observed = Observed::default();
-    let class = EdgeSediment {
+    store.catalog().register(Arc::new(EdgeSediment {
         observed: observed.clone(),
-    };
-    // T5 Step 3 registers the class on the store's catalog (`Catalog::register`)
-    let _ = (store, class);
+    }));
     observed
 }
 
@@ -107,9 +106,13 @@ pub fn install_edge_sediment_class(store: &SqliteStore) -> Observed {
 /// # Errors
 /// The pin's errors.
 pub fn pin_sediment(store: &SqliteStore) -> Result<Vec<String>> {
-    // T5 Step 3 pins the store's catalog (`Catalog::pin`)
-    let _ = store;
-    Ok(Vec::new())
+    let budget = QueryBudget::new(u64::MAX, None);
+    let pin = store.catalog().pin(&mut store.lock(), &budget)?;
+    Ok(pin
+        .sediment(ExtentClass::Test)
+        .iter()
+        .map(|row| String::from_utf8_lossy(&row.payload).into_owned())
+        .collect())
 }
 
 /// The test class: one sediment row per edge change; records every change set it is handed.

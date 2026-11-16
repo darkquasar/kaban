@@ -164,19 +164,10 @@ impl SqliteStore {
         report.record(id, &kind, OutcomeKind::Reactivated);
         Ok(Some(rid))
     }
-    /// The body of [`kaban_core::MemoryStore::forget`].
-    pub(super) fn forget_impl(
-        &self,
-        id: &NodeId,
-        mode: ForgetMode,
-        _ctx: &WriteCtx,
-    ) -> Result<ForgetOutcome> {
-        let id = id.as_str();
-        let mut conn = self.write();
-        let tx = conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .sql()?;
-        let st = Self::state_of(&tx, id)?;
+    /// The rows of one forget inside the commit's transaction: the node's new lifecycle and
+    /// the change log's head, with the node's `rid`.
+    fn forget_in(tx: &Connection, id: &str, mode: ForgetMode) -> Result<(i64, String, i64)> {
+        let st = Self::state_of(tx, id)?;
         let rid = st.rid;
         let target = match mode {
             ForgetMode::Tombstone | ForgetMode::Invalidate => Lifecycle::Tombstoned,
@@ -186,10 +177,10 @@ impl SqliteStore {
         // the spec's lifecycle table decides first (tombstoned and purged are terminal)
         kaban_core::lifecycle_transition(st.lifecycle, target)?;
         if matches!(target, Lifecycle::Tombstoned | Lifecycle::Purged) {
-            crate::jobs::revoke_document(&tx, id, &st.workspace_id)?;
+            crate::jobs::revoke_document(tx, id, &st.workspace_id)?;
         }
         let now = now_iso();
-        let scoring = crate::edge_write::scoring_columns(&tx)?;
+        let scoring = crate::edge_write::scoring_columns(tx)?;
         match mode {
             // lifecycle only (D1); `invalidate` is the same tombstone since governance went
             ForgetMode::Tombstone | ForgetMode::Invalidate => {
@@ -198,7 +189,7 @@ impl SqliteStore {
                     params![now, rid],
                 ).sql()?;
                 if scoring {
-                    anchors::remove(&tx, rid)?;
+                    anchors::remove(tx, rid)?;
                 }
             }
             ForgetMode::Archive => {
@@ -213,7 +204,7 @@ impl SqliteStore {
             // update trigger skips purged rows; the one explicit `op='purge'` row and one
             // `delete` row per removed edge are the `ChangeLog` record (MD-24).
             ForgetMode::Purge => {
-                Self::purge_in_place(&tx, rid, id, &st.workspace_id, &now)?;
+                Self::purge_in_place(tx, rid, id, &st.workspace_id, &now)?;
             }
         }
         let lifecycle: String = tx
@@ -226,7 +217,21 @@ impl SqliteStore {
                 r.get(0)
             })
             .sql()?;
-        tx.commit().sql()?;
+        Ok((rid, lifecycle, last_seq))
+    }
+    /// The body of [`kaban_core::MemoryStore::forget`].
+    pub(super) fn forget_impl(
+        &self,
+        id: &NodeId,
+        mode: ForgetMode,
+        ctx: &WriteCtx,
+    ) -> Result<ForgetOutcome> {
+        let id = id.as_str();
+        let mut conn = self.write();
+        let (rid, lifecycle, last_seq) =
+            self.catalog().commit(&mut conn, ctx.durability, |txn| {
+                Self::forget_in(txn.conn(), id, mode)
+            })?;
         let outcome = ForgetOutcome {
             lifecycle: Lifecycle::parse(&lifecycle)
                 .ok_or_else(|| bad_enum(0, &lifecycle))

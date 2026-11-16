@@ -41,6 +41,19 @@ impl ExtentClass {
             Self::Test => "test",
         }
     }
+    /// The class a catalog row names, `None` for a name this build does not know.
+    pub(crate) fn parse(s: &str) -> Option<Self> {
+        match s {
+            "text_tier" => Some(Self::TextTier),
+            "graph_base" => Some(Self::GraphBase),
+            "graph_layer" => Some(Self::GraphLayer),
+            "code_layer" => Some(Self::CodeLayer),
+            "code_base" => Some(Self::CodeBase),
+            #[cfg(any(test, feature = "failpoints"))]
+            "test" => Some(Self::Test),
+            _ => None,
+        }
+    }
 }
 
 /// Where an extent's bytes live. `File` exists so verify can report a missing cold file
@@ -63,6 +76,7 @@ pub(crate) enum ExtentLocation {
 
 /// What a seal, fold or purge produced outside the writer lock: the new extent's bytes and the
 /// inputs they replace, published by a later commit.
+#[expect(dead_code, reason = "T6's compaction publishes it")]
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct SealOutput {
     /// The new extent's bytes.
@@ -77,6 +91,10 @@ pub(crate) struct SealOutput {
 /// commit's frozen change set and must be idempotent per transaction; `seal`, `fold` and
 /// `purge` run outside the writer lock against a pin and return bytes plus the inputs they
 /// consumed. T7, T11 and T16 bring the concrete classes; T5 has a test class only.
+#[expect(
+    dead_code,
+    reason = "T6's compaction and rebuild call the methods besides `stage`"
+)]
 pub(crate) trait IndexClass: Send + Sync {
     /// The class of the extents and sediment this index owns.
     fn class(&self) -> ExtentClass;

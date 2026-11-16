@@ -85,3 +85,86 @@ fn a_link_is_in_the_sediment_of_a_pin_another_process_takes_after_it_returns() {
         "process B's pin must hold the sediment row of A's link"
     );
 }
+
+/// Every entry of `dir` by name, with a regular file's bytes (`None` for anything else).
+fn listing(dir: &std::path::Path) -> std::collections::BTreeMap<String, Option<Vec<u8>>> {
+    std::fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| {
+            let entry = entry.unwrap();
+            let bytes = entry
+                .file_type()
+                .unwrap()
+                .is_file()
+                .then(|| std::fs::read(entry.path()).unwrap());
+            (entry.file_name().into_string().unwrap(), bytes)
+        })
+        .collect()
+}
+
+/// The catalog's artefacts beside a database.
+const CATALOG_ARTEFACTS: [&str; 3] = ["kaban.kbx", "kaban.kbx.alloc", "kaban.kbx.pins"];
+
+#[test]
+fn a_fresh_project_opens_with_its_catalog_beside_the_database() {
+    // Arrange
+    let s = Scratch::new("kaban-t5-commit", "fresh-catalog");
+
+    // Act
+    let store = SqliteStore::open(&s.db(), &s.keys()).unwrap();
+
+    // Assert: the container and the allocation lock are files, the pins a directory
+    let entries = listing(&s.0);
+    for name in CATALOG_ARTEFACTS {
+        assert!(
+            entries.contains_key(name),
+            "{name} is missing: {:?}",
+            entries.keys().collect::<Vec<_>>()
+        );
+    }
+    assert!(
+        s.0.join("kaban.kbx.pins").is_dir(),
+        "the pins are a directory"
+    );
+    drop(store);
+}
+
+#[test]
+fn a_refused_older_format_project_gains_no_catalog_artefact() {
+    let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures");
+    for fixture in ["v3.0.0", "v3.0.0-wal"] {
+        // Arrange: a copy of the 3.0.0 project (never opened in place)
+        let s = Scratch::new("kaban-t5-commit", &format!("refused-{fixture}"));
+        for entry in std::fs::read_dir(fixtures.join(fixture)).unwrap() {
+            let entry = entry.unwrap();
+            std::fs::copy(entry.path(), s.0.join(entry.file_name())).unwrap();
+        }
+        let before = listing(&s.0);
+
+        // Act: every open refuses it
+        let actor = kaban_core::ActorId::default();
+        let refusals = [
+            SqliteStore::open(&s.db(), &s.keys()).map(drop),
+            SqliteStore::open_existing_key(&s.db(), &s.keys(), &actor).map(drop),
+            SqliteStore::open_diagnostic(&s.db(), &s.keys(), &actor).map(drop),
+            SqliteStore::open_for_hook(&s.db(), &s.keys(), &actor).map(drop),
+        ];
+
+        // Assert: refused, and the directory is as it was: no catalog artefact, no byte changed
+        for refused in refusals {
+            let err = refused.unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    kaban_core::StoreError::SchemaUnsupported { found: 13, .. }
+                ),
+                "{fixture}: {err:?}"
+            );
+        }
+        let after = listing(&s.0);
+        for name in CATALOG_ARTEFACTS {
+            assert!(!after.contains_key(name), "{fixture}: {name} was created");
+        }
+        assert_eq!(after, before, "{fixture}: the project was changed");
+    }
+}

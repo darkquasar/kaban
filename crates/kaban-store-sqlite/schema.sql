@@ -176,3 +176,51 @@ CREATE TRIGGER changes_stamp AFTER INSERT ON changes WHEN new.actor_id IS NULL B
       (SELECT actor_id, instance_id, pack_lineage_id FROM changes WHERE seq = new.seq)
     WHERE new.entity = 'edge' AND id = new.id;
 END;
+
+-- The catalog (spec 11 KER-01, KER-07, PC-8; `src/catalog/`): the generations of the index
+-- extents in `kaban.kbx`, the extents, the sediment rows committed beside the canonical rows,
+-- compaction claims, code views and the catalog's own settings. Written only through
+-- `Catalog::commit`.
+CREATE TABLE cat_generation(
+  generation INTEGER PRIMARY KEY
+);
+
+CREATE TABLE cat_extent(
+  id INTEGER PRIMARY KEY,
+  class TEXT NOT NULL,
+  generation INTEGER NOT NULL,
+  retired_at INTEGER,
+  kbx_offset INTEGER, kbx_len INTEGER, relpath TEXT,
+  CHECK((kbx_offset IS NOT NULL AND kbx_len IS NOT NULL AND relpath IS NULL)
+     OR (kbx_offset IS NULL AND kbx_len IS NULL AND relpath IS NOT NULL))
+);
+
+CREATE INDEX cat_extent_class ON cat_extent(class, generation);
+
+CREATE TABLE cat_sediment(
+  seq INTEGER PRIMARY KEY AUTOINCREMENT,
+  class TEXT NOT NULL,
+  generation INTEGER NOT NULL,
+  payload BLOB NOT NULL
+);
+
+CREATE INDEX cat_sediment_class ON cat_sediment(class, seq);
+
+CREATE TABLE cat_claim(
+  extent INTEGER PRIMARY KEY REFERENCES cat_extent(id),
+  claim TEXT NOT NULL,
+  claimed_at INTEGER NOT NULL
+);
+
+CREATE TABLE cat_view(
+  name TEXT PRIMARY KEY,
+  parent TEXT,
+  state TEXT NOT NULL DEFAULT 'live' CHECK(state IN ('live','needs_reimport'))
+);
+
+CREATE TABLE cat_meta(
+  key TEXT PRIMARY KEY,
+  value INTEGER NOT NULL
+);
+
+INSERT INTO cat_meta(key, value) VALUES ('reclaim_floor', 0);

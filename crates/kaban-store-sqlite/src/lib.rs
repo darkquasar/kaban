@@ -12,10 +12,11 @@
 
 mod anchors;
 mod body_codec;
-// T5 Step 1: the catalog's signatures with empty bodies; Step 3 wires them into the store
-#[expect(
-    dead_code,
-    reason = "T5 Step 3 routes the store's writers and readers through the catalog"
+// the catalog has no production index class before T7: without the test class (`failpoints`)
+// nothing registers one, so the sediment and pin paths are unused in that build
+#[cfg_attr(
+    not(feature = "failpoints"),
+    expect(dead_code, reason = "T7 registers the first production index class")
 )]
 mod catalog;
 mod changelog;

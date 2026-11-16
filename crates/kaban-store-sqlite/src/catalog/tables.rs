@@ -1,9 +1,20 @@
 //! The catalog's row vocabulary (spec 11 KER-01, INV-3): generations, extent references and
 //! sediment rows. The `cat_generation`, `cat_extent`, `cat_sediment`, `cat_claim`, `cat_view`
-//! and `cat_meta` tables (`reclaim_floor` among the latter) join `schema.sql` with the commit
-//! implementation (T5 Step 3); nothing here reads them yet.
+//! and `cat_meta` tables (`reclaim_floor` among the latter) of `schema.sql` hold them; the
+//! commit entry writes them and a pin reads them.
 
 use super::class::{ExtentClass, ExtentLocation};
+
+/// Column `idx` of `row` as the unsigned number the catalog stores in an `INTEGER`.
+pub(crate) fn uint(row: &rusqlite::Row<'_>, idx: usize) -> rusqlite::Result<u64> {
+    let v: i64 = row.get(idx)?;
+    u64::try_from(v).map_err(|_| rusqlite::Error::IntegralValueOutOfRange(idx, v))
+}
+
+/// `v` as an SQLite `INTEGER` parameter.
+pub(crate) fn sql_int(v: u64) -> rusqlite::Result<i64> {
+    i64::try_from(v).map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
+}
 
 /// A catalog generation: every commit that changes the catalog publishes the next one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]

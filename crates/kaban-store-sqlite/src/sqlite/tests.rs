@@ -993,6 +993,13 @@ fn a_creation_whose_checkpoint_stays_blocked_is_not_reported_as_success() {
             "the open failed on its publication: {err:?}"
         ),
     }
+    // the catalog opens only after publication (spec 11 T5): an unpublished project has none
+    for artefact in ["kaban.kbx", "kaban.kbx.alloc", "kaban.kbx.pins"] {
+        assert!(
+            !d.0.join(artefact).exists(),
+            "{artefact} was created for an unpublished project"
+        );
+    }
     reader.execute_batch("COMMIT").unwrap();
     drop(reader);
     let reopened = SqliteStore::open(&d.db(), &d.keys()).unwrap();
