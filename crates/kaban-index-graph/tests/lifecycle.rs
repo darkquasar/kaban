@@ -8,8 +8,8 @@
 mod oracle;
 
 use kaban_index_graph::{
-    Attr, Base, Direction, EdgeOp, FactOp, Layer, LocalId, NodeOp, OpKind, Records, RelId,
-    RelSelection, View, build_base, fold, seal,
+    Attr, Base, Direction, EdgeOp, FactOp, Layer, LocalId, NodeOp, OpKind, PreparedSediment,
+    Records, RelId, RelSelection, View, build_base, fold, seal,
 };
 use oracle::{Oracle, Rng, nodes, random_records, rows, view};
 use tantivy::directory::OwnedBytes;
@@ -323,4 +323,79 @@ fn sealing_ignores_the_parent_sediment() {
     let v = view(Some(&base), &layers, &more);
     oracle.apply(&readd);
     assert_matches(&v, &oracle, 4, "re-added after the barrier");
+}
+
+/// (g): preparing batches from scratch equals preparing a prefix and extending it with the rest,
+/// at every split and one batch at a time, including removals and re-adds across the split; a
+/// view over the prefix stays correct after the extension.
+#[test]
+fn extending_prepared_sediment_equals_preparing_from_scratch() {
+    let b = oracle::budget();
+    for seed in 0..6 {
+        let f = oracle::chain(seed, |r| r);
+        let mut rng = Rng::new(seed + 9000);
+        let mut batches: Vec<Records> = (0..5)
+            .map(|_| random_records(&mut rng, oracle::IDS, 40, 30))
+            .collect();
+        // A node with an edge both ways and a fact, removed and re-added in the next batch.
+        batches.insert(
+            2,
+            Records {
+                nodes: vec![node(5, OpKind::Add), node(6, OpKind::Add)],
+                edges: vec![edge(5, 0, 6, 1), edge(6, 0, 5, 2)],
+                facts: vec![fact(5, 0, b"before")],
+            },
+        );
+        batches.insert(
+            3,
+            Records {
+                nodes: vec![node(5, OpKind::Remove), node(5, OpKind::Add)],
+                ..Records::default()
+            },
+        );
+        let chain_oracle = |upto: usize| {
+            let mut o = Oracle::default();
+            for r in &f.all[..4] {
+                o.apply(r);
+            }
+            for r in &batches[..upto] {
+                o.apply(r);
+            }
+            o
+        };
+        let full = chain_oracle(batches.len());
+        let scratch = PreparedSediment::prepare(&batches, &b).unwrap();
+        let v = View::new(Some(&f.base), &f.layers, &scratch, &b).unwrap();
+        assert_matches(&v, &full, oracle::IDS + 3, &format!("seed {seed} scratch"));
+        for split in 0..=batches.len() {
+            let prefix = PreparedSediment::prepare(&batches[..split], &b).unwrap();
+            let before = View::new(Some(&f.base), &f.layers, &prefix, &b).unwrap();
+            let extended = prefix.extend(&batches[split..], &b).unwrap();
+            assert_eq!(extended.batches(), batches.len());
+            let v = View::new(Some(&f.base), &f.layers, &extended, &b).unwrap();
+            assert_matches(
+                &v,
+                &full,
+                oracle::IDS + 3,
+                &format!("seed {seed} split {split}"),
+            );
+            assert_matches(
+                &before,
+                &chain_oracle(split),
+                oracle::IDS + 3,
+                &format!("seed {seed} prefix {split} after extension"),
+            );
+        }
+        let mut stepwise = PreparedSediment::empty();
+        for r in &batches {
+            stepwise = stepwise.extend(std::slice::from_ref(r), &b).unwrap();
+        }
+        let v = View::new(Some(&f.base), &f.layers, &stepwise, &b).unwrap();
+        assert_matches(
+            &v,
+            &full,
+            oracle::IDS + 3,
+            &format!("seed {seed} one at a time"),
+        );
+    }
 }

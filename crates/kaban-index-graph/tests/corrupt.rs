@@ -12,8 +12,8 @@ mod oracle;
 use std::ops::Range;
 
 use kaban_index_graph::{
-    Attr, Base, Direction, EdgeOp, FactOp, GraphError, Layer, LocalId, NodeOp, OpKind, Records,
-    RelId, RelSelection, View, build_base, seal,
+    Attr, Base, Direction, EdgeOp, FactOp, GraphError, Layer, LocalId, NodeOp, OpKind,
+    PreparedSediment, Records, RelId, RelSelection, View, build_base, seal,
 };
 use oracle::{nodes, rows, view};
 use tantivy::directory::OwnedBytes;
@@ -482,7 +482,12 @@ fn clear_union_bit(bytes: &mut [u8], tag: u32, id: u32) {
 /// The view over `base` and `layers`, or the answer it gives: a view that prepares must read
 /// node `n`'s list in `dir` as the oracle does (no edge); a view that refuses must say Corrupt.
 fn assert_safe(base: &Base, layers: &[Layer], n: u32, dir: Direction, what: &str) {
-    match View::new::<Records>(Some(base), layers, &[], &oracle::budget()) {
+    match View::new(
+        Some(base),
+        layers,
+        &PreparedSediment::empty(),
+        &oracle::budget(),
+    ) {
         Err(GraphError::Corrupt(_)) => {}
         Err(e) => panic!("{what}: expected Corrupt, got {e:?}"),
         Ok(v) => assert_eq!(

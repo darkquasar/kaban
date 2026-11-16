@@ -9,8 +9,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use kaban_core::query_budget::QueryBudget;
 use kaban_index_graph::{
-    Attr, Base, Direction, EdgeOp, FactOp, Layer, LocalId, NodeOp, OpKind, Records, RelId,
-    RelSelection, View, build_base, seal,
+    Attr, Base, Direction, EdgeOp, FactOp, Layer, LocalId, NodeOp, OpKind, PreparedSediment,
+    Records, RelId, RelSelection, View, build_base, seal,
 };
 use tantivy::directory::OwnedBytes;
 
@@ -140,13 +140,17 @@ pub(crate) fn budget() -> QueryBudget {
     QueryBudget::new(u64::MAX, None)
 }
 
-/// A view that must build under an unbounded budget.
+/// A view that must build under an unbounded budget. The prepared sediment is leaked so the
+/// view can borrow it for the rest of the test (test processes are short-lived).
 pub(crate) fn view<'a, R: AsRef<Records>>(
     base: Option<&'a Base>,
     layers: &'a [Layer],
-    sediment: &'a [R],
+    sediment: &[R],
 ) -> View<'a> {
-    View::new(base, layers, sediment, &budget()).unwrap()
+    let prepared: &'a PreparedSediment = Box::leak(Box::new(
+        PreparedSediment::prepare(sediment, &budget()).unwrap(),
+    ));
+    View::new(base, layers, prepared, &budget()).unwrap()
 }
 
 /// Every row of one accessor call, under an unbounded budget.

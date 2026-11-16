@@ -22,9 +22,9 @@ use crate::charge::{Charge, Ticker};
 use crate::error::GraphError;
 use crate::id::{Direction, LocalId, RelId, RelSelection};
 use crate::layer::{Edges, Extent, Layer};
-use crate::op::{Attr, OpKind, Records, corrupt};
+use crate::op::{Attr, OpKind, corrupt};
 use crate::presence::PresenceIter;
-use crate::sediment::{SedEdge, SedNode, Sediment};
+use crate::sediment::{EMPTY, PreparedSediment, SedEdge, SedNode};
 
 /// Units of work between two budget checks of one metered loop (an accessor iterator, a
 /// structural function's loop, decoding, validation or preparation). A unit is bounded: one
@@ -38,13 +38,14 @@ use crate::sediment::{SedEdge, SedNode, Sediment};
 /// [`crate::work_units`] counts them.
 pub const BUDGET_CHECK_INTERVAL: u64 = 256;
 
-/// A read view: a base, sealed layers oldest first, then sediment records oldest first.
+/// A read view: a base, sealed layers oldest first, then a prepared sediment.
 #[derive(Debug)]
 pub struct View<'a> {
     base: Option<&'a Base>,
     layers: &'a [Layer],
-    /// The sediment's net change, prepared once at construction so reads merge sorted lists.
-    sediment: Sediment<'a>,
+    /// The sediment's net change, prepared by the caller and borrowed, so reads merge sorted
+    /// lists and construction does no sediment work.
+    sediment: &'a PreparedSediment,
     /// Whether the newest layer's union is trusted: its depth is the layer count and it was
     /// verified to cover every node touched by every layer of this chain.
     union: bool,
@@ -59,11 +60,9 @@ fn cursors<T>(charge: Option<&mut Charge>, capacity: usize) -> Result<Vec<T>, Gr
 }
 
 impl<'a> View<'a> {
-    /// A view over `base`, `layers` (oldest first) and `sediment` batches (oldest first).
-    ///
-    /// The sediment is prepared here: its node, edge and fact streams are copied into sorted
-    /// vectors whose capacity is reserved against `budget` before allocation and stays charged
-    /// until the view is dropped. Removals in the sediment are deletion barriers over the
+    /// A view over `base`, `layers` (oldest first) and a prepared `sediment`, which the view
+    /// borrows: construction copies and sorts nothing, so one [`PreparedSediment`] serves every
+    /// query over the same batches. Removals in the sediment are deletion barriers over the
     /// extents (see [`crate::NodeOp`]).
     ///
     /// When the newest layer's depth equals the number of layers, its union bitvectors may let
@@ -74,16 +73,16 @@ impl<'a> View<'a> {
     /// neither coverage nor ancestry; a chain whose depth does not match reads every layer.
     ///
     /// # Errors
-    /// [`GraphError::BudgetExceeded`] when `budget` refuses a reservation, already refuses at
-    /// entry or is cancelled or past its deadline during preparation; [`GraphError::Corrupt`]
-    /// when the newest union misses a node touched in the chain. Nothing stays charged.
-    pub fn new<R: AsRef<Records>>(
+    /// [`GraphError::BudgetExceeded`] when `budget` already refuses at entry or is cancelled or
+    /// past its deadline during the union check; [`GraphError::Corrupt`] when the newest union
+    /// misses a node touched in the chain. Nothing stays charged.
+    pub fn new(
         base: Option<&'a Base>,
         layers: &'a [Layer],
-        sediment: &'a [R],
+        sediment: &'a PreparedSediment,
         budget: &QueryBudget,
     ) -> Result<View<'a>, GraphError> {
-        let sediment = Sediment::prepare(sediment, budget)?;
+        budget.check()?;
         let union = match layers.last() {
             Some(last) if usize::try_from(last.extent.depth).ok() == Some(layers.len()) => {
                 verify_union(last, layers, &Ticker::new(budget))?;
@@ -105,7 +104,7 @@ impl<'a> View<'a> {
         View {
             base: self.base,
             layers: self.layers,
-            sediment: Sediment::empty(),
+            sediment: &EMPTY,
             union: self.union,
         }
     }
@@ -344,8 +343,7 @@ impl<'a> View<'a> {
         map.extend(
             self.sediment
                 .facts()
-                .iter()
-                .map(|f| (f.key, (f.kind, f.payload))),
+                .map(|(key, kind, payload)| (key, (kind, payload))),
         );
         map.into_iter()
             .filter(|(_, (kind, _))| *kind == OpKind::Add)
@@ -364,9 +362,8 @@ impl<'a> View<'a> {
         map.extend(
             self.sediment
                 .facts()
-                .iter()
-                .filter(|f| f.key.0 == n)
-                .map(|f| (f.key.1, f.kind)),
+                .filter(|&((m, _), _, _)| m == n)
+                .map(|((_, key), kind, _)| (key, kind)),
         );
         map.into_iter()
             .filter(|&(_, kind)| kind == OpKind::Add)

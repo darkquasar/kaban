@@ -17,8 +17,8 @@ use std::time::{Duration, Instant};
 use kaban_core::query_budget::QueryBudget;
 use kaban_index_graph::{
     Attr, BUDGET_CHECK_INTERVAL, Base, Caps, Direction, EdgeOp, FactOp, GraphError, Layer, LocalId,
-    NodeOp, OpKind, Records, RelId, RelSelection, RowCap, View, build_base, expand, seal,
-    shortest_path, topo_order, wcc, work_units,
+    NodeOp, OpKind, PreparedSediment, Records, RelId, RelSelection, RowCap, View, build_base,
+    expand, seal, shortest_path, topo_order, wcc, work_units,
 };
 use oracle::{serial, view};
 use tantivy::directory::OwnedBytes;
@@ -122,22 +122,48 @@ fn duplicates(n: u32) -> Vec<Records> {
 }
 
 #[test]
-fn view_preparation_charges_its_sediment_while_the_view_lives() {
+fn prepared_sediment_holds_its_charge_and_views_borrow_it_without_sorting() {
     let _serial = serial();
     let sediment = duplicates(10_000);
     let budget = QueryBudget::new(u64::MAX, None);
-    let v = View::new(None, &[], &sediment, &budget).unwrap();
+    let prepared = PreparedSediment::prepare(&sediment, &budget).unwrap();
     let live = budget.live_bytes();
     // Three input streams of 10,000 records each are copied, at least 16 bytes per record.
     assert!(live >= 3 * 10_000 * 16, "preparation is charged: {live}");
-    assert!(v.contains(LocalId(1)));
-    drop(v);
+    // Views over the prepared sediment charge nothing for it and do no sediment work.
+    for _ in 0..3 {
+        let before = work_units();
+        let v = View::new(None, &[], &prepared, &budget).unwrap();
+        assert_eq!(
+            work_units(),
+            before,
+            "a view over prepared sediment sorts nothing"
+        );
+        assert_eq!(budget.live_bytes(), live);
+        assert!(v.contains(LocalId(1)));
+    }
+    let extended = prepared.extend(&duplicates(10), &budget).unwrap();
+    assert!(budget.live_bytes() > live, "the extension is charged");
+    drop(prepared);
+    drop(extended);
     assert_eq!(budget.live_bytes(), 0);
 
     let small = QueryBudget::new(10_000 * 8, None);
-    let got = View::new(None, &[], &sediment, &small);
+    let got = PreparedSediment::prepare(&sediment, &small);
     assert!(got.as_ref().is_err_and(is_memory), "{:?}", got.map(|_| ()));
     assert_eq!(small.live_bytes(), 0);
+    let prepared = PreparedSediment::prepare(&duplicates(10), &budget).unwrap();
+    let got = prepared.extend(&sediment, &small);
+    assert!(
+        got.as_ref().is_err_and(is_memory),
+        "extend: {:?}",
+        got.map(|_| ())
+    );
+    assert_eq!(
+        small.live_bytes(),
+        0,
+        "a refused extension releases everything"
+    );
 }
 
 fn chain() -> (Base, Vec<Layer>) {
@@ -729,7 +755,8 @@ fn a_recorded_memory_breach_stops_decoding_opening_and_view_preparation() {
         "decode: {:?}",
         got.map(|_| ())
     );
-    let got = View::new::<Records>(None, &[], &[], &budget);
+    let empty = PreparedSediment::empty();
+    let got = View::new(None, &[], &empty, &budget);
     assert!(
         got.as_ref().is_err_and(is_memory),
         "view: {:?}",
@@ -739,6 +766,18 @@ fn a_recorded_memory_breach_stops_decoding_opening_and_view_preparation() {
     assert!(
         got.as_ref().is_err_and(is_memory),
         "base: {:?}",
+        got.map(|_| ())
+    );
+    let got = PreparedSediment::prepare::<Records>(&[], &budget);
+    assert!(
+        got.as_ref().is_err_and(is_memory),
+        "prepare: {:?}",
+        got.map(|_| ())
+    );
+    let got = PreparedSediment::empty().extend::<Records>(&[], &budget);
+    assert!(
+        got.as_ref().is_err_and(is_memory),
+        "extend: {:?}",
         got.map(|_| ())
     );
     let got = Layer::open(OwnedBytes::new(layer), &budget);
@@ -774,9 +813,7 @@ fn cancellation_stops_decoding_within_the_interval() {
 fn cancellation_stops_view_preparation_and_its_sorts_within_the_interval() {
     let _serial = serial();
     let sediment = vec![descending(PHASE)];
-    let total = cancel_in_phase("view", 0, 1, |b| {
-        View::new(None, &[], &sediment, b).map(|_| ())
-    });
+    let total = cancel_in_phase("prepare", 0, 1, |b| PreparedSediment::prepare(&sediment, b));
     // Copying, sorting and compacting the node and both edge streams.
     assert!(
         total >= u64::from(6 * PHASE),
@@ -908,4 +945,18 @@ fn cancellation_stops_a_long_union_find_walk_within_the_interval() {
     cancel_in_phase("wcc walk", total - u64::from(d / 4) * 2, 2, |b| {
         wcc(&v, &all, RowCap(1), b)
     });
+}
+
+#[test]
+fn cancellation_stops_extending_prepared_sediment_within_the_interval() {
+    let _serial = serial();
+    let free = QueryBudget::new(u64::MAX, None);
+    let prepared = PreparedSediment::prepare(&[descending(PHASE)], &free).unwrap();
+    let batch = [Records {
+        nodes: vec![node(7, OpKind::Remove), node(7, OpKind::Add)],
+        edges: vec![edge(PHASE + 5, 3, OpKind::Add)],
+        ..Records::default()
+    }];
+    cancel_in_phase("extend", 0, 1, |b| prepared.extend(&batch, b));
+    assert!(free.live_bytes() > 0, "the prepared sediment stays charged");
 }
