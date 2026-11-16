@@ -1,13 +1,19 @@
 //! Pins (spec 11 PC-8, INV-3): a reader's view of one catalog generation, race-free against
 //! reclamation. [`Catalog::with_snapshot`] evaluates inside the pin's transaction;
 //! [`Catalog::pin`] copies the index inputs and returns a detached pin.
+//!
+//! The copy is charged to the reader's budget before it is made (PC-17): the rows are counted
+//! first, every allocation the pin keeps (one vector per class, each payload and cold path,
+//! the container path) is reserved at its exact capacity, and only then copied into that
+//! capacity, never past it. Loading and the snapshot's statements obey the budget's deadline:
+//! the copy loops check it at bounded intervals, a progress handler interrupts a long
+//! statement, and a cancelled or expired budget turns any outcome into its error.
 
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use kaban_core::query_budget::{BudgetExceeded, BudgetLease, QueryBudget};
+use kaban_core::query_budget::{ALLOCATION_METADATA_BYTES, BudgetExceeded, BudgetLease, QueryBudget};
 use kaban_core::{BackendSource, Result, StoreError};
-use rusqlite::{Connection, Transaction};
+use rusqlite::{Connection, Row, Transaction};
 use tantivy::directory::OwnedBytes;
 
 use super::class::{ExtentClass, ExtentLocation};
@@ -15,6 +21,47 @@ use super::tables::{ExtentRef, Generation, SedimentRow, SedimentSeq, uint};
 use super::{Catalog, not_yet};
 use crate::rows::bad_enum;
 use crate::sql_error::SqlResultExt;
+
+/// How many rows a copy loop copies between two budget checks.
+const CHECK_EVERY: usize = 256;
+
+/// How many SQLite virtual-machine steps pass between two budget checks of a statement.
+const PROGRESS_STEPS: i32 = 1000;
+
+/// One collection per extent class in a fixed layout: no map nodes to account for.
+#[derive(Debug)]
+struct ByClass<T> {
+    rows: [Vec<T>; ExtentClass::COUNT],
+    /// The counted rows of each class: what was reserved.
+    counted: [usize; ExtentClass::COUNT],
+}
+
+impl<T> ByClass<T> {
+    /// Empty collections with the reserved capacities.
+    fn with_capacities(counted: &[usize; ExtentClass::COUNT]) -> Self {
+        Self {
+            rows: std::array::from_fn(|i| Vec::with_capacity(counted[i])),
+            counted: *counted,
+        }
+    }
+    fn get(&self, class: ExtentClass) -> &[T] {
+        &self.rows[class.index()]
+    }
+    /// Add `row` to `class` within its counted rows. A row past them means the snapshot
+    /// changed after it was counted: refused, the copy never grows past its reservation.
+    fn push(&mut self, class: ExtentClass, row: T) -> Result<()> {
+        let rows = &mut self.rows[class.index()];
+        if rows.len() >= self.counted[class.index()] {
+            return Err(StoreError::Backend {
+                source: BackendSource::new(std::io::Error::other(
+                    "the pinned snapshot holds more rows than it counted",
+                )),
+            });
+        }
+        rows.push(row);
+        Ok(())
+    }
+}
 
 /// One pinned generation: its extents and sediment by class, and the container they live in.
 #[derive(Debug)]
@@ -25,8 +72,8 @@ use crate::sql_error::SqlResultExt;
 pub(crate) struct Pin {
     generation: Generation,
     kbx: PathBuf,
-    extents: BTreeMap<ExtentClass, Vec<ExtentRef>>,
-    sediment: BTreeMap<ExtentClass, Vec<SedimentRow>>,
+    extents: ByClass<ExtentRef>,
+    sediment: ByClass<SedimentRow>,
     /// The copy's charge against the reader's budget, released with the pin.
     _copy: BudgetLease,
 }
@@ -42,11 +89,11 @@ impl Pin {
     }
     /// The pinned extents of `class`.
     pub(crate) fn extents(&self, class: ExtentClass) -> &[ExtentRef] {
-        self.extents.get(&class).map_or(&[], Vec::as_slice)
+        self.extents.get(class)
     }
     /// The pinned sediment rows of `class`, in sequence order.
     pub(crate) fn sediment(&self, class: ExtentClass) -> &[SedimentRow] {
-        self.sediment.get(&class).map_or(&[], Vec::as_slice)
+        self.sediment.get(class)
     }
     /// The bytes of `e`: a slice of a mapping of the container.
     ///
@@ -64,9 +111,63 @@ impl Pin {
     }
 }
 
+#[cfg(test)]
+impl Pin {
+    /// Every heap allocation the pin retains, as `(capacity in bytes, alignment)`: what a unit
+    /// test checks the copy's charge against.
+    pub(crate) fn retained_allocations(&self) -> Vec<(usize, usize)> {
+        let mut out = vec![(self.kbx.capacity(), 1)];
+        for rows in &self.extents.rows {
+            out.push((rows.capacity() * size_of::<ExtentRef>(), align_of::<ExtentRef>()));
+            for e in rows {
+                if let ExtentLocation::File { relpath } = &e.location {
+                    out.push((relpath.capacity(), 1));
+                }
+            }
+        }
+        for rows in &self.sediment.rows {
+            out.push((rows.capacity() * size_of::<SedimentRow>(), align_of::<SedimentRow>()));
+            out.extend(rows.iter().map(|r| (r.payload.capacity(), 1)));
+        }
+        out.retain(|(bytes, _)| *bytes > 0);
+        out
+    }
+}
+
+/// The writer connection with a progress handler that interrupts any statement once the
+/// budget is cancelled or past its deadline; removed again however the pin ends.
+struct Interruptible<'c>(&'c mut Connection);
+
+impl<'c> Interruptible<'c> {
+    fn new(conn: &'c mut Connection, budget: &QueryBudget) -> Result<Self> {
+        let budget = budget.clone();
+        conn.progress_handler(PROGRESS_STEPS, Some(move || budget.check().is_err()))
+            .sql()?;
+        Ok(Self(conn))
+    }
+    fn conn(&self) -> &Connection {
+        self.0
+    }
+}
+
+impl Drop for Interruptible<'_> {
+    fn drop(&mut self) {
+        let _ = self.0.progress_handler(0, None::<fn() -> bool>);
+    }
+}
+
+/// `out`, unless the budget is cancelled, expired or exceeded: then the budget's error,
+/// whatever the outcome was (an interrupted statement's error included).
+fn settle<T>(budget: &QueryBudget, out: Result<T>) -> Result<T> {
+    budget.check().map_err(budget_exceeded)?;
+    out
+}
+
 impl Catalog {
     /// Pin the generation the read transaction sees and run `f` with that transaction; both
-    /// end on every exit. Acquisition and execution share `budget`.
+    /// end on every exit. Acquisition and execution share `budget`: a statement of `f` is
+    /// interrupted once it is cancelled or past its deadline, and then the budget's error is
+    /// the outcome even when `f` returned `Ok`.
     ///
     /// Not yet the race-free acquisition of PC-8: the pin lock and the `reclaim_floor` retry
     /// arrive with reclamation (T5 Step 4). Until then nothing reclaims, so the transaction's
@@ -74,9 +175,12 @@ impl Catalog {
     ///
     /// # Errors
     /// The closure's, the budget's or SQLite's error.
-    #[expect(
-        dead_code,
-        reason = "the bounded SQL statements of T12 and T15 run in it"
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the bounded SQL statements of T12 and T15 run in it"
+        )
     )]
     pub(crate) fn with_snapshot<T>(
         &self,
@@ -84,10 +188,14 @@ impl Catalog {
         budget: &QueryBudget,
         f: impl FnOnce(&Transaction<'_>, &Pin) -> Result<T>,
     ) -> Result<T> {
-        self.read(conn, |tx| {
+        let conn = Interruptible::new(conn, budget)?;
+        let out = self.read(conn.conn(), |tx| {
             let pin = self.load(tx, budget)?;
-            f(tx, &pin)
-        })
+            let out = f(tx, &pin);
+            drop(pin);
+            settle(budget, out)
+        });
+        settle(budget, out)
     }
 
     /// Pin as [`Self::with_snapshot`] does, copy every index input under `budget`, end the
@@ -96,11 +204,13 @@ impl Catalog {
     /// # Errors
     /// The budget's or SQLite's error.
     pub(crate) fn pin(&self, conn: &mut Connection, budget: &QueryBudget) -> Result<Pin> {
-        self.read(conn, |tx| self.load(tx, budget))
+        let conn = Interruptible::new(conn, budget)?;
+        let out = self.read(conn.conn(), |tx| self.load(tx, budget));
+        settle(budget, out)
     }
 
-    /// The pinned generation's inputs as `tx` sees them: the copy is charged to `budget`
-    /// before it is made (PC-17).
+    /// The pinned generation's inputs as `tx` sees them: counted, charged to `budget`, then
+    /// copied into exactly the reserved capacity (PC-17).
     fn load(&self, tx: &Transaction<'_>, budget: &QueryBudget) -> Result<Pin> {
         budget.check().map_err(budget_exceeded)?;
         let generation = tx
@@ -110,83 +220,199 @@ impl Catalog {
                 |r| uint(r, 0),
             )
             .sql()?;
-        let (rows, bytes) = tx
-            .query_row(
-                "SELECT (SELECT count(*) FROM cat_extent WHERE retired_at IS NULL)
-                        + (SELECT count(*) FROM cat_sediment),
-                        (SELECT COALESCE(sum(length(payload)), 0) FROM cat_sediment)",
-                [],
-                |r| Ok((uint(r, 0)?, uint(r, 1)?)),
-            )
-            .sql()?;
-        let per_row =
-            u64::try_from(size_of::<SedimentRow>().max(size_of::<ExtentRef>())).unwrap_or(u64::MAX);
-        let charge = rows.saturating_mul(per_row).saturating_add(bytes);
-        let copy = budget.reserve(charge).map_err(budget_exceeded)?;
+        let plan = CopyPlan::count(tx, &self.kbx)?;
+        let copy = budget.reserve(plan.charge).map_err(budget_exceeded)?;
+        let kbx = self.kbx.clone();
+        let extents = self.copy_extents(tx, budget, &plan.extents)?;
+        let sediment = self.copy_sediment(tx, budget, &plan.sediment)?;
+        budget.check().map_err(budget_exceeded)?;
         Ok(Pin {
             generation: Generation(generation),
-            kbx: self.kbx.clone(),
-            extents: live_extents(tx)?,
-            sediment: sediment(tx)?,
+            kbx,
+            extents,
+            sediment,
             _copy: copy,
         })
     }
-}
 
-fn class_of(idx: usize, name: &str) -> rusqlite::Result<ExtentClass> {
-    ExtentClass::parse(name).ok_or_else(|| bad_enum(idx, name))
-}
-
-fn sediment(tx: &Transaction<'_>) -> Result<BTreeMap<ExtentClass, Vec<SedimentRow>>> {
-    let mut out: BTreeMap<ExtentClass, Vec<SedimentRow>> = BTreeMap::new();
-    let mut stmt = tx
-        .prepare("SELECT seq, class, payload FROM cat_sediment ORDER BY seq")
-        .sql()?;
-    let rows = stmt
-        .query_map([], |r| {
-            Ok(SedimentRow {
-                seq: SedimentSeq(uint(r, 0)?),
-                class: class_of(1, &r.get::<_, String>(1)?)?,
-                payload: r.get(2)?,
-            })
-        })
-        .sql()?;
-    for row in rows {
-        let row = row.sql()?;
-        out.entry(row.class).or_default().push(row);
+    fn copy_sediment(
+        &self,
+        tx: &Transaction<'_>,
+        budget: &QueryBudget,
+        counts: &[usize; ExtentClass::COUNT],
+    ) -> Result<ByClass<SedimentRow>> {
+        let mut out = ByClass::with_capacities(counts);
+        let mut stmt = tx
+            .prepare("SELECT seq, class, payload FROM cat_sediment ORDER BY seq")
+            .sql()?;
+        let mut rows = stmt.query([]).sql()?;
+        let mut n = 0;
+        while let Some(r) = rows.next().sql()? {
+            self.copying(budget, n)?;
+            let class = class_of(r, 1).sql()?;
+            let row = SedimentRow {
+                seq: SedimentSeq(uint(r, 0).sql()?),
+                class,
+                payload: r.get(2).sql()?,
+            };
+            out.push(class, row)?;
+            n += 1;
+        }
+        Ok(out)
     }
-    Ok(out)
-}
 
-fn live_extents(tx: &Transaction<'_>) -> Result<BTreeMap<ExtentClass, Vec<ExtentRef>>> {
-    let mut out: BTreeMap<ExtentClass, Vec<ExtentRef>> = BTreeMap::new();
-    let mut stmt = tx
-        .prepare(
-            "SELECT class, generation, kbx_offset, kbx_len, relpath FROM cat_extent
-             WHERE retired_at IS NULL ORDER BY id",
-        )
-        .sql()?;
-    let rows = stmt
-        .query_map([], |r| {
-            let location = match r.get::<_, Option<String>>(4)? {
+    fn copy_extents(
+        &self,
+        tx: &Transaction<'_>,
+        budget: &QueryBudget,
+        counts: &[usize; ExtentClass::COUNT],
+    ) -> Result<ByClass<ExtentRef>> {
+        let mut out = ByClass::with_capacities(counts);
+        let mut stmt = tx
+            .prepare(
+                "SELECT class, generation, kbx_offset, kbx_len, relpath FROM cat_extent
+                 WHERE retired_at IS NULL ORDER BY id",
+            )
+            .sql()?;
+        let mut rows = stmt.query([]).sql()?;
+        let mut n = 0;
+        while let Some(r) = rows.next().sql()? {
+            self.copying(budget, n)?;
+            let class = class_of(r, 0).sql()?;
+            let location = match r.get::<_, Option<String>>(4).sql()? {
                 Some(relpath) => ExtentLocation::File { relpath },
                 None => ExtentLocation::Kbx {
-                    offset: uint(r, 2)?,
-                    len: uint(r, 3)?,
+                    offset: uint(r, 2).sql()?,
+                    len: uint(r, 3).sql()?,
                 },
             };
-            Ok(ExtentRef {
-                class: class_of(0, &r.get::<_, String>(0)?)?,
-                generation: Generation(uint(r, 1)?),
+            let row = ExtentRef {
+                class,
+                generation: Generation(uint(r, 1).sql()?),
                 location,
-            })
-        })
-        .sql()?;
-    for row in rows {
-        let row = row.sql()?;
-        out.entry(row.class).or_default().push(row);
+            };
+            out.push(class, row)?;
+            n += 1;
+        }
+        Ok(out)
     }
-    Ok(out)
+
+    /// Before copying row `n` of a loop: the budget check of every [`CHECK_EVERY`]th row.
+    #[cfg_attr(not(test), expect(clippy::unused_self, reason = "a unit test observes the copy"))]
+    fn copying(&self, budget: &QueryBudget, n: usize) -> Result<()> {
+        #[cfg(test)]
+        self.copied(n);
+        if n % CHECK_EVERY == 0 {
+            budget.check().map_err(budget_exceeded)?;
+        }
+        Ok(())
+    }
+}
+
+/// The counted rows of a pin and the charge of the allocations it will keep.
+#[derive(Debug)]
+struct CopyPlan {
+    extents: [usize; ExtentClass::COUNT],
+    sediment: [usize; ExtentClass::COUNT],
+    charge: u64,
+}
+
+impl CopyPlan {
+    /// Count what `tx` holds and charge every allocation of the copy by the budget's rule for
+    /// one allocation ([`QueryBudget::allocation_charge`]): the container path's clone, one
+    /// vector per class at its exact capacity, and each payload and cold path. Every copied
+    /// string and blob is allocated at exactly its length.
+    fn count(tx: &Transaction<'_>, kbx: &Path) -> Result<Self> {
+        let mut plan = Self {
+            extents: [0; ExtentClass::COUNT],
+            sediment: [0; ExtentClass::COUNT],
+            charge: allocation(kbx.as_os_str().len(), 1)?,
+        };
+        plan.count_class_rows(
+            tx,
+            "SELECT class, count(*), COALESCE(sum(length(payload)), 0),
+                    COALESCE(sum(length(payload) > 0), 0)
+             FROM cat_sediment GROUP BY class",
+            Rows::Sediment,
+        )?;
+        plan.count_class_rows(
+            tx,
+            "SELECT class, count(*), COALESCE(sum(length(CAST(relpath AS BLOB))), 0),
+                    COALESCE(sum(length(CAST(relpath AS BLOB)) > 0), 0)
+             FROM cat_extent WHERE retired_at IS NULL GROUP BY class",
+            Rows::Extents,
+        )?;
+        Ok(plan)
+    }
+
+    /// Add the rows `sql` counts per class (`class, rows, variable bytes, variable
+    /// allocations`) to the plan.
+    fn count_class_rows(&mut self, tx: &Transaction<'_>, sql: &str, rows: Rows) -> Result<()> {
+        let mut stmt = tx.prepare(sql).sql()?;
+        let mut counted = stmt.query([]).sql()?;
+        while let Some(r) = counted.next().sql()? {
+            let class = class_of(r, 0).sql()?;
+            let n = usize::try_from(uint(r, 1).sql()?).map_err(too_large)?;
+            let (bytes, allocations) = (uint(r, 2).sql()?, uint(r, 3).sql()?);
+            let (slot, element) = match rows {
+                Rows::Sediment => (
+                    &mut self.sediment[class.index()],
+                    (size_of::<SedimentRow>(), align_of::<SedimentRow>()),
+                ),
+                Rows::Extents => (
+                    &mut self.extents[class.index()],
+                    (size_of::<ExtentRef>(), align_of::<ExtentRef>()),
+                ),
+            };
+            *slot = n;
+            let vector = allocation(n.checked_mul(element.0).ok_or_else(overflow)?, element.1)?;
+            let variable = allocations
+                .checked_mul(ALLOCATION_METADATA_BYTES)
+                .and_then(|m| m.checked_add(bytes))
+                .ok_or_else(overflow)?;
+            self.charge = self
+                .charge
+                .checked_add(vector)
+                .and_then(|c| c.checked_add(variable))
+                .ok_or_else(overflow)?;
+        }
+        Ok(())
+    }
+}
+
+/// Which rows a count covers.
+#[derive(Debug, Clone, Copy)]
+enum Rows {
+    Sediment,
+    Extents,
+}
+
+/// The charge of one allocation of `bytes` at `align`; nothing for an empty one (no
+/// allocation is made).
+fn allocation(bytes: usize, align: usize) -> Result<u64> {
+    if bytes == 0 {
+        return Ok(0);
+    }
+    let bytes = u64::try_from(bytes).map_err(too_large)?;
+    let align = u64::try_from(align).map_err(too_large)?;
+    QueryBudget::allocation_charge(bytes, align).map_err(budget_exceeded)
+}
+
+fn overflow() -> StoreError {
+    budget_exceeded(BudgetExceeded {
+        limit: kaban_core::query_budget::Limit::Memory,
+        value: u64::MAX,
+    })
+}
+
+fn too_large(_: std::num::TryFromIntError) -> StoreError {
+    overflow()
+}
+
+/// The class column `idx` of `row` names, read in place (no transient string).
+fn class_of(row: &Row<'_>, idx: usize) -> rusqlite::Result<ExtentClass> {
+    let name = row.get_ref(idx)?.as_str()?;
+    ExtentClass::parse(name).ok_or_else(|| bad_enum(idx, name))
 }
 
 fn budget_exceeded(e: BudgetExceeded) -> StoreError {

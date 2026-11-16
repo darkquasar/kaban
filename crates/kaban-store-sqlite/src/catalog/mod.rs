@@ -55,7 +55,14 @@ pub(crate) struct Catalog {
     /// A unit test's derived-row hook ([`Self::set_test_derived_rows`]).
     #[cfg(test)]
     test_derived: std::sync::Mutex<Option<commit::TestDerivedRows>>,
+    /// A unit test's observer of every row a pin copies ([`Self::set_test_copy_hook`]).
+    #[cfg(test)]
+    test_copy: std::sync::Mutex<Option<TestCopyHook>>,
 }
+
+/// A unit test's observer of the rows a pin copies, by copy index.
+#[cfg(test)]
+pub(crate) type TestCopyHook = Box<dyn Fn(usize) + Send>;
 
 impl std::fmt::Debug for Catalog {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -121,6 +128,8 @@ impl Catalog {
             phases: Arc::new(phase::Phases::default()),
             #[cfg(test)]
             test_derived: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            test_copy: std::sync::Mutex::new(None),
         }
     }
 
@@ -132,6 +141,25 @@ impl Catalog {
         phase::guard_phases(conn, &self.phases)?;
         commit::guard_writer(conn, &self.committing)?;
         Ok(self)
+    }
+
+    /// Install a unit test's observer of every row a pin copies.
+    #[cfg(test)]
+    pub(crate) fn set_test_copy_hook(&self, hook: TestCopyHook) {
+        *self.test_copy.lock().unwrap_or_else(PoisonError::into_inner) = Some(hook);
+    }
+
+    /// Tell the unit test's observer that a pin copied row `n`.
+    #[cfg(test)]
+    fn copied(&self, n: usize) {
+        if let Some(hook) = self
+            .test_copy
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+        {
+            hook(n);
+        }
     }
 
     /// Add an index class; every later commit stages it.

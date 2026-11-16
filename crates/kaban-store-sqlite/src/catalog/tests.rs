@@ -377,3 +377,255 @@ fn a_later_failing_class_rolls_back_an_earlier_class_s_staging_and_its_generatio
         1
     );
 }
+
+/// Commit `rows` sediment rows of the test class at generation 1, as a writer would.
+fn sediment_rows(store: &SqliteStore, rows: usize) {
+    store
+        .catalog()
+        .commit(&mut store.lock(), Durability::Normal, |txn| {
+            let conn = txn.conn();
+            let backend = |e| StoreError::Backend {
+                source: kaban_core::BackendSource::new(e),
+            };
+            conn.execute("INSERT INTO cat_generation(generation) VALUES (1)", [])
+                .map_err(backend)?;
+            for i in 0..rows {
+                conn.execute(
+                    "INSERT INTO cat_sediment(class, generation, payload) VALUES ('test', 1, ?1)",
+                    [format!("row {i}").into_bytes()],
+                )
+                .map_err(backend)?;
+            }
+            Ok(())
+        })
+        .unwrap();
+}
+
+/// The budget limit `err` reports, if it is a budget error.
+fn budget_limit(err: &StoreError) -> Option<kaban_core::query_budget::Limit> {
+    let StoreError::Backend { source } = err else {
+        return None;
+    };
+    let limit = source
+        .driver()
+        .downcast_ref::<kaban_core::query_budget::BudgetExceeded>()
+        .map(|e| e.limit);
+    if limit.is_none() {
+        eprintln!("not a budget error: {}", source.driver());
+    }
+    limit
+}
+
+#[test]
+fn a_pin_cancelled_while_copying_returns_the_budget_error_and_releases_everything() {
+    use kaban_core::query_budget::{Limit, QueryBudget};
+
+    // Arrange: enough rows for several check intervals; the budget is cancelled at row 10
+    let store = SqliteStore::open_memory().unwrap();
+    sediment_rows(&store, 3000);
+    let budget = QueryBudget::new(u64::MAX, None);
+    let cancel = budget.clone();
+    store.catalog().set_test_copy_hook(Box::new(move |n| {
+        if n == 10 {
+            cancel.cancel();
+        }
+    }));
+
+    // Act
+    let out = store.catalog().pin(&mut store.lock(), &budget);
+
+    // Assert
+    let err = out.expect_err("a cancelled copy produced a pin");
+    assert_eq!(budget_limit(&err), Some(Limit::Cancelled), "{err:?}");
+    assert_eq!(budget.live_bytes(), 0, "the copy's reservation outlived it");
+    assert!(store.lock().is_autocommit(), "the pin's transaction outlived it");
+}
+
+#[test]
+fn a_snapshot_whose_callback_cancels_the_budget_returns_the_budget_error() {
+    use kaban_core::query_budget::{Limit, QueryBudget};
+
+    // Arrange
+    let store = SqliteStore::open_memory().unwrap();
+    sediment_rows(&store, 3);
+    let budget = QueryBudget::new(u64::MAX, None);
+
+    // Act: the callback cancels and still returns Ok
+    let out = store
+        .catalog()
+        .with_snapshot(&mut store.lock(), &budget, |_, _| {
+            budget.cancel();
+            Ok(7)
+        });
+
+    // Assert
+    let err = out.expect_err("the cancelled snapshot reported success");
+    assert_eq!(budget_limit(&err), Some(Limit::Cancelled), "{err:?}");
+    assert_eq!(budget.live_bytes(), 0);
+    assert!(store.lock().is_autocommit());
+}
+
+#[test]
+fn a_long_statement_in_a_cancelled_snapshot_is_interrupted() {
+    use kaban_core::query_budget::{Limit, QueryBudget};
+
+    // Arrange: a statement that runs for seconds and returns one row
+    let store = SqliteStore::open_memory().unwrap();
+    let budget = QueryBudget::new(u64::MAX, None);
+    let started = std::time::Instant::now();
+
+    // Act: cancel, then run it inside the snapshot
+    let out = store
+        .catalog()
+        .with_snapshot(&mut store.lock(), &budget, |tx, _| {
+            budget.cancel();
+            tx.query_row(
+                "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 20000000)
+                 SELECT count(*) FROM c",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .map_err(|e| StoreError::Backend {
+                source: kaban_core::BackendSource::new(e),
+            })
+        });
+
+    // Assert: the budget error, well before the statement could finish
+    let elapsed = started.elapsed();
+    let err = out.expect_err("the cancelled statement ran to completion");
+    assert_eq!(budget_limit(&err), Some(Limit::Cancelled), "{err:?}");
+    assert!(
+        elapsed < std::time::Duration::from_secs(1),
+        "the statement was not interrupted: {elapsed:?}"
+    );
+}
+
+/// A file-backed store in a fresh scratch directory (the pin clones its container path).
+struct FileStore {
+    dir: std::path::PathBuf,
+    store: SqliteStore,
+}
+
+impl FileStore {
+    fn new(name: &str) -> Self {
+        let dir = std::env::temp_dir().join(format!(
+            "kaban-t5d-unit-{}-{name}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = SqliteStore::open(&dir.join("kaban.db"), &dir.join("keys")).unwrap();
+        Self { dir, store }
+    }
+}
+
+impl Drop for FileStore {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// Commit `rows` sediment rows of each of `classes` with payloads of `len` bytes, and
+/// `files` cold extents of `class`, all at generation 1.
+fn catalog_rows(store: &SqliteStore, classes: &[&str], rows: usize, len: usize, files: usize) {
+    store
+        .catalog()
+        .commit(&mut store.lock(), Durability::Normal, |txn| {
+            let conn = txn.conn();
+            let backend = |e| StoreError::Backend {
+                source: kaban_core::BackendSource::new(e),
+            };
+            conn.execute("INSERT INTO cat_generation(generation) VALUES (1)", [])
+                .map_err(backend)?;
+            for class in classes {
+                for _ in 0..rows {
+                    conn.execute(
+                        "INSERT INTO cat_sediment(class, generation, payload) VALUES (?1, 1, ?2)",
+                        rusqlite::params![class, vec![7_u8; len]],
+                    )
+                    .map_err(backend)?;
+                }
+                for i in 0..files {
+                    conn.execute(
+                        "INSERT INTO cat_extent(class, generation, relpath) VALUES (?1, 1, ?2)",
+                        rusqlite::params![class, format!("cold/{class}-{i}.seg")],
+                    )
+                    .map_err(backend)?;
+                }
+            }
+            Ok(())
+        })
+        .unwrap();
+}
+
+/// What the pin retains, charged by the budget's own rule for one allocation.
+fn retained_charge(pin: &Pin) -> u64 {
+    pin.retained_allocations()
+        .into_iter()
+        .map(|(bytes, align)| {
+            kaban_core::query_budget::QueryBudget::allocation_charge(
+                bytes as u64,
+                align as u64,
+            )
+            .unwrap()
+        })
+        .sum()
+}
+
+#[test]
+fn a_pin_reserves_every_allocation_it_retains_before_it_copies() {
+    use kaban_core::query_budget::{Limit, QueryBudget};
+
+    let cases: Vec<(&str, Vec<&str>, usize, usize, usize)> = vec![
+        ("empty", vec![], 0, 0, 0),
+        ("one small row", vec!["test"], 1, 1, 0),
+        ("several classes", vec!["test", "text_tier", "graph_base"], 3, 2, 1),
+        ("growth 4", vec!["test"], 4, 1, 0),
+        ("growth 5", vec!["test"], 5, 1, 0),
+        ("growth 9", vec!["code_base", "test"], 9, 0, 5),
+        ("growth 17", vec!["test"], 17, 3, 0),
+    ];
+    for (name, classes, rows, len, files) in cases {
+        // Arrange
+        let fs = FileStore::new(&name.replace(' ', "-"));
+        let store = &fs.store;
+        catalog_rows(store, &classes, rows, len, files);
+        let copied = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = Arc::clone(&copied);
+        store.catalog().set_test_copy_hook(Box::new(move |_| {
+            seen.fetch_add(1, Ordering::SeqCst);
+        }));
+
+        // Act: an unbounded pin tells the charge, held while it is measured
+        let open = QueryBudget::new(u64::MAX, None);
+        let pin = store.catalog().pin(&mut store.lock(), &open).unwrap();
+        let charge = open.live_bytes();
+
+        // Assert: every retained allocation is paid for, and the charge returns on drop
+        assert!(
+            charge >= retained_charge(&pin),
+            "{name}: charged {charge}, retains {}",
+            retained_charge(&pin)
+        );
+        drop(pin);
+        assert_eq!(open.live_bytes(), 0, "{name}: the charge outlived the pin");
+
+        // Act: exactly the charge admits, one byte less refuses before any row is copied
+        let at = QueryBudget::new(charge, None);
+        let pinned = store.catalog().pin(&mut store.lock(), &at);
+        assert!(pinned.is_ok(), "{name}: refused at its own charge {charge}");
+        drop(pinned);
+        assert_eq!(at.live_bytes(), 0);
+        if charge > 0 {
+            copied.store(0, Ordering::SeqCst);
+            let below = QueryBudget::new(charge - 1, None);
+            let err = store.catalog().pin(&mut store.lock(), &below).unwrap_err();
+            assert_eq!(budget_limit(&err), Some(Limit::Memory), "{name}: {err:?}");
+            assert_eq!(copied.load(Ordering::SeqCst), 0, "{name}: copied before refusing");
+            assert_eq!(below.live_bytes(), 0, "{name}: a refusal kept a charge");
+        } else {
+            panic!("{name}: a file-backed pin retains its container path, yet charged nothing");
+        }
+        assert!(store.lock().is_autocommit());
+    }
+}
