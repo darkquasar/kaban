@@ -139,7 +139,7 @@ impl SqliteStore {
              VALUES (?,?,?,?,?,?,?,'active',?,?,?,?,?,?,?,?,?,?,?,?)",
             params![id, stored_kind, bodies.stored(&n.text), n.summary, tags, n.confidence, n.importance, n.store_scope.as_str(), path_scope, n.dup_key, n.repo, now, now, n.valid_from, n.session_id, n.agent_id, tenant.ws, props, hash],
         ).sql()?;
-        let rid = conn.last_insert_rowid();
+        let rid = addressable_rid(conn)?;
         Self::maintain_anchors(conn, tenant, rid, stored_kind, n)?;
         Ok(id)
     }
@@ -284,7 +284,7 @@ impl SqliteStore {
                      VALUES (?,?,?,?,?,?,?,'active',?,?,?,?,?,?,?,?,?,?,?,?)",
                     params![id.as_str(), stored_kind, bodies.stored(&n.text), n.summary, tags, n.confidence, n.importance, n.store_scope.as_str(), path_scope, n.dup_key, n.repo, now, now, n.valid_from, n.session_id, n.agent_id, ws, props, hash],
                 ).sql()?;
-                let rid = conn.last_insert_rowid();
+                let rid = addressable_rid(conn)?;
                 report.record(id, stored_kind, OutcomeKind::Inserted);
                 rid
             }
@@ -431,4 +431,17 @@ fn ignored_fields(req: &NewNode, stored: &Node) -> Vec<String> {
         out.push("props".into());
     }
     out
+}
+
+/// The row id of the node row `conn` just inserted, refused as
+/// [`StoreError::NodeIdCeiling`] above `u32::MAX`, the graph's local id space (spec 11 PC-1).
+/// Every node insert takes its row id here, inside its write transaction, so a refusal rolls
+/// the whole write back, the row-id sequence with it.
+fn addressable_rid(conn: &Connection) -> Result<i64> {
+    let rid = conn.last_insert_rowid();
+    if u32::try_from(rid).is_ok() {
+        Ok(rid)
+    } else {
+        Err(StoreError::NodeIdCeiling { max: u32::MAX })
+    }
 }

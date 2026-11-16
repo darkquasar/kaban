@@ -338,3 +338,118 @@ fn workspace_id_is_not_null_on_exactly_the_tenant_scoped_tables() {
         "F17 (PR-6): DB-scoped bookkeeping tables carry no workspace column"
     );
 }
+
+/// Seed the node row-id sequence so the next insert gets `next`.
+fn seed_next_rid(db: &Path, next: i64) {
+    let raw = rusqlite::Connection::open(db).unwrap();
+    let updated = raw
+        .execute(
+            "UPDATE sqlite_sequence SET seq = ?1 WHERE name = 'node'",
+            [next - 1],
+        )
+        .unwrap();
+    assert_eq!(updated, 1, "the node table has a sequence row");
+}
+
+/// The node row-id sequence and the number of node rows.
+fn sequence_and_rows(db: &Path) -> (i64, i64) {
+    let raw = rusqlite::Connection::open(db).unwrap();
+    let seq = raw
+        .query_row(
+            "SELECT seq FROM sqlite_sequence WHERE name = 'node'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let rows = raw
+        .query_row("SELECT count(*) FROM node", [], |r| r.get(0))
+        .unwrap();
+    (seq, rows)
+}
+
+/// A store whose next node insert gets row id `u32::MAX`, the last one the graph can address.
+fn at_the_ceiling(s: &Scratch) {
+    {
+        let store = SqliteStore::open(&s.db(), &s.keys()).unwrap();
+        created(&store, "Fact", "the row that starts the sequence");
+    }
+    seed_next_rid(&s.db(), i64::from(u32::MAX));
+}
+
+fn note(text: &str) -> kaban_core::NewNode {
+    kaban_core::NewNode {
+        kind: "Fact".into(),
+        text: text.into(),
+        ..Default::default()
+    }
+}
+
+/// PC-1: the last addressable row id is handed out; the next `remember` is refused by name
+/// and rolls back, leaving the sequence and every row as they were.
+#[test]
+fn a_remember_past_the_local_id_ceiling_is_refused_and_rolled_back() {
+    let s = Scratch::new("kaban-migrate", "ceiling-remember");
+    at_the_ceiling(&s);
+    let store = SqliteStore::open(&s.db(), &s.keys()).unwrap();
+    let last = created(&store, "Fact", "the last addressable row");
+    assert_eq!(rid_of(&s.db(), &last.id), i64::from(u32::MAX));
+    let before = sequence_and_rows(&s.db());
+
+    let err = store
+        .remember(note("one row too many"), &[], &ctx())
+        .unwrap_err();
+
+    assert!(
+        matches!(err, StoreError::NodeIdCeiling { max } if max == u32::MAX),
+        "{err:?}"
+    );
+    assert!(err.to_string().contains(&u32::MAX.to_string()), "{err}");
+    assert_eq!(sequence_and_rows(&s.db()), before);
+}
+
+/// PC-1: a `remember` whose attached reference would cross the ceiling is refused and the
+/// note it carried is rolled back with it.
+#[test]
+fn a_remember_whose_reference_crosses_the_ceiling_rolls_back_the_note_too() {
+    let s = Scratch::new("kaban-migrate", "ceiling-refs");
+    at_the_ceiling(&s);
+    let before = sequence_and_rows(&s.db());
+    let store = SqliteStore::open(&s.db(), &s.keys()).unwrap();
+    let code_ref = kaban_core::NewNode {
+        kind: "CodeRef".into(),
+        text: "src/past_the_ceiling.rs".into(),
+        ..Default::default()
+    };
+
+    let err = store
+        .remember_with(note("a note at the ceiling"), &[], &[code_ref], &ctx())
+        .unwrap_err();
+
+    assert!(matches!(err, StoreError::NodeIdCeiling { .. }), "{err:?}");
+    assert_eq!(sequence_and_rows(&s.db()), before);
+}
+
+/// PC-1: a batch whose second insert would cross the ceiling is refused whole: its first
+/// insert, which got the last addressable id, is rolled back too.
+#[test]
+fn a_batch_crossing_the_ceiling_is_refused_whole() {
+    use kaban_core::{IngestStore, NodeId, Op, WorkspaceId, WriteBatch};
+    let s = Scratch::new("kaban-migrate", "ceiling-batch");
+    at_the_ceiling(&s);
+    let before = sequence_and_rows(&s.db());
+    let store = SqliteStore::open(&s.db(), &s.keys()).unwrap();
+    let ops = ["first in the batch", "second in the batch"]
+        .into_iter()
+        .map(|text| Op::UpsertNode {
+            id: NodeId::new(),
+            node: note(text),
+        })
+        .collect();
+
+    let err = store
+        .apply_batch(WriteBatch::new(WorkspaceId::default(), ops), &ctx())
+        .unwrap_err();
+
+    assert!(matches!(err, StoreError::NodeIdCeiling { .. }), "{err:?}");
+    assert_eq!(sequence_and_rows(&s.db()), before);
+}

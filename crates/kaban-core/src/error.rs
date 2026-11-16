@@ -151,6 +151,16 @@ pub enum StoreError {
         /// The one version this binary serves.
         supported: u32,
     },
+    /// A new node would get a row id above `max`, the highest local id the graph can address
+    /// (spec 11 PC-1: `node.rid` is the graph's `u32` local id). The whole write was rolled
+    /// back; row ids are never reused, so the project cannot take more nodes.
+    #[error(
+        "the database has used every node id the graph can address (the highest is {max}); create a fresh project and re-ingest"
+    )]
+    NodeIdCeiling {
+        /// The highest node row id the graph can address.
+        max: u32,
+    },
     /// Another process holds the database open and this store cannot share one between
     /// processes (spec 05 SS-23: the shared open, mode B, is refused). Nothing was opened.
     #[error(
@@ -273,6 +283,9 @@ impl std::fmt::Debug for StoreError {
                 .debug_struct("NotAKabanProject")
                 .field("supported", supported)
                 .finish(),
+            Self::NodeIdCeiling { max } => {
+                f.debug_struct("NodeIdCeiling").field("max", max).finish()
+            }
             Self::SharedOpenUnsupported => f.write_str("SharedOpenUnsupported"),
             Self::ExclusiveMaintenance => f.write_str("ExclusiveMaintenance"),
             Self::SnapshotMismatch => f.write_str("SnapshotMismatch"),
