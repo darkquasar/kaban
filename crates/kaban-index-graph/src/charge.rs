@@ -2,9 +2,11 @@
 //! the caller's [`QueryBudget`] before it is allocated, and the charge lives as long as the
 //! collection that owns it.
 
+use std::cell::Cell;
 use std::convert::Infallible;
+use std::sync::atomic::{AtomicU64, Ordering};
 
-use kaban_core::query_budget::{BudgetLease, GrowError, QueryBudget};
+use kaban_core::query_budget::{BudgetExceeded, BudgetLease, GrowError, QueryBudget};
 
 use crate::error::GraphError;
 use crate::view::BUDGET_CHECK_INTERVAL;
@@ -229,25 +231,112 @@ impl<T> std::ops::DerefMut for Grow<'_, T> {
     }
 }
 
-/// Checks the budget once every [`BUDGET_CHECK_INTERVAL`] units of work of a loop that does not
-/// read through the accessor (which checks on its own).
+/// Metered work units done in this process so far (instrumentation): every unit counted by a
+/// budgeted [`Ticker`], published at its interval boundaries and when it is dropped.
+static WORK_UNITS: AtomicU64 = AtomicU64::new(0);
+
+/// Metered units of query work done in this process so far, for tests and diagnostics of the
+/// bounded-work contract (PC-17).
+///
+/// A unit is one bounded step of query work: one source entry advanced or compared in a merge,
+/// one bitvector word visited, one cursor prepared, one loop iteration of a structural function,
+/// one decoded record, one validated entry or one sort step. Every budgeted loop of this crate
+/// counts its units here; the count is published every [`BUDGET_CHECK_INTERVAL`] units and when
+/// the counting loop ends, so it can lag the work by less than one interval per live loop. The
+/// counter is process-wide: concurrent queries add to the same count.
+#[must_use]
+pub fn work_units() -> u64 {
+    WORK_UNITS.load(Ordering::SeqCst)
+}
+
+/// Counts units of work and checks the budget once every [`BUDGET_CHECK_INTERVAL`] units,
+/// starting before the first unit. A ticker without a budget (writer paths) neither checks nor
+/// publishes.
+///
+/// Iterator sources that cannot return an error use [`Ticker::step`]: once a check fails the
+/// ticker remembers the breach, every later step refuses, and the owning loop reports the breach
+/// from [`Ticker::stopped`].
 #[derive(Debug)]
 pub(crate) struct Ticker<'b> {
-    budget: &'b QueryBudget,
-    work: u64,
+    budget: Option<&'b QueryBudget>,
+    units: Cell<u64>,
+    published: Cell<u64>,
+    failed: Cell<Option<BudgetExceeded>>,
 }
 
 impl<'b> Ticker<'b> {
     pub(crate) fn new(budget: &'b QueryBudget) -> Self {
-        Self { budget, work: 0 }
+        Self::maybe(Some(budget))
     }
 
-    /// One unit of work; at every interval boundary the budget is checked.
-    pub(crate) fn tick(&mut self) -> Result<(), GraphError> {
-        self.work += 1;
-        if self.work.is_multiple_of(BUDGET_CHECK_INTERVAL) {
-            self.budget.check()?;
+    /// A ticker on `budget`, or an unmetered one for writer paths.
+    pub(crate) fn maybe(budget: Option<&'b QueryBudget>) -> Self {
+        Self {
+            budget,
+            units: Cell::new(0),
+            published: Cell::new(0),
+            failed: Cell::new(None),
         }
+    }
+
+    /// An unmetered ticker (writer paths): it never refuses.
+    pub(crate) fn unmetered() -> Ticker<'static> {
+        Ticker::maybe(None)
+    }
+
+    /// One unit of work; at every interval boundary (and before the first unit) the budget is
+    /// checked.
+    pub(crate) fn tick(&self) -> Result<(), GraphError> {
+        if let Some(e) = self.failed.get() {
+            return Err(e.into());
+        }
+        let units = self.units.get();
+        if units.is_multiple_of(BUDGET_CHECK_INTERVAL) {
+            self.publish();
+            if let Some(budget) = self.budget
+                && let Err(e) = budget.check()
+            {
+                self.failed.set(Some(e));
+                return Err(e.into());
+            }
+        }
+        self.units.set(units + 1);
         Ok(())
+    }
+
+    /// [`Ticker::tick`] for sources that cannot return an error: `false` once the budget refused.
+    pub(crate) fn step(&self) -> bool {
+        self.tick().is_ok()
+    }
+
+    /// Count one unit without checking (instrumentation only).
+    pub(crate) fn count(&self) {
+        let units = self.units.get();
+        if units.is_multiple_of(BUDGET_CHECK_INTERVAL) {
+            self.publish();
+        }
+        self.units.set(units + 1);
+    }
+
+    /// The breach a failed step recorded, if any.
+    pub(crate) fn stopped(&self) -> Result<(), GraphError> {
+        match self.failed.get() {
+            Some(e) => Err(e.into()),
+            None => Ok(()),
+        }
+    }
+
+    fn publish(&self) {
+        if self.budget.is_some() {
+            let units = self.units.get();
+            WORK_UNITS.fetch_add(units - self.published.get(), Ordering::SeqCst);
+            self.published.set(units);
+        }
+    }
+}
+
+impl Drop for Ticker<'_> {
+    fn drop(&mut self) {
+        self.publish();
     }
 }

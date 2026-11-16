@@ -13,10 +13,10 @@ use kaban_index_graph::{
     Attr, Base, Caps, Direction, EdgeOp, GraphError, Layer, LocalId, NodeOp, OpKind, Reached,
     Records, RelId, RelSelection, RowCap, View, build_base, closure, common_neighbours, degree,
     expand, meet, reachable, refuse_not_planned, reverse_closure, seal, shortest_path, topo_order,
-    wcc,
+    wcc, work_units,
 };
 use oracle::structural::{Expected, Graph};
-use oracle::{Fixture, IDS, Rng, budget, chain, view};
+use oracle::{Fixture, IDS, Rng, budget, chain, serial, view};
 use tantivy::directory::OwnedBytes;
 
 const SEEDS: u64 = 6;
@@ -503,6 +503,7 @@ fn is_missing(r: &Result<impl std::fmt::Debug, GraphError>, limit: &str) -> bool
 
 #[test]
 fn a_missing_cap_is_refused_before_any_neighbour_access() {
+    let _serial = serial();
     let rs = hub_view_records(50);
     let v = view(None, &[], &rs);
     let b = budget();
@@ -514,7 +515,7 @@ fn a_missing_cap_is_refused_before_any_neighbour_access() {
         (caps(3, 0), "rows"),
         (caps(0, 0), "depth"),
     ] {
-        let before = v.raw_reads();
+        let before = work_units();
         assert!(is_missing(
             &expand(&v, &src, &all, Direction::Both, bad, &b),
             limit
@@ -525,21 +526,23 @@ fn a_missing_cap_is_refused_before_any_neighbour_access() {
         assert!(is_missing(&shortest_path(&v, a, z, &all, bad, &b), limit));
         assert!(is_missing(&meet(&v, a, z, &all, bad, &b), limit));
         assert!(is_missing(&topo_order(&v, &src, &all, bad, &b), limit));
-        assert_eq!(v.raw_reads(), before, "{bad:?}: no raw read");
+        assert_eq!(work_units(), before, "{bad:?}: no raw read");
     }
-    let before = v.raw_reads();
+    let before = work_units();
     assert!(is_missing(&wcc(&v, &all, RowCap(0), &b), "rows"));
-    assert_eq!(v.raw_reads(), before, "RowCap(0): no raw read");
+    assert_eq!(work_units(), before, "RowCap(0): no raw read");
     // Sanity: the same calls with caps do read.
     expand(&v, &src, &all, Direction::Out, caps(1, 10), &b).unwrap();
-    assert!(v.raw_reads() > before);
+    assert!(work_units() > before);
 }
 
 #[test]
 fn a_hub_cannot_widen_a_capped_expand() {
+    let _serial = serial();
     let rs = hub_view_records(10_000);
     let v = view(None, &[], &rs);
     let b = budget();
+    let start = work_units();
     let got = expand(
         &v,
         &[LocalId(0)],
@@ -549,15 +552,15 @@ fn a_hub_cannot_widen_a_capped_expand() {
         &b,
     )
     .unwrap();
+    let work = work_units() - start;
     assert_eq!(got.nodes.len(), 200);
     assert!(got.truncated);
     let want: Vec<(LocalId, u8)> = (1..=200).map(|m| (LocalId(m), 1)).collect();
     assert_eq!(got.nodes, want, "the lowest ids at the first depth");
     assert_eq!(got.edges.len(), 200, "one edge per kept node");
     assert!(
-        v.raw_reads() < 1_000,
-        "the hub list is not read past the cut: {}",
-        v.raw_reads()
+        work < 4_000,
+        "the hub list is not read past the cut: {work} units"
     );
     // Exactly the cap without more nodes is not a cut.
     let rs = hub_view_records(200);

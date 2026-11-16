@@ -21,6 +21,7 @@ use std::ops::Range;
 
 use tantivy::directory::OwnedBytes;
 
+use crate::charge::Ticker;
 use crate::error::GraphError;
 use crate::facts::{FactEntry, Facts};
 use crate::op::{Attr, OpKind, Reader, Records, column, corrupt, kind_byte, kind_from, put_len};
@@ -231,9 +232,11 @@ impl Edges {
         ))
     }
 
-    /// Touched nodes ascending.
+    /// Touched nodes ascending (writer paths: unmetered).
     pub(crate) fn touched(&self) -> impl Iterator<Item = u32> + '_ {
-        self.index.iter()
+        let mut ids = self.index.iter();
+        let t = Ticker::unmetered();
+        std::iter::from_fn(move || ids.next(&t))
     }
 }
 

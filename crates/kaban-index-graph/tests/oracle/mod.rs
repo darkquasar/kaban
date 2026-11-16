@@ -126,6 +126,15 @@ pub(crate) fn selected(rels: &RelSelection, rel: u16) -> bool {
     }
 }
 
+/// Serialises the tests of one binary that assert on [`kaban_index_graph::work_units`]: the
+/// count is process-wide, so under a threaded harness another test's work would add to it
+/// (nextest runs each test in its own process, where this lock is uncontended).
+pub(crate) fn serial() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// A budget that never refuses.
 pub(crate) fn budget() -> QueryBudget {
     QueryBudget::new(u64::MAX, None)
