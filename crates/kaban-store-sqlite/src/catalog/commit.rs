@@ -27,9 +27,9 @@ use rusqlite::{Connection, Transaction, TransactionBehavior};
 
 use super::Catalog;
 use super::capture::{self, BatchChanges};
-use super::class::ExtentClass;
-use super::phase::{Phase, Staged};
+use super::class::{ExtentClass, ExtentLocation};
 use super::kbx::Unpublished;
+use super::phase::{Phase, Staged};
 use super::tables::{ExtentId, Generation, SedimentSeq, sql_int, uint};
 use crate::sql_error::SqlResultExt;
 
@@ -52,10 +52,58 @@ impl Txn<'_> {
     ///
     /// # Errors
     /// SQLite errors.
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "publishing consumes the unpublished extent: it cannot be published twice"
+    )]
     pub(crate) fn publish(&mut self, extent: Unpublished) -> Result<ExtentId> {
-        let _ = extent;
-        Err(super::not_yet("publish"))
+        let generation = sql_int(self.generation()?.0).sql()?;
+        let (offset, len, relpath) = match &extent.location {
+            ExtentLocation::Kbx { offset, len } => (
+                Some(sql_int(*offset).sql()?),
+                Some(sql_int(*len).sql()?),
+                None,
+            ),
+            ExtentLocation::File { relpath } => (None, None, Some(relpath.as_str())),
+        };
+        let id = self
+            .tx
+            .query_row(
+                "INSERT INTO cat_extent(class, generation, kbx_offset, kbx_len, relpath)
+                 VALUES (?1, ?2, ?3, ?4, ?5) RETURNING id",
+                rusqlite::params![extent.class.as_str(), generation, offset, len, relpath],
+                |r| uint(r, 0),
+            )
+            .sql()?;
+        Ok(ExtentId(id))
     }
+
+    /// The generation this commit publishes: the one after the latest, allocated once and
+    /// shared with the staging phase (one commit publishes one generation).
+    ///
+    /// # Errors
+    /// SQLite errors.
+    pub(crate) fn generation(&mut self) -> Result<Generation> {
+        if let Some(g) = self.generation {
+            return Ok(g);
+        }
+        let g = next_generation(&self.tx)?;
+        self.generation = Some(g);
+        Ok(g)
+    }
+}
+
+/// Allocate the generation after the latest in the open transaction on `conn`.
+fn next_generation(conn: &Connection) -> Result<Generation> {
+    conn.query_row(
+        "INSERT INTO cat_generation(generation)
+           SELECT COALESCE(max(generation), 0) + 1 FROM cat_generation
+         RETURNING generation",
+        [],
+        |r| uint(r, 0),
+    )
+    .sql()
+    .map(Generation)
 }
 
 /// The derived-row hook's handle: statements over the derived tables (T13's rollups), run
@@ -117,17 +165,7 @@ impl Stage<'_> {
         if let Some(g) = self.staged.generation {
             return Ok(g);
         }
-        let g = self
-            .conn
-            .query_row(
-                "INSERT INTO cat_generation(generation)
-                   SELECT COALESCE(max(generation), 0) + 1 FROM cat_generation
-                 RETURNING generation",
-                [],
-                |r| uint(r, 0),
-            )
-            .sql()?;
-        let g = Generation(g);
+        let g = next_generation(self.conn)?;
         self.staged.generation = Some(g);
         Ok(g)
     }
@@ -181,7 +219,11 @@ impl Catalog {
         let derived = self.derived_rows(&Derived { conn: &txn.tx }, &changes);
         phase.close(&txn.tx, derived)?;
         phase.set(Phase::Stage);
-        let mut staged = Staged::default();
+        // the writer phase's publication (if any) fixed the generation the staging names
+        let mut staged = Staged {
+            generation: txn.generation,
+            first: None,
+        };
         for class in self.classes() {
             let mut handle = Stage {
                 conn: &txn.tx,

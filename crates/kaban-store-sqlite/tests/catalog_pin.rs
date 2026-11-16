@@ -25,7 +25,10 @@ fn budget() -> QueryBudget {
 
 /// `len` bytes of the nonzero `fill`.
 fn pattern(fill: u8, len: usize) -> Vec<u8> {
-    assert_ne!(fill, 0, "a pattern is never zero: zero is what reclamation writes");
+    assert_ne!(
+        fill, 0,
+        "a pattern is never zero: zero is what reclamation writes"
+    );
     vec![fill; len]
 }
 

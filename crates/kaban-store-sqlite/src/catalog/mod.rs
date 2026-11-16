@@ -33,7 +33,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, PoisonError, RwLock};
 
-use kaban_core::{Result, StoreError};
+use kaban_core::Result;
 use rusqlite::Connection;
 
 use class::{ExtentClass, IndexClass};
@@ -44,6 +44,8 @@ use crate::sql_error::SqlResultExt;
 /// The catalog of one database: its container, its reclamation mode and its index classes.
 pub(crate) struct Catalog {
     kbx: PathBuf,
+    /// The container's mapping, shared by this catalog's pins (and kept by a detached one).
+    mapping: Arc<kbx::Mapping>,
     degraded_reclamation: bool,
     classes: RwLock<Vec<Arc<dyn IndexClass>>>,
     /// Set only while [`Self::commit`] commits (and around an explicit maintenance statement,
@@ -135,6 +137,7 @@ impl Catalog {
     fn with_container(kbx: PathBuf) -> Self {
         Self {
             kbx,
+            mapping: Arc::default(),
             degraded_reclamation: false,
             classes: RwLock::new(Vec::new()),
             committing: Arc::new(AtomicBool::new(false)),
@@ -204,15 +207,13 @@ impl Catalog {
     }
 
     /// Append `bytes` to the container outside the writer lock: reserve a range under a short
-    /// `flock` on `kaban.kbx.alloc`, then `pwrite` and `fdatasync`.
+    /// `flock` on `kaban.kbx.alloc`, then `pwrite` and `fdatasync` ([`kbx::append`]). Nothing
+    /// names the bytes until a commit publishes them ([`commit::Txn::publish`]).
     ///
     /// # Errors
-    /// Always, until T5 Step 4 delivers the container writes: an unsupported-operation
-    /// `StoreError::Backend`.
-    #[expect(clippy::unused_self, reason = "T5 Step 4 writes the catalog's container")]
+    /// The container's I/O errors (`kbx::ContainerError`, a failed sync among them).
     pub(crate) fn append_extent(&self, class: ExtentClass, bytes: &[u8]) -> Result<Unpublished> {
-        let _ = (class, bytes);
-        Err(not_yet("append_extent"))
+        kbx::append(&self.kbx, class, bytes)
     }
 }
 
@@ -227,14 +228,4 @@ pub(crate) fn reclaim_floor(conn: &Connection) -> Result<u64> {
         |r| tables::uint(r, 0),
     )
     .sql()
-}
-
-/// An operation of the catalog that a later step of T5 delivers: refused, never faked.
-pub(crate) fn not_yet(op: &'static str) -> StoreError {
-    StoreError::Backend {
-        source: kaban_core::BackendSource::new(std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
-            format!("catalog {op} is not implemented yet"),
-        )),
-    }
 }

@@ -10,6 +10,7 @@
 //! statement, and a cancelled or expired budget turns any outcome into its error.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use kaban_core::query_budget::{
     ALLOCATION_METADATA_BYTES, BudgetExceeded, BudgetLease, QueryBudget,
@@ -18,9 +19,10 @@ use kaban_core::{BackendSource, Result, StoreError};
 use rusqlite::{Connection, Row, Transaction};
 use tantivy::directory::OwnedBytes;
 
+use super::Catalog;
 use super::class::{ExtentClass, ExtentLocation};
+use super::kbx::{Mapping, failed};
 use super::tables::{ExtentId, ExtentRef, Generation, SedimentRow, SedimentSeq, uint};
-use super::{Catalog, not_yet};
 use crate::rows::bad_enum;
 use crate::sql_error::SqlResultExt;
 
@@ -67,13 +69,12 @@ impl<T> ByClass<T> {
 
 /// One pinned generation: its extents and sediment by class, and the container they live in.
 #[derive(Debug)]
-#[expect(
-    dead_code,
-    reason = "T5 Step 4 and the index readers (T7, T11, T16) read the pinned extents"
-)]
 pub(crate) struct Pin {
     generation: Generation,
     kbx: PathBuf,
+    /// The container's mapping, shared with the catalog's other pins (excluded from the
+    /// copy's charge: a shared immutable mapping, PC-17).
+    mapping: Arc<Mapping>,
     extents: ByClass<ExtentRef>,
     sediment: ByClass<SedimentRow>,
     /// The copy's charge against the reader's budget, released with the pin.
@@ -97,15 +98,23 @@ impl Pin {
     pub(crate) fn sediment(&self, class: ExtentClass) -> &[SedimentRow] {
         self.sediment.get(class)
     }
-    /// The bytes of `e`: a slice of a mapping of the container.
+    /// The bytes of `e`, one of this pin's extents: a slice of the container's mapping,
+    /// re-mapped when the span lies beyond it, bounds-checked against the file. The slice is
+    /// what the pin protects: read it while the pin lives (once the pin is released,
+    /// reclamation may zero the range under a slice still held).
     ///
     /// # Errors
-    /// Always, until T5 Step 4 maps the container: an unsupported-operation
-    /// `StoreError::Backend`.
-    #[expect(clippy::unused_self, reason = "T5 Step 4 maps the pin's container")]
+    /// `kbx::ContainerError` for a span beyond the container or a container that cannot be
+    /// mapped, and for a cold extent (`ExtentLocation::File`), which this stream never reads.
     pub(crate) fn bytes(&self, e: &ExtentRef) -> Result<OwnedBytes> {
-        let _ = e;
-        Err(not_yet("Pin::bytes"))
+        match &e.location {
+            ExtentLocation::Kbx { offset, len } => self.mapping.span(&self.kbx, *offset, *len),
+            ExtentLocation::File { relpath } => Err(failed(
+                "read a cold extent outside",
+                &self.kbx,
+                std::io::Error::new(std::io::ErrorKind::Unsupported, relpath.clone()),
+            )),
+        }
     }
     /// The container's path.
     pub(crate) fn kbx_path(&self) -> &Path {
@@ -230,6 +239,7 @@ impl Catalog {
         Ok(Pin {
             generation: Generation(generation),
             kbx,
+            mapping: Arc::clone(&self.mapping),
             extents,
             sediment,
             _copy: copy,

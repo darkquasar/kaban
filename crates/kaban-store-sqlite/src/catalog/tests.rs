@@ -810,3 +810,57 @@ fn a_dead_extent_is_not_pinned() {
         }]
     );
 }
+
+#[test]
+fn a_span_beyond_the_container_is_refused_and_a_span_inside_it_reads() {
+    use super::kbx::ContainerError;
+
+    // Arrange: a 16-byte container, its one extent published, and two fabricated ranges past
+    // its end (what a corrupt catalog row would name)
+    let fs = FileStore::new("span-bounds");
+    let store = &fs.store;
+    let inside = store
+        .catalog()
+        .append_extent(ExtentClass::Test, &[1_u8; 16])
+        .unwrap();
+    store
+        .catalog()
+        .commit(&mut store.lock(), Durability::Normal, |txn| {
+            txn.publish(inside)?;
+            txn.conn()
+                .execute_batch(
+                    "INSERT INTO cat_extent(class, generation, kbx_offset, kbx_len)
+                       VALUES ('test', 1, 8, 9), ('test', 1, 9223372036854775807, 1);",
+                )
+                .map_err(|e| StoreError::Backend {
+                    source: kaban_core::BackendSource::new(e),
+                })
+        })
+        .unwrap();
+
+    // Act
+    let budget = kaban_core::query_budget::QueryBudget::new(u64::MAX, None);
+    let pin = store.catalog().pin(&mut store.lock(), &budget).unwrap();
+    let extents = pin.extents(ExtentClass::Test);
+
+    // Assert: the range inside reads; one byte past the end and an offset past it refuse
+    assert_eq!(extents.len(), 3);
+    assert_eq!(pin.bytes(&extents[0]).unwrap().as_slice(), &[1_u8; 16]);
+    for e in &extents[1..] {
+        let err = pin
+            .bytes(e)
+            .expect_err("a span beyond the container was read");
+        let StoreError::Backend { source } = &err else {
+            panic!("{e:?}: {err:?}");
+        };
+        let refused = source
+            .driver()
+            .downcast_ref::<ContainerError>()
+            .unwrap_or_else(|| panic!("{e:?}: {err:?}"));
+        assert_eq!(
+            refused.source.kind(),
+            std::io::ErrorKind::UnexpectedEof,
+            "{e:?}: {refused}"
+        );
+    }
+}
