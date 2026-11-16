@@ -253,6 +253,20 @@ unsafe fn usable(original: &Original, base: *mut Header) -> c_int {
     size.saturating_sub(HEADER_INT).max(0)
 }
 
+/// The original block size for a request of `bytes` usable bytes: `bytes` plus the header, or
+/// `None` when the request is not positive, overflows with the header, or the original's
+/// `xRoundup` refuses that size (returns 0, or less than it was asked for). A refused size is
+/// never forwarded to the original allocator.
+fn original_total(original: &Original, bytes: c_int) -> Option<c_int> {
+    if bytes <= 0 {
+        return None;
+    }
+    let total = bytes.checked_add(HEADER_INT)?;
+    // SAFETY: the original xRoundup is a pure size computation.
+    let rounded = unsafe { (original.roundup)(total) };
+    (rounded >= total).then_some(total)
+}
+
 /// Grow `lease` to the charge of `usable` bytes if it holds less; `false` when refused.
 fn reconcile(lease: &mut BudgetLease, usable: c_int) -> bool {
     match charge_for(usable).map(|charge| charge.saturating_sub(lease.bytes())) {
@@ -281,7 +295,7 @@ unsafe fn malloc(bytes: c_int) -> *mut c_void {
     let Some(original) = ORIGINAL.get() else {
         return ptr::null_mut();
     };
-    let (Some(total), Some(predicted)) = (bytes.checked_add(HEADER_INT), charge_for(bytes)) else {
+    let (Some(total), Some(predicted)) = (original_total(original, bytes), charge_for(bytes)) else {
         return ptr::null_mut();
     };
     let Ok(mut owner) = charge_current(predicted) else {
@@ -360,8 +374,8 @@ unsafe fn realloc(block: *mut c_void, bytes: c_int) -> *mut c_void {
     let Some(original) = ORIGINAL.get() else {
         return ptr::null_mut();
     };
-    let Some(total) = bytes.checked_add(HEADER_INT) else {
-        return ptr::null_mut();
+    let Some(total) = original_total(original, bytes) else {
+        return ptr::null_mut(); // the old block and its charge stay as they were
     };
     let base = header_of(block);
     // SAFETY: `block` is live, so `base` holds an initialized `Header`; SQLite does not use the
@@ -440,20 +454,24 @@ unsafe extern "C" fn x_size(block: *mut c_void) -> c_int {
 }
 
 /// `xRoundup`: the original rounding of the request plus the header, minus the header, so that
-/// `xSize(xMalloc(xRoundup(n))) == xRoundup(n)` whenever the original keeps that contract.
+/// `xSize(xMalloc(xRoundup(n))) == xRoundup(n)` whenever the original keeps that contract. A
+/// refusal is preserved: 0 when the original's rounding refuses the size (returns 0 or less than
+/// asked), when the request is not positive or overflows with the header, or on a panic. SQLite
+/// then calls `xMalloc(0)` or `xRealloc(p, 0)`, which fail without forwarding anything.
 ///
 /// # Safety
 /// Called by SQLite as its `xRoundup` hook.
 unsafe extern "C" fn x_roundup(bytes: c_int) -> c_int {
-    contained(bytes, || {
-        match (ORIGINAL.get(), bytes.checked_add(HEADER_INT)) {
-            (Some(original), Some(total)) => {
-                // SAFETY: the original xRoundup is a pure size computation.
-                let rounded = unsafe { (original.roundup)(total) };
-                rounded.saturating_sub(HEADER_INT).max(bytes)
-            }
-            _ => bytes,
-        }
+    contained(0, || {
+        let Some(original) = ORIGINAL.get() else {
+            return 0;
+        };
+        let Some(total) = (bytes > 0).then(|| bytes.checked_add(HEADER_INT)).flatten() else {
+            return 0;
+        };
+        // SAFETY: the original xRoundup is a pure size computation.
+        let rounded = unsafe { (original.roundup)(total) };
+        if rounded < total { 0 } else { rounded - HEADER_INT }
     })
 }
 

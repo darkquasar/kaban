@@ -198,3 +198,34 @@ fresh_test! {
         assert_eq!(budget.live_bytes(), 0);
     }
 }
+
+fresh_test! {
+    fn a_size_the_original_roundup_refuses_is_never_allocated() {
+        let runtime = install();
+        let budget = QueryBudget::new(u64::MAX, None);
+        let scope = RequestScope::enter(runtime, &budget).unwrap();
+        let attempts = ATTEMPTS.load(Ordering::SeqCst);
+        assert!(Block::malloc(60_000).is_none(), "a refused size was allocated");
+        assert_eq!(ATTEMPTS.load(Ordering::SeqCst), attempts, "the original was asked anyway");
+        assert_eq!(budget.live_bytes(), 0);
+        drop(scope);
+        // Unscoped too.
+        assert!(Block::malloc(60_000).is_none());
+        assert_eq!(ATTEMPTS.load(Ordering::SeqCst), attempts);
+    }
+}
+
+fresh_test! {
+    fn a_grow_to_a_refused_size_fails_and_keeps_the_block_and_its_charge() {
+        let runtime = install();
+        let budget = QueryBudget::new(u64::MAX, None);
+        let scope = RequestScope::enter(runtime, &budget).unwrap();
+        let mut block = Block::malloc(64).unwrap();
+        let attempts = ATTEMPTS.load(Ordering::SeqCst);
+        assert!(!grow_checked(&mut block, 60_000, &budget));
+        assert_eq!(ATTEMPTS.load(Ordering::SeqCst), attempts, "the original was asked anyway");
+        block.free();
+        assert_eq!(budget.live_bytes(), 0);
+        drop(scope);
+    }
+}
