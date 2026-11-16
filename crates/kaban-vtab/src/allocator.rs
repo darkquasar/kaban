@@ -147,6 +147,24 @@ pub(crate) fn enter_scope(budget: &QueryBudget) -> ScopeGuard {
     }
 }
 
+/// Charge SQLite allocations made on this thread to `budget` until the guard drops, unless a
+/// scope is already active on the thread (or its slot is unavailable): then `None`, and nothing
+/// changes. A request scope enters only through this, so request scopes never nest.
+pub(crate) fn try_enter_scope(budget: &QueryBudget) -> Option<ScopeGuard> {
+    let entered = CURRENT.try_with(|slot| {
+        let mut slot = slot.try_borrow_mut().ok()?;
+        if slot.is_some() {
+            return None;
+        }
+        *slot = Some(budget.clone());
+        Some(())
+    });
+    entered.ok().flatten().map(|()| ScopeGuard {
+        previous: None,
+        _thread_bound: PhantomData,
+    })
+}
+
 impl Drop for ScopeGuard {
     fn drop(&mut self) {
         let previous = self.previous.take();

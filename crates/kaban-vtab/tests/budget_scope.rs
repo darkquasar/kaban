@@ -15,7 +15,7 @@ use std::time::Duration;
 use common::{Range, Reserving, integers};
 use fresh::{Block, fresh_test, initialize_sqlite, installed_runtime};
 use kaban_core::query_budget::{BudgetExceeded, Limit, QueryBudget};
-use kaban_vtab::{QueryError, RequestScope, register};
+use kaban_vtab::{QueryError, RequestScope, ScopeActive, register};
 use rusqlite::{OpenFlags, ffi};
 
 /// Install the adapter and initialize SQLite outside any scope, so its process-wide state is
@@ -79,7 +79,7 @@ fresh_test! {
     fn a_request_charges_open_to_close_and_releases_everything_after_close() {
         let runtime = setup();
         let budget = QueryBudget::new(u64::MAX, None);
-        let scope = RequestScope::enter(runtime, &budget);
+        let scope = RequestScope::enter(runtime, &budget).unwrap();
         let conn = scope.open_query_connection(memory(), query_flags()).unwrap();
         let opened = budget.live_bytes();
         assert!(opened > 0, "opening the query connection charged nothing");
@@ -90,7 +90,7 @@ fresh_test! {
 
         // A later request pays for its own connection again: nothing cached was handed over.
         let later = QueryBudget::new(u64::MAX, None);
-        let scope = RequestScope::enter(runtime, &later);
+        let scope = RequestScope::enter(runtime, &later).unwrap();
         let conn = scope.open_query_connection(memory(), query_flags()).unwrap();
         assert_eq!(later.live_bytes(), opened);
         drop(conn);
@@ -103,7 +103,7 @@ fresh_test! {
     fn the_query_connection_has_lookaside_and_worker_threads_off() {
         let runtime = setup();
         let budget = QueryBudget::new(u64::MAX, None);
-        let scope = RequestScope::enter(runtime, &budget);
+        let scope = RequestScope::enter(runtime, &budget).unwrap();
         let conn = scope.open_query_connection(memory(), query_flags()).unwrap();
         assert_eq!(single(&conn, LARGE).unwrap(), 1_009_999);
         let (mut current, mut highwater) = (-1, -1);
@@ -131,7 +131,7 @@ fresh_test! {
     fn a_query_past_the_memory_limit_fails_with_the_named_limit() {
         let runtime = setup();
         let budget = QueryBudget::new(256 * 1024, None);
-        let scope = RequestScope::enter(runtime, &budget);
+        let scope = RequestScope::enter(runtime, &budget).unwrap();
         let conn = scope.open_query_connection(memory(), query_flags()).unwrap();
         let error = scope.translate(single(&conn, LARGE).unwrap_err());
         assert!(
@@ -154,7 +154,7 @@ fresh_test! {
     fn a_query_past_the_deadline_is_interrupted_with_the_named_limit() {
         let runtime = setup();
         let budget = QueryBudget::new(u64::MAX, Some(Duration::from_millis(50)));
-        let scope = RequestScope::enter(runtime, &budget);
+        let scope = RequestScope::enter(runtime, &budget).unwrap();
         let conn = scope.open_query_connection(memory(), query_flags()).unwrap();
         let error = scope.translate(bounded(&conn));
         assert!(
@@ -175,7 +175,7 @@ fresh_test! {
     fn a_cancelled_request_is_interrupted_as_cancelled() {
         let runtime = setup();
         let budget = QueryBudget::new(u64::MAX, None);
-        let scope = RequestScope::enter(runtime, &budget);
+        let scope = RequestScope::enter(runtime, &budget).unwrap();
         let conn = scope.open_query_connection(memory(), query_flags()).unwrap();
         let canceller = budget.clone();
         let timer = std::thread::spawn(move || {
@@ -201,7 +201,7 @@ fresh_test! {
     fn a_genuine_sqlite_failure_is_not_reported_as_a_limit() {
         let runtime = setup();
         let budget = QueryBudget::new(u64::MAX, None);
-        let scope = RequestScope::enter(runtime, &budget);
+        let scope = RequestScope::enter(runtime, &budget).unwrap();
         let conn = scope.open_query_connection(memory(), query_flags()).unwrap();
         let error = scope.translate(single(&conn, "SELEC 1").unwrap_err());
         assert!(matches!(error, QueryError::Sqlite(_)), "{error:?}");
@@ -225,7 +225,7 @@ fresh_test! {
     fn a_table_function_reserving_past_the_scope_limit_is_refused_naming_the_limit() {
         let runtime = setup();
         let budget = QueryBudget::new(512 * 1024, None);
-        let scope = RequestScope::enter(runtime, &budget);
+        let scope = RequestScope::enter(runtime, &budget).unwrap();
         let conn = scope.open_query_connection(memory(), query_flags()).unwrap();
         register(&conn, Arc::new(Reserving)).unwrap();
 
@@ -254,7 +254,7 @@ fresh_test! {
         let runtime = setup();
         let budget = QueryBudget::new(u64::MAX, None);
         let unwound = catch_unwind(AssertUnwindSafe(|| {
-            let scope = RequestScope::enter(runtime, &budget);
+            let scope = RequestScope::enter(runtime, &budget).unwrap();
             let conn = scope.open_query_connection(memory(), query_flags()).unwrap();
             assert!(budget.live_bytes() > 0);
             let _ = &conn;
@@ -273,12 +273,66 @@ fresh_test! {
     fn a_block_outliving_its_request_keeps_its_charge_until_freed() {
         let runtime = setup();
         let budget = QueryBudget::new(u64::MAX, None);
-        let scope = RequestScope::enter(runtime, &budget);
+        let scope = RequestScope::enter(runtime, &budget).unwrap();
         let block = Block::malloc(1000).unwrap();
         drop(scope);
         let held = budget.live_bytes();
         assert!(held >= 1000);
         std::thread::spawn(move || block.free()).join().unwrap();
         assert_eq!(budget.live_bytes(), 0);
+    }
+}
+
+fresh_test! {
+    fn a_second_scope_on_the_thread_is_refused_and_the_first_keeps_charging() {
+        let runtime = setup();
+        let a = QueryBudget::new(u64::MAX, None);
+        let scope_a = RequestScope::enter(runtime, &a).unwrap();
+        let conn_a = scope_a.open_query_connection(memory(), query_flags()).unwrap();
+
+        let b = QueryBudget::new(u64::MAX, None);
+        let refused = RequestScope::enter(runtime, &b);
+        assert_eq!(refused.as_ref().err(), Some(&ScopeActive), "a nested scope was entered");
+        assert!(refused.unwrap_err().to_string().contains("already active"));
+
+        // Connection A runs, and opens, under A's budget only.
+        let before = a.live_bytes();
+        let mut stmt = conn_a.prepare(LARGE).unwrap();
+        assert!(a.live_bytes() > before, "preparing on A charged nothing to A");
+        assert_eq!(stmt.query_row([], |row| row.get::<_, i64>(0)).unwrap(), 1_009_999);
+        drop(stmt);
+        let second = scope_a.open_query_connection(memory(), query_flags()).unwrap();
+        assert_eq!(b.live_bytes(), 0, "B was charged while it was refused");
+        drop(second);
+        drop(conn_a);
+        assert_eq!(a.live_bytes(), 0);
+        drop(scope_a);
+
+        // With A gone the thread takes a new scope.
+        let scope_b = RequestScope::enter(runtime, &b).unwrap();
+        let block = Block::malloc(64).unwrap();
+        assert!(b.live_bytes() > 0);
+        assert_eq!(a.live_bytes(), 0);
+        block.free();
+        drop(scope_b);
+    }
+}
+
+fresh_test! {
+    fn the_thread_takes_a_new_scope_after_an_unwound_one() {
+        let runtime = setup();
+        let a = QueryBudget::new(u64::MAX, None);
+        let unwound = catch_unwind(AssertUnwindSafe(|| {
+            let _scope = RequestScope::enter(runtime, &a).unwrap();
+            panic!("request unwinding");
+        }));
+        assert!(unwound.is_err());
+        let b = QueryBudget::new(u64::MAX, None);
+        let scope_b = RequestScope::enter(runtime, &b).unwrap();
+        let block = Block::malloc(64).unwrap();
+        assert!(b.live_bytes() > 0);
+        assert_eq!(a.live_bytes(), 0);
+        block.free();
+        drop(scope_b);
     }
 }

@@ -25,8 +25,9 @@ use crate::allocator::{self, ScopeGuard};
 ///
 /// Dropping it, including during an unwind, restores the scope that was active before; blocks
 /// charged inside it keep their budget until they are freed, on any thread, after the request.
-/// Scopes on one thread nest and must drop in reverse order of creation. It is bound to the
-/// thread that entered it.
+/// At most one scope is active on a thread at a time ([`RequestScope::enter`] refuses a second),
+/// so every SQLite allocation, statement and scan on the thread belongs to that one request. It
+/// is bound to the thread that entered it.
 #[derive(Debug)]
 pub struct RequestScope {
     budget: QueryBudget,
@@ -37,13 +38,17 @@ pub struct RequestScope {
 impl RequestScope {
     /// Charge this thread's SQLite allocations, and every table-function scan it runs, to
     /// `budget` until the scope drops. The [`Runtime`] proves the allocator adapter is installed.
-    #[must_use]
-    pub fn enter(runtime: Runtime, budget: &QueryBudget) -> Self {
-        Self {
+    ///
+    /// # Errors
+    /// [`ScopeActive`] when a request scope is already active on this thread: scopes do not nest,
+    /// so every allocation and scan on the thread belongs to exactly one request.
+    pub fn enter(runtime: Runtime, budget: &QueryBudget) -> Result<Self, ScopeActive> {
+        let guard = allocator::try_enter_scope(budget).ok_or(ScopeActive)?;
+        Ok(Self {
             budget: budget.clone(),
-            _guard: allocator::enter_scope(budget),
+            _guard: guard,
             _runtime: runtime,
-        }
+        })
     }
 
     /// The request's budget.
@@ -155,6 +160,18 @@ impl Deref for QueryConnection<'_> {
         &self.conn
     }
 }
+
+/// A request scope was entered on a thread that already has one active.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScopeActive;
+
+impl fmt::Display for ScopeActive {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("a request budget scope is already active on this thread; scopes do not nest")
+    }
+}
+
+impl std::error::Error for ScopeActive {}
 
 /// Why a request's query failed.
 #[derive(Debug)]

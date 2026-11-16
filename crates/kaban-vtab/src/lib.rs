@@ -24,7 +24,7 @@ mod runtime;
 mod value;
 
 pub use adapter::{FnError, Rows, TableFunction, register};
-pub use budget_scope::{QueryConnection, QueryError, RequestScope};
+pub use budget_scope::{QueryConnection, QueryError, RequestScope, ScopeActive};
 pub use plan::{Arg, BoundArg, ColumnDef, ColumnKind, OrderTerm, Plan, PlanInput};
 pub use runtime::{InitError, Runtime, initialize_for_embedding};
 pub use value::Value;

@@ -21,7 +21,7 @@ fresh_test! {
         assert_eq!(Runtime::get(), Some(runtime));
         // The installed wrapper charges a scoped connection.
         let budget = QueryBudget::new(u64::MAX, None);
-        let scope = RequestScope::enter(runtime, &budget);
+        let scope = RequestScope::enter(runtime, &budget).unwrap();
         let conn = scope
             .open_query_connection(
                 std::path::Path::new(":memory:"),

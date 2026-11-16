@@ -201,7 +201,7 @@ pub(crate) fn with_query(
 ) -> kaban_core::query_budget::QueryBudget {
     let runtime = installed_runtime();
     let budget = kaban_core::query_budget::QueryBudget::new(u64::MAX, None);
-    let scope = kaban_vtab::RequestScope::enter(runtime, &budget);
+    let scope = kaban_vtab::RequestScope::enter(runtime, &budget).unwrap();
     let conn = scope
         .open_query_connection(std::path::Path::new(":memory:"), query_flags())
         .unwrap();

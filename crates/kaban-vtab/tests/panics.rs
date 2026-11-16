@@ -118,7 +118,7 @@ impl Drop for Hostile {
 fn registration_error(fault: Fault) -> String {
     let runtime = installed_runtime();
     let budget = QueryBudget::new(u64::MAX, None);
-    let scope = kaban_vtab::RequestScope::enter(runtime, &budget);
+    let scope = kaban_vtab::RequestScope::enter(runtime, &budget).unwrap();
     let conn = scope
         .open_query_connection(std::path::Path::new(":memory:"), fresh::query_flags())
         .unwrap();
