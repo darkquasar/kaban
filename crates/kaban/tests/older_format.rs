@@ -15,7 +15,7 @@
 mod common;
 
 use common::Scratch;
-use kaban_core::StoreError;
+use kaban_core::{ActorId, StoreError};
 use kaban_store_sqlite::SqliteStore;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -300,6 +300,63 @@ fn library_open(fixture: &str, files: &[(&str, &str)]) {
     project.assert_unchanged();
 }
 
+/// The library's refusal: `SchemaUnsupported { found: 13, supported: 14 }`, named in its
+/// display with the missing upgrade path.
+fn assert_schema_unsupported(case: &str, err: &StoreError) {
+    let text = err.to_string();
+    assert!(
+        matches!(
+            err,
+            StoreError::SchemaUnsupported {
+                found: FOUND,
+                supported: SUPPORTED
+            }
+        ),
+        "{case}: expected SchemaUnsupported {{ found: {FOUND}, supported: {SUPPORTED} }}, got {err:?}"
+    );
+    assert!(
+        names_both_versions(&text) && text.contains(NO_UPGRADE),
+        "{case}: the display names both versions and the missing upgrade path: {text}"
+    );
+}
+
+/// The exclusive maintenance hold (`exclusive_hold`) is an entry point of its own: it is
+/// refused on an older-format file before its `.owner` exists, and the opens tried while it
+/// would be held (the ordinary, diagnostic and hook opens) are refused the same way, never
+/// let through as a file this process already admitted.
+fn hold_then_open(fixture: &str, files: &[(&str, &str)]) {
+    let project = Project::copy(fixture, files, "hold");
+    let keys = project.home().join("keys");
+    let actor = ActorId::default();
+    let hold = kaban_store_sqlite::exclusive_hold(&project.db());
+    let opens = [
+        ("open", SqliteStore::open(&project.db(), &keys).map(drop)),
+        (
+            "open_diagnostic",
+            SqliteStore::open_diagnostic(&project.db(), &keys, &actor).map(drop),
+        ),
+        (
+            "open_for_hook",
+            SqliteStore::open_for_hook(&project.db(), &keys, &actor).map(drop),
+        ),
+    ];
+    // the hold, if taken, lives until here: every open above ran under it
+    let held = hold.map(|hold| hold.is_some());
+    match held {
+        Ok(held) => {
+            panic!("expected error: exclusive_hold took the older-format file (held {held})")
+        }
+        Err(ref err) => assert_schema_unsupported("exclusive_hold", err),
+    }
+    for (case, opened) in opens {
+        match opened {
+            Ok(()) => panic!("expected error: {case} opened the older-format project"),
+            Err(err) => assert_schema_unsupported(case, &err),
+        }
+    }
+    project.assert_unchanged();
+}
+
 /// `doctor` reports the refusal as a failed `schema_version` check and exits 0.
 fn doctor(fixture: &str, files: &[(&str, &str)]) {
     let project = Project::copy(fixture, files, "doctor");
@@ -384,4 +441,14 @@ fn doctor_reports_a_clean_v3_project() {
 #[test]
 fn doctor_reports_a_killed_writer_v3_project() {
     doctor("v3.0.0-wal", WAL);
+}
+
+#[test]
+fn exclusive_hold_and_the_opens_under_it_refuse_a_clean_v3_project() {
+    hold_then_open("v3.0.0", CLEAN);
+}
+
+#[test]
+fn exclusive_hold_and_the_opens_under_it_refuse_a_killed_writer_v3_project() {
+    hold_then_open("v3.0.0-wal", WAL);
 }

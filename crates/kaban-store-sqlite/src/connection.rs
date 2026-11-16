@@ -426,7 +426,8 @@ impl Drop for ExclusiveHold {
 ///
 /// # Errors
 /// `StoreError::FileMode` when the database is absent or not a regular file, or when the lock
-/// file cannot be opened or locked.
+/// file cannot be opened or locked; the refusals of [`probe_version`] (spec 11 CMP-01) for a
+/// file no store of this process holds, before the lock file is created.
 pub fn exclusive_hold(path: &Path) -> Result<Option<ExclusiveHold>> {
     let meta = regular_file_metadata(path)
         .map_err(StoreError::FileMode)?
@@ -445,6 +446,10 @@ pub fn exclusive_hold(path: &Path) -> Result<Option<ExclusiveHold>> {
         entry.exclusive = true;
         return Ok(Some(ExclusiveHold(ident)));
     }
+    // a file no store of this process holds is probed like every open (CMP-01) before its
+    // owner file is created: a registered entry means a probed file, so no open under the
+    // hold skips the probe for an older or foreign database
+    probe_version(path, Some(&meta))?;
     let owner = OwnerLock {
         file: OwnerLock::open(path)?,
         sole: false,
@@ -656,8 +661,9 @@ fn file_ident(meta: &std::fs::Metadata) -> FileIdent {
 /// one at any other kaban version is refused untouched; a main file with no kaban schema
 /// (absent, empty or without the `node` table) is a fresh project unless a non-empty `-wal`
 /// lies beside it, which is never replayed. The version is read as [`Migrator::detect`]
-/// reads it. The callers skip a file a store of this process already holds: its first opener
-/// probed it, and no descriptor may be opened on it ([`tighten_regular_file`] says why).
+/// reads it. The callers skip a file a store or an [`ExclusiveHold`] of this process already
+/// holds: whoever registered it probed it, and no descriptor may be opened on it
+/// ([`tighten_regular_file`] says why).
 ///
 /// [`LATEST_SCHEMA_VERSION`]: crate::LATEST_SCHEMA_VERSION
 /// [`Migrator::detect`]: crate::schema::Migrator::detect
