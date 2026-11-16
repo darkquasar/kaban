@@ -3,8 +3,11 @@
 //! progress are kept apart: `index_meta.policy_hash` names the policy the last complete walk
 //! ran under and `policy_scan_seq` is the watermark below which every node and edge change has
 //! been judged by that policy; both move together, only at a walk's completion or in a run of
-//! that same policy. A walk in progress keeps its own watermark under `policy_walk_seq:<policy>`,
-//! so an interrupted or superseded walk never moves another policy's certified watermark.
+//! that same policy. Walks in progress keep a watermark per policy under
+//! `policy_walk_seq:<policy>`, so an interrupted or superseded walk never moves another
+//! policy's certified watermark. Walks of one policy share that watermark but each has its own
+//! cursor (two processes can walk at once), so it never depends on a cursor: a restart keeps
+//! it where it is, and it passes only change-log entries that have been judged.
 //!
 //! ```text
 //!   rescan_impl(policy, at, batch, judge)            one BEGIN IMMEDIATE per batch
@@ -12,10 +15,10 @@
 //!   | at = Start (or Changes once policy_hash names another policy, or a walk whose  |
 //!   |      own watermark is gone):                                                    |
 //!   |      policy_hash == policy and log intact => Changes (certified watermark)      |
-//!   |      else walk watermark(policy) := head  => Nodes(0)  (full walk)              |
+//!   |      else walk watermark(policy) := min(itself, head) => Nodes(0) (full walk)   |
 //!   | 1. change log: <= batch entries with seq > this run's watermark                |
-//!   |      node/edge insert|update behind the walk's cursor => judge again           |
-//!   |      (ahead of the cursor: left to the walk)                                   |
+//!   |      node/edge insert|update => judge again, wherever this walk's cursor is   |
+//!   |      (a row ahead of it may be behind another walk's; judged twice at most)    |
 //!   | 2. walk: Nodes(c) -> <= batch nodes rid > c; none => Edges(0)                  |
 //!   |          Edges(c) -> <= batch edges rowid > c; none => walk complete           |
 //!   | 3. watermark := log caught up ? head after this batch's own writes             |
@@ -81,7 +84,13 @@ impl SqliteStore {
             if certified && log_intact(&tx, head)? {
                 RescanCursor::Changes
             } else {
-                set_meta(&tx, &walk_key, head)?;
+                // the walk watermark is the policy's, shared by every walk of it: a restart
+                // keeps an older walk's position (or the head, if it is past the head), so it
+                // never skips a change that walk has not judged yet
+                let kept = meta(&tx, &walk_key)?
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .map_or(head, |w| w.min(head));
+                set_meta(&tx, &walk_key, kept)?;
                 RescanCursor::Nodes(0)
             }
         } else {
@@ -102,7 +111,7 @@ impl SqliteStore {
             return Ok(report);
         }
         let now = now_iso();
-        let log = catch_up(&tx, watermark_key, at, limit, judge, &now, &mut report)?;
+        let log = catch_up(&tx, watermark_key, limit, judge, &now, &mut report)?;
         let walk_done = match at {
             RescanCursor::Nodes(after) => {
                 match walk_nodes(&tx, after, limit, judge, &now, &mut report)? {
@@ -189,13 +198,13 @@ enum CatchUp {
 }
 
 /// Judge the nodes and edges the change log names after the watermark under `watermark_key`
-/// (at most `limit`
-/// entries) that the walk at `at` has already passed: a node behind `Nodes(c)`, any node
-/// once the nodes are walked, an edge behind `Edges(c)`, any row at `Changes`.
+/// (at most `limit` entries), wherever the caller's walk stands: the watermark is shared by
+/// every walk of the policy, so it may only pass an entry that has been judged, and a row
+/// ahead of this walk's cursor may sit behind another walk's (it is judged again when this
+/// walk reaches it).
 fn catch_up(
     conn: &Connection,
     watermark_key: &str,
-    at: RescanCursor,
     limit: i64,
     judge: &mut dyn RescanJudge,
     now: &str,
@@ -224,10 +233,6 @@ fn catch_up(
         }
         match entity.as_str() {
             "node" => {
-                let walked = match at {
-                    RescanCursor::Nodes(c) => Some(c),
-                    _ => None,
-                };
                 let mut st = conn
                     .prepare_cached(&format!(
                         "SELECT rid, {NODE_COLS} FROM node WHERE id = ?1 AND lifecycle <> 'purged'"
@@ -237,18 +242,11 @@ fn catch_up(
                     .query_row([id], |r| Ok((r.get(0)?, row_node_at(r, 1)?)))
                     .optional()
                     .sql()?;
-                if let Some((rid, node)) = row
-                    && walked.is_none_or(|c| u64::try_from(rid).unwrap_or(0) <= c)
-                {
+                if let Some((rid, node)) = row {
                     judge_node(conn, rid, &node, judge, now, report)?;
                 }
             }
             "edge" => {
-                let walked = match at {
-                    RescanCursor::Nodes(_) => continue,
-                    RescanCursor::Edges(c) => Some(c),
-                    _ => None,
-                };
                 let mut st = conn
                     .prepare_cached(&format!(
                         "SELECT {EDGE_COLS} FROM {EDGE_FROM} WHERE e.id = ?1"
@@ -258,9 +256,7 @@ fn catch_up(
                     .query_row([id], |r| Ok((row_edge(r)?, r.get::<_, i64>(7)?)))
                     .optional()
                     .sql()?;
-                if let Some((edge, rowid)) = row
-                    && walked.is_none_or(|c| u64::try_from(rowid).unwrap_or(0) <= c)
-                {
+                if let Some((edge, rowid)) = row {
                     judge_edge(conn, rowid, &edge, judge, report)?;
                 }
             }

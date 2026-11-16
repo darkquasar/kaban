@@ -171,3 +171,45 @@ fn interleaved_walks_under_different_policies_each_judge_their_own_backlog() {
     run_from(&store, RescanCursor::Start, 100);
     assert_eq!(run_from(&store, RescanCursor::Start, 100).scanned, 0);
 }
+
+/// Two walks under the same policy share its walk watermark but not their cursors. Walk A
+/// judges nodes 1 and 2; another writer rewrites node 2 to content the policy rejects; walk B
+/// starts under the same policy, judges node 1 and is abandoned; A resumes and finishes. The
+/// rewrite of node 2 sits behind A's cursor, so A must judge it before it certifies, and a
+/// later run must not report a freshness the rewrite never earned.
+#[test]
+fn a_same_policy_walk_restarted_midway_does_not_hide_a_rewrite_behind_the_older_cursor() {
+    let store = SqliteStore::open_memory().unwrap();
+    let ids: Vec<NodeId> = (0..3).map(|_| NodeId::new()).collect();
+    for (i, id) in ids.iter().enumerate() {
+        upsert(&store, id, &format!("clean note {i}"));
+    }
+
+    // walk A judges nodes 1 and 2
+    let a1 = store
+        .rescan("v2", RescanCursor::Start, 1, &mut judge)
+        .unwrap();
+    let a2 = store.rescan("v2", a1.cursor, 1, &mut judge).unwrap();
+    assert_eq!(a1.scanned + a2.scanned, 2, "{a1:?} {a2:?}");
+    assert!(matches!(a2.cursor, RescanCursor::Nodes(_)), "{a2:?}");
+
+    // another writer rewrites node 2 behind A's cursor
+    upsert(&store, &ids[1], "now naming the nightjar codename");
+
+    // walk B starts under the same policy, judges one batch and is abandoned
+    let b = store
+        .rescan("v2", RescanCursor::Start, 1, &mut judge)
+        .unwrap();
+    assert!(matches!(b.cursor, RescanCursor::Nodes(_)), "{b:?}");
+
+    // A resumes and finishes
+    run_from(&store, a2.cursor, 1);
+
+    // node 2 was judged after its rewrite, before the policy was certified
+    let rewritten = store.get(&ids[1], true).unwrap().unwrap();
+    assert_eq!(rewritten.lifecycle, Lifecycle::Tombstoned, "{rewritten:?}");
+    // and a later run reports freshness only once nothing is left unjudged
+    run_from(&store, RescanCursor::Start, 1);
+    assert_eq!(run_from(&store, RescanCursor::Start, 1).scanned, 0);
+    assert!(store.get(&ids[1], false).unwrap().is_none());
+}
