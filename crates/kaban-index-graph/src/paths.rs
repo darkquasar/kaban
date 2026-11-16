@@ -65,8 +65,10 @@ pub fn shortest_path(
             .map(|i| r.start + i)
     };
     // Backwards: mark every node of depth d < len with a successor marked at depth d + 1.
+    let tick = Ticker::new(budget);
     let mut on: Grow<'_, bool> = Grow::with_capacity(budget, order.len())?;
     for _ in 0..order.len() {
+        tick.tick()?;
         on.push(false)?;
     }
     let Some(last) = find(len, dst) else {
@@ -75,7 +77,6 @@ pub fn shortest_path(
     if let Some(mark) = on.get_mut(last) {
         *mark = true;
     }
-    let tick = Ticker::new(budget);
     for d in (1..len).rev() {
         for i in level(d) {
             tick.tick()?;

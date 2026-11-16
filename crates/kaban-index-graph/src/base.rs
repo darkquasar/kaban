@@ -3,6 +3,7 @@
 use kaban_core::query_budget::QueryBudget;
 use tantivy::directory::OwnedBytes;
 
+use crate::charge::Ticker;
 use crate::error::GraphError;
 use crate::id::LocalId;
 use crate::layer::{Extent, KIND_BASE, Net};
@@ -21,11 +22,13 @@ impl Base {
     /// # Errors
     /// [`GraphError::Corrupt`] when the bytes are not a well-formed base: truncated, padded, a
     /// layer, a section count other than four, sections out of tag order, or any invariant of
-    /// a section broken (see [`crate::Layer::open`]).
+    /// a section broken (see [`crate::Layer::open`]); [`GraphError::BudgetExceeded`] as
+    /// [`crate::Layer::open`].
     pub fn open(bytes: OwnedBytes, budget: &QueryBudget) -> Result<Base, GraphError> {
-        let _ = budget;
+        budget.check()?;
+        let t = Ticker::new(budget);
         Ok(Base {
-            extent: Extent::open(bytes, KIND_BASE)?,
+            extent: Extent::open(bytes, KIND_BASE, &t)?,
         })
     }
 }

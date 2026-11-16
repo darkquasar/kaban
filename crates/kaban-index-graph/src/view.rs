@@ -29,9 +29,11 @@ use crate::sediment::{SedEdge, SedNode, Sediment};
 /// Units of work between two budget checks of one metered loop (an accessor iterator, a
 /// structural function's loop, decoding, validation or preparation). A unit is bounded: one
 /// cursor prepared, one source compared or advanced by one entry in a merge, one bitvector word
-/// visited, one record decoded or validated, one loop iteration of a structural function, one
-/// union-find step or one sift of a sort; none costs more than a binary search over one section
-/// or [`crate::Records`] stream, plus a presence probe over the chain for a row's neighbour. A
+/// visited, one record decoded or validated, 4 KiB of fact payload copied, 256 kind bytes
+/// validated, one loop iteration of a structural function, one union-find step or one sift of
+/// a sort (at most 2 log2(n) comparisons); apart from those fixed-size chunks none costs more
+/// than a binary search over one section or prepared sediment stream, plus a presence probe
+/// over the chain for a row's neighbour. A
 /// cancellation or deadline is therefore seen within this many units of each live loop, and
 /// [`crate::work_units`] counts them.
 pub const BUDGET_CHECK_INTERVAL: u64 = 256;
@@ -281,7 +283,7 @@ impl<'a> View<'a> {
                 cursors(charge.as_mut(), self.layers.len() + 2)?;
             for e in self.extents() {
                 t.tick()?;
-                sources.push(Cursor::new(PresenceSource::Extent(e.presence.iter())));
+                sources.push(Cursor::new(PresenceSource::Extent(e.presence.cursor())));
             }
             t.tick()?;
             sources.push(Cursor::new(PresenceSource::Sediment(

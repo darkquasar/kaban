@@ -10,7 +10,7 @@
 
 use kaban_core::query_budget::QueryBudget;
 
-use crate::charge::{Charged, Grow, Hold, Ticker};
+use crate::charge::{Charged, Grow, Hold, Ticker, sort_checked};
 use crate::error::GraphError;
 use crate::id::{Direction, LocalId, RelId, RelSelection};
 use crate::view::View;
@@ -94,7 +94,9 @@ type Met = (u32, u16, u32, bool);
 /// its outgoing side), so every directed edge appears once and reciprocal edges both appear.
 ///
 /// Work: each kept node at depth below `caps.depth` reads its lists once (bounded as above);
-/// each level sorts its candidates and merges them into the seen set, O(seen) per level.
+/// each level sorts its candidates (an interruptible heapsort) and merges them into the seen
+/// set, O(seen) per level. Every loop is metered and checked every
+/// [`crate::BUDGET_CHECK_INTERVAL`] units.
 pub(crate) fn search<'b>(
     v: &View<'_>,
     src: &[LocalId],
@@ -113,10 +115,11 @@ pub(crate) fn search<'b>(
             frontier.push(n.0)?;
         }
     }
-    frontier.sort_unstable();
-    frontier.dedup();
+    sort_checked(&mut frontier, |&n| n, &tick)?;
+    frontier.dedup(&tick)?;
     let mut seen: Grow<'b, (u32, u8)> = Grow::with_capacity(budget, frontier.len())?;
     for &n in frontier.iter() {
+        tick.tick()?;
         seen.push((n, 0))?;
     }
     let mut order = Grow::new(budget)?;
@@ -167,10 +170,8 @@ pub(crate) fn search<'b>(
                 }
             }
         }
-        budget.check()?;
-        cand.sort_unstable();
-        cand.dedup();
-        budget.check()?;
+        sort_checked(&mut cand, |&m| m, &tick)?;
+        cand.dedup(&tick)?;
         if cand.len() > rows_left {
             truncated = true;
             cand.truncate(rows_left);
@@ -193,6 +194,7 @@ pub(crate) fn search<'b>(
         drop(met);
         order.reserve(cand.len())?;
         for &m in cand.iter() {
+            tick.tick()?;
             order.push((LocalId(m), next))?;
         }
         seen = merge(&seen, &cand, next, budget, &tick)?;

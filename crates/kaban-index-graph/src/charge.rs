@@ -18,8 +18,10 @@ pub(crate) struct Charge {
 }
 
 impl Charge {
-    /// An empty charge on `budget`; refused when the deadline passed or the query was cancelled.
+    /// An empty charge on `budget`; refused when the budget already refuses (a recorded memory
+    /// breach, the deadline or a cancellation).
     pub(crate) fn new(budget: &QueryBudget) -> Result<Self, GraphError> {
+        budget.check()?;
         Ok(Self {
             lease: budget.reserve(0)?,
         })
@@ -150,8 +152,10 @@ fn buffer_charge<T>(capacity: usize) -> Result<u64, GraphError> {
 }
 
 impl<'b, T> Grow<'b, T> {
-    /// An empty vector on `budget`; refused when the deadline passed or the query was cancelled.
+    /// An empty vector on `budget`; refused when the budget already refuses (a recorded memory
+    /// breach, the deadline or a cancellation).
     pub(crate) fn new(budget: &'b QueryBudget) -> Result<Self, GraphError> {
+        budget.check()?;
         Ok(Self {
             budget,
             items: Vec::new(),
@@ -210,10 +214,68 @@ impl<'b, T> Grow<'b, T> {
     }
 }
 
-impl<T: PartialEq> Grow<'_, T> {
-    /// Remove consecutive equal elements.
-    pub(crate) fn dedup(&mut self) {
-        self.items.dedup();
+impl<T: PartialEq + Copy> Grow<'_, T> {
+    /// Remove consecutive equal elements, one unit of `t` per element.
+    pub(crate) fn dedup(&mut self, t: &Ticker<'_>) -> Result<(), GraphError> {
+        let mut kept = 0;
+        for i in 0..self.items.len() {
+            t.tick()?;
+            let item = self.items[i];
+            if kept == 0 || self.items[kept - 1] != item {
+                self.items[kept] = item;
+                kept += 1;
+            }
+        }
+        self.items.truncate(kept);
+        Ok(())
+    }
+}
+
+/// Slices at most this long are sorted in one unit of work.
+const SMALL_SORT: usize = 32;
+
+/// Sort `v` by `key` in place, interruptibly: a heapsort whose every sift is one unit of `t`
+/// (a sift is at most 2 log2(len) comparisons), so a cancellation or deadline stops an
+/// input-sized sort within [`BUDGET_CHECK_INTERVAL`] sifts. Unstable; no allocation. Slices of
+/// at most [`SMALL_SORT`] elements are sorted in one unit.
+pub(crate) fn sort_checked<T, K: Ord>(
+    v: &mut [T],
+    key: impl Fn(&T) -> K,
+    t: &Ticker<'_>,
+) -> Result<(), GraphError> {
+    if v.len() <= SMALL_SORT {
+        t.tick()?;
+        v.sort_unstable_by_key(key);
+        return Ok(());
+    }
+    let n = v.len();
+    for root in (0..n / 2).rev() {
+        t.tick()?;
+        sift_down(v, root, n, &key);
+    }
+    for end in (1..n).rev() {
+        t.tick()?;
+        v.swap(0, end);
+        sift_down(v, 0, end, &key);
+    }
+    Ok(())
+}
+
+/// Restore the max-heap order of `v[..end]` below `root`.
+fn sift_down<T, K: Ord>(v: &mut [T], mut root: usize, end: usize, key: &impl Fn(&T) -> K) {
+    loop {
+        let mut child = 2 * root + 1;
+        if child >= end {
+            return;
+        }
+        if child + 1 < end && key(&v[child]) < key(&v[child + 1]) {
+            child += 1;
+        }
+        if key(&v[root]) >= key(&v[child]) {
+            return;
+        }
+        v.swap(root, child);
+        root = child;
     }
 }
 

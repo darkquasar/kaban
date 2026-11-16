@@ -308,7 +308,10 @@ fn sealing_ignores_the_parent_sediment() {
     oracle.apply(&r);
     assert_matches(&v, &oracle, 4, "sealed over sediment holding R");
     assert_eq!(v.fact(LocalId(1), 0), None);
-    assert!(rows(&v, LocalId(1), &RelSelection::All, Direction::Both).is_empty());
+    assert_eq!(
+        rows(&v, LocalId(1), &RelSelection::All, Direction::Both),
+        Vec::new()
+    );
 
     // Re-adding edges and a fact after the barrier shows only the new data.
     let readd = Records {

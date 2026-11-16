@@ -147,12 +147,15 @@ pub fn topo_order(
         });
     }
     let set = &reached.seen[..];
+    let tick = Ticker::new(budget);
     let mut indeg: Grow<'_, u32> = Grow::with_capacity(budget, set.len())?;
     for _ in set {
+        tick.tick()?;
         indeg.push(0)?;
     }
     let corrupt = || GraphError::Corrupt("in-degree out of range".to_owned());
     for &(node, _) in set {
+        tick.tick()?;
         let mut last = None;
         for row in v.neighbours(LocalId(node), rels, Direction::Out, budget) {
             let (succ, _, _) = row?;
@@ -168,12 +171,14 @@ pub fn topo_order(
     let mut charge = Charge::new(budget)?;
     let mut heap = BinaryHeap::from(charge.vec::<Reverse<usize>>(set.len())?);
     for (at, &count) in indeg.iter().enumerate() {
+        tick.tick()?;
         if count == 0 {
             heap.push(Reverse(at));
         }
     }
     let mut out = Grow::with_capacity(budget, set.len())?;
     while let Some(Reverse(at)) = heap.pop() {
+        tick.tick()?;
         let Some(&(node, _)) = set.get(at) else {
             return Err(corrupt());
         };
@@ -223,7 +228,9 @@ fn cycle(
             .and_then(|i| set.get(i))
             .ok_or_else(|| GraphError::Corrupt("no unreleased node".to_owned()))?;
         let mut cur = LocalId(start.0);
+        let tick = Ticker::new(budget);
         for _ in 0..set.len() {
+            tick.tick()?;
             let mut pred = None;
             for row in v.neighbours(cur, rels, Direction::In, budget) {
                 let (p, _, _) = row?;
@@ -243,18 +250,20 @@ fn cycle(
     }
 }
 
-/// The root of `x` in the forest `parent`, halving the path on the way.
-fn find(parent: &mut [u32], mut x: usize) -> usize {
+/// The root of `x` in the forest `parent`, halving the path on the way; every step of the walk
+/// is one unit of `t`, so a long walk is checked from inside.
+fn find(parent: &mut [u32], mut x: usize, t: &Ticker<'_>) -> Result<usize, GraphError> {
     loop {
+        t.tick()?;
         let Some(&p) = parent.get(x) else {
-            return x;
+            return Ok(x);
         };
         let p = p as usize;
         if p == x {
-            return x;
+            return Ok(x);
         }
         let Some(&grand) = parent.get(p) else {
-            return p;
+            return Ok(p);
         };
         if let Some(slot) = parent.get_mut(x) {
             *slot = grand;
@@ -288,17 +297,20 @@ pub fn wcc(
         nodes.push(n?)?;
     }
     let too_many = || GraphError::Corrupt("more present nodes than u32 positions".to_owned());
+    let tick = Ticker::new(budget);
     let mut parent: Grow<'_, u32> = Grow::with_capacity(budget, nodes.len())?;
     for i in 0..nodes.len() {
+        tick.tick()?;
         parent.push(u32::try_from(i).map_err(|_| too_many())?)?;
     }
     for (i, &n) in nodes.iter().enumerate() {
+        tick.tick()?;
         for row in v.neighbours(n, rels, Direction::Out, budget) {
             let (m, _, _) = row?;
             let Ok(j) = nodes.binary_search(&m) else {
                 continue;
             };
-            let (ri, rj) = (find(&mut parent, i), find(&mut parent, j));
+            let (ri, rj) = (find(&mut parent, i, &tick)?, find(&mut parent, j, &tick)?);
             let (low, high) = (ri.min(rj), ri.max(rj));
             if low != high
                 && let Some(slot) = parent.get_mut(high)
@@ -311,10 +323,9 @@ pub fn wcc(
         .len()
         .min(usize::try_from(cap.0).unwrap_or(usize::MAX));
     let mut out = Grow::with_capacity(budget, rows)?;
-    let tick = Ticker::new(budget);
     for (i, &n) in nodes.iter().take(rows).enumerate() {
         tick.tick()?;
-        let root = find(&mut parent, i);
+        let root = find(&mut parent, i, &tick)?;
         let Some(&c) = nodes.get(root) else {
             return Err(too_many());
         };

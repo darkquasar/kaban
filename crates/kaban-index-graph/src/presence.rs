@@ -67,6 +67,7 @@ impl IdIndex {
         r: &mut Reader<'_>,
         file: &OwnedBytes,
         domain: u64,
+        t: &Ticker<'_>,
     ) -> Result<Self, GraphError> {
         let mode = r.u8("index mode")?;
         match mode {
@@ -78,6 +79,7 @@ impl IdIndex {
                 let ids = r.slice(file, len, "sorted index")?;
                 let mut prev: Option<u32> = None;
                 for &chunk in ids.as_chunks::<4>().0 {
+                    t.tick()?;
                     let id = u32::from_le_bytes(chunk);
                     if u64::from(id) >= domain || prev.is_some_and(|p| p >= id) {
                         return Err(corrupt("sorted index order or domain"));
@@ -101,6 +103,7 @@ impl IdIndex {
                     .chunks(8 * WORDS_PER_SAMPLE)
                     .zip(samples.as_chunks::<8>().0)
                 {
+                    t.tick()?;
                     let sample = u64::from_le_bytes(*sample);
                     if sample != total {
                         return Err(corrupt("rank sample"));
@@ -182,7 +185,7 @@ impl IdIndex {
     }
 
     /// Touched ids in ascending order with their ranks.
-    pub(crate) fn iter(&self) -> IdIter<'_> {
+    pub(crate) fn cursor(&self) -> IdIter<'_> {
         IdIter {
             index: self,
             pos: 0,
@@ -316,10 +319,11 @@ impl Presence {
         r: &mut Reader<'_>,
         file: &OwnedBytes,
         domain: u64,
+        t: &Ticker<'_>,
     ) -> Result<Self, GraphError> {
-        let index = IdIndex::parse(r, file, domain)?;
+        let index = IdIndex::parse(r, file, domain, t)?;
         let kinds = r.slice(file, index.len(), "presence kinds")?;
-        check_kinds(&kinds, "presence kinds")?;
+        check_kinds(&kinds, "presence kinds", t)?;
         Ok(Self { index, kinds })
     }
 
@@ -330,9 +334,9 @@ impl Presence {
     }
 
     /// Touched ids ascending with their change.
-    pub(crate) fn iter(&self) -> PresenceIter<'_> {
+    pub(crate) fn cursor(&self) -> PresenceIter<'_> {
         PresenceIter {
-            ids: self.index.iter(),
+            ids: self.index.cursor(),
             kinds: &self.kinds,
             rank: 0,
         }
@@ -357,10 +361,17 @@ impl PresenceIter<'_> {
     }
 }
 
-/// Refuse any byte that is not a known [`OpKind`].
-pub(crate) fn check_kinds(kinds: &[u8], what: &str) -> Result<(), GraphError> {
-    for &k in kinds {
-        kind_from(k).map_err(|_| corrupt(what))?;
+/// Kind bytes validated per unit of work.
+const KINDS_PER_UNIT: usize = 256;
+
+/// Refuse any byte that is not a known [`OpKind`]; every [`KINDS_PER_UNIT`] bytes are one unit
+/// of `t`.
+pub(crate) fn check_kinds(kinds: &[u8], what: &str, t: &Ticker<'_>) -> Result<(), GraphError> {
+    for chunk in kinds.chunks(KINDS_PER_UNIT) {
+        t.tick()?;
+        for &k in chunk {
+            kind_from(k).map_err(|_| corrupt(what))?;
+        }
     }
     Ok(())
 }

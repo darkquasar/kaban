@@ -5,6 +5,7 @@ use std::cmp::Ordering;
 
 use tantivy::directory::OwnedBytes;
 
+use crate::charge::Ticker;
 use crate::error::GraphError;
 use crate::op::{OpKind, Reader, column, corrupt, kind_byte, kind_from, put_len};
 use crate::presence::check_kinds;
@@ -50,6 +51,7 @@ impl Facts {
         r: &mut Reader<'_>,
         file: &OwnedBytes,
         domain: u64,
+        t: &Ticker<'_>,
     ) -> Result<Self, GraphError> {
         let count = r.count(4 + 1 + 1 + 8, "facts")?;
         let nodes = r.slice(file, count * 4, "fact nodes")?;
@@ -61,7 +63,7 @@ impl Facts {
             .and_then(|t| usize::try_from(t).ok())
             .ok_or_else(|| corrupt("fact payload"))?;
         let payload = r.slice(file, total, "fact payload")?;
-        check_kinds(&kinds, "fact kinds")?;
+        check_kinds(&kinds, "fact kinds", t)?;
         let facts = Self {
             count,
             nodes,
@@ -72,6 +74,7 @@ impl Facts {
         };
         let mut prev: Option<(u32, u8)> = None;
         for i in 0..count {
+            t.tick()?;
             let key = facts.key_at(i).ok_or_else(|| corrupt("fact keys"))?;
             if u64::from(key.0) >= domain || prev.is_some_and(|p| p >= key) {
                 return Err(corrupt("fact order or domain"));
@@ -80,6 +83,7 @@ impl Facts {
         }
         let mut last = 0u64;
         for (i, &o) in facts.offsets.as_chunks::<8>().0.iter().enumerate() {
+            t.tick()?;
             let o = u64::from_le_bytes(o);
             if (i == 0 && o != 0) || o < last {
                 return Err(corrupt("fact offsets"));

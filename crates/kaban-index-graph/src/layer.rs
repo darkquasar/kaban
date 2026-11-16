@@ -147,8 +147,13 @@ impl Edges {
         }
     }
 
-    fn parse(r: &mut Reader<'_>, file: &OwnedBytes, domain: u64) -> Result<Self, GraphError> {
-        let index = IdIndex::parse(r, file, domain)?;
+    fn parse(
+        r: &mut Reader<'_>,
+        file: &OwnedBytes,
+        domain: u64,
+        t: &Ticker<'_>,
+    ) -> Result<Self, GraphError> {
+        let index = IdIndex::parse(r, file, domain, t)?;
         let touched = index.len();
         let noffsets = touched
             .checked_add(1)
@@ -176,17 +181,18 @@ impl Edges {
             offsets,
             entries,
         };
-        edges.validate(domain)?;
+        edges.validate(domain, t)?;
         Ok(edges)
     }
 
     /// One pass over the section: offsets start at zero and never decrease, every kind is
     /// known, and every list strictly ascends by (neighbour, relation) with neighbours below
     /// `domain`.
-    fn validate(&self, domain: u64) -> Result<(), GraphError> {
-        check_kinds(&self.kinds, "edge kinds")?;
+    fn validate(&self, domain: u64, t: &Ticker<'_>) -> Result<(), GraphError> {
+        check_kinds(&self.kinds, "edge kinds", t)?;
         let mut start = 0usize;
         for (i, &o) in self.offsets.as_chunks::<8>().0.iter().enumerate() {
+            t.tick()?;
             let end =
                 usize::try_from(u64::from_le_bytes(o)).map_err(|_| corrupt("edge offsets"))?;
             if (i == 0 && end != 0) || end < start || end > self.entries {
@@ -194,6 +200,7 @@ impl Edges {
             }
             let mut prev: Option<(u32, u16)> = None;
             for e in start..end {
+                t.tick()?;
                 let key = column::<4>(&self.nbrs, e)
                     .map(u32::from_le_bytes)
                     .zip(column::<2>(&self.rels, e).map(u16::from_le_bytes))
@@ -235,7 +242,7 @@ impl Edges {
 
     /// Touched nodes ascending (writer paths: unmetered).
     pub(crate) fn touched(&self) -> impl Iterator<Item = u32> + '_ {
-        let mut ids = self.index.iter();
+        let mut ids = self.index.cursor();
         let t = Ticker::unmetered();
         std::iter::from_fn(move || ids.next(&t))
     }
@@ -327,7 +334,11 @@ impl Extent {
         clippy::needless_pass_by_value,
         reason = "the public `open` signatures take ownership of the mapped bytes"
     )]
-    pub(crate) fn open(bytes: OwnedBytes, kind: u8) -> Result<Self, GraphError> {
+    pub(crate) fn open(
+        bytes: OwnedBytes,
+        kind: u8,
+        ticker: &Ticker<'_>,
+    ) -> Result<Self, GraphError> {
         let file = &bytes;
         let mut r = Reader::new(file.as_slice());
         if r.take(MAGIC.len(), "extent magic")? != MAGIC {
@@ -367,16 +378,16 @@ impl Extent {
         }
         let mut section = |i: usize| r.sub(lens[i], "section");
         let mut s = section(0)?;
-        let presence = Presence::parse(&mut s, file, domain)?;
+        let presence = Presence::parse(&mut s, file, domain, ticker)?;
         s.finish("section length")?;
         let mut s = section(1)?;
-        let out = Edges::parse(&mut s, file, domain)?;
+        let out = Edges::parse(&mut s, file, domain, ticker)?;
         s.finish("section length")?;
         let mut s = section(2)?;
-        let inc = Edges::parse(&mut s, file, domain)?;
+        let inc = Edges::parse(&mut s, file, domain, ticker)?;
         s.finish("section length")?;
         let mut s = section(3)?;
-        let facts = Facts::parse(&mut s, file, domain)?;
+        let facts = Facts::parse(&mut s, file, domain, ticker)?;
         s.finish("section length")?;
         let union = if kind == KIND_LAYER {
             let mut s = section(4)?;
@@ -425,10 +436,18 @@ impl Layer {
     /// domain; bitvector bits set past the domain; a bit-index count or rank sample that does
     /// not match the bits. After a successful open every lookup is exact, so corruption is never
     /// read as absence.
+    ///
+    /// Validation runs under `budget` (the loading query's deadline and cancellation): every
+    /// validated id, entry, offset, rank-sample block and 256 kind bytes is one unit of work,
+    /// checked every [`crate::BUDGET_CHECK_INTERVAL`] units. Opening allocates nothing.
+    ///
+    /// [`GraphError::BudgetExceeded`] when `budget` already refuses at entry or is cancelled or
+    /// past its deadline during validation.
     pub fn open(bytes: OwnedBytes, budget: &QueryBudget) -> Result<Layer, GraphError> {
-        let _ = budget;
+        budget.check()?;
+        let t = Ticker::new(budget);
         Ok(Layer {
-            extent: Extent::open(bytes, KIND_LAYER)?,
+            extent: Extent::open(bytes, KIND_LAYER, &t)?,
         })
     }
 }

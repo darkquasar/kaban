@@ -3,7 +3,7 @@
 use kaban_core::query_budget::{BudgetLease, QueryBudget};
 use tantivy::directory::OwnedBytes;
 
-use crate::charge::Charge;
+use crate::charge::{Charge, Ticker};
 use crate::error::GraphError;
 use crate::id::{LocalId, RelId};
 
@@ -90,6 +90,8 @@ const EDGE_BYTES: usize = 27;
 const NODE_BYTES: usize = 5;
 /// The fixed part of one encoded [`FactOp`]: node 4, key 1, kind 1, payload length 8.
 const FACT_FIXED_BYTES: usize = 14;
+/// Payload bytes copied per unit of work.
+pub(crate) const COPY_CHUNK: usize = 4096;
 
 impl Records {
     /// The sediment blob encoding: a magic and version, then the edge, node and fact streams,
@@ -136,13 +138,16 @@ impl Records {
     /// Decode a sediment blob into query-owned records. Every vector and fact payload is
     /// reserved against `budget` (its capacity plus allocation metadata) before it is
     /// allocated; the charge stays live as long as the returned [`DecodedRecords`] and is
-    /// released on drop or on error.
+    /// released on drop or on error. Every record and every [`COPY_CHUNK`] payload bytes is one
+    /// unit of work, checked every [`crate::BUDGET_CHECK_INTERVAL`] units.
     ///
     /// # Errors
     /// [`GraphError::Corrupt`] on a bad header, truncation, overflow, an unknown kind or
-    /// trailing bytes; [`GraphError::BudgetExceeded`] when `budget` refuses a reservation.
+    /// trailing bytes; [`GraphError::BudgetExceeded`] when `budget` refuses a reservation, already
+    /// refuses at entry (a recorded breach) or is cancelled or past its deadline while decoding.
     pub fn decode(bytes: &[u8], budget: &QueryBudget) -> Result<DecodedRecords, GraphError> {
         let mut charge = Charge::new(budget)?;
+        let t = Ticker::new(budget);
         let mut r = Reader::new(bytes);
         if r.take(RECORDS_MAGIC.len(), "records magic")? != RECORDS_MAGIC {
             return Err(corrupt("records magic"));
@@ -153,6 +158,7 @@ impl Records {
         let count = r.count(EDGE_BYTES, "edge records")?;
         let mut edges = charge.vec(count)?;
         for _ in 0..count {
+            t.tick()?;
             edges.push(EdgeOp {
                 src: LocalId(r.u32("edge src")?),
                 rel: RelId(r.u16("edge rel")?),
@@ -167,6 +173,7 @@ impl Records {
         let count = r.count(NODE_BYTES, "node records")?;
         let mut nodes = charge.vec(count)?;
         for _ in 0..count {
+            t.tick()?;
             nodes.push(NodeOp {
                 node: LocalId(r.u32("node id")?),
                 kind: kind_from(r.u8("node kind")?)?,
@@ -175,12 +182,16 @@ impl Records {
         let count = r.count(FACT_FIXED_BYTES, "fact records")?;
         let mut facts = charge.vec(count)?;
         for _ in 0..count {
+            t.tick()?;
             let node = LocalId(r.u32("fact node")?);
             let key = r.u8("fact key")?;
             let kind = kind_from(r.u8("fact kind")?)?;
             let len = r.count(1, "fact payload")?;
             let mut payload = charge.vec(len)?;
-            payload.extend_from_slice(r.take(len, "fact payload")?);
+            for chunk in r.take(len, "fact payload")?.chunks(COPY_CHUNK) {
+                t.tick()?;
+                payload.extend_from_slice(chunk);
+            }
             facts.push(FactOp {
                 node,
                 key,

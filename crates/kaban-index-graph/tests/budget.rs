@@ -409,9 +409,9 @@ fn cancellation_stops_a_scan_over_removed_nodes_within_the_interval() {
 /// run of empty bitvector words before the first entry. Each word visited is a unit of work.
 #[test]
 fn cancellation_stops_a_presence_scan_inside_a_run_of_empty_words() {
-    let _serial = serial();
     const DOMAIN: u32 = 1 << 21;
     const CLUSTER: u32 = 80_000; // 80,000 * 30 > 2^21: the presence index is a bitvector
+    let _serial = serial();
     let base = Base::open(
         OwnedBytes::new(build_base(
             &Records {
@@ -459,9 +459,9 @@ fn cancellation_stops_a_presence_scan_inside_a_run_of_empty_words() {
 /// every source; those are units of work, not one raw read.
 #[test]
 fn cancellation_stops_a_merge_over_many_overlapping_sources() {
-    let _serial = serial();
     const LAYERS: usize = 300;
     const KEYS: u32 = 1_000;
+    let _serial = serial();
     let base = Base::open(
         OwnedBytes::new(build_base(
             &Records {
@@ -646,6 +646,7 @@ fn an_expired_budget_stops_a_traversal_before_it_reads() {
     let v = view(None, &[], &rs);
     let expired = QueryBudget::new(u64::MAX, Some(Duration::ZERO));
     std::thread::sleep(Duration::from_millis(2));
+    let before = work_units();
     let got = expand(
         &v,
         &[LocalId(0)],
@@ -658,7 +659,11 @@ fn an_expired_budget_stops_a_traversal_before_it_reads() {
         got,
         Err(GraphError::BudgetExceeded { limit: "time", .. })
     ));
-    assert_eq!(work_units(), 0);
+    assert_eq!(
+        work_units(),
+        before,
+        "no unit of work before the first check"
+    );
 }
 
 // ---- Unchecked phases (END-MAJ-03) -------------------------------------------------------
@@ -842,7 +847,7 @@ fn cancellation_stops_shortest_path_initialisation_within_the_interval() {
 }
 
 /// Nodes 0..=d in a chain whose union-find forest is a path d -> d-1 -> ... -> 0 once the
-/// helpers are processed (each helper h_k links k-1 then k, in descending k); `extra` adds one
+/// helpers are processed (each helper `h_k` links k-1 then k, in descending k); `extra` adds one
 /// last node with an edge to d, whose find walks the whole path.
 fn deep_forest(d: u32, extra: bool) -> Vec<Records> {
     let helper = |k: u32| d + 1 + (d - k); // h_d < h_(d-1) < ... < h_1

@@ -9,11 +9,13 @@
 //!
 //! Preparation sorts in place (no hidden allocation) and compacts each stream to its newest
 //! record per key. The vectors keep the capacity of the input streams; that capacity is what is
-//! charged and it stays charged until the view is dropped.
+//! charged and it stays charged until the view is dropped. Every copied record, sort sift and
+//! compaction step is one unit of work, so a cancellation or deadline stops preparation within
+//! [`crate::BUDGET_CHECK_INTERVAL`] units.
 
 use kaban_core::query_budget::{BudgetLease, QueryBudget};
 
-use crate::charge::Charge;
+use crate::charge::{Charge, Ticker, sort_checked};
 use crate::error::GraphError;
 use crate::op::{Attr, OpKind, Records};
 
@@ -75,12 +77,15 @@ fn compact<T: Copy, K: PartialEq>(
     v: &mut [T],
     key: impl Fn(&T) -> K,
     keep: impl Fn(&T) -> bool,
-) -> usize {
+    t: &Ticker<'_>,
+) -> Result<usize, GraphError> {
     let mut kept = 0;
     let mut i = 0;
     while i < v.len() {
+        t.tick()?;
         let mut last = i;
         while last + 1 < v.len() && key(&v[last + 1]) == key(&v[i]) {
+            t.tick()?;
             last += 1;
         }
         if keep(&v[last]) {
@@ -89,7 +94,7 @@ fn compact<T: Copy, K: PartialEq>(
         }
         i = last + 1;
     }
-    kept
+    Ok(kept)
 }
 
 impl<'a> Sediment<'a> {
@@ -99,10 +104,12 @@ impl<'a> Sediment<'a> {
         budget: &QueryBudget,
     ) -> Result<Self, GraphError> {
         let mut charge = Charge::new(budget)?;
+        let t = Ticker::new(budget);
 
         let mut nodes: Vec<SedNode> = charge.vec(total(batches, |r| r.nodes.len()))?;
         for (b, r) in batches.iter().enumerate() {
             for (i, op) in r.as_ref().nodes.iter().enumerate() {
+                t.tick()?;
                 nodes.push(SedNode {
                     id: op.node.0,
                     order: (b, i),
@@ -111,25 +118,27 @@ impl<'a> Sediment<'a> {
                 });
             }
         }
-        nodes.sort_unstable_by_key(|n| (n.id, n.order));
+        sort_checked(&mut nodes, |n| (n.id, n.order), &t)?;
         // The newest change wins; the barrier is the last removal of the run.
         let mut kept = 0;
         let mut i = 0;
+        let mut barriers = false;
         while i < nodes.len() {
             let mut entry = nodes[i];
             let mut barrier = None;
             while i < nodes.len() && nodes[i].id == entry.id {
+                t.tick()?;
                 if nodes[i].kind == OpKind::Remove {
                     barrier = Some(nodes[i].order.0);
                 }
                 entry = nodes[i];
                 i += 1;
             }
+            barriers |= barrier.is_some();
             nodes[kept] = SedNode { barrier, ..entry };
             kept += 1;
         }
         nodes.truncate(kept);
-        let barriers = nodes.iter().any(|n| n.barrier.is_some());
         let barrier_of = |id: u32| -> Option<usize> {
             nodes
                 .binary_search_by_key(&id, |n| n.id)
@@ -145,6 +154,7 @@ impl<'a> Sediment<'a> {
         let mut out: Vec<SedEdge> = charge.vec(total(batches, |r| r.edges.len()))?;
         for (b, r) in batches.iter().enumerate() {
             for (i, e) in r.as_ref().edges.iter().enumerate() {
+                t.tick()?;
                 out.push(SedEdge {
                     key: (e.src.0, e.dst.0, e.rel.0),
                     order: (b, i),
@@ -153,23 +163,28 @@ impl<'a> Sediment<'a> {
                 });
             }
         }
-        out.sort_unstable_by_key(|e| (e.key, e.order));
+        sort_checked(&mut out, |e| (e.key, e.order), &t)?;
         let kept = compact(
             &mut out,
             |e| e.key,
             |e| survives(e.order.0, &[e.key.0, e.key.1]),
-        );
+            &t,
+        )?;
         out.truncate(kept);
         let mut inc: Vec<SedEdge> = charge.vec(out.len())?;
-        inc.extend(out.iter().map(|e| SedEdge {
-            key: (e.key.1, e.key.0, e.key.2),
-            ..*e
-        }));
-        inc.sort_unstable_by_key(|e| e.key);
+        for e in &out {
+            t.tick()?;
+            inc.push(SedEdge {
+                key: (e.key.1, e.key.0, e.key.2),
+                ..*e
+            });
+        }
+        sort_checked(&mut inc, |e| e.key, &t)?;
 
         let mut facts: Vec<SedFact<'a>> = charge.vec(total(batches, |r| r.facts.len()))?;
         for (b, r) in batches.iter().enumerate() {
             for (i, f) in r.as_ref().facts.iter().enumerate() {
+                t.tick()?;
                 facts.push(SedFact {
                     key: (f.node.0, f.key),
                     order: (b, i),
@@ -178,8 +193,13 @@ impl<'a> Sediment<'a> {
                 });
             }
         }
-        facts.sort_unstable_by_key(|f| (f.key, f.order));
-        let kept = compact(&mut facts, |f| f.key, |f| survives(f.order.0, &[f.key.0]));
+        sort_checked(&mut facts, |f| (f.key, f.order), &t)?;
+        let kept = compact(
+            &mut facts,
+            |f| f.key,
+            |f| survives(f.order.0, &[f.key.0]),
+            &t,
+        )?;
         facts.truncate(kept);
 
         Ok(Self {
