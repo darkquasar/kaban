@@ -3,6 +3,7 @@
 use std::borrow::Cow;
 use std::ffi::{CStr, CString, c_int};
 use std::fmt;
+use std::mem;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 
@@ -77,9 +78,38 @@ pub fn register(conn: &rusqlite::Connection, f: Arc<dyn TableFunction>) -> rusql
 }
 
 /// Run a call into the table function, turning a panic into an error so it never unwinds into C.
+/// The panic payload is leaked, not dropped: its destructor is table-function code too and could
+/// panic again outside any containment.
 fn contain<T>(name: &str, call: &str, f: impl FnOnce() -> T) -> rusqlite::Result<T> {
-    catch_unwind(AssertUnwindSafe(f))
-        .map_err(|_| Error::ModuleError(format!("{name}: {call} panicked")))
+    catch_unwind(AssertUnwindSafe(f)).map_err(|payload| {
+        mem::forget(payload);
+        Error::ModuleError(format!("{name}: {call} panicked"))
+    })
+}
+
+/// Drop table-function-owned `value` (a row iterator, the function itself) without letting a
+/// panicking destructor unwind; a panic payload is leaked, as in [`contain`].
+fn drop_contained<T>(value: T) {
+    if let Err(payload) = catch_unwind(AssertUnwindSafe(move || drop(value))) {
+        mem::forget(payload);
+    }
+}
+
+/// The registered function. Its final drop is table-function code, which can run inside SQLite's
+/// module destructor or `xDisconnect`, so it runs contained ([`drop_contained`]).
+struct ContainedFunction(Option<Arc<dyn TableFunction>>);
+
+impl ContainedFunction {
+    /// The function; `None` only while it is being dropped.
+    fn get(&self) -> Option<&dyn TableFunction> {
+        self.0.as_deref()
+    }
+}
+
+impl Drop for ContainedFunction {
+    fn drop(&mut self) {
+        drop_contained(self.0.take());
+    }
 }
 
 fn refusal(error: &FnError) -> Error {
@@ -124,7 +154,7 @@ fn schema(columns: &[ColumnDef]) -> rusqlite::Result<CString> {
 /// shared (`Arc`) by each connection's [`FunctionTable`] and each [`FunctionCursor`]; nothing
 /// mutates it after construction, so references to it never alias a value SQLite writes.
 struct Registered {
-    function: Arc<dyn TableFunction>,
+    function: ContainedFunction,
     /// The SQL name, read once at registration.
     name: &'static str,
     /// Every declared column, read once at registration.
@@ -140,10 +170,15 @@ struct Registered {
 }
 
 impl Registered {
-    /// Read and validate `function`'s declaration once.
+    /// Read and validate `function`'s declaration once; callbacks never call `name` or `columns`
+    /// again, so a declaration cannot change (or panic) after it was validated.
     fn new(function: Arc<dyn TableFunction>) -> rusqlite::Result<Self> {
-        let name = function.name();
-        let columns = function.columns();
+        let function = ContainedFunction(Some(function));
+        let Some(declared) = function.get() else {
+            return Err(Error::ModuleError("table function released".to_owned()));
+        };
+        let name = contain("table function", "name", || declared.name())?;
+        let columns = contain(name, "columns", || declared.columns())?;
         let mut slots = Vec::with_capacity(columns.len());
         let mut arguments = Vec::new();
         let mut results = 0;
@@ -172,6 +207,13 @@ impl Registered {
             arguments,
             results,
         })
+    }
+
+    /// The function, for a callback to call (contained).
+    fn function(&self) -> rusqlite::Result<&dyn TableFunction> {
+        self.function
+            .get()
+            .ok_or_else(|| Error::ModuleError(format!("{}: table function released", self.name)))
     }
 
     fn column_name(&self, column: usize) -> &'static str {
@@ -312,7 +354,8 @@ unsafe impl<'vtab> VTab<'vtab> for FunctionTable {
             order_by: &order_by,
             limit_known,
         };
-        let plan = contain(name, "plan", || registered.function.plan(&input))?;
+        let function = registered.function()?;
+        let plan = contain(name, "plan", || function.plan(&input))?;
 
         for (constraint, argv_index) in assignments {
             let mut usage = info.constraint_usage(constraint);
@@ -409,11 +452,9 @@ impl FunctionCursor<'_> {
         }
     }
 
-    /// End the scan. The row iterator is dropped under `catch_unwind`: its `Drop` is table-function
-    /// code and must not unwind into C either.
+    /// End the scan. The row iterator's `Drop` is table-function code: it runs contained.
     fn stop(&mut self) {
-        let rows = self.rows.take();
-        drop(catch_unwind(AssertUnwindSafe(move || drop(rows))));
+        drop_contained(self.rows.take());
         self.current = None;
     }
 }
@@ -455,7 +496,7 @@ unsafe impl VTabCursor for FunctionCursor<'_> {
                 "{name}: table function scanned outside a request budget scope"
             )));
         };
-        let function: &'_ dyn TableFunction = &*registered.function;
+        let function = registered.function()?;
         let rows = contain(name, "rows", || function.rows(&self.args, &budget))?
             .map_err(|error| refusal(&error))?;
         self.rows = Some(rows);
