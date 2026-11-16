@@ -11,7 +11,7 @@ use common::{Broken, Range, integers};
 use fresh::{fresh_test, with_query};
 use kaban_core::query_budget::QueryBudget;
 use kaban_vtab::{
-    Arg, ColumnDef, ColumnKind, FnError, Plan, PlanInput, Scan, Rows, TableFunction, Value,
+    Arg, ColumnDef, ColumnKind, FnError, Plan, PlanInput, Rows, Scan, TableFunction, Value,
 };
 
 fresh_test! {

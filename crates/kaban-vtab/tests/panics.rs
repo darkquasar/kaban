@@ -15,7 +15,7 @@ use common::integers;
 use fresh::{fresh_test, installed_runtime, with_query};
 use kaban_core::query_budget::QueryBudget;
 use kaban_vtab::{
-    Arg, ColumnDef, ColumnKind, FnError, Plan, PlanInput, Scan, Rows, TableFunction, Value,
+    Arg, ColumnDef, ColumnKind, FnError, Plan, PlanInput, Rows, Scan, TableFunction, Value,
 };
 
 /// A panic payload whose destructor panics again.

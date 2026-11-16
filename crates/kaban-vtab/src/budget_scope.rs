@@ -98,15 +98,11 @@ impl RequestScope {
     pub fn translate(&self, error: rusqlite::Error) -> QueryError {
         match error.sqlite_error_code() {
             Some(
-                ErrorCode::OutOfMemory
-                | ErrorCode::OperationInterrupted
-                | ErrorCode::DatabaseBusy,
-            ) => {
-                match self.budget.check() {
-                    Err(exceeded) => QueryError::Limit(exceeded),
-                    Ok(()) => QueryError::Sqlite(error),
-                }
-            }
+                ErrorCode::OutOfMemory | ErrorCode::OperationInterrupted | ErrorCode::DatabaseBusy,
+            ) => match self.budget.check() {
+                Err(exceeded) => QueryError::Limit(exceeded),
+                Ok(()) => QueryError::Sqlite(error),
+            },
             _ => QueryError::Sqlite(error),
         }
     }

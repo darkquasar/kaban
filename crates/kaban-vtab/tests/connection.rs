@@ -2,7 +2,7 @@
 //! request's budget (spec 11 T12, QRY-04, QRY-06, MED-03, MED-04). Each case runs in a fresh
 //! process with the allocator adapter installed. Every lock wait here is bounded by SQLite's own
 //! busy policy (at most rusqlite's 5 s default before the fix) and by the child's time limit.
-#![allow(clippy::unwrap_used)]
+#![allow(clippy::unwrap_used, clippy::panic)] // a wrong outcome fails the case
 
 mod fresh;
 
@@ -19,7 +19,8 @@ struct TempDb(PathBuf);
 
 impl TempDb {
     fn new(case: &str) -> Self {
-        let path = std::env::temp_dir().join(format!("kaban-vtab-{}-{case}.db", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("kaban-vtab-{}-{case}.db", std::process::id()));
         let db = Self(path);
         db.remove();
         db
@@ -94,7 +95,11 @@ fn locked(case: &str) -> (TempDb, Connection) {
 
 /// Read `t` through a query connection under `budget` while the lock is held; return the
 /// translated error and how long the statement waited.
-fn blocked_read(runtime: kaban_vtab::Runtime, db: &TempDb, budget: &QueryBudget) -> (QueryError, Duration) {
+fn blocked_read(
+    runtime: kaban_vtab::Runtime,
+    db: &TempDb,
+    budget: &QueryBudget,
+) -> (QueryError, Duration) {
     let scope = RequestScope::enter(runtime, budget).unwrap();
     let conn = scope.open_query_connection(&db.0, query_flags()).unwrap();
     let started = Instant::now();

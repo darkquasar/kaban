@@ -283,7 +283,8 @@ unsafe fn malloc(bytes: c_int) -> *mut c_void {
     let Some(original) = ORIGINAL.get() else {
         return ptr::null_mut();
     };
-    let (Some(total), Some(predicted)) = (original_total(original, bytes), charge_for(bytes)) else {
+    let (Some(total), Some(predicted)) = (original_total(original, bytes), charge_for(bytes))
+    else {
         return ptr::null_mut();
     };
     let Ok(mut owner) = charge_current(predicted) else {
@@ -459,7 +460,11 @@ unsafe extern "C" fn x_roundup(bytes: c_int) -> c_int {
         };
         // SAFETY: the original xRoundup is a pure size computation.
         let rounded = unsafe { (original.roundup)(total) };
-        if rounded < total { 0 } else { rounded - HEADER_INT }
+        if rounded < total {
+            0
+        } else {
+            rounded - HEADER_INT
+        }
     })
 }
 

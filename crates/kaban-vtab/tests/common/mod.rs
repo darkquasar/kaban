@@ -4,7 +4,8 @@
 
 use kaban_core::query_budget::QueryBudget;
 use kaban_vtab::{
-    Arg, ColumnDef, ColumnKind, FnError, OrderTerm, Plan, PlanInput, Scan, Rows, TableFunction, Value,
+    Arg, ColumnDef, ColumnKind, FnError, OrderTerm, Plan, PlanInput, Rows, Scan, TableFunction,
+    Value,
 };
 
 /// `range(start, stop)`: the integers `start..stop`, ascending, in column `value`.

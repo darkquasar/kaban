@@ -2,7 +2,7 @@
 
 use std::borrow::Cow;
 use std::ffi::{CStr, CString, c_int};
-use std::fmt;
+use std::fmt::{self, Write as _};
 use std::mem;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
@@ -14,13 +14,13 @@ use rusqlite::vtab::{
 };
 use rusqlite::{Error, ffi};
 
-use crate::{Runtime, allocator};
-use crate::value::copy_charged;
 use crate::plan::MAX_CONSTRAINTS;
+use crate::value::copy_charged;
 use crate::{
     BoundArg, BoundConstraint, ColumnDef, ColumnKind, ConstraintOp, OrderTerm, Plan, PlanInput,
     ResultConstraint, Scan, Value,
 };
+use crate::{Runtime, allocator};
 
 /// The rows a table function produces: each item is one row holding one value per result
 /// (non-argument) column, in declaration order.
@@ -152,7 +152,7 @@ fn copy_refused(name: &str, what: &str, exceeded: &BudgetExceeded) -> Error {
 }
 
 /// The comparisons a plan may consume on a result column, by SQLite operator.
-fn constraint_op(op: IndexConstraintOp) -> Option<ConstraintOp> {
+fn constraint_op(op: &IndexConstraintOp) -> Option<ConstraintOp> {
     match op {
         IndexConstraintOp::SQLITE_INDEX_CONSTRAINT_EQ => Some(ConstraintOp::Eq),
         IndexConstraintOp::SQLITE_INDEX_CONSTRAINT_NE => Some(ConstraintOp::Ne),
@@ -179,7 +179,8 @@ fn describe(strategy: i32, consumed: &[(usize, ConstraintOp)]) -> String {
     let mut descriptor = strategy.to_string();
     for (column, op) in consumed {
         let code = OPS.iter().position(|known| known == op).unwrap_or(0);
-        descriptor.push_str(&format!(" {column}:{code}"));
+        // Writing to a `String` cannot fail.
+        let _ = write!(descriptor, " {column}:{code}");
     }
     descriptor
 }
@@ -444,7 +445,7 @@ unsafe impl<'vtab> VTab<'vtab> for FunctionTable {
                 break;
             }
             let (Some(op), Some(column), true) = (
-                constraint_op(constraint.operator()),
+                constraint_op(&constraint.operator()),
                 registered.result_column(constraint.column()),
                 constraint.is_usable(),
             ) else {
@@ -453,7 +454,11 @@ unsafe impl<'vtab> VTab<'vtab> for FunctionTable {
             let column_name = registered.column_name(column);
             let value = match info.rhs_value(index).ok().flatten() {
                 Some(value) => Some(copy_charged(value, &mut copies).map_err(|exceeded| {
-                    copy_refused(name, &format!("the value compared with {column_name}"), &exceeded)
+                    copy_refused(
+                        name,
+                        &format!("the value compared with {column_name}"),
+                        &exceeded,
+                    )
                 })?),
                 None => None,
             };
@@ -667,7 +672,11 @@ unsafe impl VTabCursor for FunctionCursor<'_> {
             let column = registered.column_name(column);
             let value = match supplied.next() {
                 Some(value) => copy_charged(value, &mut charge).map_err(|exceeded| {
-                    copy_refused(name, &format!("the value compared with {column}"), &exceeded)
+                    copy_refused(
+                        name,
+                        &format!("the value compared with {column}"),
+                        &exceeded,
+                    )
                 })?,
                 None => Value::Null,
             };

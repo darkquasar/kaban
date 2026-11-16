@@ -60,7 +60,10 @@ unsafe fn prefix(p: *mut c_void) -> *mut usize {
 
 unsafe extern "C" fn test_malloc(n: c_int) -> *mut c_void {
     ATTEMPTS.fetch_add(1, Ordering::SeqCst);
-    usize::try_from(n).ok().filter(|&n| n > 0).map_or(ptr::null_mut(), place)
+    usize::try_from(n)
+        .ok()
+        .filter(|&n| n > 0)
+        .map_or(ptr::null_mut(), place)
 }
 
 unsafe extern "C" fn test_free(p: *mut c_void) {
@@ -144,10 +147,18 @@ fn grow_checked(block: &mut Block, bytes: u64, budget: &QueryBudget) -> bool {
     let grew = block.realloc(bytes);
     if grew {
         assert!(block.size() >= bytes);
-        assert_eq!(budget.live_bytes(), charge(block.size()), "a grow left the block undercharged");
+        assert_eq!(
+            budget.live_bytes(),
+            charge(block.size()),
+            "a grow left the block undercharged"
+        );
     } else {
         assert_eq!((block.addr(), block.size()), (addr, size));
-        assert_eq!(budget.live_bytes(), live, "a refused grow changed the charge");
+        assert_eq!(
+            budget.live_bytes(),
+            live,
+            "a refused grow changed the charge"
+        );
     }
     assert!(block.holds(64, 0xC3), "the block's bytes changed");
     grew

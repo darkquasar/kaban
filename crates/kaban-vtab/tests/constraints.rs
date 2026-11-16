@@ -7,6 +7,7 @@
 mod common;
 mod fresh;
 
+use std::ops::RangeInclusive;
 use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -14,8 +15,8 @@ use common::query_plan;
 use fresh::{fresh_test, with_query};
 use kaban_core::query_budget::QueryBudget;
 use kaban_vtab::{
-    Arg, ColumnDef, ColumnKind, ConstraintOp, FnError, Plan, PlanInput, Rows, Scan,
-    TableFunction, Value,
+    Arg, ColumnDef, ColumnKind, ConstraintOp, FnError, Plan, PlanInput, Rows, Scan, TableFunction,
+    Value,
 };
 
 /// `squares(n)`: rows `(id, square)` for `id` in `1..=n`. It takes a point lookup when `id = v`
@@ -104,13 +105,16 @@ impl TableFunction for Squares {
             });
         };
         let bound = |op| {
-            scan.bound.iter().find_map(|b| match (&b.value, b.column == "id" && b.op == op) {
-                (Value::Integer(v), true) => Some(*v),
-                _ => None,
-            })
+            scan.bound
+                .iter()
+                .find_map(|b| match (&b.value, b.column == "id" && b.op == op) {
+                    (Value::Integer(v), true) => Some(*v),
+                    _ => None,
+                })
         };
         let ids = match scan.strategy {
-            POINT => bound(ConstraintOp::Eq).map_or(1..=0, |id| id.max(1)..=id.min(n)),
+            POINT => bound(ConstraintOp::Eq)
+                .map_or(RangeInclusive::new(1, 0), |id| id.max(1)..=id.min(n)),
             FROM => bound(ConstraintOp::Gt).map_or(1..=n, |v| (v - 5).max(1)..=n),
             _ => 1..=n,
         };

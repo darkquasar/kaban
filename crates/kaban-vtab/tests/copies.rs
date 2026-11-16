@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use fresh::{fresh_test, installed_runtime, query_flags};
 use kaban_core::query_budget::QueryBudget;
 use kaban_vtab::{
-    Arg, ColumnDef, ColumnKind, FnError, Plan, PlanInput, Scan, RequestScope, Rows, TableFunction,
+    Arg, ColumnDef, ColumnKind, FnError, Plan, PlanInput, RequestScope, Rows, Scan, TableFunction,
     Value, register,
 };
 
@@ -48,7 +48,8 @@ impl TableFunction for Echo {
     }
 
     fn plan(&self, _input: &PlanInput<'_>) -> Plan {
-        self.planned.fetch_max(self.budget.live_bytes(), Ordering::SeqCst);
+        self.planned
+            .fetch_max(self.budget.live_bytes(), Ordering::SeqCst);
         Plan {
             cost: 1.0,
             rows: 1,
