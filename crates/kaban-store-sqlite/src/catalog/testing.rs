@@ -1,17 +1,26 @@
 //! Test access to the catalog for the integration suites (`failpoints` feature only; not a
 //! supported interface): a test index class whose `stage` writes one sediment row per edge
 //! change and records the change set it was handed, a pin of that class's sediment, and the
-//! container's extents of the test class: appended and published, pinned and read.
+//! container's extents of the test class: appended and published, pinned and read, retired and
+//! reclaimed by a test reclamation that follows T6's two-phase rule (PC-8) and zero-fills
+//! instead of punching, with hooks in the pin protocol's windows ([`Window`]).
 
+use std::os::unix::fs::FileExt;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use kaban_core::query_budget::QueryBudget;
 use kaban_core::{Durability, Result};
 use rusqlite::Connection;
 
+pub use super::failpoint::Window;
+use super::kbx::{Unpublished, failed, open_existing};
+use super::pins;
+use super::tables::{sql_int, uint};
+use crate::sql_error::SqlResultExt;
+
 use super::Catalog;
 use super::capture::{BatchChanges, CaptureOp};
-use super::class::{ExtentClass, IndexClass, SealOutput};
+use super::class::{ExtentClass, ExtentLocation, IndexClass, SealOutput};
 use super::commit::Stage;
 use super::pin::Pin;
 use crate::SqliteStore;
@@ -131,6 +140,37 @@ pub fn append_and_publish(store: &SqliteStore, bytes: &[u8]) -> Result<u64> {
     Ok(id.0)
 }
 
+/// Append every one of `extents` to `store`'s container with one write and one sync, and
+/// publish each as its own extent of the test class in one commit; returns their ids in order.
+///
+/// # Errors
+/// The append's or the commit's errors.
+pub fn append_and_publish_all(store: &SqliteStore, extents: &[Vec<u8>]) -> Result<Vec<u64>> {
+    let whole = extents.concat();
+    let appended = store.catalog().append_extent(ExtentClass::Test, &whole)?;
+    let ExtentLocation::Kbx { offset: start, .. } = appended.location else {
+        unreachable!("an append names a container range")
+    };
+    let mut offset = start;
+    let mut parts = Vec::with_capacity(extents.len());
+    for bytes in extents {
+        let len = bytes.len() as u64;
+        parts.push(Unpublished {
+            class: ExtentClass::Test,
+            location: ExtentLocation::Kbx { offset, len },
+        });
+        offset += len;
+    }
+    store
+        .catalog()
+        .commit(&mut store.lock(), Durability::Normal, |txn| {
+            parts
+                .into_iter()
+                .map(|part| txn.publish(part).map(|id| id.0))
+                .collect()
+        })
+}
+
 /// A detached pin of `store`'s catalog ([`Catalog::pin`]).
 #[derive(Debug)]
 pub struct TestPin(Pin);
@@ -200,6 +240,144 @@ pub fn with_snapshot<T>(
     store
         .catalog()
         .with_snapshot(&mut store.lock(), budget, |_, pin| f(PinView(pin)))
+}
+
+/// Install `hook` in `window` of `store`'s catalog (`None` removes it). A reader's windows run
+/// on the reader's thread with its connection held; the reclamation's on the thread of
+/// [`reclaim`], with no connection held. A hook may block to hold its window open; the test
+/// bounds that wait.
+pub fn set_failpoint(
+    store: &SqliteStore,
+    window: Window,
+    hook: Option<Arc<dyn Fn() + Send + Sync>>,
+) {
+    store.catalog().failpoints.set(window, hook);
+}
+
+/// How often `store`'s readers retried because a reclamation's floor passed their candidate
+/// generation (PC-8 step 4).
+#[must_use]
+pub fn pin_retries(store: &SqliteStore) -> u64 {
+    store.catalog().failpoints.retries()
+}
+
+/// Retire the extents `ids` in one commit, as T6's publication switch does: dead since the
+/// generation that commit publishes. Returns that generation.
+///
+/// # Errors
+/// The commit's errors.
+pub fn retire(store: &SqliteStore, ids: &[u64]) -> Result<u64> {
+    store
+        .catalog()
+        .commit(&mut store.lock(), Durability::Normal, |txn| {
+            let generation = txn.generation()?.0;
+            for id in ids {
+                txn.conn()
+                    .execute(
+                        "UPDATE cat_extent SET dead_since = ?1 WHERE id = ?2 AND dead_since IS NULL",
+                        rusqlite::params![sql_int(generation).sql()?, sql_int(*id).sql()?],
+                    )
+                    .sql()?;
+            }
+            Ok(generation)
+        })
+}
+
+/// What one test reclamation did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Reclaimed {
+    /// The `reclaim_floor` it committed.
+    pub floor: u64,
+    /// The extents whose container ranges it zeroed and whose rows it dropped, in id order.
+    pub punched: Vec<u64>,
+    /// Whether its re-scan found a live pin below the floor (`pin_race_retry`): then it
+    /// zeroed nothing.
+    pub pin_race_retry: bool,
+}
+
+/// Reclaim `store`'s container by T6's two-phase rule (PC-8), zero-filling where T6 punches:
+/// scan the live pin locks for the lowest generation P (the latest generation when none is
+/// live), commit `reclaim_floor = max(floor, P)`, [`Window::ReclaimFloorCommitted`], re-scan;
+/// a live pin below the floor makes it a `pin_race_retry` that zeroes nothing, else it zeroes
+/// every container range of an extent dead since a generation at or below the floor and drops
+/// those rows.
+///
+/// # Errors
+/// The scans', commits' and container writes' errors; a catalog without a container.
+pub fn reclaim(store: &SqliteStore) -> Result<Reclaimed> {
+    let catalog = store.catalog();
+    let Some(pins) = catalog.pins.as_deref() else {
+        return Err(failed(
+            "reclaim",
+            &catalog.kbx,
+            std::io::Error::new(std::io::ErrorKind::NotFound, "no container"),
+        ));
+    };
+    let latest = catalog.read(&store.lock(), |tx| {
+        tx.query_row(
+            "SELECT COALESCE(max(generation), 0) FROM cat_generation",
+            [],
+            |r| uint(r, 0),
+        )
+        .sql()
+    })?;
+    let lowest = pins::lowest_live(pins)?.map_or(latest, |p| p.min(latest));
+    let floor = catalog.commit(&mut store.lock(), Durability::Normal, |txn| {
+        txn.conn()
+            .query_row(
+                "UPDATE cat_meta SET value = max(value, ?1) WHERE key = 'reclaim_floor'
+                 RETURNING value",
+                [sql_int(lowest).sql()?],
+                |r| uint(r, 0),
+            )
+            .sql()
+    })?;
+    catalog.failpoint(Window::ReclaimFloorCommitted);
+    if pins::lowest_live(pins)?.is_some_and(|p| p < floor) {
+        return Ok(Reclaimed {
+            floor,
+            punched: Vec::new(),
+            pin_race_retry: true,
+        });
+    }
+    let doomed = catalog.read(&store.lock(), |tx| {
+        let mut stmt = tx
+            .prepare(
+                "SELECT id, kbx_offset, kbx_len FROM cat_extent
+                 WHERE dead_since IS NOT NULL AND dead_since <= ?1 AND kbx_offset IS NOT NULL
+                 ORDER BY id",
+            )
+            .sql()?;
+        let rows = stmt
+            .query_map([sql_int(floor).sql()?], |r| {
+                Ok((uint(r, 0)?, uint(r, 1)?, uint(r, 2)?))
+            })
+            .sql()?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().sql()
+    })?;
+    let kbx = open_existing(&catalog.kbx).map_err(|e| failed("open", &catalog.kbx, e))?;
+    for (_, offset, len) in &doomed {
+        let zeros = vec![0_u8; usize::try_from(*len).unwrap_or(usize::MAX)];
+        kbx.write_all_at(&zeros, *offset)
+            .map_err(|e| failed("zero a reclaimed range of", &catalog.kbx, e))?;
+    }
+    let punched: Vec<u64> = doomed.into_iter().map(|(id, _, _)| id).collect();
+    catalog.commit(&mut store.lock(), Durability::Normal, |txn| {
+        for id in &punched {
+            txn.conn()
+                .execute(
+                    "DELETE FROM cat_extent WHERE id = ?1",
+                    [sql_int(*id).sql()?],
+                )
+                .sql()?;
+        }
+        Ok(())
+    })?;
+    Ok(Reclaimed {
+        floor,
+        punched,
+        pin_race_retry: false,
+    })
 }
 
 /// The test class: one sediment row per edge change; records every change set it is handed.

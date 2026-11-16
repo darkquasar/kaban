@@ -21,6 +21,7 @@ use tantivy::directory::OwnedBytes;
 
 use super::Catalog;
 use super::class::{ExtentClass, ExtentLocation};
+use super::failpoint::Window;
 use super::kbx::{Mapping, failed};
 use super::tables::{ExtentId, ExtentRef, Generation, SedimentRow, SedimentSeq, uint};
 use crate::rows::bad_enum;
@@ -199,6 +200,8 @@ impl Catalog {
         f: impl FnOnce(&Transaction<'_>, &Pin) -> Result<T>,
     ) -> Result<T> {
         let conn = Interruptible::new(conn, budget)?;
+        self.failpoint(Window::ReaderCandidate);
+        self.failpoint(Window::ReaderLocked);
         let out = self.read(conn.conn(), |tx| {
             let pin = self.load(tx, budget)?;
             let out = f(tx, &pin);
@@ -215,6 +218,8 @@ impl Catalog {
     /// The budget's or SQLite's error.
     pub(crate) fn pin(&self, conn: &mut Connection, budget: &QueryBudget) -> Result<Pin> {
         let conn = Interruptible::new(conn, budget)?;
+        self.failpoint(Window::ReaderCandidate);
+        self.failpoint(Window::ReaderLocked);
         let out = self.read(conn.conn(), |tx| self.load(tx, budget));
         settle(budget, out)
     }
@@ -230,6 +235,7 @@ impl Catalog {
                 |r| uint(r, 0),
             )
             .sql()?;
+        self.failpoint(Window::ReaderInTransaction);
         let plan = CopyPlan::count(tx, &self.kbx)?;
         let copy = budget.reserve(plan.charge).map_err(budget_exceeded)?;
         let kbx = self.kbx.clone();
@@ -430,7 +436,7 @@ fn class_of(row: &Row<'_>, idx: usize) -> rusqlite::Result<ExtentClass> {
     ExtentClass::parse(name).ok_or_else(|| bad_enum(idx, name))
 }
 
-fn budget_exceeded(e: BudgetExceeded) -> StoreError {
+pub(super) fn budget_exceeded(e: BudgetExceeded) -> StoreError {
     StoreError::Backend {
         source: BackendSource::new(e),
     }

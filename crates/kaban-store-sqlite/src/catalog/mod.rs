@@ -19,10 +19,12 @@
 pub(crate) mod capture;
 pub(crate) mod class;
 pub(crate) mod commit;
+pub(crate) mod failpoint;
 pub(crate) mod io;
 pub(crate) mod kbx;
 pub(crate) mod phase;
 pub(crate) mod pin;
+pub(crate) mod pins;
 pub(crate) mod tables;
 #[cfg(feature = "failpoints")]
 pub mod testing;
@@ -46,6 +48,9 @@ pub(crate) struct Catalog {
     kbx: PathBuf,
     /// The container's mapping, shared by this catalog's pins (and kept by a detached one).
     mapping: Arc<kbx::Mapping>,
+    /// The pins directory beside the container (`None` for an in-memory database: no
+    /// container, nothing to reclaim).
+    pins: Option<Arc<Path>>,
     degraded_reclamation: bool,
     classes: RwLock<Vec<Arc<dyn IndexClass>>>,
     /// Set only while [`Self::commit`] commits (and around an explicit maintenance statement,
@@ -54,6 +59,9 @@ pub(crate) struct Catalog {
     committing: Arc<AtomicBool>,
     /// The writer connection's commit phase, which its authorizer enforces (`phase`).
     phases: Arc<phase::Phases>,
+    /// The race tests' hooks in the pin protocol's windows.
+    #[cfg(any(test, feature = "failpoints"))]
+    failpoints: failpoint::Failpoints,
     /// A unit test's derived-row hook ([`Self::set_test_derived_rows`]).
     #[cfg(test)]
     test_derived: std::sync::Mutex<Option<commit::TestDerivedRows>>,
@@ -135,9 +143,13 @@ impl Catalog {
     }
 
     fn with_container(kbx: PathBuf) -> Self {
+        let pins = (!kbx.as_os_str().is_empty()).then(|| Arc::from(kbx::pins_dir(&kbx).as_path()));
         Self {
             kbx,
             mapping: Arc::default(),
+            pins,
+            #[cfg(any(test, feature = "failpoints"))]
+            failpoints: failpoint::Failpoints::default(),
             degraded_reclamation: false,
             classes: RwLock::new(Vec::new()),
             committing: Arc::new(AtomicBool::new(false)),
@@ -180,6 +192,32 @@ impl Catalog {
             hook(n);
         }
     }
+
+    /// Run the race tests' hook of `window` (test builds only).
+    #[cfg(any(test, feature = "failpoints"))]
+    pub(crate) fn failpoint(&self, window: failpoint::Window) {
+        self.failpoints.hit(window);
+    }
+
+    /// The pin protocol's windows are a test-build hook (see the test-build twin).
+    #[cfg(not(any(test, feature = "failpoints")))]
+    #[expect(clippy::unused_self, reason = "the test build's twin runs a hook")]
+    #[inline]
+    pub(crate) fn failpoint(&self, window: failpoint::Window) {
+        let _ = window;
+    }
+
+    /// Count a reader's retry (test builds only: the race tests read the count).
+    #[cfg(any(test, feature = "failpoints"))]
+    pub(crate) fn retried(&self) {
+        self.failpoints.retried();
+    }
+
+    /// Reader retries are counted in test builds only.
+    #[cfg(not(any(test, feature = "failpoints")))]
+    #[expect(clippy::unused_self, reason = "the test build's twin counts")]
+    #[inline]
+    pub(crate) fn retried(&self) {}
 
     /// Add an index class; every later commit stages it.
     pub(crate) fn register(&self, class: Arc<dyn IndexClass>) {
