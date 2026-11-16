@@ -19,6 +19,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 
+use kaban_core::query_budget::QueryBudget;
 use tantivy::directory::OwnedBytes;
 
 use crate::charge::Ticker;
@@ -424,7 +425,8 @@ impl Layer {
     /// domain; bitvector bits set past the domain; a bit-index count or rank sample that does
     /// not match the bits. After a successful open every lookup is exact, so corruption is never
     /// read as absence.
-    pub fn open(bytes: OwnedBytes) -> Result<Layer, GraphError> {
+    pub fn open(bytes: OwnedBytes, budget: &QueryBudget) -> Result<Layer, GraphError> {
+        let _ = budget;
         Ok(Layer {
             extent: Extent::open(bytes, KIND_LAYER)?,
         })

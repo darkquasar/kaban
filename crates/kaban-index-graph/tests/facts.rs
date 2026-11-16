@@ -38,11 +38,11 @@ fn unset(id: u32, key: u8) -> FactOp {
 }
 
 fn open_base(bytes: Vec<u8>) -> Base {
-    Base::open(OwnedBytes::new(bytes)).unwrap()
+    Base::open(OwnedBytes::new(bytes), &oracle::budget()).unwrap()
 }
 
 fn open_layer(bytes: Vec<u8>) -> Layer {
-    Layer::open(OwnedBytes::new(bytes)).unwrap()
+    Layer::open(OwnedBytes::new(bytes), &oracle::budget()).unwrap()
 }
 
 fn get<'v>(v: &'v View<'_>, id: u32, key: u8) -> Option<&'v [u8]> {

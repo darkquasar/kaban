@@ -59,7 +59,11 @@ fn spread() -> (Base, Vec<Layer>, Vec<Records>, Oracle) {
         ],
         ..Records::default()
     }];
-    let base = Base::open(OwnedBytes::new(build_base(&base_recs, 0))).unwrap();
+    let base = Base::open(
+        OwnedBytes::new(build_base(&base_recs, 0)),
+        &oracle::budget(),
+    )
+    .unwrap();
     let layer = seal(&view::<Records>(Some(&base), &[], &[]), &layer_recs);
     let mut oracle = Oracle::default();
     for r in [&base_recs, &layer_recs, &sediment[0]] {
@@ -67,7 +71,7 @@ fn spread() -> (Base, Vec<Layer>, Vec<Records>, Oracle) {
     }
     (
         base,
-        vec![Layer::open(OwnedBytes::new(layer)).unwrap()],
+        vec![Layer::open(OwnedBytes::new(layer), &oracle::budget()).unwrap()],
         sediment,
         oracle,
     )

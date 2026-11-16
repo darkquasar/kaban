@@ -41,11 +41,11 @@ fn fact(id: u32, key: u8, payload: &[u8]) -> FactOp {
 }
 
 fn open_base(bytes: Vec<u8>) -> Base {
-    Base::open(OwnedBytes::new(bytes)).unwrap()
+    Base::open(OwnedBytes::new(bytes), &oracle::budget()).unwrap()
 }
 
 fn open_layer(bytes: Vec<u8>) -> Layer {
-    Layer::open(OwnedBytes::new(bytes)).unwrap()
+    Layer::open(OwnedBytes::new(bytes), &oracle::budget()).unwrap()
 }
 
 /// Every probe of `view` over ids `0..ids` equals `oracle`.

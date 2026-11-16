@@ -281,11 +281,11 @@ pub(crate) fn chain(seed: u64, map: impl Fn(Records) -> Records) -> Fixture {
         map(random_records(&mut rng, IDS, 40, 30)),
         map(random_records(&mut rng, IDS, 30, 30)),
     ];
-    let base = Base::open(OwnedBytes::new(build_base(&base_recs, domain))).unwrap();
+    let base = Base::open(OwnedBytes::new(build_base(&base_recs, domain)), &budget()).unwrap();
     let mut layers: Vec<Layer> = Vec::new();
     for r in &layer_recs {
         let bytes = seal(&view::<Records>(Some(&base), &layers, &[]), r);
-        layers.push(Layer::open(OwnedBytes::new(bytes)).unwrap());
+        layers.push(Layer::open(OwnedBytes::new(bytes), &budget()).unwrap());
     }
     let mut all = vec![base_recs];
     all.extend(layer_recs);

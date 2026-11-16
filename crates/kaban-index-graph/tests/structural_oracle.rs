@@ -86,14 +86,17 @@ struct Gra08 {
 }
 
 fn gra08() -> Gra08 {
-    let base = Base::open(OwnedBytes::new(build_base(
-        &Records {
-            nodes: vec![node(1), node(2), node(3)],
-            edges: vec![edge(1, 0, 2)],
-            ..Records::default()
-        },
-        0,
-    )))
+    let base = Base::open(
+        OwnedBytes::new(build_base(
+            &Records {
+                nodes: vec![node(1), node(2), node(3)],
+                edges: vec![edge(1, 0, 2)],
+                ..Records::default()
+            },
+            0,
+        )),
+        &oracle::budget(),
+    )
     .unwrap();
     let layer = seal(
         &view::<Records>(Some(&base), &[], &[]),
@@ -104,7 +107,7 @@ fn gra08() -> Gra08 {
     );
     Gra08 {
         base,
-        layers: vec![Layer::open(OwnedBytes::new(layer)).unwrap()],
+        layers: vec![Layer::open(OwnedBytes::new(layer), &oracle::budget()).unwrap()],
         sediment: vec![Records {
             edges: vec![edge(3, 0, 2)],
             ..Records::default()

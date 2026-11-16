@@ -14,8 +14,8 @@ use std::time::{Duration, Instant};
 use kaban_core::query_budget::QueryBudget;
 use kaban_index_graph::{
     Attr, BUDGET_CHECK_INTERVAL, Base, Caps, Direction, EdgeOp, FactOp, GraphError, Layer, LocalId,
-    NodeOp, OpKind, Records, RelId, RelSelection, RowCap, View, build_base, expand, seal, wcc,
-    work_units,
+    NodeOp, OpKind, Records, RelId, RelSelection, RowCap, View, build_base, expand, seal,
+    shortest_path, topo_order, wcc, work_units,
 };
 use oracle::{serial, view};
 use tantivy::directory::OwnedBytes;
@@ -138,14 +138,17 @@ fn view_preparation_charges_its_sediment_while_the_view_lives() {
 }
 
 fn chain() -> (Base, Vec<Layer>) {
-    let base = Base::open(OwnedBytes::new(build_base(
-        &Records {
-            nodes: (0..10).map(|n| node(n, OpKind::Add)).collect(),
-            edges: (1..10).map(|n| edge(0, n, OpKind::Add)).collect(),
-            ..Records::default()
-        },
-        10,
-    )))
+    let base = Base::open(
+        OwnedBytes::new(build_base(
+            &Records {
+                nodes: (0..10).map(|n| node(n, OpKind::Add)).collect(),
+                edges: (1..10).map(|n| edge(0, n, OpKind::Add)).collect(),
+                ..Records::default()
+            },
+            10,
+        )),
+        &oracle::budget(),
+    )
     .unwrap();
     let mut layers = Vec::new();
     for i in 0..3 {
@@ -154,7 +157,7 @@ fn chain() -> (Base, Vec<Layer>) {
             ..Records::default()
         };
         let bytes = seal(&view::<Records>(Some(&base), &layers, &[]), &r);
-        layers.push(Layer::open(OwnedBytes::new(bytes)).unwrap());
+        layers.push(Layer::open(OwnedBytes::new(bytes), &oracle::budget()).unwrap());
     }
     (base, layers)
 }
@@ -189,14 +192,17 @@ fn simultaneous_iterators_hold_their_cursor_charges() {
 /// A present hub (node 0) with `HUB_EDGES` outgoing edges that all filter out: the base holds
 /// them with absent endpoints; a layer re-adds the endpoints but tombstones every edge.
 fn hub() -> (Base, Vec<Layer>) {
-    let base = Base::open(OwnedBytes::new(build_base(
-        &Records {
-            nodes: vec![node(0, OpKind::Add)],
-            edges: (1..=HUB_EDGES).map(|n| edge(0, n, OpKind::Add)).collect(),
-            ..Records::default()
-        },
-        0,
-    )))
+    let base = Base::open(
+        OwnedBytes::new(build_base(
+            &Records {
+                nodes: vec![node(0, OpKind::Add)],
+                edges: (1..=HUB_EDGES).map(|n| edge(0, n, OpKind::Add)).collect(),
+                ..Records::default()
+            },
+            0,
+        )),
+        &oracle::budget(),
+    )
     .unwrap();
     let tombstones = Records {
         nodes: (1..=HUB_EDGES).map(|n| node(n, OpKind::Add)).collect(),
@@ -206,7 +212,10 @@ fn hub() -> (Base, Vec<Layer>) {
         ..Records::default()
     };
     let layer = seal(&view::<Records>(Some(&base), &[], &[]), &tombstones);
-    (base, vec![Layer::open(OwnedBytes::new(layer)).unwrap()])
+    (
+        base,
+        vec![Layer::open(OwnedBytes::new(layer), &oracle::budget()).unwrap()],
+    )
 }
 
 /// Scans before [`cancel_mid_scan`] gives up: an un-cancelled scan of the hub finishes in
@@ -249,6 +258,11 @@ fn cancel_mid_scan(
         }
         done.store(true, Ordering::SeqCst);
         let seen = canceller.join().unwrap();
+        assert_eq!(
+            budget.live_bytes(),
+            0,
+            "every lease is released on the failure path"
+        );
         let Some(err) = err else {
             panic!("the scan never stopped on cancellation (seen {seen:?}, {rows} rows)");
         };
@@ -349,14 +363,17 @@ fn cancellation_stops_an_all_filtered_neighbour_scan_within_the_interval() {
 fn cancellation_stops_a_scan_over_removed_endpoints_within_the_interval() {
     let _serial = serial();
     // The hub's edges survive, but every endpoint is absent (never added).
-    let base = Base::open(OwnedBytes::new(build_base(
-        &Records {
-            nodes: vec![node(0, OpKind::Add)],
-            edges: (1..=HUB_EDGES).map(|n| edge(0, n, OpKind::Add)).collect(),
-            ..Records::default()
-        },
-        0,
-    )))
+    let base = Base::open(
+        OwnedBytes::new(build_base(
+            &Records {
+                nodes: vec![node(0, OpKind::Add)],
+                edges: (1..=HUB_EDGES).map(|n| edge(0, n, OpKind::Add)).collect(),
+                ..Records::default()
+            },
+            0,
+        )),
+        &oracle::budget(),
+    )
     .unwrap();
     let v = view::<Records>(Some(&base), &[], &[]);
     let start = 3 * BUDGET_CHECK_INTERVAL;
@@ -378,7 +395,7 @@ fn cancellation_stops_a_scan_over_removed_nodes_within_the_interval() {
     };
     let layer = seal(&view::<Records>(Some(&base), &layers, &[]), &all);
     let mut layers = layers;
-    layers.push(Layer::open(OwnedBytes::new(layer)).unwrap());
+    layers.push(Layer::open(OwnedBytes::new(layer), &oracle::budget()).unwrap());
     let v = view::<Records>(Some(&base), &layers, &[]);
     let free = QueryBudget::new(u64::MAX, None);
     assert_eq!(drain(v.nodes(&free)), (0, None));
@@ -395,15 +412,18 @@ fn cancellation_stops_a_presence_scan_inside_a_run_of_empty_words() {
     let _serial = serial();
     const DOMAIN: u32 = 1 << 21;
     const CLUSTER: u32 = 80_000; // 80,000 * 30 > 2^21: the presence index is a bitvector
-    let base = Base::open(OwnedBytes::new(build_base(
-        &Records {
-            nodes: (DOMAIN - CLUSTER..DOMAIN)
-                .map(|n| node(n, OpKind::Add))
-                .collect(),
-            ..Records::default()
-        },
-        DOMAIN,
-    )))
+    let base = Base::open(
+        OwnedBytes::new(build_base(
+            &Records {
+                nodes: (DOMAIN - CLUSTER..DOMAIN)
+                    .map(|n| node(n, OpKind::Add))
+                    .collect(),
+                ..Records::default()
+            },
+            DOMAIN,
+        )),
+        &oracle::budget(),
+    )
     .unwrap();
     let v = view::<Records>(Some(&base), &[], &[]);
     let free = QueryBudget::new(u64::MAX, None);
@@ -442,13 +462,16 @@ fn cancellation_stops_a_merge_over_many_overlapping_sources() {
     let _serial = serial();
     const LAYERS: usize = 300;
     const KEYS: u32 = 1_000;
-    let base = Base::open(OwnedBytes::new(build_base(
-        &Records {
-            nodes: (0..=KEYS).map(|n| node(n, OpKind::Add)).collect(),
-            ..Records::default()
-        },
-        0,
-    )))
+    let base = Base::open(
+        OwnedBytes::new(build_base(
+            &Records {
+                nodes: (0..=KEYS).map(|n| node(n, OpKind::Add)).collect(),
+                ..Records::default()
+            },
+            0,
+        )),
+        &oracle::budget(),
+    )
     .unwrap();
     // Every layer tombstones the same edges of node 0: each merged key is in every layer.
     let tombstones = Records {
@@ -458,7 +481,7 @@ fn cancellation_stops_a_merge_over_many_overlapping_sources() {
     let mut layers: Vec<Layer> = Vec::new();
     for _ in 0..LAYERS {
         let bytes = seal(&view::<Records>(Some(&base), &layers, &[]), &tombstones);
-        layers.push(Layer::open(OwnedBytes::new(bytes)).unwrap());
+        layers.push(Layer::open(OwnedBytes::new(bytes), &oracle::budget()).unwrap());
     }
     let v = view::<Records>(Some(&base), &layers, &[]);
     let all = RelSelection::All;
@@ -636,4 +659,245 @@ fn an_expired_budget_stops_a_traversal_before_it_reads() {
         Err(GraphError::BudgetExceeded { limit: "time", .. })
     ));
     assert_eq!(work_units(), 0);
+}
+
+// ---- Unchecked phases (END-MAJ-03) -------------------------------------------------------
+
+/// Input size of the phase tests: large enough that each phase is many check intervals long.
+const PHASE: u32 = 50_000;
+
+fn is_cancelled(e: &GraphError) -> bool {
+    matches!(
+        e,
+        GraphError::BudgetExceeded {
+            limit: "cancelled",
+            ..
+        }
+    )
+}
+
+/// Run `call` once unbudgeted and return the units it metered, then cancel a second run once
+/// `from` units past the start plus half of the rest are done, and require the refusal within
+/// `loops` check intervals (one per metered loop live at that point).
+fn cancel_in_phase<T>(
+    what: &str,
+    from: u64,
+    loops: u64,
+    call: impl Fn(&QueryBudget) -> Result<T, GraphError>,
+) -> u64 {
+    let free = QueryBudget::new(u64::MAX, None);
+    let before = work_units();
+    assert!(call(&free).is_ok(), "{what}: the free run succeeds");
+    let total = work_units() - before;
+    assert!(
+        total > from,
+        "{what}: {total} units, phase starts at {from}"
+    );
+    let start = work_units() + from + (total - from) / 2;
+    let (seen, end, _, err) = cancel_mid_scan(start, |b| match call(b) {
+        Ok(_) => (1, None),
+        Err(e) => (0, Some(e)),
+    });
+    assert!(is_cancelled(&err), "{what}: {err:?}");
+    assert!(
+        end <= seen + loops * BUDGET_CHECK_INTERVAL,
+        "{what}: stopped {} units after the cancellation was seen",
+        end - seen
+    );
+    total
+}
+
+#[test]
+fn a_recorded_memory_breach_stops_decoding_opening_and_view_preparation() {
+    let _serial = serial();
+    let blob = Records::default().encode();
+    let base = build_base(&Records::default(), 0);
+    let layer = seal(&view::<Records>(None, &[], &[]), &Records::default());
+    let budget = QueryBudget::new(1024, None);
+    assert!(budget.reserve(4096).is_err(), "records a memory breach");
+    let got = Records::decode(&blob, &budget);
+    assert!(
+        got.as_ref().is_err_and(is_memory),
+        "decode: {:?}",
+        got.map(|_| ())
+    );
+    let got = View::new::<Records>(None, &[], &[], &budget);
+    assert!(
+        got.as_ref().is_err_and(is_memory),
+        "view: {:?}",
+        got.map(|_| ())
+    );
+    let got = Base::open(OwnedBytes::new(base), &budget);
+    assert!(
+        got.as_ref().is_err_and(is_memory),
+        "base: {:?}",
+        got.map(|_| ())
+    );
+    let got = Layer::open(OwnedBytes::new(layer), &budget);
+    assert!(
+        got.as_ref().is_err_and(is_memory),
+        "layer: {:?}",
+        got.map(|_| ())
+    );
+    assert_eq!(budget.live_bytes(), 0);
+}
+
+/// Many edges in descending order, so preparation has to sort them.
+fn descending(n: u32) -> Records {
+    Records {
+        nodes: (0..=n).rev().map(|m| node(m, OpKind::Add)).collect(),
+        edges: (1..=n).rev().map(|m| edge(m, m - 1, OpKind::Add)).collect(),
+        ..Records::default()
+    }
+}
+
+#[test]
+fn cancellation_stops_decoding_within_the_interval() {
+    let _serial = serial();
+    let blob = descending(PHASE).encode();
+    let total = cancel_in_phase("decode", 0, 1, |b| Records::decode(&blob, b));
+    assert!(
+        total >= u64::from(2 * PHASE),
+        "every record is metered: {total}"
+    );
+}
+
+#[test]
+fn cancellation_stops_view_preparation_and_its_sorts_within_the_interval() {
+    let _serial = serial();
+    let sediment = vec![descending(PHASE)];
+    let total = cancel_in_phase("view", 0, 1, |b| {
+        View::new(None, &[], &sediment, b).map(|_| ())
+    });
+    // Copying, sorting and compacting the node and both edge streams.
+    assert!(
+        total >= u64::from(6 * PHASE),
+        "preparation is metered: {total}"
+    );
+}
+
+#[test]
+fn cancellation_stops_extent_validation_within_the_interval() {
+    let _serial = serial();
+    let bytes = OwnedBytes::new(build_base(&descending(PHASE), 0));
+    let total = cancel_in_phase("open", 0, 1, |b| Base::open(bytes.clone(), b).map(|_| ()));
+    // Presence, both edge sections: every id and entry validated.
+    assert!(
+        total >= u64::from(3 * PHASE),
+        "validation is metered: {total}"
+    );
+}
+
+#[test]
+fn cancellation_stops_whole_graph_functions_over_an_empty_relation() {
+    let _serial = serial();
+    let sediment = vec![descending(PHASE)];
+    let v = view(None, &[], &sediment);
+    let none = RelSelection::only(Vec::new());
+    let free = QueryBudget::new(u64::MAX, None);
+    let before = work_units();
+    assert_eq!(drain(v.nodes(&free)), (PHASE as usize + 1, None));
+    let listing = work_units() - before;
+    let total = cancel_in_phase("wcc", listing, 2, |b| wcc(&v, &none, RowCap(10), b));
+    // The forest initialisation and the node loop, which reads no edge.
+    assert!(
+        total - listing >= u64::from(2 * PHASE),
+        "wcc's own loops are metered: {}",
+        total - listing
+    );
+
+    // Sources in descending order: the search sorts them, then in-degrees, heap and release.
+    let src: Vec<LocalId> = (0..=PHASE).rev().map(LocalId).collect();
+    let caps = Caps {
+        depth: 1,
+        rows: 10 * PHASE,
+    };
+    let total = cancel_in_phase("topo_order", 0, 2, |b| topo_order(&v, &src, &none, caps, b));
+    assert!(
+        total >= u64::from(5 * PHASE),
+        "topo_order's loops and sort are metered: {total}"
+    );
+}
+
+#[test]
+fn cancellation_stops_shortest_path_initialisation_within_the_interval() {
+    let _serial = serial();
+    // 0 fans out to 1..=n, each of which reaches n + 1.
+    let n = PHASE;
+    let sediment = vec![Records {
+        nodes: (0..=n + 1).map(|m| node(m, OpKind::Add)).collect(),
+        edges: (1..=n)
+            .flat_map(|m| [edge(0, m, OpKind::Add), edge(m, n + 1, OpKind::Add)])
+            .collect(),
+        ..Records::default()
+    }];
+    let v = view(None, &[], &sediment);
+    let caps = Caps {
+        depth: 3,
+        rows: 10 * n,
+    };
+    cancel_in_phase("shortest_path", 0, 2, |b| {
+        shortest_path(&v, LocalId(0), LocalId(n + 1), &RelSelection::All, caps, b)
+    });
+}
+
+/// Nodes 0..=d in a chain whose union-find forest is a path d -> d-1 -> ... -> 0 once the
+/// helpers are processed (each helper h_k links k-1 then k, in descending k); `extra` adds one
+/// last node with an edge to d, whose find walks the whole path.
+fn deep_forest(d: u32, extra: bool) -> Vec<Records> {
+    let helper = |k: u32| d + 1 + (d - k); // h_d < h_(d-1) < ... < h_1
+    let mut r = Records {
+        nodes: (0..=d)
+            .chain((1..=d).map(helper))
+            .map(|m| node(m, OpKind::Add))
+            .collect(),
+        edges: (1..=d)
+            .flat_map(|k| {
+                [
+                    edge(helper(k), k - 1, OpKind::Add),
+                    edge(helper(k), k, OpKind::Add),
+                ]
+            })
+            .collect(),
+        ..Records::default()
+    };
+    if extra {
+        let z = 2 * d + 1;
+        r.nodes.push(node(z, OpKind::Add));
+        r.edges.push(edge(z, d, OpKind::Add));
+    }
+    vec![r]
+}
+
+#[test]
+fn cancellation_stops_a_long_union_find_walk_within_the_interval() {
+    let _serial = serial();
+    let d = PHASE;
+    let all = RelSelection::All;
+    let free = QueryBudget::new(u64::MAX, None);
+    let without = deep_forest(d, false);
+    let v = view(None, &[], &without);
+    let before = work_units();
+    wcc(&v, &all, RowCap(1), &free).unwrap();
+    let base = work_units() - before;
+    let with = deep_forest(d, true);
+    let v = view(None, &[], &with);
+    let components = wcc(&v, &all, RowCap(u32::MAX), &free).unwrap();
+    assert!(
+        components.iter().all(|&(_, c)| c == LocalId(0)),
+        "one component"
+    );
+    drop(components);
+    let before = work_units();
+    wcc(&v, &all, RowCap(1), &free).unwrap();
+    let total = work_units() - before;
+    assert!(
+        total - base >= u64::from(d / 2),
+        "the walk of the last find is metered: {} units",
+        total - base
+    );
+    // Cancel inside the last walk: it is the last quarter of the work.
+    cancel_in_phase("wcc walk", total - u64::from(d / 4) * 2, 2, |b| {
+        wcc(&v, &all, RowCap(1), b)
+    });
 }

@@ -53,11 +53,11 @@ fn fact(id: u32, key: u8, payload: &[u8]) -> FactOp {
 }
 
 fn open_base(bytes: &[u8]) -> Result<Base, GraphError> {
-    Base::open(OwnedBytes::new(bytes.to_vec()))
+    Base::open(OwnedBytes::new(bytes.to_vec()), &oracle::budget())
 }
 
 fn open_layer(bytes: &[u8]) -> Result<Layer, GraphError> {
-    Layer::open(OwnedBytes::new(bytes.to_vec()))
+    Layer::open(OwnedBytes::new(bytes.to_vec()), &oracle::budget())
 }
 
 fn assert_corrupt<T>(r: Result<T, GraphError>, what: &str) {

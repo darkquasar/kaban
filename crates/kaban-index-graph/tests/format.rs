@@ -18,7 +18,7 @@ use tantivy::directory::OwnedBytes;
 const SEEDS: u64 = 16;
 
 fn open_base(bytes: Vec<u8>) -> Base {
-    Base::open(OwnedBytes::new(bytes)).expect("base opens")
+    Base::open(OwnedBytes::new(bytes), &oracle::budget()).expect("base opens")
 }
 
 fn fixture(seed: u64) -> Fixture {
@@ -210,27 +210,27 @@ fn truncated_or_padded_bytes_are_corrupt() {
         for len in (0..bytes.len()).step_by(7).chain([bytes.len() - 1]) {
             let cut = OwnedBytes::new(bytes[..len].to_vec());
             let opened = if name == "base" {
-                Base::open(cut).map(|_| ())
+                Base::open(cut, &oracle::budget()).map(|_| ())
             } else {
-                Layer::open(cut).map(|_| ())
+                Layer::open(cut, &oracle::budget()).map(|_| ())
             };
             assert!(is_corrupt(&opened), "{name} prefix {len}");
         }
         let mut padded = bytes.clone();
         padded.push(0);
         let opened = if name == "base" {
-            Base::open(OwnedBytes::new(padded)).map(|_| ())
+            Base::open(OwnedBytes::new(padded), &oracle::budget()).map(|_| ())
         } else {
-            Layer::open(OwnedBytes::new(padded)).map(|_| ())
+            Layer::open(OwnedBytes::new(padded), &oracle::budget()).map(|_| ())
         };
         assert!(is_corrupt(&opened), "{name} trailing byte");
     }
     assert!(
-        is_corrupt(&Layer::open(OwnedBytes::new(base_bytes)).map(|_| ())),
+        is_corrupt(&Layer::open(OwnedBytes::new(base_bytes), &oracle::budget()).map(|_| ())),
         "a base is not a layer"
     );
     assert!(
-        is_corrupt(&Base::open(OwnedBytes::new(layer_bytes)).map(|_| ())),
+        is_corrupt(&Base::open(OwnedBytes::new(layer_bytes), &oracle::budget()).map(|_| ())),
         "a layer is not a base"
     );
 }
@@ -271,12 +271,30 @@ fn an_extent_without_presence_is_corrupt() {
     let base_bytes = build_base(&f.all[0], 200);
     let layer_bytes = seal(&view::<Records>(Some(&f.base), &[], &[]), &f.all[1]);
     // Sanity: dropping nothing keeps the bytes valid.
-    assert!(Base::open(OwnedBytes::new(without_section(&base_bytes, 99))).is_ok());
-    assert!(Layer::open(OwnedBytes::new(without_section(&layer_bytes, 99))).is_ok());
+    assert!(
+        Base::open(
+            OwnedBytes::new(without_section(&base_bytes, 99)),
+            &oracle::budget()
+        )
+        .is_ok()
+    );
+    assert!(
+        Layer::open(
+            OwnedBytes::new(without_section(&layer_bytes, 99)),
+            &oracle::budget()
+        )
+        .is_ok()
+    );
     let presence = 1;
-    let base = Base::open(OwnedBytes::new(without_section(&base_bytes, presence)));
+    let base = Base::open(
+        OwnedBytes::new(without_section(&base_bytes, presence)),
+        &oracle::budget(),
+    );
     assert!(is_corrupt(&base.map(|_| ())), "base without presence");
-    let layer = Layer::open(OwnedBytes::new(without_section(&layer_bytes, presence)));
+    let layer = Layer::open(
+        OwnedBytes::new(without_section(&layer_bytes, presence)),
+        &oracle::budget(),
+    );
     assert!(is_corrupt(&layer.map(|_| ())), "layer without presence");
 }
 
