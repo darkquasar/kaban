@@ -22,9 +22,10 @@ fn install() {
     initialize_sqlite();
 }
 
-/// What one live block of `size` usable bytes must be charged.
+/// What one live block of `size` usable bytes must be charged: its 24-byte header is 16 bytes of
+/// accounting metadata plus the owner's budget handle, charged as 8 more bytes.
 fn charge(size: u64) -> u64 {
-    QueryBudget::allocation_charge(size, 8).unwrap()
+    QueryBudget::allocation_charge(size + 8, 8).unwrap()
 }
 
 fn round8(n: u64) -> u64 {

@@ -24,7 +24,7 @@
 use std::cell::RefCell;
 use std::ffi::{c_int, c_void};
 use std::marker::PhantomData;
-use std::mem::{self, ManuallyDrop};
+use std::mem;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr;
 use std::sync::OnceLock;
@@ -38,24 +38,36 @@ use crate::InitError;
 const SQLITE_ALIGN: usize = 8;
 
 /// The bytes in front of every block handed to SQLite.
-const HEADER_BYTES: usize = 16;
+const HEADER_BYTES: usize = 24;
 
 /// [`HEADER_BYTES`] in SQLite's size type.
-const HEADER_INT: c_int = 16;
+const HEADER_INT: c_int = 24;
 
-/// Ownership record in front of every block: the owner's lease, or `None` for an unscoped block.
-#[repr(C)]
-struct Header {
-    lease: Option<BudgetLease>,
+/// Header bytes beyond the `ALLOCATION_METADATA_BYTES` that `QueryBudget::allocation_charge`
+/// adds to every charge; they are charged as if they were usable bytes, so a block's charge is
+/// exactly what the original allocator holds for it.
+const HEADER_EXTRA: u64 = HEADER_BYTES as u64 - ALLOCATION_METADATA_BYTES;
+
+/// Who pays for a scoped block: the budget, kept so a grow can reserve the replacement block
+/// against it, and the block's charge.
+struct Owner {
+    budget: QueryBudget,
+    lease: BudgetLease,
 }
 
-// The header must fit its slot without disturbing SQLite's alignment, and the slot must be exactly
-// the metadata `QueryBudget::allocation_charge` charges beside each allocation.
+/// Ownership record in front of every block: the owner, or `None` for an unscoped block.
+#[repr(C)]
+struct Header {
+    owner: Option<Owner>,
+}
+
+// The header must fit its slot without disturbing SQLite's alignment, and the slot must hold at
+// least the metadata `QueryBudget::allocation_charge` charges beside each allocation.
 const _: () = {
     assert!(mem::size_of::<Header>() <= HEADER_BYTES);
     assert!(mem::align_of::<Header>() <= SQLITE_ALIGN);
     assert!(HEADER_BYTES.is_multiple_of(SQLITE_ALIGN));
-    assert!(HEADER_BYTES as u64 == ALLOCATION_METADATA_BYTES);
+    assert!(HEADER_BYTES as u64 >= ALLOCATION_METADATA_BYTES);
     assert!(HEADER_INT as usize == HEADER_BYTES);
 };
 
@@ -193,7 +205,7 @@ pub(crate) fn current_budget() -> Option<QueryBudget> {
 }
 
 /// Charge `bytes` to this thread's scope: `Ok(None)` when unscoped, `Err` when refused.
-fn charge_current(bytes: u64) -> Result<Option<BudgetLease>, ()> {
+fn charge_current(bytes: u64) -> Result<Option<Owner>, ()> {
     let Some(budget) = current_budget() else {
         return Ok(None);
     };
@@ -202,12 +214,13 @@ fn charge_current(bytes: u64) -> Result<Option<BudgetLease>, ()> {
         PANIC_NEXT_CHARGE.try_with(|flag| flag.replace(false)) != Ok(true),
         "injected panic in an allocator charge"
     );
-    budget.reserve(bytes).map(Some).map_err(drop)
+    let lease = budget.reserve(bytes).map_err(drop)?;
+    Ok(Some(Owner { budget, lease }))
 }
 
 /// The charge for a block with `usable` bytes, or `None` on a negative size or overflow.
 fn charge_for(usable: c_int) -> Option<u64> {
-    let usable = u64::try_from(usable).ok()?;
+    let usable = u64::try_from(usable).ok()?.checked_add(HEADER_EXTRA)?;
     QueryBudget::allocation_charge(usable, SQLITE_ALIGN as u64).ok()
 }
 
@@ -271,18 +284,18 @@ unsafe fn malloc(bytes: c_int) -> *mut c_void {
     let (Some(total), Some(predicted)) = (bytes.checked_add(HEADER_INT), charge_for(bytes)) else {
         return ptr::null_mut();
     };
-    let Ok(mut lease) = charge_current(predicted) else {
+    let Ok(mut owner) = charge_current(predicted) else {
         return ptr::null_mut();
     };
     // SAFETY: the original xMalloc accepts any positive size and returns null on failure.
     let base = unsafe { (original.malloc)(total) }.cast::<Header>();
     if base.is_null() {
-        return ptr::null_mut(); // dropping `lease` releases the charge
+        return ptr::null_mut(); // dropping `owner` releases the charge
     }
-    if let Some(lease) = lease.as_mut() {
+    if let Some(owner) = owner.as_mut() {
         // SAFETY: `base` is the live block just allocated.
         let actual = unsafe { usable(original, base) };
-        if !reconcile(lease, actual) {
+        if !reconcile(&mut owner.lease, actual) {
             // SAFETY: `base` is live and not yet handed to SQLite.
             unsafe { (original.free)(base.cast()) };
             return ptr::null_mut();
@@ -291,7 +304,7 @@ unsafe fn malloc(bytes: c_int) -> *mut c_void {
     // SAFETY: `base` is live, at least `HEADER_BYTES` long and 8-byte aligned (the original
     // allocator's contract, and `Header`'s alignment is at most 8); the slot is uninitialized, so
     // writing does not drop anything.
-    unsafe { base.write(Header { lease }) };
+    unsafe { base.write(Header { owner }) };
     block_of(base)
 }
 
@@ -334,6 +347,13 @@ unsafe extern "C" fn x_realloc(block: *mut c_void, bytes: c_int) -> *mut c_void 
 
 /// The body of [`x_realloc`] for a live block.
 ///
+/// An unscoped block is forwarded to the original `xRealloc`. A scoped block that fits keeps its
+/// place (its charge already covers its full size). A scoped grow is a replacement, never a
+/// destructive resize: the replacement is reserved against the owner's budget while the old block
+/// keeps its own charge (the copy's peak), allocated, charged for every byte the original handed
+/// out, then filled, and only then is the old block freed and its charge released. Any refusal
+/// frees the replacement and leaves the old block, its bytes and its charge as they were.
+///
 /// # Safety
 /// `block` is a live block handed out by the wrapper.
 unsafe fn realloc(block: *mut c_void, bytes: c_int) -> *mut c_void {
@@ -344,11 +364,10 @@ unsafe fn realloc(block: *mut c_void, bytes: c_int) -> *mut c_void {
         return ptr::null_mut();
     };
     let base = header_of(block);
-    // SAFETY: `block` is live, so `base` holds an initialized `Header`. The owner is moved out
-    // here and written back to exactly one live block on every path below; `ManuallyDrop` keeps
-    // an unwind from dropping it while the header bytes still name it.
-    let mut owner = ManuallyDrop::new(unsafe { base.read() });
-    let Some(lease) = owner.lease.as_mut() else {
+    // SAFETY: `block` is live, so `base` holds an initialized `Header`; SQLite does not use the
+    // block concurrently with its own realloc, so nothing else reads or writes the header while
+    // this shared borrow lives (it ends before the header is moved out below).
+    let Some(owner) = (unsafe { &*base }).owner.as_ref() else {
         // Unscoped: forward unchanged. The header bytes (`None`) move with the block.
         // SAFETY: `base` is the live original block; on null it is left untouched.
         let moved = unsafe { (original.realloc)(base.cast(), total) }.cast::<Header>();
@@ -363,41 +382,46 @@ unsafe fn realloc(block: *mut c_void, bytes: c_int) -> *mut c_void {
     if bytes <= old_usable {
         // A charged shrink keeps the block in place: SQLite then sees (and the lease charges) its
         // full size, so the charge stays exact without reserving under an exhausted budget.
-        // SAFETY: `base` is still the live block; its header slot holds the bytes read above.
-        unsafe { base.write(ManuallyDrop::into_inner(owner)) };
         return block;
     }
-    let grown = charge_for(bytes).ok_or(()).and_then(|predicted| {
-        let extra = predicted.saturating_sub(lease.bytes());
-        lease
-            .grow_with(extra, || {
-                // SAFETY: `base` is the live original block; on null it is left untouched,
-                // otherwise it moved (header bytes included) to the returned block.
-                let moved = unsafe { (original.realloc)(base.cast(), total) };
-                if moved.is_null() {
-                    Err(())
-                } else {
-                    Ok(moved.cast::<Header>())
-                }
-            })
-            .map_err(drop)
-    });
-    if let Ok(moved) = grown {
-        // An original allocator that hands out more than requested is charged for it; if the
-        // budget refuses that slack, the block keeps the charge for the requested size.
-        // SAFETY: `moved` is the live, moved block.
-        let actual = unsafe { usable(original, moved) };
-        let _ = reconcile(lease, actual);
-        // SAFETY: `moved` is live and aligned; its header slot holds a stale bitwise copy of
-        // the owner moved out above, which is overwritten without being dropped.
-        unsafe { moved.write(ManuallyDrop::into_inner(owner)) };
-        block_of(moved)
-    } else {
-        // SAFETY: the grow was refused or the original realloc failed, so `base` is still the
-        // live old block; restore its owner (the lease kept its old charge).
-        unsafe { base.write(ManuallyDrop::into_inner(owner)) };
-        ptr::null_mut()
+    let Some(predicted) = charge_for(bytes) else {
+        return ptr::null_mut();
+    };
+    let Ok(mut lease) = owner.budget.reserve(predicted) else {
+        return ptr::null_mut();
+    };
+    // SAFETY: the original xMalloc accepts any positive size and returns null on failure.
+    let fresh = unsafe { (original.malloc)(total) }.cast::<Header>();
+    if fresh.is_null() {
+        return ptr::null_mut(); // dropping `lease` releases the reservation
     }
+    // SAFETY: `fresh` is the live block just allocated.
+    let actual = unsafe { usable(original, fresh) };
+    if !reconcile(&mut lease, actual) {
+        // SAFETY: `fresh` is live and was never handed to SQLite.
+        unsafe { (original.free)(fresh.cast()) };
+        return ptr::null_mut();
+    }
+    let budget = owner.budget.clone();
+    let keep = usize::try_from(old_usable.min(actual)).unwrap_or(0);
+    // SAFETY: both blocks are live and distinct; the old one has `old_usable` usable bytes and the
+    // fresh one `actual`, so `keep` bytes are in bounds of each.
+    unsafe { ptr::copy_nonoverlapping(block.cast::<u8>(), block_of(fresh).cast::<u8>(), keep) };
+    // SAFETY: `fresh` is live, at least `HEADER_BYTES` long and 8-byte aligned; its header slot is
+    // uninitialized, so writing drops nothing.
+    unsafe {
+        fresh.write(Header {
+            owner: Some(Owner { budget, lease }),
+        });
+    };
+    // SAFETY: the shared borrow of the old header ended above; `base` still holds its
+    // initialized `Header`, which this read takes ownership of. The old block is freed next and
+    // its header never read again.
+    let old = unsafe { base.read() };
+    // SAFETY: `base` is the live old original block, replaced by `fresh`.
+    unsafe { (original.free)(base.cast()) };
+    drop(old); // releases the old block's charge to its owner
+    block_of(fresh)
 }
 
 /// `xSize`.
