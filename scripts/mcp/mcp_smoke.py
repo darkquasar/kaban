@@ -250,9 +250,9 @@ r = json.loads(t)
 check(not e and r["status"] == "existing" and r["id"] == fixid and r["links_created"] == 1 and r["links_ignored"] is False and "summary" in r["fields_ignored"], f"dedup retry attaches links and reports ignored fields: {t}")
 e, t = call("link", {"from": fid, "to": fid, "rel": "SUPERSEDES"})
 check(e and "itself" in t, "self-link refused")
-# M3 (C3.8): a Decision with a path_scope is stored. Supersede via `link SUPERSEDES` is not
-# exercised: the store moves only an accepted Decision to superseded, and no public surface
-# accepts one since the governance removal
+# M3 (C3.8): a Decision with a path_scope is stored. It is active at once, so a later
+# `link SUPERSEDES` archives it like any active target; the store suites cover that, this
+# smoke does not repeat it
 SCOPE = ["src/store/**"]
 e, t = call("remember", {"kind": "Decision", "text": "store writes go through one connection per process", "summary": "one writer connection", "props": {"rationale": "SQLite allows a single writer"}, "path_scope": SCOPE})
 check(not e and json.loads(t)["status"] == "created", "remember Decision with path_scope"); did = json.loads(t)["id"] if not e else ""
