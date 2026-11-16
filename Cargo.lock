@@ -1667,6 +1667,7 @@ name = "kaban-vtab"
 version = "3.0.0"
 dependencies = [
  "kaban-core",
+ "kaban-vtab",
  "rusqlite",
 ]
 
