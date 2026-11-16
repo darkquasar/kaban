@@ -83,10 +83,6 @@ fn wrong_type(path: &Path, expected: &str) -> io::Error {
 /// commit publishes them, or reclamation finds them unreferenced.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[must_use = "an unpublished extent is garbage until a commit publishes it"]
-#[expect(
-    dead_code,
-    reason = "T5 Steps 4-5 deliver the container I/O and the pin protocol that use it"
-)]
 pub(crate) struct Unpublished {
     /// The class the bytes belong to.
     pub(crate) class: ExtentClass,

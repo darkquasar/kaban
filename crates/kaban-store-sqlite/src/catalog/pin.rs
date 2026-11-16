@@ -183,13 +183,6 @@ impl Catalog {
     ///
     /// # Errors
     /// The closure's, the budget's or SQLite's error.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the bounded SQL statements of T12 and T15 run in it"
-        )
-    )]
     pub(crate) fn with_snapshot<T>(
         &self,
         conn: &mut Connection,

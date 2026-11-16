@@ -1,11 +1,12 @@
 //! Test access to the catalog for the integration suites (`failpoints` feature only; not a
 //! supported interface): a test index class whose `stage` writes one sediment row per edge
-//! change and records the change set it was handed, and a pin of that class's sediment.
+//! change and records the change set it was handed, a pin of that class's sediment, and the
+//! container's extents of the test class: appended and published, pinned and read.
 
 use std::sync::{Arc, Mutex, PoisonError};
 
-use kaban_core::Result;
 use kaban_core::query_budget::QueryBudget;
+use kaban_core::{Durability, Result};
 use rusqlite::Connection;
 
 use super::Catalog;
@@ -113,6 +114,92 @@ pub fn pin_sediment(store: &SqliteStore) -> Result<Vec<String>> {
         .iter()
         .map(|row| String::from_utf8_lossy(&row.payload).into_owned())
         .collect())
+}
+
+/// Append `bytes` to `store`'s container as an extent of the test class and publish it in one
+/// commit; returns its extent id.
+///
+/// # Errors
+/// The append's or the commit's errors.
+pub fn append_and_publish(store: &SqliteStore, bytes: &[u8]) -> Result<u64> {
+    let extent = store.catalog().append_extent(ExtentClass::Test, bytes)?;
+    let id = store
+        .catalog()
+        .commit(&mut store.lock(), Durability::Normal, |txn| {
+            txn.publish(extent)
+        })?;
+    Ok(id.0)
+}
+
+/// A detached pin of `store`'s catalog ([`Catalog::pin`]).
+#[derive(Debug)]
+pub struct TestPin(Pin);
+
+impl TestPin {
+    /// The pin's view.
+    #[must_use]
+    pub fn view(&self) -> PinView<'_> {
+        PinView(&self.0)
+    }
+}
+
+/// A pin as a test reads it: the test class's extents and their bytes.
+#[derive(Debug, Clone, Copy)]
+pub struct PinView<'p>(&'p Pin);
+
+impl PinView<'_> {
+    /// The pinned generation.
+    #[must_use]
+    pub fn generation(&self) -> u64 {
+        self.0.generation().0
+    }
+    /// The ids of the pinned extents of the test class, in id order.
+    #[must_use]
+    pub fn extents(&self) -> Vec<u64> {
+        self.0
+            .extents(ExtentClass::Test)
+            .iter()
+            .map(|e| e.id.0)
+            .collect()
+    }
+    /// A copy of the bytes of the pinned test-class extent `id`, `None` when the pin does not
+    /// hold it.
+    ///
+    /// # Errors
+    /// [`Pin::bytes`]'s errors.
+    pub fn read(&self, id: u64) -> Result<Option<Vec<u8>>> {
+        let Some(e) = self
+            .0
+            .extents(ExtentClass::Test)
+            .iter()
+            .find(|e| e.id.0 == id)
+        else {
+            return Ok(None);
+        };
+        Ok(Some(self.0.bytes(e)?.as_slice().to_vec()))
+    }
+}
+
+/// Pin `store`'s catalog under `budget` and return the detached pin.
+///
+/// # Errors
+/// The pin's errors.
+pub fn pin(store: &SqliteStore, budget: &QueryBudget) -> Result<TestPin> {
+    Ok(TestPin(store.catalog().pin(&mut store.lock(), budget)?))
+}
+
+/// Run `f` inside a snapshot of `store`'s catalog under `budget` ([`Catalog::with_snapshot`]).
+///
+/// # Errors
+/// The snapshot's or `f`'s errors.
+pub fn with_snapshot<T>(
+    store: &SqliteStore,
+    budget: &QueryBudget,
+    f: impl FnOnce(PinView<'_>) -> Result<T>,
+) -> Result<T> {
+    store
+        .catalog()
+        .with_snapshot(&mut store.lock(), budget, |_, pin| f(PinView(pin)))
 }
 
 /// The test class: one sediment row per edge change; records every change set it is handed.

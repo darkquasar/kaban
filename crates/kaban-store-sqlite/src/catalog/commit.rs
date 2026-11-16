@@ -29,19 +29,32 @@ use super::Catalog;
 use super::capture::{self, BatchChanges};
 use super::class::ExtentClass;
 use super::phase::{Phase, Staged};
-use super::tables::{Generation, SedimentSeq, sql_int, uint};
+use super::kbx::Unpublished;
+use super::tables::{ExtentId, Generation, SedimentSeq, sql_int, uint};
 use crate::sql_error::SqlResultExt;
 
 /// The writer phase's handle on the open writer transaction: the writer closure's statements.
 /// It holds no change set (the set is frozen only after the closure) and stages nothing.
 pub(crate) struct Txn<'c> {
     tx: Transaction<'c>,
+    /// The generation this commit publishes, once the writer phase allocated it.
+    generation: Option<Generation>,
 }
 
 impl Txn<'_> {
     /// The transaction's connection, for the writer's own statements.
     pub(crate) fn conn(&self) -> &Connection {
         &self.tx
+    }
+
+    /// Publish `extent` in this commit: its catalog row names the generation the commit
+    /// publishes, so a pin sees it once the commit is visible and never before (INV-3).
+    ///
+    /// # Errors
+    /// SQLite errors.
+    pub(crate) fn publish(&mut self, extent: Unpublished) -> Result<ExtentId> {
+        let _ = extent;
+        Err(super::not_yet("publish"))
     }
 }
 
@@ -153,7 +166,10 @@ impl Catalog {
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .sql()?;
-        let mut txn = Txn { tx };
+        let mut txn = Txn {
+            tx,
+            generation: None,
+        };
         // declared after `txn`, so it drops first: an early exit's rollback runs unrestricted
         let phase = self.phases.enter();
         // the writer phase; an error drops `txn`, which rolls everything back

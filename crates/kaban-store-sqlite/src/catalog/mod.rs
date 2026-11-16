@@ -209,11 +209,7 @@ impl Catalog {
     /// # Errors
     /// Always, until T5 Step 4 delivers the container writes: an unsupported-operation
     /// `StoreError::Backend`.
-    #[expect(
-        dead_code,
-        clippy::unused_self,
-        reason = "T5 Steps 4-5 deliver the container I/O and the pin protocol that use it"
-    )]
+    #[expect(clippy::unused_self, reason = "T5 Step 4 writes the catalog's container")]
     pub(crate) fn append_extent(&self, class: ExtentClass, bytes: &[u8]) -> Result<Unpublished> {
         let _ = (class, bytes);
         Err(not_yet("append_extent"))
@@ -234,10 +230,6 @@ pub(crate) fn reclaim_floor(conn: &Connection) -> Result<u64> {
 }
 
 /// An operation of the catalog that a later step of T5 delivers: refused, never faked.
-#[expect(
-    dead_code,
-    reason = "T5 Steps 4-5 deliver the container I/O and the pin protocol that use it"
-)]
 pub(crate) fn not_yet(op: &'static str) -> StoreError {
     StoreError::Backend {
         source: kaban_core::BackendSource::new(std::io::Error::new(
