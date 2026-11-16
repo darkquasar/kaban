@@ -1061,3 +1061,51 @@ fn a_second_first_opener_never_succeeds_before_the_version_is_in_the_main_file()
         Some(crate::LATEST_SCHEMA_VERSION.to_string())
     );
 }
+
+/// Spec 11 CMP-01, an independent reader beside a first opener: while the creator has
+/// committed its schema but not yet published it into the main file (held there by
+/// [`super::BEFORE_PUBLICATION`]), `IndexRows::open` in the same process gives no usable
+/// reader; once the creator has published, it opens.
+#[test]
+fn an_index_reader_is_not_admitted_before_the_creator_published_the_version() {
+    let d = Scratch::new("index-reader-before-publication");
+    let (at_publication, creator_paused) = std::sync::mpsc::channel::<()>();
+    let (go_on, resume) = std::sync::mpsc::channel::<()>();
+    let creator = {
+        let (db, keys) = (d.db(), d.keys());
+        std::thread::spawn(move || {
+            super::BEFORE_PUBLICATION.with(|seam| {
+                *seam.borrow_mut() = Some(Box::new(move || {
+                    at_publication.send(()).unwrap();
+                    let _ = resume.recv_timeout(std::time::Duration::from_secs(20));
+                }));
+            });
+            SqliteStore::open(&db, &keys).map(|store| store.migration().from)
+        })
+    };
+    creator_paused
+        .recv_timeout(std::time::Duration::from_secs(20))
+        .expect("the creator reached its publication");
+
+    let early = crate::index_rows::IndexRows::open(&d.db());
+    let in_main_file = main_file_version(&d.db());
+    go_on.send(()).unwrap();
+    match early {
+        Ok(_) => panic!(
+            "an index reader was admitted before publication, main-file version {in_main_file:?}"
+        ),
+        Err(err) => assert!(is_unpublished(&err), "{err:?}"),
+    }
+
+    assert_eq!(
+        creator.join().unwrap().unwrap(),
+        0,
+        "the creator created it"
+    );
+    assert_eq!(
+        main_file_version(&d.db()),
+        Some(crate::LATEST_SCHEMA_VERSION.to_string())
+    );
+    crate::index_rows::IndexRows::open(&d.db())
+        .expect("the published project opens for the index reader");
+}

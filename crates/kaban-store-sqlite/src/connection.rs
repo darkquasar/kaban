@@ -822,24 +822,40 @@ fn probe_version(path: &Path, meta: Option<&std::fs::Metadata>) -> Result<Probed
 /// The format check of a read-only connection opened apart from a store
 /// ([`IndexRows::open`](crate::index_rows::IndexRows::open), a public entry point; spec 11
 /// CMP-01): a file a store or hold of this process already holds was probed when it was
-/// registered and is not probed again (no descriptor may be opened on it); any other file is
+/// registered and is not probed again (no descriptor may be opened on it), but it is admitted
+/// only once its version is published into the main file: while the entry is a fresh project
+/// whose creator has not published yet ([`LiveGuard::publish`]), the check waits, polling the
+/// registry with no lock held between polls, for [`PUBLISH_WINDOW`]. Any other file is
 /// probed, under the registry lock like an open, before SQLite reads it, so an older or
 /// foreign database is refused before a read-only connection can create its `-shm` or
 /// replay its `-wal`.
 ///
 /// # Errors
 /// `StoreError::FileMode` when the path is a symlink or not a regular file; the refusals of
-/// [`probe_version`].
+/// [`probe_version`]; `StoreError::Backend` ([`VersionUnpublished`]) when the file's creator
+/// in this process has not published its version within the window.
 pub(crate) fn probe_unregistered(path: &Path) -> Result<()> {
-    let live = live_stores();
-    let meta = regular_file_metadata(path).map_err(StoreError::FileMode)?;
-    if meta
-        .as_ref()
-        .is_some_and(|meta| live.iter().any(|entry| entry.ident == file_ident(meta)))
-    {
-        return Ok(());
+    let deadline = std::time::Instant::now() + PUBLISH_WINDOW;
+    loop {
+        let live = live_stores();
+        let meta = regular_file_metadata(path).map_err(StoreError::FileMode)?;
+        let entry = meta
+            .as_ref()
+            .and_then(|meta| live.iter().find(|entry| entry.ident == file_ident(meta)));
+        match entry {
+            None => return probe_version(path, meta.as_ref()).map(drop),
+            Some(entry) if entry.published => return Ok(()),
+            Some(_) => {}
+        }
+        drop(live);
+        let now = std::time::Instant::now();
+        if now >= deadline {
+            return Err(StoreError::Backend {
+                source: kaban_core::BackendSource::new(VersionUnpublished),
+            });
+        }
+        std::thread::sleep(PROBE_RETRY_INTERVAL.min(deadline - now));
     }
-    probe_version(path, meta.as_ref()).map(drop)
 }
 
 #[cfg(test)]
