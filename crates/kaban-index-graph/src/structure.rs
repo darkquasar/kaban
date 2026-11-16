@@ -38,16 +38,17 @@ pub fn degree(
     })
 }
 
-/// The distinct neighbours of `n` ignoring direction, ascending: the [`Direction::Both`] stream
-/// is non-decreasing by neighbour, so equal-neighbour runs collapse without a sort.
+/// The distinct neighbours of `n` in `dir`, ascending: every accessor stream is non-decreasing
+/// by neighbour, so equal-neighbour runs collapse without a sort.
 fn distinct<'b>(
     v: &View<'_>,
     n: LocalId,
     rels: &RelSelection,
+    dir: Direction,
     budget: &'b QueryBudget,
 ) -> Result<Grow<'b, LocalId>, GraphError> {
     let mut out = Grow::new(budget)?;
-    for row in v.neighbours(n, rels, Direction::Both, budget) {
+    for row in v.neighbours(n, rels, dir, budget) {
         let (m, _, _) = row?;
         if out.last() != Some(&m) {
             out.push(m)?;
@@ -68,7 +69,12 @@ fn gallop(s: &[LocalId], from: usize, x: LocalId) -> usize {
     from + window.partition_point(|&y| y < x)
 }
 
-/// Neighbours shared by `a` and `b` ignoring direction, each once, ascending.
+/// Neighbours shared by `a` and `b` in `dir`, each once, ascending.
+///
+/// [`Direction::Out`]: the nodes both `a` and `b` have an outgoing edge to (things both call);
+/// [`Direction::In`]: the nodes with an edge into both (things that call both);
+/// [`Direction::Both`]: direction ignored. A node counts as its own neighbour only through a
+/// self-loop in the asked direction.
 ///
 /// Work: both distinct neighbour lists are collected from the accessor (runs collapsed, no
 /// sort), then each element of the shorter list gallops through the longer one, so the cost is
@@ -85,10 +91,9 @@ pub fn common_neighbours(
     dir: Direction,
     budget: &QueryBudget,
 ) -> Result<Charged<Vec<LocalId>>, GraphError> {
-    let _ = dir;
     budget.check()?;
-    let na = distinct(v, a, rels, budget)?;
-    let nb = distinct(v, b, rels, budget)?;
+    let na = distinct(v, a, rels, dir, budget)?;
+    let nb = distinct(v, b, rels, dir, budget)?;
     let (short, long) = if na.len() <= nb.len() {
         (&na, &nb)
     } else {
