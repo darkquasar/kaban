@@ -36,13 +36,16 @@ fn round8(n: u64) -> u64 {
 /// Open a connection, write and read some rows, close it.
 fn workload(rows: i64) {
     let conn = Connection::open_in_memory().unwrap();
-    conn.execute_batch("CREATE TABLE t(x INTEGER, y TEXT)").unwrap();
+    conn.execute_batch("CREATE TABLE t(x INTEGER, y TEXT)")
+        .unwrap();
     for i in 0..rows {
         conn.execute("INSERT INTO t VALUES (?1, printf('%0100d', ?1))", [i])
             .unwrap();
     }
     let count: i64 = conn
-        .query_row("SELECT count(*) FROM t WHERE y LIKE '%1%'", [], |row| row.get(0))
+        .query_row("SELECT count(*) FROM t WHERE y LIKE '%1%'", [], |row| {
+            row.get(0)
+        })
         .unwrap();
     assert!(count > 0);
 }
