@@ -2,24 +2,27 @@
 //!
 //! The adapter wraps the allocator SQLite had before it ([`wrap`] records it from
 //! `SQLITE_CONFIG_GETMALLOC`) and forwards every hook to it. Each block it hands to SQLite
-//! carries a [`Header`] of [`HEADER_BYTES`] in front: the owner's [`BudgetLease`] for a block
+//! carries a [`Header`] of [`HEADER_BYTES`] in front: the [`Owner`] (budget and lease) of a block
 //! allocated while a budget scope was active on the thread, or `None` for an unscoped block. The
-//! lease travels with the block through `xRealloc` and is dropped by `xFree` on whatever thread
+//! owner travels with the block through `xRealloc` and is dropped by `xFree` on whatever thread
 //! frees it, so a charge always returns to the budget that paid it, even after its query ended.
 //!
 //! Layout of one block (`base` comes from the original allocator, 8-byte aligned):
 //!
 //! ```text
-//! base                       base + 16 (pointer SQLite sees, 8-byte aligned)
-//! | Header (16 bytes)        | usable bytes (original xSize - 16)            |
+//! base                       base + 24 (pointer SQLite sees, 8-byte aligned)
+//! | Header (24 bytes)        | usable bytes (original xSize - 24)            |
 //! ```
 //!
-//! A scoped block is charged `QueryBudget::allocation_charge(usable, 8)`, which is the usable
-//! size plus `ALLOCATION_METADATA_BYTES` (the header), i.e. exactly what the original allocator
-//! holds for it. The callbacks never call into SQLite, never allocate through SQLite, take no
-//! lock (the scope slot is a thread-local; the recorded hooks are read with a lock-free
-//! `OnceLock::get`) and never unwind into C: every callback body runs under `catch_unwind` and
-//! fails closed (null, zero or nothing) if it panics.
+//! A scoped block is charged `QueryBudget::allocation_charge(usable + 8, 8)`: the usable size
+//! plus the whole header, i.e. exactly what the original allocator holds for it. A scoped grow
+//! is a replacement charged before the old block is released, never a destructive resize. The
+//! callbacks never call into SQLite, never allocate through SQLite and never unwind into C: every
+//! callback body runs under `catch_unwind` and fails closed (null, zero or nothing) if it panics.
+//! The wrapper's own state takes no lock (the scope slot is a thread-local; the recorded hooks
+//! are read with a lock-free `OnceLock::get`); a refused charge records the budget's first breach
+//! through a `OnceLock`, which can wait briefly for a concurrent recorder of the same budget, and
+//! the forwarded original hooks lock as that allocator does (docs/developer/SAFETY.md).
 
 use std::cell::RefCell;
 use std::ffi::{c_int, c_void};

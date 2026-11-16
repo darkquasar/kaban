@@ -84,14 +84,19 @@ impl std::error::Error for InitError {}
 /// interface cannot supply or accept the hooks.
 ///
 /// # Safety
-/// The caller guarantees, for the whole life of the process:
-/// - exclusive startup: this runs before any SQLite entry in the process and while no other
-///   thread can call into SQLite (or call `sqlite3_config`) concurrently;
-/// - no concurrent external SQLite use during the call, including a concurrent call of this
+/// Sufficient preconditions the caller guarantees:
+/// - SQLite is not initialized yet, or it was initialized by the host (then the call is refused
+///   with [`InitError::HostInitializedSqlite`] and changes nothing); before the call the host may
+///   only have configured SQLite with `sqlite3_config` on this thread, for example
+///   `SQLITE_CONFIG_MALLOC` to supply the original allocator the wrapper records, which must keep
+///   SQLite's allocator contract and never call back into SQLite;
+/// - no other thread calls into SQLite (any API, including `sqlite3_config` and the implicit
+///   initialization of a first open) during the call, including a concurrent call of this
 ///   function from a thread kaban does not coordinate (the internal `OnceLock` excludes only
 ///   kaban's own callers);
-/// - no allocator replacement (`SQLITE_CONFIG_MALLOC`) and no `sqlite3_shutdown` after it
-///   returns `Ok`, while the [`Runtime`] lives (which is until process exit).
+/// - after it returns `Ok`, while the [`Runtime`] lives (until process exit): no allocator
+///   replacement (`SQLITE_CONFIG_MALLOC`) or other memory reconfiguration and no
+///   `sqlite3_shutdown`.
 pub unsafe fn initialize_for_embedding() -> Result<Runtime, InitError> {
     let mut ran = false;
     let outcome = INSTALLED.get_or_init(|| {

@@ -6,8 +6,9 @@
 //! `.init_array.00101`: after the standard library's own `.init_array.00099` entry and before
 //! every unprioritized constructor of the binary (shared-library constructors run earlier still,
 //! and none of them can reach the statically linked SQLite). On Mach-O targets it sits in
-//! `__DATA,__mod_init_func`, which has no priorities. Any SQLite use before it, from any earlier
-//! constructor, is detected (`SQLITE_MISUSE`) and refuses startup by name. Other targets do not
+//! `__DATA,__mod_init_func`, which has no priorities (untested: no Apple build has been run).
+//! Any SQLite use before it, from any earlier constructor, is detected (`SQLITE_MISUSE`) and
+//! refuses startup by name. Other targets do not
 //! compile with the feature on: there is no constructor section to place the entry in, and a
 //! silent no-install would leave every query unbudgeted.
 //!
