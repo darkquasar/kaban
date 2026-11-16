@@ -7,7 +7,7 @@ use std::mem;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 
-use kaban_core::query_budget::QueryBudget;
+use kaban_core::query_budget::{BudgetExceeded, BudgetLease, QueryBudget};
 use rusqlite::vtab::{
     Context, Filters, IndexConstraintOp, IndexFlags, IndexInfo, Module, VTab, VTabConnection,
     VTabCursor, escape_double_quote,
@@ -15,6 +15,7 @@ use rusqlite::vtab::{
 use rusqlite::{Error, ffi};
 
 use crate::allocator;
+use crate::value::copy_charged;
 use crate::{BoundArg, ColumnDef, ColumnKind, OrderTerm, Plan, PlanInput, Value};
 
 /// The rows a table function produces: each item is one row holding one value per result
@@ -114,6 +115,27 @@ impl Drop for ContainedFunction {
 
 fn refusal(error: &FnError) -> Error {
     Error::ModuleError(error.to_string())
+}
+
+/// The budget of the request scope active on this thread: planning and scanning a table function
+/// copy request data into Rust, which is charged there, so neither runs outside a scope.
+fn request_budget(name: &str, what: &str) -> rusqlite::Result<QueryBudget> {
+    allocator::current_budget().ok_or_else(|| {
+        Error::ModuleError(format!(
+            "{name}: table function {what} outside a request budget scope"
+        ))
+    })
+}
+
+/// An empty lease on `budget` that the adapter's copies for one plan or scan are charged to.
+fn copy_lease(name: &str, budget: &QueryBudget) -> rusqlite::Result<BudgetLease> {
+    budget
+        .reserve(0)
+        .map_err(|exceeded| copy_refused(name, "the request", &exceeded))
+}
+
+fn copy_refused(name: &str, what: &str, exceeded: &BudgetExceeded) -> Error {
+    Error::ModuleError(format!("{name}: copying {what} refused: {exceeded}"))
 }
 
 /// Where a declared column's value comes from.
@@ -280,6 +302,10 @@ unsafe impl<'vtab> VTab<'vtab> for FunctionTable {
     fn best_index(&self, info: &mut IndexInfo) -> rusqlite::Result<bool> {
         let registered = &*self.registered;
         let name = registered.name;
+        // Plan-time argument values are copied into Rust for the function: charged to the
+        // request, held until planning ends.
+        let budget = request_budget(name, "planned")?;
+        let mut copies = copy_lease(name, &budget)?;
         // The first usable equality constraint per argument, and whether an unusable one exists.
         let mut usable: Vec<Option<usize>> = vec![None; registered.arguments.len()];
         let mut unusable = vec![false; registered.arguments.len()];
@@ -330,9 +356,16 @@ unsafe impl<'vtab> VTab<'vtab> for FunctionTable {
             argv_index += 1;
             idx_num |= 1 << position;
             assignments.push((constraint, argv_index));
+            let argument = registered.column_name(registered.arguments[position]);
+            let value = match info.rhs_value(constraint).ok().flatten() {
+                Some(value) => Some(copy_charged(value, &mut copies).map_err(|exceeded| {
+                    copy_refused(name, &format!("argument {argument}"), &exceeded)
+                })?),
+                None => None,
+            };
             bound.push(BoundArg {
-                name: registered.column_name(registered.arguments[position]),
-                value: info.rhs_value(constraint).ok().flatten().map(Value::from),
+                name: argument,
+                value,
             });
         }
 
@@ -388,6 +421,7 @@ unsafe impl<'vtab> VTab<'vtab> for FunctionTable {
             base: ffi::sqlite3_vtab_cursor::default(),
             registered: &table.registered,
             args: Vec::new(),
+            args_charge: None,
             rows: None,
             current: None,
             rowid: 0,
@@ -405,6 +439,9 @@ struct FunctionCursor<'vtab> {
     registered: &'vtab Registered,
     /// The scan's arguments, one per argument column.
     args: Vec<Value>,
+    /// The request charge for `args`' copies; dropped after them, when the next scan replaces
+    /// them or the cursor closes.
+    args_charge: Option<BudgetLease>,
     rows: Option<Rows<'vtab>>,
     /// The current row; `None` at end of scan.
     current: Option<Vec<Value>>,
@@ -478,24 +515,29 @@ unsafe impl VTabCursor for FunctionCursor<'_> {
     ) -> rusqlite::Result<()> {
         let registered = self.registered;
         let name = registered.name;
-        let mut supplied = args.iter();
-        self.args = (0..registered.arguments.len())
-            .map(|position| {
-                if (idx_num >> position) & 1 == 1 {
-                    supplied.next().map_or(Value::Null, Value::from)
-                } else {
-                    Value::Null
-                }
-            })
-            .collect();
         self.stop();
         self.rowid = 0;
-        // A scan runs only inside a request budget scope: it is charged to that scope's budget.
-        let Some(budget) = allocator::current_budget() else {
-            return Err(Error::ModuleError(format!(
-                "{name}: table function scanned outside a request budget scope"
-            )));
-        };
+        self.args = Vec::new();
+        self.args_charge = None;
+        // A scan runs only inside a request budget scope: it is charged to that scope's budget,
+        // including the adapter's copies of its arguments, reserved before each copy.
+        let budget = request_budget(name, "scanned")?;
+        let mut charge = copy_lease(name, &budget)?;
+        let mut supplied = args.iter();
+        let mut copied = Vec::with_capacity(registered.arguments.len());
+        for position in 0..registered.arguments.len() {
+            let bound = (idx_num >> position) & 1 == 1;
+            let value = match supplied.next().filter(|_| bound) {
+                Some(value) => copy_charged(value, &mut charge).map_err(|exceeded| {
+                    let argument = registered.column_name(registered.arguments[position]);
+                    copy_refused(name, &format!("argument {argument}"), &exceeded)
+                })?,
+                None => Value::Null,
+            };
+            copied.push(value);
+        }
+        self.args = copied;
+        self.args_charge = Some(charge);
         let function = registered.function()?;
         let rows = contain(name, "rows", || function.rows(&self.args, &budget))?
             .map_err(|error| refusal(&error))?;
