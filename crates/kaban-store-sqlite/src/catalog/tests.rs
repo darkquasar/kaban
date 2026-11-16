@@ -5,6 +5,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // test code: failures are the assertion
 
+use std::panic::AssertUnwindSafe;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -375,6 +376,67 @@ fn a_later_failing_class_rolls_back_an_earlier_class_s_staging_and_its_generatio
     assert_eq!(
         count(&conn, "SELECT count(*) FROM cat_sediment WHERE generation = 1"),
         1
+    );
+}
+
+#[test]
+fn a_panicking_writer_leaves_no_row_no_capture_and_the_original_durability() {
+    // Arrange: an ordinary safety level the panicking commit raises to FULL
+    let (store, [(a, ra), (b, _)]) = store_with_two_nodes();
+    store
+        .lock()
+        .execute_batch("PRAGMA synchronous = NORMAL")
+        .unwrap();
+    let level = |store: &SqliteStore| -> i64 {
+        store
+            .lock()
+            .query_row("PRAGMA synchronous", [], |r| r.get(0))
+            .unwrap()
+    };
+    let before = level(&store);
+    assert_ne!(before, 2, "the arrangement needs a level below FULL");
+
+    // Act: a Full commit whose writer archives a node and then panics
+    let unwound = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        let mut conn = store.lock();
+        let _ = store
+            .catalog()
+            .commit(&mut conn, Durability::Full, |txn| -> Result<()> {
+                txn.conn()
+                    .execute("UPDATE node SET lifecycle = 'archived' WHERE rid = ?1", [ra])
+                    .unwrap();
+                panic!("an injected writer panic");
+            });
+    }));
+
+    // Assert: rolled back, the queue empty, the level restored, the next commit succeeds
+    assert!(unwound.is_err());
+    {
+        let conn = store.lock();
+        assert_eq!(lifecycle(&conn, ra), "active");
+        assert_eq!(count(&conn, "SELECT count(*) FROM temp.cat_capture"), 0);
+        assert!(conn.is_autocommit(), "the transaction outlived the panic");
+    }
+    assert_eq!(level(&store), before, "the panic left synchronous=FULL behind");
+    link(&store, &a, &b).unwrap();
+}
+
+#[test]
+fn a_panic_inside_an_outside_commit_withdraws_its_admission() {
+    // Arrange
+    let store = SqliteStore::open_memory().unwrap();
+    let catalog = store.catalog();
+
+    // Act
+    let unwound = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        catalog.outside_commit(|| panic!("an injected maintenance panic"));
+    }));
+
+    // Assert: the writer guard no longer admits commits outside the catalog
+    assert!(unwound.is_err());
+    assert!(
+        !catalog.committing.load(Ordering::Acquire),
+        "the admission flag outlived the panic"
     );
 }
 

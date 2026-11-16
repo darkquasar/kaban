@@ -134,26 +134,15 @@ impl Catalog {
         durability: Durability,
         stage: impl FnOnce(&mut Txn<'_>) -> Result<T>,
     ) -> Result<T> {
-        // SQLite refuses a change of the safety level inside a transaction: set around it
-        let restore = match durability {
-            Durability::Normal => None,
-            Durability::Full => {
-                let level: i64 = conn
-                    .query_row("PRAGMA synchronous", [], |r| r.get(0))
-                    .sql()?;
-                conn.execute_batch("PRAGMA synchronous = FULL").sql()?;
-                Some(level)
-            }
-        };
-        let out = self.commit_in(conn, stage);
-        if let Some(level) = restore {
-            let restored = conn.pragma_update(None, "synchronous", level).sql();
-            // the commit's own error wins; a failed restore of a committed write is reported
-            if out.is_ok() {
-                restored?;
-            }
-        }
-        out
+        // SQLite refuses a change of the safety level inside a transaction: set around it, and
+        // restored however the commit ends (an unwound writer included)
+        let mut level = SafetyLevel::raise(conn, durability)?;
+        let out = self.commit_in(level.conn(), stage);
+        let restored = level.restore();
+        // the commit's own error wins; a failed restore of a committed write is reported
+        let out = out?;
+        restored?;
+        Ok(out)
     }
 
     fn commit_in<T>(
@@ -236,14 +225,13 @@ impl OutsideCommit {
     /// Run `f`, whose commits on the writer connection the writer guard admits. The caller
     /// holds the writer connection's lock, so no catalog commit runs meanwhile.
     pub(crate) fn run<T>(&self, f: impl FnOnce() -> T) -> T {
-        self.0.store(true, Ordering::Release);
-        let out = f();
-        self.0.store(false, Ordering::Release);
-        out
+        let _admitted = Admitted::enter(&self.0);
+        f()
     }
 }
 
-/// The writer guard's admission of one commit, withdrawn however the commit ends.
+/// The writer guard's admission of one commit, withdrawn however the commit ends (an unwind
+/// included).
 struct Admitted<'a>(&'a AtomicBool);
 
 impl<'a> Admitted<'a> {
@@ -256,6 +244,46 @@ impl<'a> Admitted<'a> {
 impl Drop for Admitted<'_> {
     fn drop(&mut self) {
         self.0.store(false, Ordering::Release);
+    }
+}
+
+/// The safety level of the writer connection around one commit: raised to FULL for a
+/// [`Durability::Full`] commit and restored once it ends, an unwind included (SQLite refuses
+/// the change inside a transaction).
+struct SafetyLevel<'c> {
+    conn: &'c mut Connection,
+    restore: Option<i64>,
+}
+
+impl<'c> SafetyLevel<'c> {
+    fn raise(conn: &'c mut Connection, durability: Durability) -> Result<Self> {
+        let restore = match durability {
+            Durability::Normal => None,
+            Durability::Full => {
+                let level: i64 = conn
+                    .query_row("PRAGMA synchronous", [], |r| r.get(0))
+                    .sql()?;
+                conn.execute_batch("PRAGMA synchronous = FULL").sql()?;
+                Some(level)
+            }
+        };
+        Ok(Self { conn, restore })
+    }
+    fn conn(&mut self) -> &mut Connection {
+        self.conn
+    }
+    /// Restore the level the commit found (once).
+    fn restore(&mut self) -> Result<()> {
+        match self.restore.take() {
+            Some(level) => self.conn.pragma_update(None, "synchronous", level).sql(),
+            None => Ok(()),
+        }
+    }
+}
+
+impl Drop for SafetyLevel<'_> {
+    fn drop(&mut self) {
+        let _ = self.restore();
     }
 }
 
