@@ -10,59 +10,19 @@ use kaban_index_graph::{
     Base, Direction, EdgeOp, GraphError, Layer, LocalId, NodeOp, OpKind, Records, RelId,
     RelSelection, View, build_base, fold, seal,
 };
-use oracle::{Oracle, Rng, budget, nodes, random_records, rows, selected, view};
+use oracle::{
+    Fixture, IDS, Oracle, Rng, budget, chain, nodes, random_records, rows, selected, view,
+};
 use tantivy::directory::OwnedBytes;
 
-const IDS: u32 = 120;
 const SEEDS: u64 = 16;
-
-struct Fixture {
-    base: Base,
-    layers: Vec<Layer>,
-    sediment: Vec<Records>,
-    all: Vec<Records>,
-    oracle: Oracle,
-}
 
 fn open_base(bytes: Vec<u8>) -> Base {
     Base::open(OwnedBytes::new(bytes)).expect("base opens")
 }
 
-/// A base, three layers (dense, sparse, medium) and two sediment batches from `seed`. Even
-/// seeds use a small id domain (dense presence indexes), odd seeds a large one (sparse).
 fn fixture(seed: u64) -> Fixture {
-    let mut rng = Rng::new(seed);
-    let domain = if seed.is_multiple_of(2) { 200 } else { 20_000 };
-    let base_recs = random_records(&mut rng, IDS, 400, 5);
-    let layer_recs = [
-        random_records(&mut rng, IDS, 150, 30),
-        random_records(&mut rng, IDS, 2, 40),
-        random_records(&mut rng, IDS, 60, 30),
-    ];
-    let sediment = vec![
-        random_records(&mut rng, IDS, 40, 30),
-        random_records(&mut rng, IDS, 30, 30),
-    ];
-    let base = open_base(build_base(&base_recs, domain));
-    let mut layers: Vec<Layer> = Vec::new();
-    for r in &layer_recs {
-        let bytes = seal(&view::<Records>(Some(&base), &layers, &[]), r);
-        layers.push(Layer::open(OwnedBytes::new(bytes)).expect("layer opens"));
-    }
-    let mut all = vec![base_recs];
-    all.extend(layer_recs);
-    all.extend(sediment.iter().cloned());
-    let mut oracle = Oracle::default();
-    for r in &all {
-        oracle.apply(r);
-    }
-    Fixture {
-        base,
-        layers,
-        sediment,
-        all,
-        oracle,
-    }
+    chain(seed, |r| r)
 }
 
 fn selections() -> Vec<RelSelection> {

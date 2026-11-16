@@ -3,13 +3,16 @@
 #![allow(dead_code)] // each test binary uses a different part of the oracle
 #![allow(clippy::unwrap_used)] // test code: failures are the assertion
 
+pub(crate) mod structural;
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use kaban_core::query_budget::QueryBudget;
 use kaban_index_graph::{
     Attr, Base, Direction, EdgeOp, FactOp, Layer, LocalId, NodeOp, OpKind, Records, RelId,
-    RelSelection, View,
+    RelSelection, View, build_base, seal,
 };
+use tantivy::directory::OwnedBytes;
 
 /// The merged state of base, layer and sediment records applied in order.
 #[derive(Debug, Clone, Default)]
@@ -232,4 +235,61 @@ pub(crate) fn random_records(rng: &mut Rng, ids: u32, ops: usize, remove_percent
         });
     }
     r
+}
+
+/// Ids the seeded fixtures draw from.
+pub(crate) const IDS: u32 = 120;
+
+/// A base, three sealed layers and two sediment batches, with the oracle of all of them.
+pub(crate) struct Fixture {
+    pub(crate) base: Base,
+    pub(crate) layers: Vec<Layer>,
+    pub(crate) sediment: Vec<Records>,
+    pub(crate) all: Vec<Records>,
+    pub(crate) oracle: Oracle,
+}
+
+impl Fixture {
+    /// The merged view of the whole chain.
+    pub(crate) fn view(&self) -> View<'_> {
+        view(Some(&self.base), &self.layers, &self.sediment)
+    }
+}
+
+/// A base, three layers (dense, sparse, medium) and two sediment batches from `seed`, each batch
+/// passed through `map` first. Even seeds use a small id domain (dense presence indexes), odd
+/// seeds a large one (sparse).
+pub(crate) fn chain(seed: u64, map: impl Fn(Records) -> Records) -> Fixture {
+    let mut rng = Rng::new(seed);
+    let domain = if seed.is_multiple_of(2) { 200 } else { 20_000 };
+    let base_recs = map(random_records(&mut rng, IDS, 400, 5));
+    let layer_recs = [
+        map(random_records(&mut rng, IDS, 150, 30)),
+        map(random_records(&mut rng, IDS, 2, 40)),
+        map(random_records(&mut rng, IDS, 60, 30)),
+    ];
+    let sediment = vec![
+        map(random_records(&mut rng, IDS, 40, 30)),
+        map(random_records(&mut rng, IDS, 30, 30)),
+    ];
+    let base = Base::open(OwnedBytes::new(build_base(&base_recs, domain))).unwrap();
+    let mut layers: Vec<Layer> = Vec::new();
+    for r in &layer_recs {
+        let bytes = seal(&view::<Records>(Some(&base), &layers, &[]), r);
+        layers.push(Layer::open(OwnedBytes::new(bytes)).unwrap());
+    }
+    let mut all = vec![base_recs];
+    all.extend(layer_recs);
+    all.extend(sediment.iter().cloned());
+    let mut oracle = Oracle::default();
+    for r in &all {
+        oracle.apply(r);
+    }
+    Fixture {
+        base,
+        layers,
+        sediment,
+        all,
+        oracle,
+    }
 }
