@@ -309,15 +309,6 @@ impl<'b> Ticker<'b> {
         self.tick().is_ok()
     }
 
-    /// Count one unit without checking (instrumentation only).
-    pub(crate) fn count(&self) {
-        let units = self.units.get();
-        if units.is_multiple_of(BUDGET_CHECK_INTERVAL) {
-            self.publish();
-        }
-        self.units.set(units + 1);
-    }
-
     /// The breach a failed step recorded, if any.
     pub(crate) fn stopped(&self) -> Result<(), GraphError> {
         match self.failed.get() {

@@ -4,7 +4,8 @@
 //! [`View::neighbours`]. Its working set (sources, the sorted seen set, a level's candidates and
 //! met edges) and its output are reserved on the caller's budget before they grow; the output's
 //! charge is returned with it in a [`Charged`] value. The accessor checks the budget every
-//! [`crate::BUDGET_CHECK_INTERVAL`] raw reads; the search's own loops check at the same interval.
+//! [`crate::BUDGET_CHECK_INTERVAL`] units of work; the search's own loops check at the same
+//! interval.
 //! There is no recursion.
 
 use kaban_core::query_budget::QueryBudget;
@@ -104,7 +105,7 @@ pub(crate) fn search<'b>(
     budget: &'b QueryBudget,
 ) -> Result<Search<'b>, GraphError> {
     budget.check()?;
-    let mut tick = Ticker::new(budget);
+    let tick = Ticker::new(budget);
     let mut frontier: Grow<'b, u32> = Grow::with_capacity(budget, src.len())?;
     for &n in src {
         tick.tick()?;
@@ -194,7 +195,7 @@ pub(crate) fn search<'b>(
         for &m in cand.iter() {
             order.push((LocalId(m), next))?;
         }
-        seen = merge(&seen, &cand, next, budget, &mut tick)?;
+        seen = merge(&seen, &cand, next, budget, &tick)?;
         let found = want.stop.is_some_and(|s| cand.binary_search(&s.0).is_ok());
         frontier = cand;
         if truncated || found {
@@ -216,7 +217,7 @@ fn merge<'b>(
     level: &[u32],
     depth: u8,
     budget: &'b QueryBudget,
-    tick: &mut Ticker<'_>,
+    tick: &Ticker<'_>,
 ) -> Result<Grow<'b, (u32, u8)>, GraphError> {
     let mut out = Grow::with_capacity(budget, seen.len() + level.len())?;
     let (mut i, mut j) = (0, 0);

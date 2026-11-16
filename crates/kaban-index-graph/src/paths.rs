@@ -75,7 +75,7 @@ pub fn shortest_path(
     if let Some(mark) = on.get_mut(last) {
         *mark = true;
     }
-    let mut tick = Ticker::new(budget);
+    let tick = Ticker::new(budget);
     for d in (1..len).rev() {
         for i in level(d) {
             tick.tick()?;
@@ -144,7 +144,7 @@ pub fn meet(
     };
     let sa = search(v, &[a], rels, Direction::Out, caps, want, budget)?;
     let sb = search(v, &[b], rels, Direction::Out, caps, want, budget)?;
-    let mut tick = Ticker::new(budget);
+    let tick = Ticker::new(budget);
     let mut best: Option<u16> = None;
     let mut out: Grow<'_, LocalId> = Grow::new(budget)?;
     let (mut at_a, mut at_b) = (0, 0);

@@ -93,7 +93,7 @@ pub fn common_neighbours(
         (&nb, &na)
     };
     let mut out = Grow::with_capacity(budget, short.len())?;
-    let mut tick = Ticker::new(budget);
+    let tick = Ticker::new(budget);
     let mut at = 0;
     for &x in short.iter() {
         tick.tick()?;
@@ -311,7 +311,7 @@ pub fn wcc(
         .len()
         .min(usize::try_from(cap.0).unwrap_or(usize::MAX));
     let mut out = Grow::with_capacity(budget, rows)?;
-    let mut tick = Ticker::new(budget);
+    let tick = Ticker::new(budget);
     for (i, &n) in nodes.iter().take(rows).enumerate() {
         tick.tick()?;
         let root = find(&mut parent, i);

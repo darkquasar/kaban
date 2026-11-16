@@ -586,8 +586,10 @@ fn cancellation_stops_a_low_output_traversal_within_the_interval() {
         ),
         "{err:?}"
     );
+    // Two metered loops are live (the search's and the accessor's): each sees the
+    // cancellation within the interval.
     assert!(
-        end <= seen + BUDGET_CHECK_INTERVAL,
+        end <= seen + 2 * BUDGET_CHECK_INTERVAL,
         "expand: {} past",
         end - seen
     );
@@ -608,7 +610,7 @@ fn cancellation_stops_a_low_output_traversal_within_the_interval() {
         "{err:?}"
     );
     assert!(
-        end <= seen + BUDGET_CHECK_INTERVAL,
+        end <= seen + 2 * BUDGET_CHECK_INTERVAL,
         "wcc: {} past",
         end - seen
     );

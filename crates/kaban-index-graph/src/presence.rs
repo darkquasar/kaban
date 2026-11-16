@@ -208,14 +208,17 @@ pub(crate) struct IdIter<'i> {
 
 impl IdIter<'_> {
     /// The next id; every id of a sorted index and every bitvector word visited is one unit of
-    /// `t`, so a long run of empty words is metered word by word.
+    /// `t`, so a long run of empty words is metered and checked word by word; `None` once `t`
+    /// refused.
     pub(crate) fn next(&mut self, t: &Ticker<'_>) -> Option<u32> {
         match self.index {
             IdIndex::Sorted { ids, count } => {
                 if self.pos >= *count {
                     return None;
                 }
-                t.count();
+                if !t.step() {
+                    return None;
+                }
                 let id = u32::from_le_bytes(column::<4>(ids, self.pos)?);
                 self.pos += 1;
                 Some(id)
@@ -230,7 +233,9 @@ impl IdIter<'_> {
                     self.rank += 1;
                     return u32::try_from(self.word + bit).ok();
                 }
-                t.count();
+                if !t.step() {
+                    return None;
+                }
                 self.word_bits = u64::from_le_bytes(column::<8>(words, self.pos)?);
                 self.word = (self.pos as u64) * 64;
                 self.pos += 1;

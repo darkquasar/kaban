@@ -6,8 +6,11 @@
 //! Query-side work is charged and checked against the caller's [`QueryBudget`] (PC-17):
 //! preparing the sediment reserves its vectors before allocating them and holds the charge
 //! while the view lives; each [`View::neighbours`] and [`View::nodes`] iterator reserves its
-//! cursors and holds that charge while it lives, and checks the budget before its first raw
-//! read and after every [`BUDGET_CHECK_INTERVAL`] raw reads, whether or not a row was yielded.
+//! cursors and holds that charge while it lives. Every unit of work beneath the iterator is
+//! metered, not only the merged rows: preparing a cursor, comparing a source in the merge,
+//! advancing a source by one entry and visiting one bitvector word are one unit each. The budget
+//! is checked before the first unit and after every [`BUDGET_CHECK_INTERVAL`] units, whether or
+//! not a row was yielded, so a cancellation is seen within that many units.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
@@ -23,9 +26,14 @@ use crate::op::{Attr, OpKind, Records};
 use crate::presence::PresenceIter;
 use crate::sediment::{SedEdge, SedNode, Sediment};
 
-/// Raw reads between two budget checks of one accessor iterator. A raw read is one merged
-/// entry consumed from the sources (a neighbour-list entry or a presence entry), counted
-/// whether it is yielded or filtered out (tombstone, unselected relation, absent endpoint).
+/// Units of work between two budget checks of one metered loop (an accessor iterator, a
+/// structural function's loop, decoding, validation or preparation). A unit is bounded: one
+/// cursor prepared, one source compared or advanced by one entry in a merge, one bitvector word
+/// visited, one record decoded or validated, one loop iteration of a structural function, one
+/// union-find step or one sift of a sort; none costs more than a binary search over one section
+/// or [`crate::Records`] stream, plus a presence probe over the chain for a row's neighbour. A
+/// cancellation or deadline is therefore seen within this many units of each live loop, and
+/// [`crate::work_units`] counts them.
 pub const BUDGET_CHECK_INTERVAL: u64 = 256;
 
 /// A read view: a base, sealed layers oldest first, then sediment records oldest first.
@@ -117,8 +125,8 @@ impl<'a> View<'a> {
     /// nothing.
     ///
     /// The iterator charges its cursors to `budget` while it lives and checks `budget` before
-    /// its first raw read and after every [`BUDGET_CHECK_INTERVAL`] raw reads. After it yields
-    /// an error it ends.
+    /// its first unit of work and after every [`BUDGET_CHECK_INTERVAL`] units (see the module
+    /// documentation). After it yields an error it ends.
     ///
     /// # Errors
     /// Yields [`GraphError::BudgetExceeded`] when the budget refuses the cursors, the deadline
@@ -136,7 +144,6 @@ impl<'a> View<'a> {
             out_head: None,
             inc_head: None,
             ticker: Ticker::new(budget),
-            meter: Meter::new(Some(budget)),
             pending: None,
             done: false,
             lease: None,
@@ -192,14 +199,14 @@ impl<'a> View<'a> {
                 .into_iter()
                 .chain(layer_extents.take(if skip_layers { 0 } else { self.layers.len() }));
             for e in extents {
-                t.count();
+                t.tick()?;
                 let edges = e.edges(out);
                 if let Some(range) = edges.list(n) {
                     sources.push(Cursor::new(EdgeSource::Extent { edges, range }));
                 }
             }
         }
-        t.count();
+        t.tick()?;
         sources.push(Cursor::new(EdgeSource::Sediment(
             self.sediment.list(n, out).iter(),
         )));
@@ -217,8 +224,7 @@ impl<'a> View<'a> {
         let Ok(mut list) = self.list(n, out, None, None, &t) else {
             return rows;
         };
-        let mut meter = Meter::new(None);
-        while let Ok(Some(row)) = list.next(&t, &mut meter) {
+        while let Ok(Some(row)) = list.next(&t) {
             rows.push(row);
         }
         rows
@@ -265,7 +271,6 @@ impl<'a> View<'a> {
                 sources: Vec::new(),
             },
             ticker: Ticker::maybe(budget),
-            meter: Meter::new(budget),
             pending: None,
             done: false,
             lease: None,
@@ -275,10 +280,10 @@ impl<'a> View<'a> {
             let mut sources: Vec<Cursor<PresenceSource<'v>>> =
                 cursors(charge.as_mut(), self.layers.len() + 2)?;
             for e in self.extents() {
-                t.count();
+                t.tick()?;
                 sources.push(Cursor::new(PresenceSource::Extent(e.presence.iter())));
             }
-            t.count();
+            t.tick()?;
             sources.push(Cursor::new(PresenceSource::Sediment(
                 self.sediment.nodes().iter(),
             )));
@@ -354,33 +359,6 @@ impl<'a> View<'a> {
     }
 }
 
-/// The merged-key check of the accessor before the work meter (checks every
-/// [`BUDGET_CHECK_INTERVAL`] merged keys).
-#[derive(Debug)]
-struct Meter<'v> {
-    budget: Option<&'v QueryBudget>,
-    raw: u64,
-}
-
-impl<'v> Meter<'v> {
-    fn new(budget: Option<&'v QueryBudget>) -> Self {
-        Self { budget, raw: 0 }
-    }
-
-    fn before_read(&mut self) -> Result<(), GraphError> {
-        if self.raw.is_multiple_of(BUDGET_CHECK_INTERVAL)
-            && let Some(budget) = self.budget
-        {
-            budget.check()?;
-        }
-        Ok(())
-    }
-
-    fn read(&mut self) {
-        self.raw += 1;
-    }
-}
-
 /// A sorted keyed source read by [`NewestWins`]; every advance is metered on the ticker.
 trait Source {
     type Key: Ord + Copy;
@@ -431,7 +409,9 @@ impl<S: Source> NewestWins<S> {
     fn next(&mut self, t: &Ticker<'_>) -> Option<(S::Key, S::Value)> {
         let mut best: Option<(S::Key, usize)> = None;
         for (i, c) in self.sources.iter_mut().enumerate() {
-            t.count();
+            if !t.step() {
+                return None;
+            }
             if let Some(k) = c.peek(t)
                 && best.is_none_or(|(b, _)| k <= b)
             {
@@ -466,7 +446,9 @@ impl Source for PresenceSource<'_> {
         match self {
             Self::Extent(it) => it.next(t),
             Self::Sediment(it) => {
-                t.count();
+                if !t.step() {
+                    return None;
+                }
                 it.next().map(|n| (n.id, n.kind))
             }
         }
@@ -477,7 +459,6 @@ impl Source for PresenceSource<'_> {
 pub(crate) struct Nodes<'v> {
     merge: NewestWins<PresenceSource<'v>>,
     ticker: Ticker<'v>,
-    meter: Meter<'v>,
     pending: Option<GraphError>,
     done: bool,
     /// The cursors' charge, released when the iterator is dropped.
@@ -497,10 +478,6 @@ impl Iterator for Nodes<'_> {
             return Some(Err(e));
         }
         loop {
-            if let Err(e) = self.meter.before_read() {
-                self.done = true;
-                return Some(Err(e));
-            }
             let item = self.merge.next(&self.ticker);
             if let Err(e) = self.ticker.stopped() {
                 self.done = true;
@@ -510,7 +487,6 @@ impl Iterator for Nodes<'_> {
                 self.done = true;
                 return None;
             };
-            self.meter.read();
             if kind == OpKind::Add {
                 return Some(Ok(LocalId(n)));
             }
@@ -533,7 +509,9 @@ impl Source for EdgeSource<'_> {
     type Value = (OpKind, Attr, bool);
 
     fn advance(&mut self, t: &Ticker<'_>) -> Option<(Self::Key, Self::Value)> {
-        t.count();
+        if !t.step() {
+            return None;
+        }
         match self {
             Self::Extent { edges, range } => {
                 let (nbr, rel, kind, attr) = edges.entry(range.next()?)?;
@@ -556,19 +534,13 @@ struct List<'v> {
 
 impl List<'_> {
     /// The next surviving entry, metered on `t`.
-    fn next(
-        &mut self,
-        t: &Ticker<'_>,
-        meter: &mut Meter<'_>,
-    ) -> Result<Option<(u32, u16, Attr)>, GraphError> {
+    fn next(&mut self, t: &Ticker<'_>) -> Result<Option<(u32, u16, Attr)>, GraphError> {
         loop {
-            meter.before_read()?;
             let item = self.merge.next(t);
             t.stopped()?;
             let Some(((nbr, rel), (kind, attr, fresh))) = item else {
                 return Ok(None);
             };
-            meter.read();
             // An extent entry whose neighbour is removed in the sediment is deleted.
             if kind != OpKind::Add || (!fresh && self.view.sediment.barrier(nbr)) {
                 continue;
@@ -590,7 +562,6 @@ struct Neighbours<'v> {
     out_head: Option<(u32, u16, Attr)>,
     inc_head: Option<(u32, u16, Attr)>,
     ticker: Ticker<'v>,
-    meter: Meter<'v>,
     pending: Option<GraphError>,
     done: bool,
     /// The cursors' charge, released when the iterator is dropped.
@@ -608,7 +579,7 @@ impl Neighbours<'_> {
             if head.is_none()
                 && let Some(l) = list
             {
-                *head = l.next(&self.ticker, &mut self.meter)?;
+                *head = l.next(&self.ticker)?;
                 if head.is_none() {
                     *list = None;
                 }
