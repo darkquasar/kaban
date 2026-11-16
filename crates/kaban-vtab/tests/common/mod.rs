@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use kaban_core::query_budget::QueryBudget;
 use kaban_vtab::{
-    Arg, ColumnDef, ColumnKind, FnError, OrderTerm, Plan, PlanInput, Rows, TableFunction, Value,
+    Arg, ColumnDef, ColumnKind, FnError, OrderTerm, Plan, PlanInput, Scan, Rows, TableFunction, Value,
 };
 
 /// `range(start, stop)`: the integers `start..stop`, ascending, in column `value`.
@@ -69,15 +69,16 @@ impl TableFunction for Range {
             rows: span,
             consumes_order: input.order_by == ascending_value,
             point_lookup: false,
+            ..Plan::default()
         }
     }
 
-    fn rows(&self, args: &[Value], _budget: &QueryBudget) -> Result<Rows<'_>, FnError> {
+    fn rows(&self, scan: &Scan<'_>, _budget: &QueryBudget) -> Result<Rows<'_>, FnError> {
         let refuse = |reason: String| FnError {
             construct: "range".to_owned(),
             reason,
         };
-        let (start, stop) = match args {
+        let (start, stop) = match scan.args {
             [Value::Integer(start), Value::Integer(stop)] => (*start, *stop),
             other => {
                 return Err(refuse(format!(
@@ -116,10 +117,11 @@ impl TableFunction for Broken {
             rows: 2,
             consumes_order: false,
             point_lookup: false,
+            ..Plan::default()
         }
     }
 
-    fn rows(&self, _args: &[Value], _budget: &QueryBudget) -> Result<Rows<'_>, FnError> {
+    fn rows(&self, _scan: &Scan<'_>, _budget: &QueryBudget) -> Result<Rows<'_>, FnError> {
         let rows = [
             Ok(vec![Value::Text("first".to_owned())]),
             Err(FnError {
@@ -196,15 +198,16 @@ impl TableFunction for Reserving {
             rows: 1,
             consumes_order: false,
             point_lookup: true,
+            ..Plan::default()
         }
     }
 
-    fn rows(&self, args: &[Value], budget: &QueryBudget) -> Result<Rows<'_>, FnError> {
+    fn rows(&self, scan: &Scan<'_>, budget: &QueryBudget) -> Result<Rows<'_>, FnError> {
         let refuse = |reason: String| FnError {
             construct: "reserving".to_owned(),
             reason,
         };
-        let bytes = match args {
+        let bytes = match scan.args {
             [Value::Integer(bytes)] => u64::try_from(*bytes).map_err(|e| refuse(e.to_string()))?,
             _ => return Err(refuse("bytes must be an integer".to_owned())),
         };

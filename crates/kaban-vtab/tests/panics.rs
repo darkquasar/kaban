@@ -15,7 +15,7 @@ use common::integers;
 use fresh::{fresh_test, installed_runtime, with_query};
 use kaban_core::query_budget::QueryBudget;
 use kaban_vtab::{
-    Arg, ColumnDef, ColumnKind, FnError, Plan, PlanInput, Rows, TableFunction, Value,
+    Arg, ColumnDef, ColumnKind, FnError, Plan, PlanInput, Scan, Rows, TableFunction, Value,
 };
 
 /// A panic payload whose destructor panics again.
@@ -92,10 +92,11 @@ impl TableFunction for Hostile {
             rows: 1,
             consumes_order: false,
             point_lookup: false,
+            ..Plan::default()
         }
     }
 
-    fn rows(&self, _args: &[Value], _budget: &QueryBudget) -> Result<Rows<'_>, FnError> {
+    fn rows(&self, _scan: &Scan<'_>, _budget: &QueryBudget) -> Result<Rows<'_>, FnError> {
         match self.0 {
             Fault::Rows => panic!("rows failed"),
             Fault::RowsPayload => std::panic::panic_any(PanicsWhenDropped),
@@ -236,10 +237,11 @@ impl TableFunction for Shifty {
             rows: 1,
             consumes_order: false,
             point_lookup: false,
+            ..Plan::default()
         }
     }
 
-    fn rows(&self, _args: &[Value], _budget: &QueryBudget) -> Result<Rows<'_>, FnError> {
+    fn rows(&self, _scan: &Scan<'_>, _budget: &QueryBudget) -> Result<Rows<'_>, FnError> {
         Ok(Box::new(std::iter::once(Ok(vec![Value::Integer(1)]))))
     }
 }

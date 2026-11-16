@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use fresh::{fresh_test, installed_runtime, query_flags};
 use kaban_core::query_budget::QueryBudget;
 use kaban_vtab::{
-    Arg, ColumnDef, ColumnKind, FnError, Plan, PlanInput, RequestScope, Rows, TableFunction,
+    Arg, ColumnDef, ColumnKind, FnError, Plan, PlanInput, Scan, RequestScope, Rows, TableFunction,
     Value, register,
 };
 
@@ -54,12 +54,13 @@ impl TableFunction for Echo {
             rows: 1,
             consumes_order: false,
             point_lookup: true,
+            ..Plan::default()
         }
     }
 
-    fn rows(&self, args: &[Value], budget: &QueryBudget) -> Result<Rows<'_>, FnError> {
+    fn rows(&self, scan: &Scan<'_>, budget: &QueryBudget) -> Result<Rows<'_>, FnError> {
         self.scanned.store(budget.live_bytes(), Ordering::SeqCst);
-        let len = match args {
+        let len = match scan.args {
             [Value::Blob(bytes)] => bytes.len(),
             [Value::Text(text)] => text.len(),
             _ => 0,

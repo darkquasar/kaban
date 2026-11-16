@@ -8,7 +8,7 @@ use std::sync::Arc;
 use common::{Broken, Range, connection, integers, unbounded_scope};
 use kaban_core::query_budget::QueryBudget;
 use kaban_vtab::{
-    Arg, ColumnDef, ColumnKind, FnError, Plan, PlanInput, Rows, TableFunction, Value,
+    Arg, ColumnDef, ColumnKind, FnError, Plan, PlanInput, Scan, Rows, TableFunction, Value,
 };
 
 #[test]
@@ -120,11 +120,12 @@ impl TableFunction for Panicky {
             rows: 1,
             consumes_order: false,
             point_lookup: false,
+            ..Plan::default()
         }
     }
 
-    fn rows(&self, args: &[Value], _budget: &QueryBudget) -> Result<Rows<'_>, FnError> {
-        match args {
+    fn rows(&self, scan: &Scan<'_>, _budget: &QueryBudget) -> Result<Rows<'_>, FnError> {
+        match scan.args {
             [Value::Integer(1)] => Ok(Box::new(PanicOnDrop(Some(7)))),
             _ => panic!("rows failed"),
         }

@@ -25,7 +25,10 @@ mod value;
 
 pub use adapter::{FnError, Rows, TableFunction, register};
 pub use budget_scope::{QueryConnection, QueryError, RequestScope, ScopeActive};
-pub use plan::{Arg, BoundArg, ColumnDef, ColumnKind, OrderTerm, Plan, PlanInput};
+pub use plan::{
+    Arg, BoundArg, BoundConstraint, ColumnDef, ColumnKind, ConstraintOp, MAX_CONSTRAINTS,
+    OrderTerm, Plan, PlanInput, ResultConstraint, Scan,
+};
 pub use runtime::{InitError, Runtime, initialize_for_embedding};
 pub use value::Value;
 

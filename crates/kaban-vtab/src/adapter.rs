@@ -16,7 +16,11 @@ use rusqlite::{Error, ffi};
 
 use crate::allocator;
 use crate::value::copy_charged;
-use crate::{BoundArg, ColumnDef, ColumnKind, OrderTerm, Plan, PlanInput, Value};
+use crate::plan::MAX_CONSTRAINTS;
+use crate::{
+    BoundArg, BoundConstraint, ColumnDef, ColumnKind, ConstraintOp, OrderTerm, Plan, PlanInput,
+    ResultConstraint, Scan, Value,
+};
 
 /// The rows a table function produces: each item is one row holding one value per result
 /// (non-argument) column, in declaration order.
@@ -29,15 +33,16 @@ pub trait TableFunction: Send + Sync + 'static {
     /// Every column, result and argument; argument columns are hidden and bind positionally in
     /// declaration order.
     fn columns(&self) -> &'static [ColumnDef];
-    /// Cost one candidate plan whose required arguments are all bound.
+    /// Cost one candidate plan whose required arguments are all bound, and say which offered
+    /// result-column constraints it consumes ([`Plan::consumes`]).
     fn plan(&self, input: &PlanInput<'_>) -> Plan;
-    /// Produce the rows for one scan. `args` holds one value per argument column in declaration
-    /// order ([`Value::Null`] when an optional argument is unbound). `budget` is the budget of
-    /// the request scope the scan runs in: reserve through it before allocating working memory.
+    /// Produce the rows for one scan of the chosen plan: its arguments, the constraints it
+    /// consumed with their values, and its strategy ([`Scan`]). `budget` is the budget of the
+    /// request scope the scan runs in: reserve through it before allocating working memory.
     ///
     /// # Errors
     /// An [`FnError`] refuses the scan; SQLite reports it as the statement's error.
-    fn rows(&self, args: &[Value], budget: &QueryBudget) -> Result<Rows<'_>, FnError>;
+    fn rows(&self, scan: &Scan<'_>, budget: &QueryBudget) -> Result<Rows<'_>, FnError>;
 }
 
 /// A refusal from a table function, surfaced as a SQLite error whose text is
@@ -136,6 +141,53 @@ fn copy_lease(name: &str, budget: &QueryBudget) -> rusqlite::Result<BudgetLease>
 
 fn copy_refused(name: &str, what: &str, exceeded: &BudgetExceeded) -> Error {
     Error::ModuleError(format!("{name}: copying {what} refused: {exceeded}"))
+}
+
+/// The comparisons a plan may consume on a result column, by SQLite operator.
+fn constraint_op(op: IndexConstraintOp) -> Option<ConstraintOp> {
+    match op {
+        IndexConstraintOp::SQLITE_INDEX_CONSTRAINT_EQ => Some(ConstraintOp::Eq),
+        IndexConstraintOp::SQLITE_INDEX_CONSTRAINT_NE => Some(ConstraintOp::Ne),
+        IndexConstraintOp::SQLITE_INDEX_CONSTRAINT_LT => Some(ConstraintOp::Lt),
+        IndexConstraintOp::SQLITE_INDEX_CONSTRAINT_LE => Some(ConstraintOp::Le),
+        IndexConstraintOp::SQLITE_INDEX_CONSTRAINT_GT => Some(ConstraintOp::Gt),
+        IndexConstraintOp::SQLITE_INDEX_CONSTRAINT_GE => Some(ConstraintOp::Ge),
+        _ => None,
+    }
+}
+
+const OPS: [ConstraintOp; 6] = [
+    ConstraintOp::Eq,
+    ConstraintOp::Ne,
+    ConstraintOp::Lt,
+    ConstraintOp::Le,
+    ConstraintOp::Gt,
+    ConstraintOp::Ge,
+];
+
+/// The scan descriptor `xBestIndex` hands `xFilter` in `idxStr`: the plan's strategy, then one
+/// `column:op` per consumed constraint, in argv order after the bound arguments.
+fn describe(strategy: i32, consumed: &[(usize, ConstraintOp)]) -> String {
+    let mut descriptor = strategy.to_string();
+    for (column, op) in consumed {
+        let code = OPS.iter().position(|known| known == op).unwrap_or(0);
+        descriptor.push_str(&format!(" {column}:{code}"));
+    }
+    descriptor
+}
+
+/// Read back a [`describe`]d scan descriptor; `None` when it is malformed.
+fn parse_descriptor(descriptor: &str) -> Option<(i32, Vec<(usize, ConstraintOp)>)> {
+    let mut parts = descriptor.split(' ');
+    let strategy = parts.next()?.parse().ok()?;
+    let consumed = parts
+        .map(|part| {
+            let (column, code) = part.split_once(':')?;
+            let op = *OPS.get(code.parse::<usize>().ok()?)?;
+            Some((column.parse().ok()?, op))
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some((strategy, consumed))
 }
 
 /// Where a declared column's value comes from.
@@ -247,6 +299,12 @@ impl Registered {
             .get(column)
             .and_then(|column| column.argument)
             .is_some_and(|argument| argument.required)
+    }
+
+    /// The declared index of `column` when it is a result column.
+    fn result_column(&self, column: c_int) -> Option<usize> {
+        let column = usize::try_from(column).ok()?;
+        matches!(self.slots.get(column)?, Slot::Result(_)).then_some(column)
     }
 
     /// The argument position a constraint on declared column `column` binds, if any.
@@ -369,6 +427,36 @@ unsafe impl<'vtab> VTab<'vtab> for FunctionTable {
             });
         }
 
+        // Usable constraints on result columns, offered to the plan with their plan-time values
+        // (copies charged like the arguments'), at most MAX_CONSTRAINTS of them.
+        let mut constraints = Vec::new();
+        let mut sources = Vec::new();
+        for (index, constraint) in info.constraints().enumerate() {
+            if constraints.len() == MAX_CONSTRAINTS {
+                break;
+            }
+            let (Some(op), Some(column), true) = (
+                constraint_op(constraint.operator()),
+                registered.result_column(constraint.column()),
+                constraint.is_usable(),
+            ) else {
+                continue;
+            };
+            let column_name = registered.column_name(column);
+            let value = match info.rhs_value(index).ok().flatten() {
+                Some(value) => Some(copy_charged(value, &mut copies).map_err(|exceeded| {
+                    copy_refused(name, &format!("the value compared with {column_name}"), &exceeded)
+                })?),
+                None => None,
+            };
+            constraints.push(ResultConstraint {
+                column: column_name,
+                op,
+                value,
+            });
+            sources.push((index, column, op));
+        }
+
         // An order on a column the function cannot name (the rowid) is never consumed.
         let order_by: Option<Vec<OrderTerm>> = info
             .order_bys()
@@ -386,6 +474,7 @@ unsafe impl<'vtab> VTab<'vtab> for FunctionTable {
             bound: &bound,
             order_by: &order_by,
             limit_known,
+            constraints: &constraints,
         };
         let function = registered.function()?;
         let plan = contain(name, "plan", || function.plan(&input))?;
@@ -394,6 +483,22 @@ unsafe impl<'vtab> VTab<'vtab> for FunctionTable {
             let mut usage = info.constraint_usage(constraint);
             usage.set_argv_index(argv_index);
             usage.set_omit(true);
+        }
+        // Consumed constraints follow the arguments in argv; SQLite skips its own check only for
+        // the ones the function guarantees (`omits`).
+        let mut consumed = Vec::new();
+        for (bit, (constraint, column, op)) in sources.into_iter().enumerate() {
+            if (plan.consumes >> bit) & 1 == 0 {
+                continue;
+            }
+            argv_index += 1;
+            let mut usage = info.constraint_usage(constraint);
+            usage.set_argv_index(argv_index);
+            usage.set_omit((plan.omits >> bit) & 1 == 1);
+            consumed.push((column, op));
+        }
+        if plan.strategy != 0 || !consumed.is_empty() {
+            info.set_idx_str(&describe(plan.strategy, &consumed));
         }
         info.set_idx_num(idx_num);
         let cost = if plan.cost.is_finite() && plan.cost >= 0.0 {
@@ -421,6 +526,8 @@ unsafe impl<'vtab> VTab<'vtab> for FunctionTable {
             base: ffi::sqlite3_vtab_cursor::default(),
             registered: &table.registered,
             args: Vec::new(),
+            bound: Vec::new(),
+            strategy: 0,
             args_charge: None,
             rows: None,
             current: None,
@@ -439,8 +546,12 @@ struct FunctionCursor<'vtab> {
     registered: &'vtab Registered,
     /// The scan's arguments, one per argument column.
     args: Vec<Value>,
-    /// The request charge for `args`' copies; dropped after them, when the next scan replaces
-    /// them or the cursor closes.
+    /// The consumed constraints with this scan's values.
+    bound: Vec<BoundConstraint>,
+    /// The chosen plan's strategy.
+    strategy: i32,
+    /// The request charge for the copies in `args` and `bound`; dropped after them, when the
+    /// next scan replaces them or the cursor closes.
     args_charge: Option<BudgetLease>,
     rows: Option<Rows<'vtab>>,
     /// The current row; `None` at end of scan.
@@ -510,7 +621,7 @@ unsafe impl VTabCursor for FunctionCursor<'_> {
     fn filter(
         &mut self,
         idx_num: c_int,
-        _idx_str: Option<&str>,
+        idx_str: Option<&str>,
         args: &Filters<'_>,
     ) -> rusqlite::Result<()> {
         let registered = self.registered;
@@ -518,7 +629,14 @@ unsafe impl VTabCursor for FunctionCursor<'_> {
         self.stop();
         self.rowid = 0;
         self.args = Vec::new();
+        self.bound = Vec::new();
         self.args_charge = None;
+        let (strategy, consumed) = match idx_str {
+            None => (0, Vec::new()),
+            Some(descriptor) => parse_descriptor(descriptor).ok_or_else(|| {
+                Error::ModuleError(format!("{name}: malformed scan descriptor {descriptor:?}"))
+            })?,
+        };
         // A scan runs only inside a request budget scope: it is charged to that scope's budget,
         // including the adapter's copies of its arguments, reserved before each copy.
         let budget = request_budget(name, "scanned")?;
@@ -527,7 +645,7 @@ unsafe impl VTabCursor for FunctionCursor<'_> {
         let mut copied = Vec::with_capacity(registered.arguments.len());
         for position in 0..registered.arguments.len() {
             let bound = (idx_num >> position) & 1 == 1;
-            let value = match supplied.next().filter(|_| bound) {
+            let value = match if bound { supplied.next() } else { None } {
                 Some(value) => copy_charged(value, &mut charge).map_err(|exceeded| {
                     let argument = registered.column_name(registered.arguments[position]);
                     copy_refused(name, &format!("argument {argument}"), &exceeded)
@@ -536,10 +654,28 @@ unsafe impl VTabCursor for FunctionCursor<'_> {
             };
             copied.push(value);
         }
+        let mut bound = Vec::with_capacity(consumed.len());
+        for (column, op) in consumed {
+            let column = registered.column_name(column);
+            let value = match supplied.next() {
+                Some(value) => copy_charged(value, &mut charge).map_err(|exceeded| {
+                    copy_refused(name, &format!("the value compared with {column}"), &exceeded)
+                })?,
+                None => Value::Null,
+            };
+            bound.push(BoundConstraint { column, op, value });
+        }
         self.args = copied;
+        self.bound = bound;
+        self.strategy = strategy;
         self.args_charge = Some(charge);
         let function = registered.function()?;
-        let rows = contain(name, "rows", || function.rows(&self.args, &budget))?
+        let scan = Scan {
+            args: &self.args,
+            bound: &self.bound,
+            strategy: self.strategy,
+        };
+        let rows = contain(name, "rows", || function.rows(&scan, &budget))?
             .map_err(|error| refusal(&error))?;
         self.rows = Some(rows);
         self.advance()
