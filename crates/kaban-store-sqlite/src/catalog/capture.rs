@@ -10,6 +10,16 @@
 //! trigger fires on the canonical columns only: the writer stamp (`actor_id`, `instance_id`,
 //! `pack_lineage_id`, which `changes_stamp` sets after every change-log row) is not a change of
 //! its own.
+//!
+//! Writes the AFTER triggers cannot see are refused or captured, never lost: SQLite fires no
+//! delete trigger for a row a REPLACE conflict removes (recursive triggers stay off: the stamp
+//! trigger updates the rows it fires for). So a node insert or update that would replace
+//! another row, a change of a node's `rid` (its identity, PC-1), and an edge insert or update
+//! that would replace an edge of another identity raise `catalog_capture_refused` (a plain
+//! statement of that shape fails on its constraint anyway). An `INSERT OR REPLACE` of an
+//! existing edge identity, which the store's upsert shares its BEFORE trigger with, is
+//! captured instead: the replaced row's last values are kept before the insert
+//! (`cat_replaced`) and queued as its delete.
 
 use kaban_core::Result;
 use rusqlite::{Connection, Row};
@@ -134,6 +144,44 @@ fn capture_ddl() -> String {
            b_exists INTEGER NOT NULL, b_kind TEXT, b_lifecycle TEXT, b_producer TEXT,
            a_exists INTEGER NOT NULL, a_kind TEXT, a_lifecycle TEXT, a_producer TEXT
          );
+         CREATE TEMP TABLE IF NOT EXISTS cat_replaced(
+           src INTEGER, dst INTEGER, rel TEXT, producer TEXT
+         );
+         CREATE TEMP TRIGGER IF NOT EXISTS cat_guard_node_bi BEFORE INSERT ON main.node
+             WHEN EXISTS (SELECT 1 FROM main.node WHERE rid = new.rid)
+               OR EXISTS (SELECT 1 FROM main.node WHERE id = new.id)
+               OR (new.lifecycle = 'active' AND EXISTS (
+                     SELECT 1 FROM main.node
+                     WHERE content_hash = new.content_hash AND lifecycle = 'active')) BEGIN
+           SELECT RAISE(ABORT, 'catalog_capture_refused: a node insert would replace a row');
+         END;
+         CREATE TEMP TRIGGER IF NOT EXISTS cat_guard_node_bu
+             BEFORE UPDATE OF rid, id, content_hash, lifecycle ON main.node
+             WHEN new.rid IS NOT old.rid
+               OR (new.id IS NOT old.id AND EXISTS (SELECT 1 FROM main.node WHERE id = new.id))
+               OR (new.lifecycle = 'active' AND EXISTS (
+                     SELECT 1 FROM main.node
+                     WHERE content_hash = new.content_hash AND lifecycle = 'active'
+                       AND rid <> old.rid)) BEGIN
+           SELECT RAISE(ABORT,
+             'catalog_capture_refused: a node update would change its rid or replace a row');
+         END;
+         CREATE TEMP TRIGGER IF NOT EXISTS cat_guard_edge_bi BEFORE INSERT ON main.edge BEGIN
+           SELECT RAISE(ABORT, 'catalog_capture_refused: an edge insert would replace another edge')
+             WHERE EXISTS (SELECT 1 FROM main.edge WHERE id = new.id
+                           AND NOT (src = new.src AND dst = new.dst AND rel = new.rel));
+           DELETE FROM temp.cat_replaced;
+           INSERT INTO temp.cat_replaced(src, dst, rel, producer)
+             SELECT src, dst, rel, producer FROM main.edge
+             WHERE src = new.src AND dst = new.dst AND rel = new.rel;
+         END;
+         CREATE TEMP TRIGGER IF NOT EXISTS cat_guard_edge_bu
+             BEFORE UPDATE OF id, src, dst, rel ON main.edge
+             WHEN EXISTS (SELECT 1 FROM main.edge WHERE rowid <> old.rowid
+                          AND (id = new.id OR (src = new.src AND dst = new.dst AND rel = new.rel)))
+             BEGIN
+           SELECT RAISE(ABORT, 'catalog_capture_refused: an edge update would replace another edge');
+         END;
          CREATE TEMP TRIGGER IF NOT EXISTS cat_capture_node_ai AFTER INSERT ON main.node BEGIN
            INSERT INTO cat_capture(entity, op, rid, b_exists, a_exists, a_kind, a_lifecycle)
              VALUES ('node', 'insert', new.rid, 0, 1, new.kind, new.lifecycle);
@@ -150,6 +198,9 @@ fn capture_ddl() -> String {
              VALUES ('node', 'delete', old.rid, 1, old.kind, old.lifecycle, 0);
          END;
          CREATE TEMP TRIGGER IF NOT EXISTS cat_capture_edge_ai AFTER INSERT ON main.edge BEGIN
+           INSERT INTO cat_capture(entity, op, src, dst, rel, b_exists, b_producer, a_exists)
+             SELECT 'edge', 'delete', src, dst, rel, 1, producer, 0 FROM temp.cat_replaced;
+           DELETE FROM temp.cat_replaced;
            INSERT INTO cat_capture(entity, op, src, dst, rel, b_exists, a_exists, a_producer)
              VALUES ('edge', 'insert', new.src, new.dst, new.rel, 0, 1, new.producer);
          END;
@@ -191,8 +242,8 @@ pub(crate) fn install(conn: &Connection) -> Result<()> {
 /// # Errors
 /// SQLite errors.
 pub(crate) fn reset(conn: &Connection) -> Result<()> {
-    conn.execute("DELETE FROM temp.cat_capture", []).sql()?;
-    Ok(())
+    conn.execute_batch("DELETE FROM temp.cat_capture; DELETE FROM temp.cat_replaced;")
+        .sql()
 }
 
 /// Freeze and drain the queue of the open transaction on `conn`: called once per commit.
@@ -392,5 +443,114 @@ mod tests {
             [(CaptureOp::Delete, 1, 2), (CaptureOp::Insert, 2, 1)],
             "a moved edge is a delete and an insert"
         );
+    }
+
+    /// Two nodes and the edge `a` (1 -> 2, `authored`), the queue empty.
+    fn two_nodes_one_edge() -> Connection {
+        let conn = rows_db();
+        conn.execute_batch(
+            "INSERT INTO node(rid, id, kind, lifecycle)
+               VALUES (1, 'n1', 'Fact', 'active'), (2, 'n2', 'Fact', 'active');
+             INSERT INTO edge(id, src, dst, rel, producer) VALUES ('a', 1, 2, 'RELATES_TO', 'authored');",
+        )
+        .unwrap();
+        reset(&conn).unwrap();
+        conn
+    }
+
+    #[test]
+    fn writes_the_triggers_cannot_see_are_refused() {
+        for sql in [
+            // a replaced node row would vanish without a delete image
+            "INSERT OR REPLACE INTO node(rid, id, kind, lifecycle) VALUES (1, 'n9', 'Fact', 'active')",
+            "INSERT OR REPLACE INTO node(rid, id, kind, lifecycle) VALUES (7, 'n1', 'Fact', 'active')",
+            "UPDATE OR REPLACE node SET id = 'n2' WHERE rid = 1",
+            // a node's identity is its rid
+            "UPDATE node SET rid = 9 WHERE rid = 1",
+            // an edge row replaced by id under another identity
+            "INSERT OR REPLACE INTO edge(id, src, dst, rel, producer) VALUES ('a', 2, 1, 'RELATES_TO', 'rules')",
+            "UPDATE OR REPLACE edge SET id = 'b' WHERE id = 'c'",
+        ] {
+            // Arrange
+            let conn = two_nodes_one_edge();
+            conn.execute(
+                "INSERT INTO edge(id, src, dst, rel, producer) VALUES ('c', 2, 1, 'RELATES_TO', 'x')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO edge(id, src, dst, rel, producer) VALUES ('b', 1, 1, 'RELATES_TO', 'x')",
+                [],
+            )
+            .unwrap();
+            let before: i64 = conn
+                .query_row("SELECT count(*) FROM node", [], |r| r.get(0))
+                .unwrap();
+            reset(&conn).unwrap();
+
+            // Act
+            let out = conn.execute(sql, []);
+
+            // Assert: refused, nothing changed, nothing queued
+            assert!(out.is_err(), "{sql} was admitted");
+            let after: i64 = conn
+                .query_row("SELECT count(*) FROM node", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(after, before, "{sql}");
+            assert!(drain(&conn).unwrap().is_empty(), "{sql}");
+        }
+    }
+
+    #[test]
+    fn a_replaced_edge_identity_is_captured_as_a_delete_and_an_insert() {
+        // Arrange
+        let conn = two_nodes_one_edge();
+
+        // Act: the same identity under another id and producer
+        conn.execute(
+            "INSERT OR REPLACE INTO edge(id, src, dst, rel, producer) VALUES ('z', 1, 2, 'RELATES_TO', 'rules')",
+            [],
+        )
+        .unwrap();
+        let changes = drain(&conn).unwrap();
+
+        // Assert: the replaced row's last values, then the new row
+        let sides: Vec<_> = changes
+            .edges()
+            .iter()
+            .map(|e| (e.op, e.before.clone(), e.after.clone()))
+            .collect();
+        let producer = |p: &str| {
+            Some(EdgeImage {
+                producer: Some(p.into()),
+            })
+        };
+        assert_eq!(
+            sides,
+            [
+                (CaptureOp::Delete, producer("authored"), None),
+                (CaptureOp::Insert, None, producer("rules")),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_edge_upsert_is_captured_as_one_update() {
+        // Arrange
+        let conn = two_nodes_one_edge();
+
+        // Act: the store's one edge writer shape
+        conn.execute(
+            "INSERT INTO edge(id, src, dst, rel, producer) VALUES ('z', 1, 2, 'RELATES_TO', 'rules')
+             ON CONFLICT(src, dst, rel) DO UPDATE SET producer = excluded.producer",
+            [],
+        )
+        .unwrap();
+        let changes = drain(&conn).unwrap();
+
+        // Assert
+        let ops: Vec<_> = changes.edges().iter().map(|e| e.op).collect();
+        assert_eq!(ops, [CaptureOp::Update]);
+        assert!(drain(&conn).unwrap().is_empty());
     }
 }

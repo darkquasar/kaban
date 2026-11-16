@@ -11,13 +11,15 @@
 
 use std::path::{Path, PathBuf};
 
-use kaban_core::query_budget::{ALLOCATION_METADATA_BYTES, BudgetExceeded, BudgetLease, QueryBudget};
+use kaban_core::query_budget::{
+    ALLOCATION_METADATA_BYTES, BudgetExceeded, BudgetLease, QueryBudget,
+};
 use kaban_core::{BackendSource, Result, StoreError};
 use rusqlite::{Connection, Row, Transaction};
 use tantivy::directory::OwnedBytes;
 
 use super::class::{ExtentClass, ExtentLocation};
-use super::tables::{ExtentRef, Generation, SedimentRow, SedimentSeq, uint};
+use super::tables::{ExtentId, ExtentRef, Generation, SedimentRow, SedimentSeq, uint};
 use super::{Catalog, not_yet};
 use crate::rows::bad_enum;
 use crate::sql_error::SqlResultExt;
@@ -118,7 +120,10 @@ impl Pin {
     pub(crate) fn retained_allocations(&self) -> Vec<(usize, usize)> {
         let mut out = vec![(self.kbx.capacity(), 1)];
         for rows in &self.extents.rows {
-            out.push((rows.capacity() * size_of::<ExtentRef>(), align_of::<ExtentRef>()));
+            out.push((
+                rows.capacity() * size_of::<ExtentRef>(),
+                align_of::<ExtentRef>(),
+            ));
             for e in rows {
                 if let ExtentLocation::File { relpath } = &e.location {
                     out.push((relpath.capacity(), 1));
@@ -126,7 +131,10 @@ impl Pin {
             }
         }
         for rows in &self.sediment.rows {
-            out.push((rows.capacity() * size_of::<SedimentRow>(), align_of::<SedimentRow>()));
+            out.push((
+                rows.capacity() * size_of::<SedimentRow>(),
+                align_of::<SedimentRow>(),
+            ));
             out.extend(rows.iter().map(|r| (r.payload.capacity(), 1)));
         }
         out.retain(|(bytes, _)| *bytes > 0);
@@ -270,8 +278,8 @@ impl Catalog {
         let mut out = ByClass::with_capacities(counts);
         let mut stmt = tx
             .prepare(
-                "SELECT class, generation, kbx_offset, kbx_len, relpath FROM cat_extent
-                 WHERE retired_at IS NULL ORDER BY id",
+                "SELECT class, generation, kbx_offset, kbx_len, relpath, id FROM cat_extent
+                 WHERE dead_since IS NULL ORDER BY id",
             )
             .sql()?;
         let mut rows = stmt.query([]).sql()?;
@@ -287,6 +295,7 @@ impl Catalog {
                 },
             };
             let row = ExtentRef {
+                id: ExtentId(uint(r, 5).sql()?),
                 class,
                 generation: Generation(uint(r, 1).sql()?),
                 location,
@@ -298,11 +307,14 @@ impl Catalog {
     }
 
     /// Before copying row `n` of a loop: the budget check of every [`CHECK_EVERY`]th row.
-    #[cfg_attr(not(test), expect(clippy::unused_self, reason = "a unit test observes the copy"))]
+    #[cfg_attr(
+        not(test),
+        expect(clippy::unused_self, reason = "a unit test observes the copy")
+    )]
     fn copying(&self, budget: &QueryBudget, n: usize) -> Result<()> {
         #[cfg(test)]
         self.copied(n);
-        if n % CHECK_EVERY == 0 {
+        if n.is_multiple_of(CHECK_EVERY) {
             budget.check().map_err(budget_exceeded)?;
         }
         Ok(())
@@ -339,7 +351,7 @@ impl CopyPlan {
             tx,
             "SELECT class, count(*), COALESCE(sum(length(CAST(relpath AS BLOB))), 0),
                     COALESCE(sum(length(CAST(relpath AS BLOB)) > 0), 0)
-             FROM cat_extent WHERE retired_at IS NULL GROUP BY class",
+             FROM cat_extent WHERE dead_since IS NULL GROUP BY class",
             Rows::Extents,
         )?;
         Ok(plan)

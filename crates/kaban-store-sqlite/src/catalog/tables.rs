@@ -24,9 +24,16 @@ pub(crate) struct Generation(pub(crate) u64);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
 pub(crate) struct SedimentSeq(pub(crate) u64);
 
+/// An extent's stable identity (`cat_extent.id`, never reused): what a compaction claims
+/// and retires (T6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(crate) struct ExtentId(pub(crate) u64);
+
 /// One published extent as a pin sees it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ExtentRef {
+    /// The extent's identity.
+    pub(crate) id: ExtentId,
     /// The extent's class.
     pub(crate) class: ExtentClass,
     /// The generation that published it.

@@ -185,11 +185,14 @@ CREATE TABLE cat_generation(
   generation INTEGER PRIMARY KEY
 );
 
+-- `id` is the extent's stable identity (T6's `ExtentId`), never reused (AUTOINCREMENT);
+-- `dead_since` is the generation that retired the extent (NULL while it is live): reclaim
+-- punches only extents dead since a generation at or below `reclaim_floor` (PC-8).
 CREATE TABLE cat_extent(
-  id INTEGER PRIMARY KEY,
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
   class TEXT NOT NULL,
   generation INTEGER NOT NULL,
-  retired_at INTEGER,
+  dead_since INTEGER,
   kbx_offset INTEGER, kbx_len INTEGER, relpath TEXT,
   CHECK((kbx_offset IS NOT NULL AND kbx_len IS NOT NULL AND relpath IS NULL)
      OR (kbx_offset IS NULL AND kbx_len IS NULL AND relpath IS NOT NULL))

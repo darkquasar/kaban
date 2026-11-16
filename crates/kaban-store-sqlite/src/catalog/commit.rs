@@ -27,8 +27,8 @@ use rusqlite::{Connection, Transaction, TransactionBehavior};
 
 use super::Catalog;
 use super::capture::{self, BatchChanges};
-use super::phase::{Phase, Staged};
 use super::class::ExtentClass;
+use super::phase::{Phase, Staged};
 use super::tables::{Generation, SedimentSeq, sql_int, uint};
 use crate::sql_error::SqlResultExt;
 
@@ -317,6 +317,14 @@ impl Catalog {
     /// The derived-row hook: rows derived from the commit's changes, written in its transaction
     /// before the index classes stage. T5 has none; T13 installs rollup maintenance here. A
     /// unit test installs its own ([`Self::set_test_derived_rows`]).
+    #[cfg_attr(
+        not(test),
+        expect(
+            clippy::unused_self,
+            clippy::unnecessary_wraps,
+            reason = "the hook's shape: T13 writes rollups through `derived` and can fail"
+        )
+    )]
     fn derived_rows(&self, derived: &Derived<'_>, changes: &BatchChanges) -> Result<()> {
         #[cfg(test)]
         if let Some(hook) = self
@@ -343,5 +351,4 @@ impl Catalog {
 
 /// A unit test's derived-row hook ([`Catalog::set_test_derived_rows`]).
 #[cfg(test)]
-pub(crate) type TestDerivedRows =
-    Box<dyn Fn(&Derived<'_>, &BatchChanges) -> Result<()> + Send>;
+pub(crate) type TestDerivedRows = Box<dyn Fn(&Derived<'_>, &BatchChanges) -> Result<()> + Send>;

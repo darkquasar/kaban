@@ -71,7 +71,8 @@ impl std::fmt::Debug for Catalog {
             .field("degraded_reclamation", &self.degraded_reclamation)
             .field("classes", &self.classes().len())
             .field("committing", &self.committing)
-            .finish()
+            .field("phases", &self.phases)
+            .finish_non_exhaustive()
     }
 }
 
@@ -158,7 +159,10 @@ impl Catalog {
     /// Install a unit test's observer of every row a pin copies.
     #[cfg(test)]
     pub(crate) fn set_test_copy_hook(&self, hook: TestCopyHook) {
-        *self.test_copy.lock().unwrap_or_else(PoisonError::into_inner) = Some(hook);
+        *self
+            .test_copy
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(hook);
     }
 
     /// Tell the unit test's observer that a pin copied row `n`.

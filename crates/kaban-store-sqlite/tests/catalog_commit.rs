@@ -14,6 +14,7 @@ use kaban_core::MemoryStore;
 use kaban_store_sqlite::SqliteStore;
 use kaban_store_sqlite::catalog_testing::{self, ObservedOp};
 use rusqlite::{Connection, OpenFlags};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
@@ -100,7 +101,7 @@ fn stalled_role() {
     if std::env::var_os(STALL).is_none() {
         return;
     }
-    eprintln!("stalled role: sleeping");
+    let _ = writeln!(std::io::stderr(), "stalled role: sleeping");
     std::thread::sleep(Duration::from_secs(10));
 }
 
@@ -111,14 +112,25 @@ fn a_stalled_role_is_killed_and_reaped_at_its_deadline_with_diagnostics() {
     let started = Instant::now();
 
     // Act
-    let out = supervise("stalled_role", (STALL, "1".as_ref()), &s.0, Duration::from_secs(2));
+    let out = supervise(
+        "stalled_role",
+        (STALL, "1".as_ref()),
+        &s.0,
+        Duration::from_secs(2),
+    );
 
     // Assert: an error well before the role's own end, naming it and carrying its stderr
     let elapsed = started.elapsed();
     let err = out.expect_err("a stalled role was reported as finished");
-    assert!(elapsed < Duration::from_secs(8), "supervision took {elapsed:?}");
+    assert!(
+        elapsed < Duration::from_secs(8),
+        "supervision took {elapsed:?}"
+    );
     assert!(err.contains("stalled_role"), "{err}");
-    assert!(err.contains("stalled role: sleeping"), "no stderr in: {err}");
+    assert!(
+        err.contains("stalled role: sleeping"),
+        "no stderr in: {err}"
+    );
 }
 
 fn rid(conn: &Connection, id: &str) -> i64 {
@@ -244,7 +256,10 @@ fn a_fresh_project_whose_key_cannot_be_created_gains_no_catalog_artefact() {
     // Assert: the key refusal, no catalog artefact and no key record
     assert!(matches!(err, kaban_core::StoreError::Audit(_)), "{err:?}");
     assert_no_catalog_artefact(&s.0, "fresh project");
-    assert!(!key_recorded(&s.db()), "a key was recorded without its file");
+    assert!(
+        !key_recorded(&s.db()),
+        "a key was recorded without its file"
+    );
 }
 
 #[test]
@@ -349,7 +364,9 @@ const OPENER_ALLOWLIST: [(&str, &str, &str); 5] = [
     (
         "projector_thread.rs",
         "immediate",
-        "the projector's cursor on its own connection; removed by T7",
+        "the projector's cursor and lease transactions on the shared writer connection (it \
+         holds the writer mutex; admitted by OutsideCommit, it writes no node or edge row); \
+         removed by T7",
     ),
 ];
 

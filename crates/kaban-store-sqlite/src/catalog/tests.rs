@@ -15,11 +15,11 @@ use kaban_core::{
 };
 use rusqlite::Connection;
 
+use super::Catalog;
 use super::capture::{BatchChanges, CaptureOp};
 use super::class::{ExtentClass, IndexClass, SealOutput};
 use super::commit::Stage;
 use super::pin::Pin;
-use super::Catalog;
 use crate::SqliteStore;
 
 fn ctx() -> WriteCtx {
@@ -70,15 +70,16 @@ fn count(conn: &Connection, sql: &str) -> i64 {
 }
 
 fn link(store: &SqliteStore, from: &str, to: &str) -> Result<()> {
-    store.link(
-        &NodeId::parse(from).unwrap(),
-        &NodeId::parse(to).unwrap(),
-        "RELATES_TO",
-        None,
-        None,
-        &ctx(),
-    )
-    .map(drop)
+    store
+        .link(
+            &NodeId::parse(from).unwrap(),
+            &NodeId::parse(to).unwrap(),
+            "RELATES_TO",
+            None,
+            None,
+            &ctx(),
+        )
+        .map(drop)
 }
 
 /// What a scripted class does in `stage`.
@@ -132,7 +133,10 @@ fn assert_refused(err: &StoreError, what: &str) {
         panic!("{what}: not a refused commit: {err:?}");
     };
     assert!(
-        source.driver().to_string().starts_with("catalog_commit_refused"),
+        source
+            .driver()
+            .to_string()
+            .starts_with("catalog_commit_refused"),
         "{what}: not the named refusal: {}",
         source.driver()
     );
@@ -195,8 +199,16 @@ fn a_class_that_writes_a_canonical_row_while_staging_is_refused_and_rolled_back(
         // Assert: refused by name, nothing of it committed
         assert_refused(&refused, "a canonical write while staging");
         let conn = store.lock();
-        assert_eq!(lifecycle(&conn, ra), "active", "cached {cached}: the archive committed");
-        assert_eq!(count(&conn, "SELECT count(*) FROM edge"), 0, "the link committed");
+        assert_eq!(
+            lifecycle(&conn, ra),
+            "active",
+            "cached {cached}: the archive committed"
+        );
+        assert_eq!(
+            count(&conn, "SELECT count(*) FROM edge"),
+            0,
+            "the link committed"
+        );
         assert_eq!(count(&conn, "SELECT count(*) FROM cat_sediment"), 0);
         assert_eq!(count(&conn, "SELECT count(*) FROM temp.cat_capture"), 0);
     }
@@ -212,9 +224,10 @@ fn the_next_commit_after_a_refused_one_holds_only_its_own_changes() {
         store.catalog(),
         Box::new(move |txn, _| {
             if flag.swap(false, Ordering::SeqCst) {
-                let _ = txn
-                    .conn_for_test()
-                    .execute("UPDATE node SET lifecycle = 'archived' WHERE rid = ?1", [ra]);
+                let _ = txn.conn_for_test().execute(
+                    "UPDATE node SET lifecycle = 'archived' WHERE rid = ?1",
+                    [ra],
+                );
             }
             Ok(())
         }),
@@ -297,7 +310,9 @@ fn staging_cannot_outlive_its_generation_through_a_savepoint() {
         }
         let run = move |conn: &Connection, sql: &str| {
             if cached {
-                conn.prepare_cached(sql).and_then(|mut s| s.execute([])).map(drop)
+                conn.prepare_cached(sql)
+                    .and_then(|mut s| s.execute([]))
+                    .map(drop)
             } else {
                 conn.execute_batch(sql)
             }
@@ -321,21 +336,22 @@ fn staging_cannot_outlive_its_generation_through_a_savepoint() {
 
         // Assert: refused, or every committed sediment row names the pinned generation
         let conn = store.lock();
-        assert_eq!(stray_sediment(&conn), 0, "{end} (cached {cached}): orphan sediment");
-        match out {
-            Err(e) => {
-                assert_refused(&e, end);
-                assert_eq!(count(&conn, "SELECT count(*) FROM cat_sediment"), 0);
-                assert_eq!(count(&conn, "SELECT count(*) FROM cat_generation"), 0);
-            }
-            Ok(()) => {
-                let latest = count(&conn, "SELECT max(generation) FROM cat_generation");
-                let off = count(
-                    &conn,
-                    &format!("SELECT count(*) FROM cat_sediment WHERE generation <> {latest}"),
-                );
-                assert_eq!(off, 0, "{end}: sediment beside the pinned generation");
-            }
+        assert_eq!(
+            stray_sediment(&conn),
+            0,
+            "{end} (cached {cached}): orphan sediment"
+        );
+        if let Err(e) = out {
+            assert_refused(&e, end);
+            assert_eq!(count(&conn, "SELECT count(*) FROM cat_sediment"), 0);
+            assert_eq!(count(&conn, "SELECT count(*) FROM cat_generation"), 0);
+        } else {
+            let latest = count(&conn, "SELECT max(generation) FROM cat_generation");
+            let off = count(
+                &conn,
+                &format!("SELECT count(*) FROM cat_sediment WHERE generation <> {latest}"),
+            );
+            assert_eq!(off, 0, "{end}: sediment beside the pinned generation");
         }
     }
 }
@@ -372,9 +388,15 @@ fn a_later_failing_class_rolls_back_an_earlier_class_s_staging_and_its_generatio
 
     // Assert: the successful commit publishes generation 1 with its one row
     let conn = store.lock();
-    assert_eq!(count(&conn, "SELECT max(generation) FROM cat_generation"), 1);
     assert_eq!(
-        count(&conn, "SELECT count(*) FROM cat_sediment WHERE generation = 1"),
+        count(&conn, "SELECT max(generation) FROM cat_generation"),
+        1
+    );
+    assert_eq!(
+        count(
+            &conn,
+            "SELECT count(*) FROM cat_sediment WHERE generation = 1"
+        ),
         1
     );
 }
@@ -403,7 +425,10 @@ fn a_panicking_writer_leaves_no_row_no_capture_and_the_original_durability() {
             .catalog()
             .commit(&mut conn, Durability::Full, |txn| -> Result<()> {
                 txn.conn()
-                    .execute("UPDATE node SET lifecycle = 'archived' WHERE rid = ?1", [ra])
+                    .execute(
+                        "UPDATE node SET lifecycle = 'archived' WHERE rid = ?1",
+                        [ra],
+                    )
                     .unwrap();
                 panic!("an injected writer panic");
             });
@@ -417,7 +442,11 @@ fn a_panicking_writer_leaves_no_row_no_capture_and_the_original_durability() {
         assert_eq!(count(&conn, "SELECT count(*) FROM temp.cat_capture"), 0);
         assert!(conn.is_autocommit(), "the transaction outlived the panic");
     }
-    assert_eq!(level(&store), before, "the panic left synchronous=FULL behind");
+    assert_eq!(
+        level(&store),
+        before,
+        "the panic left synchronous=FULL behind"
+    );
     link(&store, &a, &b).unwrap();
 }
 
@@ -468,14 +497,10 @@ fn budget_limit(err: &StoreError) -> Option<kaban_core::query_budget::Limit> {
     let StoreError::Backend { source } = err else {
         return None;
     };
-    let limit = source
+    source
         .driver()
         .downcast_ref::<kaban_core::query_budget::BudgetExceeded>()
-        .map(|e| e.limit);
-    if limit.is_none() {
-        eprintln!("not a budget error: {}", source.driver());
-    }
-    limit
+        .map(|e| e.limit)
 }
 
 #[test]
@@ -500,7 +525,10 @@ fn a_pin_cancelled_while_copying_returns_the_budget_error_and_releases_everythin
     let err = out.expect_err("a cancelled copy produced a pin");
     assert_eq!(budget_limit(&err), Some(Limit::Cancelled), "{err:?}");
     assert_eq!(budget.live_bytes(), 0, "the copy's reservation outlived it");
-    assert!(store.lock().is_autocommit(), "the pin's transaction outlived it");
+    assert!(
+        store.lock().is_autocommit(),
+        "the pin's transaction outlived it"
+    );
 }
 
 #[test]
@@ -570,10 +598,8 @@ struct FileStore {
 
 impl FileStore {
     fn new(name: &str) -> Self {
-        let dir = std::env::temp_dir().join(format!(
-            "kaban-t5d-unit-{}-{name}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("kaban-t5d-unit-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let store = SqliteStore::open(&dir.join("kaban.db"), &dir.join("keys")).unwrap();
@@ -625,11 +651,8 @@ fn retained_charge(pin: &Pin) -> u64 {
     pin.retained_allocations()
         .into_iter()
         .map(|(bytes, align)| {
-            kaban_core::query_budget::QueryBudget::allocation_charge(
-                bytes as u64,
-                align as u64,
-            )
-            .unwrap()
+            kaban_core::query_budget::QueryBudget::allocation_charge(bytes as u64, align as u64)
+                .unwrap()
         })
         .sum()
 }
@@ -641,7 +664,13 @@ fn a_pin_reserves_every_allocation_it_retains_before_it_copies() {
     let cases: Vec<(&str, Vec<&str>, usize, usize, usize)> = vec![
         ("empty", vec![], 0, 0, 0),
         ("one small row", vec!["test"], 1, 1, 0),
-        ("several classes", vec!["test", "text_tier", "graph_base"], 3, 2, 1),
+        (
+            "several classes",
+            vec!["test", "text_tier", "graph_base"],
+            3,
+            2,
+            1,
+        ),
         ("growth 4", vec!["test"], 4, 1, 0),
         ("growth 5", vec!["test"], 5, 1, 0),
         ("growth 9", vec!["code_base", "test"], 9, 0, 5),
@@ -683,11 +712,101 @@ fn a_pin_reserves_every_allocation_it_retains_before_it_copies() {
             let below = QueryBudget::new(charge - 1, None);
             let err = store.catalog().pin(&mut store.lock(), &below).unwrap_err();
             assert_eq!(budget_limit(&err), Some(Limit::Memory), "{name}: {err:?}");
-            assert_eq!(copied.load(Ordering::SeqCst), 0, "{name}: copied before refusing");
+            assert_eq!(
+                copied.load(Ordering::SeqCst),
+                0,
+                "{name}: copied before refusing"
+            );
             assert_eq!(below.live_bytes(), 0, "{name}: a refusal kept a charge");
         } else {
             panic!("{name}: a file-backed pin retains its container path, yet charged nothing");
         }
         assert!(store.lock().is_autocommit());
     }
+}
+
+#[test]
+fn an_extent_keeps_a_stable_id_that_is_never_reused() {
+    // Arrange: two cold extents, the second deleted, then a third
+    let store = SqliteStore::open_memory().unwrap();
+    let ids = |store: &SqliteStore| -> Vec<i64> {
+        let conn = store.lock();
+        let mut stmt = conn
+            .prepare("SELECT id FROM cat_extent ORDER BY id")
+            .unwrap();
+        stmt.query_map([], |r| r.get(0))
+            .unwrap()
+            .map(std::result::Result::unwrap)
+            .collect()
+    };
+    let write = |sql: &'static str| {
+        store
+            .catalog()
+            .commit(&mut store.lock(), Durability::Normal, |txn| {
+                txn.conn()
+                    .execute_batch(sql)
+                    .map_err(|e| StoreError::Backend {
+                        source: kaban_core::BackendSource::new(e),
+                    })
+            })
+            .unwrap();
+    };
+    write(
+        "INSERT INTO cat_generation(generation) VALUES (1);
+         INSERT INTO cat_extent(class, generation, relpath) VALUES ('test', 1, 'a.seg');
+         INSERT INTO cat_extent(class, generation, relpath) VALUES ('test', 1, 'b.seg');",
+    );
+    write("DELETE FROM cat_extent WHERE relpath = 'b.seg'");
+
+    // Act
+    write("INSERT INTO cat_extent(class, generation, relpath) VALUES ('test', 1, 'c.seg')");
+
+    // Assert: the third extent does not take the deleted one's id, and a pin carries the ids
+    assert_eq!(ids(&store), [1, 3], "a deleted extent's id was reused");
+    let budget = kaban_core::query_budget::QueryBudget::new(u64::MAX, None);
+    let pin = store.catalog().pin(&mut store.lock(), &budget).unwrap();
+    let pinned: Vec<u64> = pin
+        .extents(ExtentClass::Test)
+        .iter()
+        .map(|e| e.id.0)
+        .collect();
+    assert_eq!(pinned, [1, 3]);
+}
+
+#[test]
+fn a_dead_extent_is_not_pinned() {
+    // Arrange: a live and a dead extent
+    let store = SqliteStore::open_memory().unwrap();
+    store
+        .catalog()
+        .commit(&mut store.lock(), Durability::Normal, |txn| {
+            txn.conn()
+                .execute_batch(
+                    "INSERT INTO cat_generation(generation) VALUES (1), (2);
+                     INSERT INTO cat_extent(class, generation, relpath) VALUES ('test', 1, 'live.seg');
+                     INSERT INTO cat_extent(class, generation, dead_since, relpath)
+                       VALUES ('test', 1, 2, 'dead.seg');",
+                )
+                .map_err(|e| StoreError::Backend {
+                    source: kaban_core::BackendSource::new(e),
+                })
+        })
+        .unwrap();
+
+    // Act
+    let budget = kaban_core::query_budget::QueryBudget::new(u64::MAX, None);
+    let pin = store.catalog().pin(&mut store.lock(), &budget).unwrap();
+
+    // Assert
+    let paths: Vec<_> = pin
+        .extents(ExtentClass::Test)
+        .iter()
+        .map(|e| e.location.clone())
+        .collect();
+    assert_eq!(
+        paths,
+        [super::class::ExtentLocation::File {
+            relpath: "live.seg".into()
+        }]
+    );
 }
