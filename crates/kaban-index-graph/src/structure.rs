@@ -82,8 +82,10 @@ pub fn common_neighbours(
     a: LocalId,
     b: LocalId,
     rels: &RelSelection,
+    dir: Direction,
     budget: &QueryBudget,
 ) -> Result<Charged<Vec<LocalId>>, GraphError> {
+    let _ = dir;
     budget.check()?;
     let na = distinct(v, a, rels, budget)?;
     let nb = distinct(v, b, rels, budget)?;

@@ -204,15 +204,15 @@ fn set_functions_collapse_equal_neighbour_runs() {
     let all = RelSelection::All;
     // 1 reaches 5 by three relations and is reached from 5; 4's and 5's only neighbour is 1,
     // and 1 is a neighbour of itself through its self-loop.
-    let shared = common_neighbours(&v, LocalId(1), LocalId(4), &all, &b).unwrap();
+    let shared = common_neighbours(&v, LocalId(1), LocalId(4), &all, Direction::Both, &b).unwrap();
     assert_eq!(*shared, vec![LocalId(1)]);
-    let shared = common_neighbours(&v, LocalId(1), LocalId(5), &all, &b).unwrap();
+    let shared = common_neighbours(&v, LocalId(1), LocalId(5), &all, Direction::Both, &b).unwrap();
     assert_eq!(
         *shared,
         vec![LocalId(1)],
         "1 once despite five edges between 1 and 5"
     );
-    let shared = common_neighbours(&v, LocalId(1), LocalId(1), &all, &b).unwrap();
+    let shared = common_neighbours(&v, LocalId(1), LocalId(1), &all, Direction::Both, &b).unwrap();
     assert_eq!(
         *shared,
         [1, 2, 3, 4, 5, 9].map(LocalId).to_vec(),

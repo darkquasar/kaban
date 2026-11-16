@@ -185,9 +185,9 @@ impl Graph {
     }
 
     /// Distinct neighbours shared by `a` and `b`, ignoring direction.
-    pub(crate) fn common(&self, a: u32, b: u32) -> Vec<LocalId> {
-        let na = self.adj(a, Direction::Both);
-        let nb = self.adj(b, Direction::Both);
+    pub(crate) fn common(&self, a: u32, b: u32, dir: Direction) -> Vec<LocalId> {
+        let na = self.adj(a, dir);
+        let nb = self.adj(b, dir);
         na.intersection(&nb).map(|&n| LocalId(n)).collect()
     }
 

@@ -330,8 +330,14 @@ fn degree_and_common_neighbours_equal_the_oracle() {
                 }
             }
             for (a, c) in pairs(&mut rng, 40) {
-                let got = common_neighbours(&v, LocalId(a), LocalId(c), rels, &b).unwrap();
-                assert_eq!(*got, g.common(a, c), "seed {seed} {rels:?} common {a} {c}");
+                for dir in [Direction::Out, Direction::In, Direction::Both] {
+                    let got = common_neighbours(&v, LocalId(a), LocalId(c), rels, dir, &b).unwrap();
+                    assert_eq!(
+                        *got,
+                        g.common(a, c, dir),
+                        "seed {seed} {rels:?} common {a} {c} {dir:?}"
+                    );
+                }
             }
         }
     }
@@ -678,4 +684,43 @@ fn rows_bounds_the_results_of_topo_order_and_meet() {
     );
     let got = meet(&v, LocalId(1), LocalId(2), &all, caps(1, 2), &b).unwrap();
     assert_eq!(*got, vec![LocalId(1), LocalId(2)]);
+}
+
+/// Directed common neighbours on a named fixture: X calls log and fmt, log calls Y, Y calls fmt.
+#[test]
+fn common_neighbours_follow_the_asked_direction() {
+    let (x, y, fmt, log) = (1, 2, 3, 4);
+    let rs = [Records {
+        nodes: [x, y, fmt, log].into_iter().map(node).collect(),
+        edges: vec![
+            edge(x, 0, log),
+            edge(log, 0, y),
+            edge(x, 0, fmt),
+            edge(y, 0, fmt),
+        ],
+        ..Records::default()
+    }];
+    let v = view(None, &[], &rs);
+    let b = budget();
+    let all = RelSelection::All;
+    let common = |dir| {
+        common_neighbours(&v, LocalId(x), LocalId(y), &all, dir, &b)
+            .unwrap()
+            .to_vec()
+    };
+    assert_eq!(
+        common(Direction::Out),
+        vec![LocalId(fmt)],
+        "things both X and Y call"
+    );
+    assert_eq!(
+        common(Direction::In),
+        Vec::<LocalId>::new(),
+        "nothing calls both"
+    );
+    assert_eq!(
+        common(Direction::Both),
+        vec![LocalId(fmt), LocalId(log)],
+        "direction ignored"
+    );
 }
