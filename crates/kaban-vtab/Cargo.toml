@@ -11,6 +11,9 @@ authors.workspace = true
 # Process-level bootstrap of the virtual-table module. Inert scaffold until T12 owns the startup
 # implementation; the CLI always enables it.
 process-bootstrap = []
+# Fault injection for the allocator tests (a charge that panics inside a SQLite callback). Never
+# enabled by a production build.
+test-hooks = []
 
 [dependencies]
 kaban-core.workspace = true
