@@ -40,8 +40,28 @@ each `unsafe` block here with the one it meets:
   after the query ends; a failed grow keeps the old block and its charge.
 - No unwinding across FFI. Callbacks never unwind into C and never call back into SQLite.
 
-**What exists today (T1).** The crate is a scaffold with no `unsafe` code: the `process-bootstrap`
-feature is empty and nothing is installed. `QueryBudget` itself is safe code in `kaban-core`.
+**What exists today (T12, registration layer).** The crate holds the virtual-table glue and no
+allocator code yet: the `process-bootstrap` feature is still empty and nothing is installed at
+startup. `QueryBudget` itself is safe code in `kaban-core`. The crate has no `unsafe` block and no
+`unsafe fn`; it has exactly two `unsafe impl` blocks, both in `crates/kaban-vtab/src/adapter.rs`:
+
+| `unsafe impl` | rusqlite contract it meets | Invariants the adapter keeps |
+|---|---|---|
+| `VTab<'vtab> for FunctionTable` | The implementing struct is `#[repr(C)]` with `ffi::sqlite3_vtab` as its first field, so rusqlite can cast the `sqlite3_vtab` pointer SQLite passes back. | `FunctionTable` is `#[repr(C)]` and `base` is its first field. The module is eponymous-only (no `xCreate`), so `CREATE VIRTUAL TABLE` cannot instantiate it. |
+| `VTabCursor for FunctionCursor<'_>` | The implementing struct is `#[repr(C)]` with `ffi::sqlite3_vtab_cursor` as its first field, so rusqlite can cast the cursor pointer. | `FunctionCursor` is `#[repr(C)]` and `base` is its first field. The cursor borrows its table for `'vtab`, which rusqlite's `open(&'vtab mut self)` ties to the table's lifetime. |
+
+Both impls hold to the no-unwinding rule. rusqlite's virtual-table callbacks do not catch panics, so
+every call into the safe `TableFunction` (`plan`, `rows`, each step of the row iterator and the
+iterator's `Drop`) runs under `catch_unwind`; a panic in a call becomes a SQLite error naming the
+function, and a panic while dropping the iterator is discarded. The adapter's own code has no
+`unwrap`, `expect` or `panic!` (lint table). One gap remains: the `Drop` of the
+`Arc<dyn TableFunction>` itself, when SQLite disconnects the table or frees the module's client
+data, is not contained; a panic there aborts the process at the `extern "C"` boundary instead of
+unwinding into C.
+
+**How a budget reaches `rows` (this step).** `register` takes no budget (the plan's interface).
+Each scan (`xFilter`) creates a fresh unbounded `QueryBudget` and passes it to `rows` by reference;
+the adapter does not keep it. Request-scoped budgets replace this once the budget scope exists.
 
 **How it is held to this.**
 

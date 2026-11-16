@@ -79,7 +79,11 @@ impl TableFunction for Range {
         };
         let (start, stop) = match args {
             [Value::Integer(start), Value::Integer(stop)] => (*start, *stop),
-            other => return Err(refuse(format!("start and stop must be integers, got {other:?}"))),
+            other => {
+                return Err(refuse(format!(
+                    "start and stop must be integers, got {other:?}"
+                )));
+            }
         };
         if start > stop {
             return Err(refuse(format!("start {start} is after stop {stop}")));
