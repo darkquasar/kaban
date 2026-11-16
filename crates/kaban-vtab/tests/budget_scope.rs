@@ -239,14 +239,18 @@ fresh_test! {
     }
 }
 
-#[test]
-fn a_table_function_outside_a_request_scope_is_refused_by_name() {
-    let conn = common::connection(vec![Arc::new(Range)]);
-    let error = integers(&conn, "SELECT value FROM range(1, 4)").unwrap_err();
-    assert!(
-        error.contains("range") && error.contains("outside a request budget scope"),
-        "{error}"
-    );
+fresh_test! {
+    fn a_table_function_outside_a_request_scope_is_refused_by_name() {
+        let _runtime = setup();
+        // A connection not opened through a request scope, with no scope on the thread.
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        register(&conn, Arc::new(Range)).unwrap();
+        let error = integers(&conn, "SELECT value FROM range(1, 4)").unwrap_err();
+        assert!(
+            error.contains("range") && error.contains("outside a request budget scope"),
+            "{error}"
+        );
+    }
 }
 
 fresh_test! {

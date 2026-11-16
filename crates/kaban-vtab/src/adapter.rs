@@ -14,7 +14,7 @@ use rusqlite::vtab::{
 };
 use rusqlite::{Error, ffi};
 
-use crate::allocator;
+use crate::{Runtime, allocator};
 use crate::value::copy_charged;
 use crate::plan::MAX_CONSTRAINTS;
 use crate::{
@@ -69,17 +69,25 @@ const MAX_ARGUMENTS: usize = 31;
 
 /// Register `f` on `conn` as an eponymous-only virtual table named [`TableFunction::name`].
 ///
-/// Each scan hands [`TableFunction::rows`] the [`QueryBudget`] of the request scope active on the
+/// Registration needs the installed runtime ([`crate::Runtime::get`]): without kaban's allocator
+/// adapter a scan's SQLite memory could not be charged to its request. Each scan hands [`TableFunction::rows`] the [`QueryBudget`] of the request scope active on the
 /// scanning thread (see [`crate::RequestScope`]); a scan with no active scope is refused with an
 /// error naming the function.
 ///
 /// # Errors
-/// A rusqlite error when `f` declares more than 31 argument columns, its name is not a valid C
-/// string, or SQLite refuses the module.
+/// A rusqlite error naming the function when this process has no installed runtime, when `f`
+/// declares more than 31 argument columns or its metadata panics; also when its name is not a
+/// valid C string or SQLite refuses the module.
 pub fn register(conn: &rusqlite::Connection, f: Arc<dyn TableFunction>) -> rusqlite::Result<()> {
     const MODULE: Module<'static, FunctionTable> = Module::eponymous_only_module();
     let registered = Registered::new(f)?;
     let name = registered.name;
+    if Runtime::get().is_none() {
+        return Err(Error::ModuleError(format!(
+            "{name}: table functions need kaban's installed runtime (initialize_for_embedding or \
+             the process bootstrap) before registration"
+        )));
+    }
     conn.create_module(name, &MODULE, Some(Arc::new(registered)))
 }
 

@@ -6,11 +6,14 @@
 // with `process-bootstrap` on; tests/bootstrap.rs covers that build.
 #![cfg(not(feature = "process-bootstrap"))]
 
+mod common;
 mod fresh;
+
+use std::sync::Arc;
 
 use fresh::{Block, configured_allocator, fresh_test};
 use kaban_core::query_budget::QueryBudget;
-use kaban_vtab::{InitError, Runtime, initialize_for_embedding, test_hooks};
+use kaban_vtab::{InitError, RequestScope, Runtime, initialize_for_embedding};
 use rusqlite::{Connection, ffi};
 
 fresh_test! {
@@ -29,7 +32,7 @@ fresh_test! {
 
         // A scoped SQLite allocation is charged to the scope's budget.
         let budget = QueryBudget::new(u64::MAX, None);
-        let scope = test_hooks::scope(&budget);
+        let scope = RequestScope::enter(runtime, &budget).unwrap();
         let conn = Connection::open_in_memory().unwrap();
         assert!(budget.live_bytes() > 0, "opening a connection charged nothing");
         drop(conn);
@@ -68,13 +71,9 @@ fresh_test! {
         let two: i64 = again.query_row("SELECT 2", [], |row| row.get(0)).unwrap();
         assert_eq!(two, 2);
         assert_eq!(configured_allocator().err(), Some(ffi::SQLITE_MISUSE));
-        // Allocations stay uncharged: no adapter is installed.
-        let budget = QueryBudget::new(u64::MAX, None);
-        let scope = test_hooks::scope(&budget);
+        // No adapter is installed, so no request scope can be entered (it needs the runtime).
         let block = Block::malloc(64).unwrap();
-        assert_eq!(budget.live_bytes(), 0);
         block.free();
-        drop(scope);
     }
 }
 
@@ -103,6 +102,18 @@ fresh_test! {
         assert_eq!(unsafe { initialize_for_embedding() }, Err(InitError::HostInitializedSqlite));
         // SAFETY: as above.
         assert_eq!(unsafe { initialize_for_embedding() }, Err(InitError::AlreadyInitialized));
+        assert_eq!(Runtime::get(), None);
+    }
+}
+
+fresh_test! {
+    fn registration_without_the_installed_runtime_is_refused_by_name() {
+        let conn = Connection::open_in_memory().unwrap();
+        let error = kaban_vtab::register(&conn, Arc::new(common::Range)).unwrap_err().to_string();
+        assert!(
+            error.contains("range") && error.contains("runtime"),
+            "registration must name the function and the missing runtime: {error}"
+        );
         assert_eq!(Runtime::get(), None);
     }
 }

@@ -2,8 +2,6 @@
 // Each test binary uses a subset of these helpers.
 #![allow(dead_code)]
 
-use std::sync::Arc;
-
 use kaban_core::query_budget::QueryBudget;
 use kaban_vtab::{
     Arg, ColumnDef, ColumnKind, FnError, OrderTerm, Plan, PlanInput, Scan, Rows, TableFunction, Value,
@@ -133,15 +131,6 @@ impl TableFunction for Broken {
     }
 }
 
-/// An in-memory connection with `functions` registered.
-pub(crate) fn connection(functions: Vec<Arc<dyn TableFunction>>) -> rusqlite::Connection {
-    let conn = rusqlite::Connection::open_in_memory().unwrap();
-    for f in functions {
-        kaban_vtab::register(&conn, f).unwrap();
-    }
-    conn
-}
-
 /// Run `sql` and collect its first column as integers, or the error text.
 pub(crate) fn integers(conn: &rusqlite::Connection, sql: &str) -> Result<Vec<i64>, String> {
     let collect = || -> rusqlite::Result<Vec<i64>> {
@@ -158,12 +147,6 @@ pub(crate) fn query_plan(conn: &rusqlite::Connection, sql: &str) -> Result<Vec<S
         stmt.query_map([], |row| row.get(3))?.collect()
     };
     collect().map_err(|e| e.to_string())
-}
-
-/// Charge this thread's SQLite work and table-function scans to an unbounded budget until the
-/// guard drops: a table function scans only inside a request budget scope.
-pub(crate) fn unbounded_scope() -> kaban_vtab::test_hooks::ScopeGuard {
-    kaban_vtab::test_hooks::scope(&QueryBudget::new(u64::MAX, None))
 }
 
 /// `reserving(bytes)`: reserves `bytes` through the scan's budget for the life of the scan and

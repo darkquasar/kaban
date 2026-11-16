@@ -138,30 +138,17 @@ pub(crate) fn wrap(
     })
 }
 
-/// While alive, SQLite allocations made on this thread are charged to one [`QueryBudget`].
-/// Dropping it restores the scope that was active before; guards on one thread drop in reverse
-/// order of creation. It is bound to the thread that created it.
+/// While alive, SQLite allocations made on this thread are charged to one [`QueryBudget`];
+/// dropping it leaves the thread unscoped. At most one exists per thread ([`try_enter_scope`]).
+/// It is bound to the thread that created it.
 #[derive(Debug)]
-pub struct ScopeGuard {
-    previous: Option<QueryBudget>,
+pub(crate) struct ScopeGuard {
     _thread_bound: PhantomData<*const ()>,
-}
-
-/// Charge SQLite allocations made on this thread to `budget` until the guard drops.
-///
-/// This is the seam the request-scoped budget scope drives; blocks keep the budget they were
-/// charged to after the guard drops.
-pub(crate) fn enter_scope(budget: &QueryBudget) -> ScopeGuard {
-    let previous = CURRENT.with_borrow_mut(|slot| slot.replace(budget.clone()));
-    ScopeGuard {
-        previous,
-        _thread_bound: PhantomData,
-    }
 }
 
 /// Charge SQLite allocations made on this thread to `budget` until the guard drops, unless a
 /// scope is already active on the thread (or its slot is unavailable): then `None`, and nothing
-/// changes. A request scope enters only through this, so request scopes never nest.
+/// changes. The request scope is the only caller, so scopes never nest.
 pub(crate) fn try_enter_scope(budget: &QueryBudget) -> Option<ScopeGuard> {
     let entered = CURRENT.try_with(|slot| {
         let mut slot = slot.try_borrow_mut().ok()?;
@@ -172,18 +159,16 @@ pub(crate) fn try_enter_scope(budget: &QueryBudget) -> Option<ScopeGuard> {
         Some(())
     });
     entered.ok().flatten().map(|()| ScopeGuard {
-        previous: None,
         _thread_bound: PhantomData,
     })
 }
 
 impl Drop for ScopeGuard {
     fn drop(&mut self) {
-        let previous = self.previous.take();
-        // During thread teardown the slot may already be gone; nothing is left to restore then.
+        // During thread teardown the slot may already be gone; nothing is left to clear then.
         let _ = CURRENT.try_with(|slot| {
             if let Ok(mut slot) = slot.try_borrow_mut() {
-                *slot = previous;
+                *slot = None;
             }
         });
     }

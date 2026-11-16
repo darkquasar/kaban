@@ -10,16 +10,17 @@ use std::thread;
 
 use fresh::{Block, fresh_test, initialize_sqlite, installed_runtime};
 use kaban_core::query_budget::QueryBudget;
-use kaban_vtab::test_hooks;
+use kaban_vtab::{RequestScope, Runtime};
 use rusqlite::Connection;
 
 const SIZES: &[u64] = &[1, 7, 8, 9, 24, 100, 4096, 100_000];
 
 /// Install the adapter, then initialize SQLite outside any scope so its process-wide state is
 /// never charged to a test budget.
-fn install() {
-    installed_runtime();
+fn install() -> Runtime {
+    let runtime = installed_runtime();
     initialize_sqlite();
+    runtime
 }
 
 /// What one live block of `size` usable bytes must be charged: its 24-byte header is 16 bytes of
@@ -51,9 +52,9 @@ fn workload(rows: i64) {
 
 fresh_test! {
     fn scoped_blocks_are_aligned_sized_and_charged_exactly() {
-        install();
+        let runtime = install();
         let budget = QueryBudget::new(u64::MAX, None);
-        let _scope = test_hooks::scope(&budget);
+        let _scope = RequestScope::enter(runtime, &budget).unwrap();
         for &n in SIZES {
             let block = Block::malloc(n).unwrap();
             assert_eq!(block.addr() % 8, 0, "block of {n} bytes is not 8-byte aligned");
@@ -98,9 +99,9 @@ fresh_test! {
 
 fresh_test! {
     fn a_failed_grow_returns_null_and_keeps_the_old_block_and_its_charge() {
-        install();
+        let runtime = install();
         let budget = QueryBudget::new(charge(64) + 100, None);
-        let _scope = test_hooks::scope(&budget);
+        let _scope = RequestScope::enter(runtime, &budget).unwrap();
         let mut block = Block::malloc(64).unwrap();
         block.fill(64, 0xA5);
         let (addr, size, live) = (block.addr(), block.size(), budget.live_bytes());
@@ -118,9 +119,9 @@ fresh_test! {
 
 fresh_test! {
     fn a_grow_charges_the_difference_and_moves_the_charge_with_the_block() {
-        install();
+        let runtime = install();
         let budget = QueryBudget::new(u64::MAX, None);
-        let _scope = test_hooks::scope(&budget);
+        let _scope = RequestScope::enter(runtime, &budget).unwrap();
         let mut block = Block::malloc(100).unwrap();
         block.fill(100, 0x3C);
         assert!(block.realloc(50_000));
@@ -134,9 +135,9 @@ fresh_test! {
 
 fresh_test! {
     fn a_shrink_is_charged_exactly_for_the_block_it_leaves() {
-        install();
+        let runtime = install();
         let budget = QueryBudget::new(u64::MAX, None);
-        let _scope = test_hooks::scope(&budget);
+        let _scope = RequestScope::enter(runtime, &budget).unwrap();
         let mut block = Block::malloc(10_000).unwrap();
         block.fill(100, 0x5A);
         assert!(block.realloc(100));
@@ -150,9 +151,9 @@ fresh_test! {
 
 fresh_test! {
     fn a_block_freed_on_another_thread_releases_its_owners_charge() {
-        install();
+        let runtime = install();
         let owner = QueryBudget::new(u64::MAX, None);
-        let scope = test_hooks::scope(&owner);
+        let scope = RequestScope::enter(runtime, &owner).unwrap();
         let block = Block::malloc(1000).unwrap();
         drop(scope);
         assert_eq!(owner.live_bytes(), charge(1000));
@@ -160,7 +161,7 @@ fresh_test! {
         let bystander = QueryBudget::new(u64::MAX, None);
         let in_thread = bystander.clone();
         thread::spawn(move || {
-            let _other_scope = test_hooks::scope(&in_thread);
+            let _other_scope = RequestScope::enter(runtime, &in_thread).unwrap();
             block.free();
         })
         .join()
@@ -173,14 +174,14 @@ fresh_test! {
 
 fresh_test! {
     fn a_block_outliving_its_scope_stays_owned_by_its_budget() {
-        install();
+        let runtime = install();
         let owner = QueryBudget::new(u64::MAX, None);
-        let scope = test_hooks::scope(&owner);
+        let scope = RequestScope::enter(runtime, &owner).unwrap();
         let mut block = Block::malloc(200).unwrap();
         drop(scope);
 
         let later = QueryBudget::new(u64::MAX, None);
-        let later_scope = test_hooks::scope(&later);
+        let later_scope = RequestScope::enter(runtime, &later).unwrap();
         assert!(block.realloc(20_000));
         assert_eq!(owner.live_bytes(), charge(block.size()), "growth after the scope");
         assert_eq!(later.live_bytes(), 0, "the current scope took a block it does not own");
@@ -193,9 +194,9 @@ fresh_test! {
 
 fresh_test! {
     fn closing_a_scoped_connection_releases_everything_it_charged() {
-        install();
+        let runtime = install();
         let budget = QueryBudget::new(u64::MAX, None);
-        let _scope = test_hooks::scope(&budget);
+        let _scope = RequestScope::enter(runtime, &budget).unwrap();
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch("CREATE TABLE t(x); INSERT INTO t VALUES (1), (2), (3);").unwrap();
         assert!(budget.live_bytes() > 0);
@@ -206,12 +207,12 @@ fresh_test! {
 
 fresh_test! {
     fn simultaneous_queries_and_writers_keep_separate_accounting() {
-        install();
+        let runtime = install();
         let barrier = Arc::new(Barrier::new(3));
         let query = |size: u64, count: usize, barrier: Arc<Barrier>| {
             thread::spawn(move || {
                 let budget = QueryBudget::new(u64::MAX, None);
-                let _scope = test_hooks::scope(&budget);
+                let _scope = RequestScope::enter(runtime, &budget).unwrap();
                 workload(200);
                 let after_close = budget.live_bytes();
                 let blocks: Vec<Block> =
@@ -245,14 +246,14 @@ fresh_test! {
 
 fresh_test! {
     fn unscoped_allocations_are_forwarded_and_uncharged() {
-        install();
+        let runtime = install();
         let budget = QueryBudget::new(u64::MAX, None);
         let elsewhere = budget.clone();
         // A scope on another thread does not reach this one.
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
         let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
         let other = thread::spawn(move || {
-            let _scope = test_hooks::scope(&elsewhere);
+            let _scope = RequestScope::enter(runtime, &elsewhere).unwrap();
             ready_tx.send(()).unwrap();
             done_rx.recv().unwrap();
         });
@@ -275,13 +276,13 @@ fresh_test! {
 #[cfg(feature = "test-hooks")]
 fresh_test! {
     fn a_panicking_charge_fails_the_allocation_without_unwinding_into_sqlite() {
-        install();
+        let runtime = install();
         let budget = QueryBudget::new(u64::MAX, None);
-        let _scope = test_hooks::scope(&budget);
+        let _scope = RequestScope::enter(runtime, &budget).unwrap();
         let prior = Block::malloc(16).unwrap();
         let prior_live = budget.live_bytes();
 
-        test_hooks::panic_on_next_charge();
+        kaban_vtab::test_hooks::panic_on_next_charge();
         let refused = Block::malloc(64);
 
         assert!(refused.is_none(), "an allocation whose charge panicked must fail");
