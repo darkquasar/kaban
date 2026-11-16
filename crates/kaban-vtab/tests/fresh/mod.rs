@@ -4,11 +4,14 @@
 //! case runs in its own child process: the test re-executes its own binary with `--exact <name>`
 //! and an environment marker naming the case, and the child runs the body.
 #![allow(dead_code)] // each test binary uses a subset
+#![allow(clippy::panic)] // a child past its time limit fails the case
 
 use std::ffi::c_void;
-use std::process::Command;
+use std::process::{Command, Output, Stdio};
+use std::time::{Duration, Instant};
 use std::ptr;
 
+use kaban_vtab::{Runtime, initialize_for_embedding};
 use rusqlite::ffi;
 
 const MARKER: &str = "KABAN_VTAB_FRESH_CASE";
@@ -28,16 +31,11 @@ pub(crate) use fresh_test;
 /// In the child named by the marker, run `body`; otherwise spawn that child and require that it
 /// ran exactly this case and passed.
 pub(crate) fn run_fresh(name: &str, body: fn()) {
-    if std::env::var(MARKER).is_ok_and(|case| case == name) {
+    if is_child(name) {
         body();
         return;
     }
-    let exe = std::env::current_exe().unwrap();
-    let output = Command::new(exe)
-        .args(["--exact", name, "--nocapture", "--test-threads", "1"])
-        .env(MARKER, name)
-        .output()
-        .unwrap();
+    let output = spawn_child(name);
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
@@ -45,6 +43,51 @@ pub(crate) fn run_fresh(name: &str, body: fn()) {
         "fresh child `{name}` failed ({}):\n--- stdout\n{stdout}\n--- stderr\n{stderr}",
         output.status
     );
+}
+
+/// Whether this process is the child running case `name`.
+pub(crate) fn is_child(name: &str) -> bool {
+    std::env::var(MARKER).is_ok_and(|case| case == name)
+}
+
+/// How long a fresh child may run before it is killed and its case fails.
+const CHILD_LIMIT: Duration = Duration::from_secs(60);
+
+/// Re-execute this test binary as the child for case `name` and collect its output. A child
+/// still running after [`CHILD_LIMIT`] is killed and fails the case: the wait never hangs.
+pub(crate) fn spawn_child(name: &str) -> Output {
+    let exe = std::env::current_exe().unwrap();
+    let mut child = Command::new(exe)
+        .args(["--exact", name, "--nocapture", "--test-threads", "1"])
+        .env(MARKER, name)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let started = Instant::now();
+    while child.try_wait().unwrap().is_none() {
+        if started.elapsed() > CHILD_LIMIT {
+            child.kill().unwrap();
+            let output = child.wait_with_output().unwrap();
+            panic!(
+                "fresh child `{name}` ran past {CHILD_LIMIT:?} and was killed:\n--- stdout\n{}\n--- stderr\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    child.wait_with_output().unwrap()
+}
+
+/// The installed runtime: the startup bootstrap's when `process-bootstrap` is on, otherwise
+/// installed here through the embedding initializer.
+pub(crate) fn installed_runtime() -> Runtime {
+    Runtime::get().unwrap_or_else(|| {
+        // SAFETY: called first thing in a fresh child, on one thread, before any SQLite entry;
+        // nothing replaces the allocator or shuts SQLite down afterwards.
+        unsafe { initialize_for_embedding() }.unwrap()
+    })
 }
 
 fn empty_methods() -> ffi::sqlite3_mem_methods {

@@ -2,6 +2,9 @@
 //! refuses every other order by name (spec 11 T12 allocator RED/GREEN, QRY-07). Each case runs
 //! in a fresh process.
 #![allow(clippy::unwrap_used)]
+// The startup bootstrap installs before main, so the embedding initializer's own cases cannot run
+// with `process-bootstrap` on; tests/bootstrap.rs covers that build.
+#![cfg(not(feature = "process-bootstrap"))]
 
 mod fresh;
 

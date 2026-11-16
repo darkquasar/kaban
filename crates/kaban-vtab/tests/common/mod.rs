@@ -157,3 +157,63 @@ pub(crate) fn query_plan(conn: &rusqlite::Connection, sql: &str) -> Result<Vec<S
     };
     collect().map_err(|e| e.to_string())
 }
+
+/// Charge this thread's SQLite work and table-function scans to an unbounded budget until the
+/// guard drops: a table function scans only inside a request budget scope.
+pub(crate) fn unbounded_scope() -> kaban_vtab::test_hooks::ScopeGuard {
+    kaban_vtab::test_hooks::scope(&QueryBudget::new(u64::MAX, None))
+}
+
+/// `reserving(bytes)`: reserves `bytes` through the scan's budget for the life of the scan and
+/// yields one row holding the budget's live bytes after the reservation.
+pub(crate) struct Reserving;
+
+const RESERVING_COLUMNS: &[ColumnDef] = &[
+    ColumnDef {
+        name: "live",
+        kind: ColumnKind::Integer,
+        argument: None,
+    },
+    ColumnDef {
+        name: "bytes",
+        kind: ColumnKind::Integer,
+        argument: Some(Arg { required: true }),
+    },
+];
+
+impl TableFunction for Reserving {
+    fn name(&self) -> &'static str {
+        "reserving"
+    }
+
+    fn columns(&self) -> &'static [ColumnDef] {
+        RESERVING_COLUMNS
+    }
+
+    fn plan(&self, _input: &PlanInput<'_>) -> Plan {
+        Plan {
+            cost: 1.0,
+            rows: 1,
+            consumes_order: false,
+            point_lookup: true,
+        }
+    }
+
+    fn rows(&self, args: &[Value], budget: &QueryBudget) -> Result<Rows<'_>, FnError> {
+        let refuse = |reason: String| FnError {
+            construct: "reserving".to_owned(),
+            reason,
+        };
+        let bytes = match args {
+            [Value::Integer(bytes)] => u64::try_from(*bytes).map_err(|e| refuse(e.to_string()))?,
+            _ => return Err(refuse("bytes must be an integer".to_owned())),
+        };
+        let lease = budget.reserve(bytes).map_err(|e| refuse(e.to_string()))?;
+        let live = i64::try_from(budget.live_bytes()).unwrap_or(i64::MAX);
+        Ok(Box::new(
+            std::iter::once(Ok(vec![Value::Integer(live)])).inspect(move |_| {
+                let _held = &lease;
+            }),
+        ))
+    }
+}

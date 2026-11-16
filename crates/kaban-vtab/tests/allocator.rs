@@ -8,9 +8,9 @@ mod fresh;
 use std::sync::{Arc, Barrier};
 use std::thread;
 
-use fresh::{Block, configured_allocator, fresh_test, initialize_sqlite};
+use fresh::{Block, configured_allocator, fresh_test, initialize_sqlite, installed_runtime};
 use kaban_core::query_budget::QueryBudget;
-use kaban_vtab::{initialize_for_embedding, test_hooks};
+use kaban_vtab::test_hooks;
 use rusqlite::Connection;
 
 const SIZES: &[u64] = &[1, 7, 8, 9, 24, 100, 4096, 100_000];
@@ -18,9 +18,7 @@ const SIZES: &[u64] = &[1, 7, 8, 9, 24, 100, 4096, 100_000];
 /// Install the adapter, then initialize SQLite outside any scope so its process-wide state is
 /// never charged to a test budget.
 fn install() {
-    // SAFETY: the case runs in a fresh process, on one thread, before any SQLite entry, and
-    // nothing replaces the allocator or shuts SQLite down afterwards.
-    unsafe { initialize_for_embedding() }.unwrap();
+    installed_runtime();
     initialize_sqlite();
 }
 
@@ -66,11 +64,13 @@ fresh_test! {
     }
 }
 
+// The original allocator is observable only before installation, so not under the bootstrap.
+#[cfg(not(feature = "process-bootstrap"))]
 fresh_test! {
     fn the_wrapper_keeps_the_original_roundup_and_size_contract() {
         let original = configured_allocator().unwrap();
         // SAFETY: fresh process, single thread, no SQLite entry yet.
-        unsafe { initialize_for_embedding() }.unwrap();
+        unsafe { kaban_vtab::initialize_for_embedding() }.unwrap();
         let wrapper = configured_allocator().unwrap();
         let (malloc, free, size, roundup) = (
             wrapper.xMalloc.unwrap(),

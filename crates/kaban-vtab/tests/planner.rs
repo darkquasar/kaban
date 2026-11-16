@@ -5,7 +5,7 @@ mod common;
 
 use std::sync::Arc;
 
-use common::{Range, connection, integers, query_plan};
+use common::{Range, connection, integers, query_plan, unbounded_scope};
 
 /// A connection with `range` and a real table `t(x)` holding 1..=10.
 fn with_table() -> rusqlite::Connection {
@@ -33,6 +33,7 @@ fn loop_order(plan: &[String]) -> Vec<String> {
 
 #[test]
 fn a_table_feeding_an_argument_is_the_outer_loop() {
+    let _scope = unbounded_scope();
     let conn = with_table();
     let sql = "SELECT * FROM t JOIN range(1, x)";
     let plan = query_plan(&conn, sql);
@@ -50,6 +51,7 @@ fn a_table_feeding_an_argument_is_the_outer_loop() {
 
 #[test]
 fn a_consumed_order_needs_no_sort() {
+    let _scope = unbounded_scope();
     let conn = with_table();
     let sql = "SELECT value FROM range(1, 100) ORDER BY value LIMIT 2";
     let plan = query_plan(&conn, sql);
@@ -63,6 +65,7 @@ fn a_consumed_order_needs_no_sort() {
 
 #[test]
 fn an_order_the_function_cannot_satisfy_is_sorted_by_sqlite() {
+    let _scope = unbounded_scope();
     let conn = with_table();
     let sql = "SELECT value FROM range(1, 100) ORDER BY value DESC LIMIT 2";
     let plan = query_plan(&conn, sql);

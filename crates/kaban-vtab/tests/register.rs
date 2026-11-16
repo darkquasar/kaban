@@ -5,7 +5,7 @@ mod common;
 
 use std::sync::Arc;
 
-use common::{Broken, Range, connection, integers};
+use common::{Broken, Range, connection, integers, unbounded_scope};
 use kaban_core::query_budget::QueryBudget;
 use kaban_vtab::{
     Arg, ColumnDef, ColumnKind, FnError, Plan, PlanInput, Rows, TableFunction, Value,
@@ -13,6 +13,7 @@ use kaban_vtab::{
 
 #[test]
 fn range_returns_its_integers() {
+    let _scope = unbounded_scope();
     let conn = connection(vec![Arc::new(Range)]);
     assert_eq!(
         integers(&conn, "SELECT value FROM range(1, 4)"),
@@ -22,6 +23,7 @@ fn range_returns_its_integers() {
 
 #[test]
 fn argument_columns_are_hidden_from_select_star() {
+    let _scope = unbounded_scope();
     let conn = connection(vec![Arc::new(Range)]);
     let columns = conn
         .prepare("SELECT * FROM range(1, 4)")
@@ -32,6 +34,7 @@ fn argument_columns_are_hidden_from_select_star() {
 
 #[test]
 fn a_missing_required_argument_is_refused_by_name() {
+    let _scope = unbounded_scope();
     let conn = connection(vec![Arc::new(Range)]);
     let err = integers(&conn, "SELECT * FROM range").unwrap_err();
     assert!(
@@ -42,6 +45,7 @@ fn a_missing_required_argument_is_refused_by_name() {
 
 #[test]
 fn a_refusal_from_rows_carries_construct_and_reason() {
+    let _scope = unbounded_scope();
     let conn = connection(vec![Arc::new(Range)]);
     let err = integers(&conn, "SELECT value FROM range(5, 1)").unwrap_err();
     assert!(
@@ -52,6 +56,7 @@ fn a_refusal_from_rows_carries_construct_and_reason() {
 
 #[test]
 fn a_failing_row_carries_construct_and_reason() {
+    let _scope = unbounded_scope();
     let conn = connection(vec![Arc::new(Broken)]);
     let err = conn
         .prepare("SELECT value FROM broken")
@@ -128,6 +133,7 @@ impl TableFunction for Panicky {
 
 #[test]
 fn a_panic_in_rows_becomes_an_error_naming_the_function() {
+    let _scope = unbounded_scope();
     let conn = connection(vec![Arc::new(Panicky)]);
     let err = integers(&conn, "SELECT value FROM panicky(0)").unwrap_err();
     assert!(err.contains("panicky: rows panicked"), "{err}");
@@ -135,6 +141,7 @@ fn a_panic_in_rows_becomes_an_error_naming_the_function() {
 
 #[test]
 fn a_panic_while_dropping_rows_does_not_unwind_into_sqlite() {
+    let _scope = unbounded_scope();
     let conn = connection(vec![Arc::new(Panicky)]);
     assert_eq!(integers(&conn, "SELECT value FROM panicky(1)"), Ok(vec![7]));
 }
