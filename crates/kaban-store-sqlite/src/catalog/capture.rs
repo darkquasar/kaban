@@ -94,16 +94,6 @@ pub(crate) struct BatchChanges {
     edges: Vec<EdgeChange>,
 }
 
-/// The set of a commit that changed nothing.
-#[expect(
-    dead_code,
-    reason = "read through `Txn::changes`, which T13's derived-row hook uses"
-)]
-pub(crate) static NO_CHANGES: BatchChanges = BatchChanges {
-    nodes: Vec::new(),
-    edges: Vec::new(),
-};
-
 impl BatchChanges {
     /// The captured node changes.
     pub(crate) fn nodes(&self) -> &[NodeChange] {
@@ -288,7 +278,7 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "PRAGMA foreign_keys = ON;
-             CREATE TABLE node(rid INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT, kind TEXT, text TEXT,
+             CREATE TABLE node(rid INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE, kind TEXT, text TEXT,
                summary TEXT, tags TEXT, confidence REAL, importance REAL, status TEXT,
                created_at TEXT, updated_at TEXT, valid_from TEXT, valid_to TEXT,
                source_session TEXT, agent_id TEXT, workspace_id TEXT, props TEXT,
@@ -301,7 +291,7 @@ mod tests {
                rel TEXT NOT NULL, confidence REAL, created_at TEXT, props TEXT,
                workspace_id TEXT, producer TEXT, method TEXT, score REAL, source_id TEXT,
                offset INTEGER, len INTEGER, actor_id TEXT, instance_id TEXT,
-               pack_lineage_id TEXT);",
+               pack_lineage_id TEXT, UNIQUE(src, dst, rel));",
         )
         .unwrap();
         install(&conn).unwrap();

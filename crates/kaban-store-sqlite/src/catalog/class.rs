@@ -6,7 +6,7 @@ use rusqlite::Connection;
 
 use super::Catalog;
 use super::capture::BatchChanges;
-use super::commit::Txn;
+use super::commit::Stage;
 use super::pin::Pin;
 use super::tables::{ExtentRef, SedimentSeq};
 
@@ -98,11 +98,12 @@ pub(crate) struct SealOutput {
 pub(crate) trait IndexClass: Send + Sync {
     /// The class of the extents and sediment this index owns.
     fn class(&self) -> ExtentClass;
-    /// Stage this commit's changes (sediment rows) inside the writer transaction.
+    /// Stage this commit's changes (sediment rows) inside the writer transaction; `txn` stages
+    /// sediment and nothing else.
     ///
     /// # Errors
     /// Any error rolls the whole commit back.
-    fn stage(&self, txn: &mut Txn<'_>, changes: &BatchChanges) -> Result<()>;
+    fn stage(&self, txn: &mut Stage<'_>, changes: &BatchChanges) -> Result<()>;
     /// Seal the pinned sediment into an extent.
     ///
     /// # Errors

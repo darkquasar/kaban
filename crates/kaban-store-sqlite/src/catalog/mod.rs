@@ -21,10 +21,13 @@ pub(crate) mod class;
 pub(crate) mod commit;
 pub(crate) mod io;
 pub(crate) mod kbx;
+pub(crate) mod phase;
 pub(crate) mod pin;
 pub(crate) mod tables;
 #[cfg(feature = "failpoints")]
 pub mod testing;
+#[cfg(test)]
+mod tests;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
@@ -47,6 +50,11 @@ pub(crate) struct Catalog {
     /// [`Self::outside_commit`]): the writer guard of test builds refuses any other commit on
     /// the writer connection.
     committing: Arc<AtomicBool>,
+    /// The writer connection's commit phase, which its authorizer enforces (`phase`).
+    phases: Arc<phase::Phases>,
+    /// A unit test's derived-row hook ([`Self::set_test_derived_rows`]).
+    #[cfg(test)]
+    test_derived: std::sync::Mutex<Option<commit::TestDerivedRows>>,
 }
 
 impl std::fmt::Debug for Catalog {
@@ -110,13 +118,18 @@ impl Catalog {
             degraded_reclamation: false,
             classes: RwLock::new(Vec::new()),
             committing: Arc::new(AtomicBool::new(false)),
+            phases: Arc::new(phase::Phases::default()),
+            #[cfg(test)]
+            test_derived: std::sync::Mutex::new(None),
         }
     }
 
     /// Take `conn` as this catalog's writer connection: the capture triggers its commits
-    /// drain ([`capture::install`]) and, in test builds, the writer guard.
+    /// drain ([`capture::install`]), the phase authorizer ([`phase::guard_phases`]) and, in
+    /// test builds, the writer guard.
     fn attach_writer(self, conn: &mut Connection) -> Result<Self> {
         capture::install(conn)?;
+        phase::guard_phases(conn, &self.phases)?;
         commit::guard_writer(conn, &self.committing)?;
         Ok(self)
     }

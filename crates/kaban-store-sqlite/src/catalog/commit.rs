@@ -3,17 +3,22 @@
 //! [`Catalog::read`].
 //!
 //! ```text
-//!   BEGIN IMMEDIATE => writer closure => capture drain (frozen once)
-//!       => derived-row hook => every IndexClass::stage (same changes) => COMMIT
-//!   any error on the way => ROLLBACK (rows, derived rows, sediment and the capture queue)
+//!   BEGIN IMMEDIATE => writer closure [Txn] => capture drain (frozen once)
+//!       => derived-row hook [Derived] => every IndexClass::stage [Stage] (same changes)
+//!       => generation check => COMMIT
+//!   any error or phase breach on the way => ROLLBACK (rows, derived rows, sediment and the
+//!   capture queue)
 //! ```
+//!
+//! Each phase has its own handle and reaches only what it may change (`super::phase`): the
+//! writer closure any row, the derived-row hook the derived tables, a class's staging its
+//! sediment. A breach refuses the commit by name (`CommitRefused`).
 //!
 //! No row write of the store commits elsewhere on the writer connection: the open-time schema
 //! and seed transactions run before the catalog attaches, and the one maintenance statement
 //! that cannot run in a transaction (`VACUUM`) runs in [`Catalog::outside_commit`]. Test builds
 //! (`cfg(test)`, `failpoints`) enforce it with a commit hook ([`guard_writer`]).
 
-use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -21,18 +26,16 @@ use kaban_core::{Durability, Result};
 use rusqlite::{Connection, Transaction, TransactionBehavior};
 
 use super::Catalog;
-use super::capture::{self, BatchChanges, NO_CHANGES};
+use super::capture::{self, BatchChanges};
+use super::phase::{Phase, Staged};
 use super::class::ExtentClass;
 use super::tables::{Generation, SedimentSeq, sql_int, uint};
 use crate::sql_error::SqlResultExt;
 
-/// The open writer transaction as a writer closure and the index classes see it.
+/// The writer phase's handle on the open writer transaction: the writer closure's statements.
+/// It holds no change set (the set is frozen only after the closure) and stages nothing.
 pub(crate) struct Txn<'c> {
     tx: Transaction<'c>,
-    /// The frozen change set: `None` in the writer phase, set once before the hook phase.
-    changes: Option<Rc<BatchChanges>>,
-    /// The generation this commit publishes, allocated by its first catalog write.
-    generation: Option<Generation>,
 }
 
 impl Txn<'_> {
@@ -40,6 +43,32 @@ impl Txn<'_> {
     pub(crate) fn conn(&self) -> &Connection {
         &self.tx
     }
+}
+
+/// The derived-row hook's handle: statements over the derived tables (T13's rollups), run
+/// after the change set is frozen.
+pub(crate) struct Derived<'t> {
+    conn: &'t Connection,
+}
+
+impl Derived<'_> {
+    /// The transaction's connection, for statements over the derived tables.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "T13's rollup maintenance writes through it")
+    )]
+    pub(crate) fn conn(&self) -> &Connection {
+        self.conn
+    }
+}
+
+/// An index class's handle in the staging phase: it stages sediment and nothing else.
+pub(crate) struct Stage<'t> {
+    conn: &'t Connection,
+    staged: &'t mut Staged,
+}
+
+impl Stage<'_> {
     /// Stage one sediment row of `class` in this transaction; the commit publishes the next
     /// generation with it.
     ///
@@ -52,7 +81,7 @@ impl Txn<'_> {
     ) -> Result<SedimentSeq> {
         let generation = self.generation()?;
         let seq = self
-            .tx
+            .conn
             .query_row(
                 "INSERT INTO cat_sediment(class, generation, payload) VALUES (?1, ?2, ?3)
                  RETURNING seq",
@@ -60,24 +89,23 @@ impl Txn<'_> {
                 |r| uint(r, 0),
             )
             .sql()?;
-        Ok(SedimentSeq(seq))
+        let seq = SedimentSeq(seq);
+        self.staged.first.get_or_insert(seq);
+        Ok(seq)
     }
-    /// The commit's frozen change set. In the hook phase (the derived-row hook, every index
-    /// class's `stage`) it is complete and immutable; in the writer phase it is empty.
-    #[expect(
-        dead_code,
-        reason = "T13's derived-row hook reads the frozen set through it"
-    )]
-    pub(crate) fn changes(&self) -> &BatchChanges {
-        self.changes.as_deref().unwrap_or(&NO_CHANGES)
+    /// The connection itself, for a unit test that plays a class breaking the staging
+    /// contract: never reachable from a production class.
+    #[cfg(test)]
+    pub(crate) fn conn_for_test(&self) -> &Connection {
+        self.conn
     }
     /// The generation this commit publishes: the one after the latest, allocated once.
     fn generation(&mut self) -> Result<Generation> {
-        if let Some(g) = self.generation {
+        if let Some(g) = self.staged.generation {
             return Ok(g);
         }
         let g = self
-            .tx
+            .conn
             .query_row(
                 "INSERT INTO cat_generation(generation)
                    SELECT COALESCE(max(generation), 0) + 1 FROM cat_generation
@@ -87,7 +115,7 @@ impl Txn<'_> {
             )
             .sql()?;
         let g = Generation(g);
-        self.generation = Some(g);
+        self.staged.generation = Some(g);
         Ok(g)
     }
 }
@@ -136,23 +164,32 @@ impl Catalog {
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .sql()?;
-        let mut txn = Txn {
-            tx,
-            changes: None,
-            generation: None,
-        };
+        let mut txn = Txn { tx };
+        // declared after `txn`, so it drops first: an early exit's rollback runs unrestricted
+        let phase = self.phases.enter();
         // the writer phase; an error drops `txn`, which rolls everything back
         let out = stage(&mut txn)?;
-        // the hook phase: one freeze, then every consumer over the same immutable set
-        let changes = Rc::new(capture::drain(&txn.tx)?);
-        txn.changes = Some(Rc::clone(&changes));
-        derived_rows(&mut txn, &changes)?;
+        // the hook phase: one freeze, then every consumer over the same immutable set; each
+        // phase closes with the queue still empty (nothing canonical changed after the freeze)
+        let changes = capture::drain(&txn.tx)?;
+        phase.set(Phase::Derived);
+        let derived = self.derived_rows(&Derived { conn: &txn.tx }, &changes);
+        phase.close(&txn.tx, derived)?;
+        phase.set(Phase::Stage);
+        let mut staged = Staged::default();
         for class in self.classes() {
-            class.stage(&mut txn, &changes)?;
+            let mut handle = Stage {
+                conn: &txn.tx,
+                staged: &mut staged,
+            };
+            let staging = class.stage(&mut handle, &changes);
+            phase.close(&txn.tx, staging)?;
         }
-        self.committing.store(true, Ordering::Release);
+        staged.check(&txn.tx)?;
+        drop(phase);
+        let admitted = Admitted::enter(&self.committing);
         let committed = txn.tx.commit().sql();
-        self.committing.store(false, Ordering::Release);
+        drop(admitted);
         committed?;
         Ok(out)
     }
@@ -206,6 +243,22 @@ impl OutsideCommit {
     }
 }
 
+/// The writer guard's admission of one commit, withdrawn however the commit ends.
+struct Admitted<'a>(&'a AtomicBool);
+
+impl<'a> Admitted<'a> {
+    fn enter(flag: &'a AtomicBool) -> Self {
+        flag.store(true, Ordering::Release);
+        Self(flag)
+    }
+}
+
+impl Drop for Admitted<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
 /// The writer guard of test builds: a commit hook on the writer connection that refuses
 /// (rolls back) every commit outside [`Catalog::commit`] and [`Catalog::outside_commit`], so an
 /// autocommit row write or a transaction the catalog did not open fails where it runs. It
@@ -232,13 +285,35 @@ pub(super) fn guard_writer(conn: &mut Connection, committing: &Arc<AtomicBool>) 
     Ok(())
 }
 
-/// The derived-row hook: rows derived from the commit's changes, written in its transaction
-/// before the index classes stage. T5 has none; T13 installs rollup maintenance here.
-#[expect(
-    clippy::unnecessary_wraps,
-    reason = "the hook's shape: T13 writes rollups through the transaction and can fail"
-)]
-fn derived_rows(txn: &mut Txn<'_>, changes: &BatchChanges) -> Result<()> {
-    let _ = (txn, changes);
-    Ok(())
+impl Catalog {
+    /// The derived-row hook: rows derived from the commit's changes, written in its transaction
+    /// before the index classes stage. T5 has none; T13 installs rollup maintenance here. A
+    /// unit test installs its own ([`Self::set_test_derived_rows`]).
+    fn derived_rows(&self, derived: &Derived<'_>, changes: &BatchChanges) -> Result<()> {
+        #[cfg(test)]
+        if let Some(hook) = self
+            .test_derived
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+        {
+            return hook(derived, changes);
+        }
+        let _ = (derived, changes);
+        Ok(())
+    }
+
+    /// Install a unit test's derived-row hook: every later commit runs it in the hook phase.
+    #[cfg(test)]
+    pub(crate) fn set_test_derived_rows(&self, hook: TestDerivedRows) {
+        *self
+            .test_derived
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(hook);
+    }
 }
+
+/// A unit test's derived-row hook ([`Catalog::set_test_derived_rows`]).
+#[cfg(test)]
+pub(crate) type TestDerivedRows =
+    Box<dyn Fn(&Derived<'_>, &BatchChanges) -> Result<()> + Send>;

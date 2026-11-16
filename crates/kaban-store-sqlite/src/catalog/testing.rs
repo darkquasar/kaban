@@ -11,7 +11,7 @@ use rusqlite::Connection;
 use super::Catalog;
 use super::capture::{BatchChanges, CaptureOp};
 use super::class::{ExtentClass, IndexClass, SealOutput};
-use super::commit::Txn;
+use super::commit::Stage;
 use super::pin::Pin;
 use crate::SqliteStore;
 
@@ -124,7 +124,7 @@ impl IndexClass for EdgeSediment {
     fn class(&self) -> ExtentClass {
         ExtentClass::Test
     }
-    fn stage(&self, txn: &mut Txn<'_>, changes: &BatchChanges) -> Result<()> {
+    fn stage(&self, txn: &mut Stage<'_>, changes: &BatchChanges) -> Result<()> {
         for e in changes.edges() {
             let payload = edge_payload(ObservedOp::of(e.op), e.src, e.dst, &e.rel);
             txn.put_sediment(ExtentClass::Test, payload.as_bytes())?;
