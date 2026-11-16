@@ -390,3 +390,44 @@ fn every_autocommit_writer_commits_once_through_the_catalog() {
         );
     }
 }
+
+/// SQLite's default automatic checkpoint threshold, in WAL frames (pages).
+const DEFAULT_AUTOCHECKPOINT_FRAMES: u64 = 1000;
+
+#[test]
+fn the_writer_never_checkpoints_on_its_own_and_its_close_folds_the_wal() {
+    // Arrange: a store and the WAL size an automatic checkpoint would never let it reach (a
+    // restarted WAL is rewritten from its start, so the file stays near the threshold)
+    let s = Scratch::new("kaban-t5-commit", "no-autocheckpoint");
+    let store = SqliteStore::open(&s.db(), &s.keys()).unwrap();
+    let page: u64 = {
+        let raw = Connection::open_with_flags(s.db(), OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        let page: i64 = raw.query_row("PRAGMA page_size", [], |r| r.get(0)).unwrap();
+        u64::try_from(page).unwrap()
+    };
+    let past = 3 * DEFAULT_AUTOCHECKPOINT_FRAMES * (page + 24);
+    let wal = s.0.join("kaban.db-wal");
+    let wal_len = || std::fs::metadata(&wal).map_or(0, |m| m.len());
+
+    // Act: write until the WAL is past that size, at most a bounded number of writes
+    let mut writes = 0;
+    while wal_len() <= past && writes < 6000 {
+        created(
+            &store,
+            "Fact",
+            &format!("note {writes} on the harbour tide tables"),
+        );
+        writes += 1;
+    }
+
+    // Assert: no automatic checkpoint restarted the WAL (today a writer's WAL is bounded only
+    // by an explicit checkpoint or the last close) ...
+    assert!(
+        wal_len() > past,
+        "after {writes} writes the WAL is {} bytes, not past {past}: a checkpoint restarted it",
+        wal_len()
+    );
+    // ... and the last connection's close folds it into the main file
+    drop(store);
+    assert_eq!(wal_len(), 0, "the close left the WAL behind");
+}

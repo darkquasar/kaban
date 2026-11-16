@@ -27,10 +27,16 @@ use std::time::{Duration, Instant};
 const SCHEMA: &str = include_str!("../schema.sql");
 
 /// Per-connection settings applied after WAL is established (not DDL, not versioned): durability
-/// level, foreign keys and secure delete (core-spec S5).
+/// level, foreign keys and secure delete (core-spec S5), and no automatic checkpoint on a
+/// writer (spec 11 PC-9 item 3): every checkpoint is explicit. Today those are the bootstrap
+/// publication (`connection::publish_version`), the purge hygiene and `optimize_fts`
+/// (`SqliteStore::purge_hygiene`), plus SQLite's own fold when the last connection to the file
+/// closes; a long-lived writer's WAL grows until one of them runs. T6's scheduled checkpoint
+/// bounds it.
 const CONNECTION_PRAGMAS: &str = "PRAGMA synchronous = NORMAL;
 PRAGMA foreign_keys = ON;
-PRAGMA secure_delete = FAST;";
+PRAGMA secure_delete = FAST;
+PRAGMA wal_autocheckpoint = 0;";
 
 /// How long a connection waits for a lock (core-spec N4), both as SQLite's busy handler and as
 /// the deadline of [`ensure_wal`].
