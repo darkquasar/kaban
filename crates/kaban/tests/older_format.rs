@@ -341,10 +341,10 @@ fn hold_then_open(fixture: &str, files: &[(&str, &str)]) {
         ),
     ];
     // the hold, if taken, lives until here: every open above ran under it
-    let held = hold.map(|hold| hold.is_some());
-    match held {
-        Ok(held) => {
-            panic!("expected error: exclusive_hold took the older-format file (held {held})")
+    let taken = hold.map(|hold| hold.is_some());
+    match taken {
+        Ok(taken) => {
+            panic!("expected error: exclusive_hold took the older-format file (taken {taken})")
         }
         Err(ref err) => assert_schema_unsupported("exclusive_hold", err),
     }
