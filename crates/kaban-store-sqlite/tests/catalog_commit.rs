@@ -15,6 +15,8 @@ use kaban_store_sqlite::SqliteStore;
 use kaban_store_sqlite::catalog_testing::{self, ObservedOp};
 use rusqlite::{Connection, OpenFlags};
 use std::path::{Path, PathBuf};
+use std::process::{Command, ExitStatus, Stdio};
+use std::time::{Duration, Instant};
 
 /// The database the pinning role opens (set only for the child process).
 const PIN_DB: &str = "KABAN_T5_PIN_DB";
@@ -35,6 +37,88 @@ fn multi_process_pin_role() {
     let store = SqliteStore::open(&db, &dir.join("keys")).unwrap();
     let rows = catalog_testing::pin_sediment(&store).unwrap();
     std::fs::write(dir.join(PINNED), rows.join("\n")).unwrap();
+}
+
+/// How long a role of a two-process case may run before it is killed.
+const ROLE_DEADLINE: Duration = Duration::from_secs(60);
+
+/// A spawned role process, killed and reaped however the test ends.
+struct Supervised(std::process::Child);
+
+impl Drop for Supervised {
+    fn drop(&mut self) {
+        // a role that already exited makes both calls no-ops
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// Run the ignored test `role` of this binary in a child process with `env` set, its stderr
+/// kept in `dir`, and wait at most `deadline` for it. A role still running then is killed and
+/// reaped, and the error carries its stderr.
+fn supervise(
+    role: &str,
+    env: (&str, &std::ffi::OsStr),
+    dir: &Path,
+    deadline: Duration,
+) -> Result<ExitStatus, String> {
+    let log = dir.join(format!("{role}.stderr"));
+    let stderr = std::fs::File::create(&log).map_err(|e| format!("{role}: {e}"))?;
+    let child = Command::new(std::env::current_exe().map_err(|e| e.to_string())?)
+        .args(["--exact", role, "--ignored", "--nocapture"])
+        .env(env.0, env.1)
+        .stdout(Stdio::null())
+        .stderr(stderr)
+        .spawn()
+        .map_err(|e| format!("{role}: spawn: {e}"))?;
+    let mut child = Supervised(child);
+    let started = Instant::now();
+    loop {
+        if let Some(status) = child.0.try_wait().map_err(|e| format!("{role}: {e}"))? {
+            return Ok(status);
+        }
+        if started.elapsed() >= deadline {
+            let _ = child.0.kill();
+            let reaped = child.0.wait();
+            let tail = std::fs::read_to_string(&log).unwrap_or_default();
+            return Err(format!(
+                "role {role} still ran after {deadline:?}: killed, reaped ({reaped:?}); stderr:\n{tail}"
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// The environment variable that turns on the stalled role.
+const STALL: &str = "KABAN_T5_STALL";
+
+/// A role that never finishes in time: it sleeps (bounded, in case nothing kills it). A no-op
+/// unless `KABAN_T5_STALL` is set.
+#[test]
+#[ignore = "a role of the supervision case"]
+fn stalled_role() {
+    if std::env::var_os(STALL).is_none() {
+        return;
+    }
+    eprintln!("stalled role: sleeping");
+    std::thread::sleep(Duration::from_secs(10));
+}
+
+#[test]
+fn a_stalled_role_is_killed_and_reaped_at_its_deadline_with_diagnostics() {
+    // Arrange
+    let s = Scratch::new("kaban-t5-commit", "stalled-role");
+    let started = Instant::now();
+
+    // Act
+    let out = supervise("stalled_role", (STALL, "1".as_ref()), &s.0, Duration::from_secs(2));
+
+    // Assert: an error well before the role's own end, naming it and carrying its stderr
+    let elapsed = started.elapsed();
+    let err = out.expect_err("a stalled role was reported as finished");
+    assert!(elapsed < Duration::from_secs(8), "supervision took {elapsed:?}");
+    assert!(err.contains("stalled_role"), "{err}");
+    assert!(err.contains("stalled role: sleeping"), "no stderr in: {err}");
 }
 
 fn rid(conn: &Connection, id: &str) -> i64 {
@@ -62,12 +146,13 @@ fn a_link_is_in_the_sediment_of_a_pin_another_process_takes_after_it_returns() {
             &ctx(),
         )
         .unwrap();
-    let status = std::process::Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", "multi_process_pin_role", "--ignored"])
-        .env(PIN_DB, s.db())
-        .stdout(std::process::Stdio::null())
-        .status()
-        .unwrap();
+    let status = supervise(
+        "multi_process_pin_role",
+        (PIN_DB, s.db().as_os_str()),
+        &s.0,
+        ROLE_DEADLINE,
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
     assert!(status.success(), "the pinning role failed: {status:?}");
 
     // Assert: B's pin holds exactly the one row A's link staged
