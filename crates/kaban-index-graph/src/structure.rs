@@ -125,8 +125,9 @@ fn index(set: &[(u32, u8)], m: LocalId) -> Option<usize> {
 ///
 /// # Errors
 /// [`GraphError::Cycle`] naming a node on a cycle; [`GraphError::CapExceeded`] when the rows cap
-/// cuts the reached set (an order of part of it would mislead); plus the [`crate::expand`]
-/// errors.
+/// cuts the reached set (an order of part of it would mislead) or the complete set, sources
+/// included, has more than `caps.rows` nodes (`rows` bounds the result); plus the
+/// [`crate::expand`] errors.
 pub fn topo_order(
     v: &View<'_>,
     nodes: &[LocalId],
@@ -140,7 +141,7 @@ pub fn topo_order(
         stop: None,
     };
     let reached = search(v, nodes, rels, Direction::Out, caps, want, budget)?;
-    if reached.truncated {
+    if reached.truncated || reached.seen.len() > usize::try_from(caps.rows).unwrap_or(usize::MAX) {
         return Err(GraphError::CapExceeded {
             limit: "rows",
             max: u64::from(caps.rows),

@@ -129,7 +129,8 @@ pub fn shortest_path(
 /// charge.
 ///
 /// # Errors
-/// As [`crate::expand`].
+/// [`GraphError::CapExceeded`] when more than `caps.rows` nodes share the smallest summed depth
+/// (`rows` bounds the result; the minima are not truncated); plus the [`crate::expand`] errors.
 pub fn meet(
     v: &View<'_>,
     a: LocalId,
@@ -167,6 +168,12 @@ pub fn meet(
                 at_b += 1;
             }
         }
+    }
+    if out.len() > usize::try_from(caps.rows).unwrap_or(usize::MAX) {
+        return Err(GraphError::CapExceeded {
+            limit: "rows",
+            max: u64::from(caps.rows),
+        });
     }
     let (out, lease) = out.into_parts();
     Ok(Charged::new(out, Hold::new(lease, None)))
