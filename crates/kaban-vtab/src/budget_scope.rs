@@ -64,14 +64,23 @@ impl RequestScope {
     /// once the budget's deadline passes or the request is cancelled. It is closed when the
     /// returned value drops or [`QueryConnection::close`] runs, both before the scope ends.
     ///
+    /// The connection always uses a private cache (`SQLITE_OPEN_PRIVATECACHE` is added): a
+    /// shared cache could hand it schema and pages another connection allocated, uncharged or
+    /// charged to an earlier request.
+    ///
     /// # Errors
-    /// A [`QueryError`] when SQLite cannot open or configure the connection; a refusal caused by
-    /// the budget names the limit.
+    /// [`QueryError::SharedCache`] when `flags` hold `SQLITE_OPEN_SHARED_CACHE` or `path` is a
+    /// `file:` URI with a `cache` parameter other than `private`; otherwise a [`QueryError`] when
+    /// SQLite cannot open or configure the connection, naming the limit when the budget caused it.
     pub fn open_query_connection(
         &self,
         path: &Path,
         flags: OpenFlags,
     ) -> Result<QueryConnection<'_>, QueryError> {
+        if flags.contains(OpenFlags::SQLITE_OPEN_SHARED_CACHE) || asks_shared_cache(path) {
+            return Err(QueryError::SharedCache);
+        }
+        let flags = flags | OpenFlags::SQLITE_OPEN_PRIVATE_CACHE;
         let mut conn = Connection::open_with_flags(path, flags).map_err(|e| self.translate(e))?;
         self.configure(&mut conn).map_err(|e| self.translate(e))?;
         Ok(QueryConnection {
@@ -104,6 +113,49 @@ impl RequestScope {
         let budget = self.budget.clone();
         conn.progress_handler(PROGRESS_STEPS, Some(move || budget.check().is_err()))
     }
+}
+
+/// Whether `path`, read as SQLite reads a `file:` URI (this build interprets them whatever the
+/// open flags say), carries a `cache` query parameter other than `private`. Names and values are
+/// percent-decoded first, as SQLite decodes them. Overrides the open flags, so it is refused.
+fn asks_shared_cache(path: &Path) -> bool {
+    let path = path.to_string_lossy();
+    let Some(scheme) = path.get(..5) else {
+        return false;
+    };
+    if !scheme.eq_ignore_ascii_case("file:") {
+        return false;
+    }
+    let Some((_, query)) = path.split_once('?') else {
+        return false;
+    };
+    let query = query.split_once('#').map_or(query, |(query, _)| query);
+    query.split('&').any(|parameter| {
+        let (name, value) = parameter.split_once('=').unwrap_or((parameter, ""));
+        percent_decoded(name) == b"cache" && percent_decoded(value) != b"private"
+    })
+}
+
+/// `text` with every `%XX` escape decoded, as SQLite decodes URI components.
+fn percent_decoded(text: &str) -> Vec<u8> {
+    let bytes = text.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let escape = (bytes[i] == b'%')
+            .then(|| bytes.get(i + 1..i + 3))
+            .flatten()
+            .and_then(|hex| std::str::from_utf8(hex).ok())
+            .and_then(|hex| u8::from_str_radix(hex, 16).ok());
+        if let Some(byte) = escape {
+            decoded.push(byte);
+            i += 3;
+        } else {
+            decoded.push(bytes[i]);
+            i += 1;
+        }
+    }
+    decoded
 }
 
 /// Virtual-machine steps between two deadline checks of a running statement.
@@ -178,6 +230,10 @@ impl std::error::Error for ScopeActive {}
 pub enum QueryError {
     /// The request's budget exceeded a configured limit.
     Limit(BudgetExceeded),
+    /// The query connection was asked to share SQLite's cache with other connections
+    /// (`SQLITE_OPEN_SHARED_CACHE`, or `cache=` other than `private` in a `file:` URI); a
+    /// request's connection keeps a private cache, charged to it and closed with it.
+    SharedCache,
     /// SQLite failed for a reason other than the budget.
     Sqlite(rusqlite::Error),
 }
@@ -200,6 +256,9 @@ impl fmt::Display for QueryError {
                 limit: Limit::Cancelled,
                 value,
             }) => write!(f, "query refused: cancelled after {value} ms"),
+            Self::SharedCache => f.write_str(
+                "query refused: the query connection must use a private cache, not a shared one",
+            ),
             Self::Sqlite(error) => write!(f, "query failed: {error}"),
         }
     }
@@ -209,6 +268,7 @@ impl std::error::Error for QueryError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Limit(exceeded) => Some(exceeded),
+            Self::SharedCache => None,
             Self::Sqlite(error) => Some(error),
         }
     }
