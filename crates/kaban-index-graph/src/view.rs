@@ -22,7 +22,7 @@ use crate::charge::{Charge, Ticker};
 use crate::error::GraphError;
 use crate::id::{Direction, LocalId, RelId, RelSelection};
 use crate::layer::{Edges, Extent, Layer};
-use crate::op::{Attr, OpKind, Records};
+use crate::op::{Attr, OpKind, Records, corrupt};
 use crate::presence::PresenceIter;
 use crate::sediment::{SedEdge, SedNode, Sediment};
 
@@ -45,7 +45,8 @@ pub struct View<'a> {
     layers: &'a [Layer],
     /// The sediment's net change, prepared once at construction so reads merge sorted lists.
     sediment: Sediment<'a>,
-    /// Whether the newest layer's union covers exactly this chain (its depth is the layer count).
+    /// Whether the newest layer's union is trusted: its depth is the layer count and it was
+    /// verified to cover every node touched by every layer of this chain.
     union: bool,
 }
 
@@ -65,8 +66,17 @@ impl<'a> View<'a> {
     /// until the view is dropped. Removals in the sediment are deletion barriers over the
     /// extents (see [`crate::NodeOp`]).
     ///
+    /// When the newest layer's depth equals the number of layers, its union bitvectors may let
+    /// reads skip the layers for untouched nodes. The union is trusted only after this call
+    /// verifies that it covers every touched node (outgoing and incoming) of every supplied
+    /// layer, so a union missing a bit is refused rather than read as absence: O(touched ids of
+    /// the layers), metered like every other preparation step. Depth equality alone proves
+    /// neither coverage nor ancestry; a chain whose depth does not match reads every layer.
+    ///
     /// # Errors
-    /// [`GraphError::BudgetExceeded`] when `budget` refuses a reservation; nothing stays charged.
+    /// [`GraphError::BudgetExceeded`] when `budget` refuses a reservation, already refuses at
+    /// entry or is cancelled or past its deadline during preparation; [`GraphError::Corrupt`]
+    /// when the newest union misses a node touched in the chain. Nothing stays charged.
     pub fn new<R: AsRef<Records>>(
         base: Option<&'a Base>,
         layers: &'a [Layer],
@@ -74,9 +84,13 @@ impl<'a> View<'a> {
         budget: &QueryBudget,
     ) -> Result<View<'a>, GraphError> {
         let sediment = Sediment::prepare(sediment, budget)?;
-        let union = layers
-            .last()
-            .is_some_and(|l| usize::try_from(l.extent.depth).ok() == Some(layers.len()));
+        let union = match layers.last() {
+            Some(last) if usize::try_from(last.extent.depth).ok() == Some(layers.len()) => {
+                verify_union(last, layers, &Ticker::new(budget))?;
+                true
+            }
+            _ => false,
+        };
         Ok(View {
             base,
             layers,
@@ -359,6 +373,26 @@ impl<'a> View<'a> {
             .map(|(k, _)| k)
             .collect()
     }
+}
+
+/// Refuse a newest-layer union that misses a node touched (in either direction) by any layer of
+/// `layers`, one unit of `t` per touched id or index word visited.
+fn verify_union(last: &Layer, layers: &[Layer], t: &Ticker<'_>) -> Result<(), GraphError> {
+    let Some((out, inc)) = last.extent.union.as_ref() else {
+        return Err(corrupt("layer union"));
+    };
+    for layer in layers {
+        for (union, edges) in [(out, &layer.extent.out), (inc, &layer.extent.inc)] {
+            let mut ids = edges.touched_cursor();
+            while let Some(n) = ids.next(t) {
+                if !union.contains(n) {
+                    return Err(corrupt("layer union coverage"));
+                }
+            }
+            t.stopped()?;
+        }
+    }
+    Ok(())
 }
 
 /// A sorted keyed source read by [`NewestWins`]; every advance is metered on the ticker.

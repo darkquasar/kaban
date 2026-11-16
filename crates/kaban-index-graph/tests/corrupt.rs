@@ -533,8 +533,14 @@ fn a_union_missing_a_touched_node_is_never_trusted() {
         vec![open_layer(&l1).unwrap(), open_layer(&l2).unwrap()],
     ] {
         let v = view::<Records>(Some(&base), &layers, &[]);
-        assert!(rows(&v, LocalId(1), &RelSelection::All, Direction::Out).is_empty());
-        assert!(rows(&v, LocalId(2), &RelSelection::All, Direction::In).is_empty());
+        assert_eq!(
+            rows(&v, LocalId(1), &RelSelection::All, Direction::Out),
+            Vec::new()
+        );
+        assert_eq!(
+            rows(&v, LocalId(2), &RelSelection::All, Direction::In),
+            Vec::new()
+        );
     }
     for (tag, n, dir) in [(UNION_OUT, 1, Direction::Out), (UNION_IN, 2, Direction::In)] {
         // The current layer's own change.

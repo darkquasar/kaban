@@ -26,7 +26,7 @@ use crate::charge::Ticker;
 use crate::error::GraphError;
 use crate::facts::{FactEntry, Facts};
 use crate::op::{Attr, OpKind, Reader, Records, column, corrupt, kind_byte, kind_from, put_len};
-use crate::presence::{IdIndex, Presence, check_kinds, parse_bits, test_bit, write_bits};
+use crate::presence::{IdIndex, IdIter, Presence, check_kinds, parse_bits, test_bit, write_bits};
 use crate::view::View;
 
 const MAGIC: &[u8; 4] = b"KBXG";
@@ -238,6 +238,11 @@ impl Edges {
                 ts: i64::from_le_bytes(column::<8>(&self.tss, i)?),
             },
         ))
+    }
+
+    /// A metered cursor over the touched nodes, ascending.
+    pub(crate) fn touched_cursor(&self) -> IdIter<'_> {
+        self.index.cursor()
     }
 
     /// Touched nodes ascending (writer paths: unmetered).
