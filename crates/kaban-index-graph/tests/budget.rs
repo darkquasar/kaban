@@ -1,8 +1,11 @@
 //! Query budgets reach the graph engine (T9 midpoint MAJ-02, MAJ-03; PC-17): decoding and
 //! sediment preparation reserve before allocating and hold their charge while the data lives;
 //! accessor iterators charge their cursors while alive; a cancelled or expired budget stops a
-//! filtered scan within [`BUDGET_CHECK_INTERVAL`] raw reads, even when no row is produced. The
-//! structural functions share that budget for their working sets and results (Step 3).
+//! filtered scan within [`BUDGET_CHECK_INTERVAL`] units of work, even when no row is produced. The
+//! structural functions share that budget for their working sets and results (Step 3). Units are
+//! observed through the process-wide [`work_units`] count, so these tests hold [`serial`]
+//! (END-MAJ-02, END-MAJ-03: work beneath the merge, decoding, validation, preparation, sorts and
+//! structural loops).
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // test code: failures are the assertion
 

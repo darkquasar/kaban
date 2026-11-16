@@ -42,6 +42,10 @@ pub enum GraphError {
         value: u64,
     },
     /// Encoded bytes are truncated, overflow or break a format invariant.
+    ///
+    /// The message is a short fixed-format diagnostic (a section name or a fixed phrase, at most
+    /// a few dozen bytes, one per failed call). Its allocation is a bounded exemption from the
+    /// query budget: it is not reserved or charged, unlike every query-owned collection.
     #[error("corrupt graph bytes: {0}")]
     Corrupt(String),
 }
