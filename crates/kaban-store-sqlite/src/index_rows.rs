@@ -10,6 +10,7 @@
 //! keys and the sequence of one call come from one snapshot: another connection's deployment
 //! or write lands wholly before or wholly after it, never in between.
 
+use crate::catalog::Catalog;
 use crate::ident::{committed_fields, summary_projection_over};
 use crate::sql_error::SqlResultExt;
 use kaban_core::Result;
@@ -29,6 +30,8 @@ const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 #[derive(Debug)]
 pub struct IndexRows {
     conn: Arc<Mutex<Connection>>,
+    /// The one read primitive every operation reads through ([`Catalog::read`]).
+    catalog: Catalog,
 }
 
 impl IndexRows {
@@ -55,6 +58,7 @@ impl IndexRows {
         crate::body_codec::verify(&conn)?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
+            catalog: Catalog::reader(Some(db)),
         })
     }
 
@@ -63,7 +67,10 @@ impl IndexRows {
     /// released (constraint 1: the lock order is store, then adapter, never the reverse).
     #[must_use]
     pub(crate) fn shared(conn: Arc<Mutex<Connection>>) -> Self {
-        Self { conn }
+        Self {
+            conn,
+            catalog: Catalog::reader(None),
+        }
     }
 
     fn lock(&self) -> MutexGuard<'_, Connection> {
@@ -93,52 +100,49 @@ impl Rows for IndexRows {
         let conn = self.lock();
         let selected = serde_json::to_string(ids)?;
         // one deferred read transaction: the committed maps and the rows from one snapshot
-        let tx = conn.unchecked_transaction().sql()?;
-        let mut out = Vec::new();
-        rows(&tx, Some(&selected), &mut |row| {
-            out.push(row);
-            Ok(())
-        })?;
-        tx.commit().sql()?;
-        Ok(out)
+        self.catalog.read(&conn, |tx| {
+            let mut out = Vec::new();
+            rows(tx, Some(&selected), &mut |row| {
+                out.push(row);
+                Ok(())
+            })?;
+            Ok(out)
+        })
     }
 
     fn active(&self, visit: &mut dyn FnMut(IndexRow) -> Result<()>) -> Result<Canonical> {
         let conn = self.lock();
         // one deferred read transaction: the position and every row come from one snapshot
-        let tx = conn.unchecked_transaction().sql()?;
-        let at = canonical(&tx)?;
-        rows(&tx, None, visit)?;
-        tx.commit().sql()?;
-        Ok(at)
+        self.catalog.read(&conn, |tx| {
+            let at = canonical(tx)?;
+            rows(tx, None, visit)?;
+            Ok(at)
+        })
     }
 
     fn canonical(&self) -> Result<Canonical> {
         let conn = self.lock();
         // one deferred read transaction: the identity keys and the sequence from one snapshot
-        let tx = conn.unchecked_transaction().sql()?;
-        let at = canonical(&tx)?;
-        tx.commit().sql()?;
-        Ok(at)
+        self.catalog.read(&conn, |tx| canonical(tx))
     }
 
     fn replay(&self, after: u64, limit: usize) -> Result<Replay> {
         let conn = self.lock();
         // one deferred read transaction: the oldest surviving row, the position and the page
         // from one snapshot (design amendment 6)
-        let tx = conn.unchecked_transaction().sql()?;
-        let oldest: i64 = tx
-            .prepare_cached("SELECT coalesce(min(seq), 0) FROM changes")
-            .sql()?
-            .query_row([], |r| r.get(0))
-            .sql()?;
-        let at = canonical(&tx)?;
-        let changes = crate::changelog::read(&tx, after, limit)?;
-        tx.commit().sql()?;
-        Ok(Replay {
-            oldest: u64::try_from(oldest).unwrap_or_default(),
-            at,
-            changes,
+        self.catalog.read(&conn, |tx| {
+            let oldest: i64 = tx
+                .prepare_cached("SELECT coalesce(min(seq), 0) FROM changes")
+                .sql()?
+                .query_row([], |r| r.get(0))
+                .sql()?;
+            let at = canonical(tx)?;
+            let changes = crate::changelog::read(tx, after, limit)?;
+            Ok(Replay {
+                oldest: u64::try_from(oldest).unwrap_or_default(),
+                at,
+                changes,
+            })
         })
     }
 }

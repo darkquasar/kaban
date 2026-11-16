@@ -24,6 +24,7 @@
 //! transactions, never held across a wait, and nothing here takes the connection while an
 //! adapter call runs (constraint 1).
 
+use crate::catalog::commit::OutsideCommit;
 use crate::changelog;
 use crate::index_rows::IndexRows;
 use crate::leases;
@@ -162,10 +163,12 @@ impl std::fmt::Debug for ProjectorThread {
 
 impl ProjectorThread {
     /// Start the thread of a serving store over `index`, `conn` (the store's connection,
-    /// shared) and the database at `db` (its observation connection).
+    /// shared, whose commits here `outside` admits) and the database at `db` (its observation
+    /// connection).
     pub(crate) fn start(
         index: Arc<TantivyIndex>,
         conn: SharedConnection,
+        outside: OutsideCommit,
         db: &Path,
     ) -> Result<Self> {
         let observation = IndexRows::open(db)?;
@@ -180,7 +183,7 @@ impl ProjectorThread {
         let thread = std::thread::Builder::new()
             .name("text-index-projector".into())
             .spawn(move || {
-                let db = Db(conn);
+                let db = Db(conn, outside);
                 let shared = loop_shared;
                 // t8b-4: a panic unwinds the session (lease given back, lock released) and
                 // this guard leaves no waiter on a holder that is gone
@@ -359,7 +362,7 @@ impl Drop for ProjectorThread {
 /// The thread's side of the database: the change log and the leases over the store's shared
 /// connection, each call one short transaction (`SqliteStore` implements the same traits for
 /// its callers; the thread cannot borrow the store it lives in).
-struct Db(SharedConnection);
+struct Db(SharedConnection, OutsideCommit);
 
 impl Db {
     fn lock(&self) -> MutexGuard<'_, Connection> {
@@ -377,7 +380,8 @@ impl Db {
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .sql()?;
         let out = body(&tx)?;
-        tx.commit().sql()?;
+        // the projector's own commit on the writer connection, outside the catalog until T7
+        self.1.run(|| tx.commit()).sql()?;
         Ok(out)
     }
 }

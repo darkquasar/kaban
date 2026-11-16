@@ -194,8 +194,9 @@ pub(crate) fn install(conn: &Connection) -> Result<()> {
     conn.execute_batch(&capture_ddl()).sql()
 }
 
-/// Discard whatever the queue holds: the start of every commit, so a commit's set holds that
-/// commit's writes only (not those of a writer that committed outside the catalog).
+/// Discard whatever the queue holds: the end of every drain. Every row write of the writer
+/// connection runs in [`super::Catalog::commit`], whose rollback also empties the queue, so a
+/// commit's set holds that commit's writes only.
 ///
 /// # Errors
 /// SQLite errors.

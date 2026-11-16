@@ -3,12 +3,19 @@
 //! [`Catalog::read`].
 //!
 //! ```text
-//!   BEGIN IMMEDIATE => capture reset => writer closure => capture drain (frozen once)
+//!   BEGIN IMMEDIATE => writer closure => capture drain (frozen once)
 //!       => derived-row hook => every IndexClass::stage (same changes) => COMMIT
-//!   any error on the way => ROLLBACK (rows, derived rows and sediment together)
+//!   any error on the way => ROLLBACK (rows, derived rows, sediment and the capture queue)
 //! ```
+//!
+//! No row write of the store commits elsewhere on the writer connection: the open-time schema
+//! and seed transactions run before the catalog attaches, and the one maintenance statement
+//! that cannot run in a transaction (`VACUUM`) runs in [`Catalog::outside_commit`]. Test builds
+//! (`cfg(test)`, `failpoints`) enforce it with a commit hook ([`guard_writer`]).
 
 use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use kaban_core::{Durability, Result};
 use rusqlite::{Connection, Transaction, TransactionBehavior};
@@ -129,7 +136,6 @@ impl Catalog {
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .sql()?;
-        capture::reset(&tx)?;
         let mut txn = Txn {
             tx,
             changes: None,
@@ -144,8 +150,25 @@ impl Catalog {
         for class in self.classes() {
             class.stage(&mut txn, &changes)?;
         }
-        txn.tx.commit().sql()?;
+        self.committing.store(true, Ordering::Release);
+        let committed = txn.tx.commit().sql();
+        self.committing.store(false, Ordering::Release);
+        committed?;
         Ok(out)
+    }
+
+    /// Run `f`, a statement on the writer connection that commits on its own and cannot run
+    /// in a transaction (`VACUUM`), as an admitted exception to [`Self::commit`]. It writes no
+    /// row: nothing is captured or staged.
+    pub(crate) fn outside_commit<T>(&self, f: impl FnOnce() -> T) -> T {
+        self.outside_commits().run(f)
+    }
+
+    /// The admission of [`Self::outside_commit`] as a handle for a thread that commits on the
+    /// writer connection without the catalog: the serving projector's cursor and lease
+    /// transactions (`crate::projector_thread`), removed by T7.
+    pub(crate) fn outside_commits(&self) -> OutsideCommit {
+        OutsideCommit(Arc::clone(&self.committing))
     }
 
     /// Run `f` in one deferred (read) transaction on `conn`.
@@ -166,6 +189,47 @@ impl Catalog {
         tx.finish().sql()?;
         Ok(out)
     }
+}
+
+/// See [`Catalog::outside_commits`].
+#[derive(Debug, Clone)]
+pub(crate) struct OutsideCommit(Arc<AtomicBool>);
+
+impl OutsideCommit {
+    /// Run `f`, whose commits on the writer connection the writer guard admits. The caller
+    /// holds the writer connection's lock, so no catalog commit runs meanwhile.
+    pub(crate) fn run<T>(&self, f: impl FnOnce() -> T) -> T {
+        self.0.store(true, Ordering::Release);
+        let out = f();
+        self.0.store(false, Ordering::Release);
+        out
+    }
+}
+
+/// The writer guard of test builds: a commit hook on the writer connection that refuses
+/// (rolls back) every commit outside [`Catalog::commit`] and [`Catalog::outside_commit`], so an
+/// autocommit row write or a transaction the catalog did not open fails where it runs. It
+/// sees this connection only: another connection's writes (the projector's own, a test's raw
+/// connection) and the open-time writes before the catalog attaches are not its.
+///
+/// # Errors
+/// SQLite errors registering the hook.
+#[cfg(any(test, feature = "failpoints"))]
+pub(super) fn guard_writer(conn: &mut Connection, committing: &Arc<AtomicBool>) -> Result<()> {
+    let committing = Arc::clone(committing);
+    conn.commit_hook(Some(move || !committing.load(Ordering::Acquire)))
+        .sql()
+}
+
+/// The writer guard is a test-build check (see the test-build [`guard_writer`]).
+#[cfg(not(any(test, feature = "failpoints")))]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "the test build's twin registers a hook and can fail"
+)]
+pub(super) fn guard_writer(conn: &mut Connection, committing: &Arc<AtomicBool>) -> Result<()> {
+    let _ = (conn, committing);
+    Ok(())
 }
 
 /// The derived-row hook: rows derived from the commit's changes, written in its transaction

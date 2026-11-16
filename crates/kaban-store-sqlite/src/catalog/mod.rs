@@ -27,6 +27,7 @@ pub(crate) mod tables;
 pub mod testing;
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, PoisonError, RwLock};
 
 use kaban_core::{Result, StoreError};
@@ -42,6 +43,10 @@ pub(crate) struct Catalog {
     kbx: PathBuf,
     degraded_reclamation: bool,
     classes: RwLock<Vec<Arc<dyn IndexClass>>>,
+    /// Set only while [`Self::commit`] commits (and around an explicit maintenance statement,
+    /// [`Self::outside_commit`]): the writer guard of test builds refuses any other commit on
+    /// the writer connection.
+    committing: Arc<AtomicBool>,
 }
 
 impl std::fmt::Debug for Catalog {
@@ -50,13 +55,15 @@ impl std::fmt::Debug for Catalog {
             .field("kbx", &self.kbx)
             .field("degraded_reclamation", &self.degraded_reclamation)
             .field("classes", &self.classes().len())
+            .field("committing", &self.committing)
             .finish()
     }
 }
 
 impl Catalog {
     /// Create or open `kaban.kbx`, `kaban.kbx.alloc` and `kaban.kbx.pins/` beside `db_path`
-    /// and check that the database on `conn` holds the catalog tables. Called only once the
+    /// and check that the database on `conn` holds the catalog tables, then take `conn` as the
+    /// writer connection (its capture triggers; [`Self::attach_writer`]). Called only once the
     /// open admitted the database and published its version (spec 11 CMP-01): a refused
     /// project never gains a catalog artefact. The hole-punch probe (KER-11) arrives with the
     /// container I/O (T5 Step 5); until then reclamation is not degraded.
@@ -64,10 +71,10 @@ impl Catalog {
     /// # Errors
     /// `StoreError::FileMode` for an artefact that cannot be created or is not of its type;
     /// SQLite errors (a database without the catalog tables among them).
-    pub(crate) fn open(db_path: &Path, conn: &Connection) -> Result<Self> {
+    pub(crate) fn open(db_path: &Path, conn: &mut Connection) -> Result<Self> {
         reclaim_floor(conn)?;
         kbx::create_artefacts(db_path)?;
-        Ok(Self::with_container(kbx::kbx_path(db_path)))
+        Self::with_container(kbx::kbx_path(db_path)).attach_writer(conn)
     }
 
     /// [`Self::open`] for an open that serves the database as it is (verification, doctor, a
@@ -76,18 +83,25 @@ impl Catalog {
     ///
     /// # Errors
     /// SQLite errors (a database without the catalog tables among them).
-    pub(crate) fn open_as_is(db_path: &Path, conn: &Connection) -> Result<Self> {
+    pub(crate) fn open_as_is(db_path: &Path, conn: &mut Connection) -> Result<Self> {
         reclaim_floor(conn)?;
-        Ok(Self::with_container(kbx::kbx_path(db_path)))
+        Self::with_container(kbx::kbx_path(db_path)).attach_writer(conn)
     }
 
     /// The catalog of an in-memory database: its rows only, no container beside it.
     ///
     /// # Errors
     /// SQLite errors (a database without the catalog tables among them).
-    pub(crate) fn in_memory(conn: &Connection) -> Result<Self> {
+    pub(crate) fn in_memory(conn: &mut Connection) -> Result<Self> {
         reclaim_floor(conn)?;
-        Ok(Self::with_container(PathBuf::new()))
+        Self::with_container(PathBuf::new()).attach_writer(conn)
+    }
+
+    /// The catalog as a read connection of its own sees it (`crate::index_rows`): the one
+    /// read primitive, [`Self::read`], over that connection. Nothing is checked or created and
+    /// no writer is attached; `db_path` is `None` for the in-memory store's shared connection.
+    pub(crate) fn reader(db_path: Option<&Path>) -> Self {
+        Self::with_container(db_path.map(kbx::kbx_path).unwrap_or_default())
     }
 
     fn with_container(kbx: PathBuf) -> Self {
@@ -95,7 +109,16 @@ impl Catalog {
             kbx,
             degraded_reclamation: false,
             classes: RwLock::new(Vec::new()),
+            committing: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Take `conn` as this catalog's writer connection: the capture triggers its commits
+    /// drain ([`capture::install`]) and, in test builds, the writer guard.
+    fn attach_writer(self, conn: &mut Connection) -> Result<Self> {
+        capture::install(conn)?;
+        commit::guard_writer(conn, &self.committing)?;
+        Ok(self)
     }
 
     /// Add an index class; every later commit stages it.

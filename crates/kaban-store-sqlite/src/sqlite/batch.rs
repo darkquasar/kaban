@@ -26,88 +26,87 @@ impl SqliteStore {
         ) -> Result<kaban_core::JobFinishStateUpdate>,
     ) -> Result<String> {
         let mut conn = self.write();
-        let tx = conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .sql()?;
-        let current = crate::jobs::get(&tx, &request.job, &ctx.workspace_id)?
-            .ok_or_else(|| StoreError::NotFound("job_revoked".into()))?;
-        crate::jobs::holder(&tx, &current, request.contract.fence(), false)?;
-        let now = now_unix();
-        if current.expires_at <= now || current.status == kaban_core::JobStatus::Expired {
-            return Err(StoreError::InvalidName("job".into(), "expired"));
-        }
-        if !matches!(
-            current.status,
-            kaban_core::JobStatus::Open | kaban_core::JobStatus::Finished
-        ) || kaban_core::JobSubmitContract::from_finish_job(&current)?
-            .with_fence(request.contract.fence())
-            != request.contract
-        {
-            return Err(StoreError::InvalidName("job".into(), "stale"));
-        }
-        crate::jobs::check_source(
-            &tx,
-            &current,
-            &request.document,
-            &request.source_rev,
-            &request.chunks,
-        )?;
-        let mut outcome = kaban_core::JobFinishOutcome::default();
-        let mut plan: serde_json::Value = serde_json::from_str(&current.plan_json)?;
-        if current.status == kaban_core::JobStatus::Open {
-            let population = crate::jobs::finish_population(&tx, &current, request)?;
-            outcome.skipped_cap = population.skipped_cap;
-            if !outcome.skipped_cap {
-                let before: i64 = tx
-                    .query_row("SELECT COALESCE(max(seq),0) FROM changes", [], |r| r.get(0))
-                    .sql()?;
-                let named: BTreeSet<_> = current.named_edges.iter().cloned().collect();
-                for (src, dst, rel, src_id, dst_id) in population.edges {
-                    if !named.contains(&(src_id, dst_id, rel.clone())) {
-                        // Delete only the job's own producer's remainder, never another's row.
-                        tx.execute(
-                            "DELETE FROM edge WHERE src=?1 AND dst=?2 AND rel=?3 AND producer=?4",
-                            params![src, dst, rel, population.producer.as_str()],
-                        )
+        self.catalog.commit(&mut conn, ctx.durability, |txn| {
+            let tx = txn.conn();
+            let current = crate::jobs::get(tx, &request.job, &ctx.workspace_id)?
+                .ok_or_else(|| StoreError::NotFound("job_revoked".into()))?;
+            crate::jobs::holder(tx, &current, request.contract.fence(), false)?;
+            let now = now_unix();
+            if current.expires_at <= now || current.status == kaban_core::JobStatus::Expired {
+                return Err(StoreError::InvalidName("job".into(), "expired"));
+            }
+            if !matches!(
+                current.status,
+                kaban_core::JobStatus::Open | kaban_core::JobStatus::Finished
+            ) || kaban_core::JobSubmitContract::from_finish_job(&current)?
+                .with_fence(request.contract.fence())
+                != request.contract
+            {
+                return Err(StoreError::InvalidName("job".into(), "stale"));
+            }
+            crate::jobs::check_source(
+                tx,
+                &current,
+                &request.document,
+                &request.source_rev,
+                &request.chunks,
+            )?;
+            let mut outcome = kaban_core::JobFinishOutcome::default();
+            let mut plan: serde_json::Value = serde_json::from_str(&current.plan_json)?;
+            if current.status == kaban_core::JobStatus::Open {
+                let population = crate::jobs::finish_population(tx, &current, request)?;
+                outcome.skipped_cap = population.skipped_cap;
+                if !outcome.skipped_cap {
+                    let before: i64 = tx
+                        .query_row("SELECT COALESCE(max(seq),0) FROM changes", [], |r| r.get(0))
                         .sql()?;
-                        let remains: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM edge WHERE src=?1 AND dst=?2 AND rel=?3)",params![src,dst,rel],|r|r.get(0)).sql()?;
-                        if !remains {
-                            outcome.deleted_edges += 1;
+                    let named: BTreeSet<_> = current.named_edges.iter().cloned().collect();
+                    for (src, dst, rel, src_id, dst_id) in population.edges {
+                        if !named.contains(&(src_id, dst_id, rel.clone())) {
+                            // Delete only the job's own producer's remainder, never another's row.
+                            tx.execute(
+                                "DELETE FROM edge WHERE src=?1 AND dst=?2 AND rel=?3 AND producer=?4",
+                                params![src, dst, rel, population.producer.as_str()],
+                            )
+                            .sql()?;
+                            let remains: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM edge WHERE src=?1 AND dst=?2 AND rel=?3)",params![src,dst,rel],|r|r.get(0)).sql()?;
+                            if !remains {
+                                outcome.deleted_edges += 1;
+                            }
                         }
                     }
-                }
-                let after: i64 = tx
-                    .query_row("SELECT COALESCE(max(seq),0) FROM changes", [], |r| r.get(0))
-                    .sql()?;
-                if after > before {
-                    outcome.first_seq = Some(u64::try_from(before + 1).map_err(|_| {
-                        StoreError::InvalidName("changes".into(), "invalid_sequence")
-                    })?);
-                    outcome.last_seq = Some(u64::try_from(after).map_err(|_| {
-                        StoreError::InvalidName("changes".into(), "invalid_sequence")
-                    })?);
+                    let after: i64 = tx
+                        .query_row("SELECT COALESCE(max(seq),0) FROM changes", [], |r| r.get(0))
+                        .sql()?;
+                    if after > before {
+                        outcome.first_seq = Some(u64::try_from(before + 1).map_err(|_| {
+                            StoreError::InvalidName("changes".into(), "invalid_sequence")
+                        })?);
+                        outcome.last_seq = Some(u64::try_from(after).map_err(|_| {
+                            StoreError::InvalidName("changes".into(), "invalid_sequence")
+                        })?);
+                    }
                 }
             }
-        }
-        // the run's terminal sequence (SS-10): the head this transaction sees, the receipt's
-        // position whether or not the finish wrote change rows
-        outcome.terminal_seq = crate::changelog::head(&tx)?;
-        ctx.record_terminal_seq(outcome.terminal_seq);
-        let state = report(&current, &outcome)?;
-        if current.status == kaban_core::JobStatus::Finished {
-            if plan["finished_report_json"].as_str() != Some(state.report_json.as_str()) {
-                return Err(StoreError::InvalidName("job".into(), "report_changed"));
+            // the run's terminal sequence (SS-10): the head this transaction sees, the receipt's
+            // position whether or not the finish wrote change rows
+            outcome.terminal_seq = crate::changelog::head(tx)?;
+            ctx.record_terminal_seq(outcome.terminal_seq);
+            let state = report(&current, &outcome)?;
+            if current.status == kaban_core::JobStatus::Finished {
+                if plan["finished_report_json"].as_str() != Some(state.report_json.as_str()) {
+                    return Err(StoreError::InvalidName("job".into(), "report_changed"));
+                }
+            } else {
+                let marker = crate::jobs::done_artifact(tx, &current, request)?;
+                super::artifacts::publish(tx, &[marker])?;
+                crate::jobs::release(tx, &current)?;
+                let _: serde_json::Value = serde_json::from_str(&state.report_json)?;
+                plan["finished_report_json"] = serde_json::Value::String(state.report_json.clone());
+                tx.execute("UPDATE ingest_jobs SET plan=?1,status='finished',finished_at=?2,expires_at=?3 WHERE job_id=?4 AND workspace_id=?5 AND status='open'",params![plan.to_string(),now,now.saturating_add(i64::from(request.retention_days)*86400),current.job.as_str(),current.workspace.as_str()]).sql()?;
             }
-        } else {
-            let marker = crate::jobs::done_artifact(&tx, &current, request)?;
-            super::artifacts::publish(&tx, &[marker])?;
-            crate::jobs::release(&tx, &current)?;
-            let _: serde_json::Value = serde_json::from_str(&state.report_json)?;
-            plan["finished_report_json"] = serde_json::Value::String(state.report_json.clone());
-            tx.execute("UPDATE ingest_jobs SET plan=?1,status='finished',finished_at=?2,expires_at=?3 WHERE job_id=?4 AND workspace_id=?5 AND status='open'",params![plan.to_string(),now,now.saturating_add(i64::from(request.retention_days)*86400),current.job.as_str(),current.workspace.as_str()]).sql()?;
-        }
-        tx.commit().sql()?;
-        Ok(state.report_json)
+            Ok(state.report_json)
+        })
     }
 
     pub(super) fn job_submit_impl(
@@ -135,49 +134,49 @@ impl SqliteStore {
             return Err(StoreError::InvalidName("submit".into(), "invalid_batch"));
         }
         let mut conn = self.write();
-        let tx = conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .sql()?;
-        let current = crate::jobs::get(&tx, &request.job, &ctx.workspace_id)?
-            .ok_or_else(|| StoreError::NotFound("job_revoked".into()))?;
-        crate::jobs::holder(&tx, &current, request.contract.fence(), true)?;
-        if current.status != kaban_core::JobStatus::Open {
-            return Err(StoreError::InvalidName("job".into(), "stale"));
-        }
-        if current.expires_at <= now_unix() {
-            return Err(StoreError::InvalidName("job".into(), "expired"));
-        }
-        if kaban_core::JobSubmitContract::from_job(&current)?.with_fence(request.contract.fence())
-            != request.contract
-        {
-            return Err(StoreError::InvalidName("job".into(), "stale"));
-        }
-        crate::jobs::check_source(
-            &tx,
-            &current,
-            &request.document,
-            &request.source_rev,
-            &request.chunks,
-        )?;
-        let redactions = request.redactions;
-        let report = self.apply_batch_body(&tx, request.batch)?;
-        if report.stale_source != 0 {
-            // Drop the uncommitted transaction, including any body bookkeeping.
-            return Err(StoreError::InvalidName("job".into(), "stale"));
-        }
-        crate::jobs::check_source(
-            &tx,
-            &current,
-            &request.document,
-            &request.source_rev,
-            &request.chunks,
-        )?;
-        let state = accumulate(&current, &report)?;
-        let updated = crate::jobs::record_submit(&tx, current, &report, state, redactions)?;
-        tx.commit().sql()?;
-        Ok(kaban_core::JobSubmitReceipt {
-            batch: report,
-            job: updated,
+        self.catalog.commit(&mut conn, ctx.durability, |txn| {
+            let tx = txn.conn();
+            let current = crate::jobs::get(tx, &request.job, &ctx.workspace_id)?
+                .ok_or_else(|| StoreError::NotFound("job_revoked".into()))?;
+            crate::jobs::holder(tx, &current, request.contract.fence(), true)?;
+            if current.status != kaban_core::JobStatus::Open {
+                return Err(StoreError::InvalidName("job".into(), "stale"));
+            }
+            if current.expires_at <= now_unix() {
+                return Err(StoreError::InvalidName("job".into(), "expired"));
+            }
+            if kaban_core::JobSubmitContract::from_job(&current)?
+                .with_fence(request.contract.fence())
+                != request.contract
+            {
+                return Err(StoreError::InvalidName("job".into(), "stale"));
+            }
+            crate::jobs::check_source(
+                tx,
+                &current,
+                &request.document,
+                &request.source_rev,
+                &request.chunks,
+            )?;
+            let redactions = request.redactions;
+            let report = self.apply_batch_body(tx, request.batch)?;
+            if report.stale_source != 0 {
+                // Drop the uncommitted transaction, including any body bookkeeping.
+                return Err(StoreError::InvalidName("job".into(), "stale"));
+            }
+            crate::jobs::check_source(
+                tx,
+                &current,
+                &request.document,
+                &request.source_rev,
+                &request.chunks,
+            )?;
+            let state = accumulate(&current, &report)?;
+            let updated = crate::jobs::record_submit(tx, current, &report, state, redactions)?;
+            Ok(kaban_core::JobSubmitReceipt {
+                batch: report,
+                job: updated,
+            })
         })
     }
 
@@ -196,15 +195,14 @@ impl SqliteStore {
             });
         }
         let mut conn = self.write();
-        let tx = conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .sql()?;
-        let report = self.apply_batch_body(&tx, batch)?;
-        if report.stale_source == 0 {
-            crate::changelog::record_terminal(&tx, ctx)?;
-            tx.commit().sql()?;
-        }
-        Ok(report)
+        self.catalog.commit(&mut conn, ctx.durability, |txn| {
+            let tx = txn.conn();
+            let report = self.apply_batch_body(tx, batch)?;
+            if report.stale_source == 0 {
+                crate::changelog::record_terminal(tx, ctx)?;
+            }
+            Ok(report)
+        })
     }
 
     /// Shared transaction body: callers retain lock/transaction ownership.

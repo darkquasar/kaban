@@ -168,3 +168,225 @@ fn a_refused_older_format_project_gains_no_catalog_artefact() {
         assert_eq!(after, before, "{fixture}: the project was changed");
     }
 }
+
+/// The transaction openers the structural scan looks for (the task's inventory grep).
+const OPENERS: [&str; 5] = [
+    "TransactionBehavior::Immediate",
+    "TransactionBehavior::Exclusive",
+    "unchecked_transaction",
+    ".transaction()",
+    "\"BEGIN",
+];
+
+/// The sites that may open a transaction outside the catalog, by file (relative to `src/`)
+/// and enclosing function, each with its reason. Every entry must still match a site.
+const OPENER_ALLOWLIST: [(&str, &str, &str); 5] = [
+    ("catalog/commit.rs", "commit_in", "the one writer entry"),
+    ("catalog/commit.rs", "read", "the one read entry"),
+    (
+        "schema.rs",
+        "ensure_current",
+        "open-time schema creation, before the catalog exists",
+    ),
+    (
+        "sqlite.rs",
+        "init_schema",
+        "open-time seed and identity rows, before admission and version publication: the \
+         catalog opens only after publication (CMP-01) and the seed writes no node or edge row",
+    ),
+    (
+        "projector_thread.rs",
+        "immediate",
+        "the projector's cursor on its own connection; removed by T7",
+    ),
+];
+
+/// The test-only source files the scan skips: each must be declared `#[cfg(test)]` by its
+/// parent module (`(file, parent, declaration)`), so production code is never skipped.
+const TEST_ONLY_FILES: [(&str, &str, &str); 1] = [("sqlite/tests.rs", "sqlite.rs", "mod tests;")];
+
+/// The `.rs` files under `dir`, as paths relative to `root` with `/` separators.
+fn rust_files(root: &std::path::Path, dir: &std::path::Path, out: &mut Vec<String>) {
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            rust_files(root, &path, out);
+        } else if path.extension().is_some_and(|e| e == "rs") {
+            let rel = path.strip_prefix(root).unwrap();
+            let parts: Vec<_> = rel.iter().map(|p| p.to_str().unwrap()).collect();
+            out.push(parts.join("/"));
+        }
+    }
+}
+
+/// The name of the function a line declares, if it declares one (`fn name`, any visibility).
+fn declared_fn(line: &str) -> Option<String> {
+    let code = line.trim_start();
+    if code.starts_with("//") {
+        return None;
+    }
+    let at = code.find("fn ")?;
+    // `fn` as a keyword: at the start or after a space (`pub fn`, `pub(crate) fn`)
+    if at > 0 && !code[..at].ends_with(' ') {
+        return None;
+    }
+    let name: String = code[at + 3..]
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .collect();
+    (!name.is_empty()).then_some(name)
+}
+
+/// Every transaction opener in the store's source as `(file, enclosing fn, line number)`.
+fn opener_sites(src: &std::path::Path) -> Vec<(String, String, usize)> {
+    let mut files = Vec::new();
+    rust_files(src, src, &mut files);
+    files.sort();
+    let mut sites = Vec::new();
+    for file in files {
+        if TEST_ONLY_FILES.iter().any(|(skip, ..)| *skip == file) {
+            continue;
+        }
+        let text = std::fs::read_to_string(src.join(&file)).unwrap();
+        let mut current = String::new();
+        for (n, line) in text.lines().enumerate() {
+            if let Some(name) = declared_fn(line) {
+                current = name;
+            }
+            if OPENERS.iter().any(|o| line.contains(o)) {
+                sites.push((file.clone(), current.clone(), n + 1));
+            }
+        }
+    }
+    sites
+}
+
+#[test]
+fn every_writer_transaction_of_the_store_opens_in_the_catalog() {
+    // Arrange: the store's production source; each skipped test file is test-only
+    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    for (file, parent, declaration) in TEST_ONLY_FILES {
+        let text = std::fs::read_to_string(src.join(parent)).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        let at = lines
+            .iter()
+            .position(|l| l.trim() == declaration)
+            .unwrap_or_else(|| panic!("{parent} declares no `{declaration}` for {file}"));
+        assert!(
+            lines[at.saturating_sub(3)..at]
+                .iter()
+                .any(|l| l.trim() == "#[cfg(test)]"),
+            "{file} is skipped as test-only, but {parent} does not declare it #[cfg(test)]"
+        );
+    }
+
+    // Act
+    let sites = opener_sites(&src);
+
+    // Assert: no opener outside the allowlist, and no stale allowlist entry
+    let unrouted: Vec<String> = sites
+        .iter()
+        .filter(|(file, function, _)| {
+            !OPENER_ALLOWLIST
+                .iter()
+                .any(|(f, func, _)| f == file && func == function)
+        })
+        .map(|(file, function, line)| format!("{file}:{line} ({function})"))
+        .collect();
+    assert!(
+        unrouted.is_empty(),
+        "transactions opened outside Catalog::commit / Catalog::read:\n{}",
+        unrouted.join("\n")
+    );
+    for (file, function, reason) in OPENER_ALLOWLIST {
+        assert!(
+            sites
+                .iter()
+                .any(|(f, func, _)| f == file && func == function),
+            "stale allowlist entry {file} ({function}): {reason}"
+        );
+    }
+}
+
+/// One store write the autocommit case drives.
+type Writer<'a> = Box<dyn Fn() -> kaban_core::Result<()> + 'a>;
+
+#[test]
+fn every_autocommit_writer_commits_once_through_the_catalog() {
+    use kaban_core::{
+        IngestStore, JobId, Producer, SchemaStore, SessionEdit, SessionEditKind, SessionStore,
+        TypeDef, WorkspaceId,
+    };
+    use kaban_store_sqlite::ProducerRunOutcome;
+
+    // Arrange: a store with the test class, which records one change set per commit
+    let s = Scratch::new("kaban-t5-commit", "autocommit-writers");
+    let store = SqliteStore::open(&s.db(), &s.keys()).unwrap();
+    let observed = catalog_testing::install_edge_sediment_class(&store);
+    let workspace = WorkspaceId::new("default");
+    let label = TypeDef {
+        kind: "label".into(),
+        name: "Widget".into(),
+        ns: None,
+        description: "a widget".into(),
+        from_kinds: vec![],
+        to_kinds: vec![],
+        directed: true,
+        props_schema: None,
+        builtin: false,
+        declaration: kaban_core::TypeDeclaration::default(),
+    };
+    let edit = SessionEdit {
+        session_id: "s1".into(),
+        kind: SessionEditKind::Edit,
+        path: "p".into(),
+        ts: 10,
+    };
+    let writers: Vec<(&str, Writer<'_>)> = vec![
+        (
+            "set_index_meta",
+            Box::new(|| store.set_index_meta("t5c", "1")),
+        ),
+        (
+            "record_producer_run",
+            Box::new(|| store.record_producer_run(Producer::Gazetteer, 1, ProducerRunOutcome::Ok)),
+        ),
+        (
+            "schema_extend",
+            Box::new(|| store.schema_extend(label.clone()).map(drop)),
+        ),
+        (
+            "session_edit_record",
+            Box::new(|| store.session_edit_record(&edit)),
+        ),
+        (
+            "session_edits_prune",
+            Box::new(|| store.session_edits_prune(20, 10).map(drop)),
+        ),
+        (
+            "jobs_prune",
+            Box::new(|| store.jobs_prune(&workspace, 0, 10).map(drop)),
+        ),
+        (
+            "job_mark_stale",
+            Box::new(|| {
+                store
+                    .job_mark_stale(&JobId::from_digest(&[7; 32]), &workspace)
+                    .map(drop)
+            }),
+        ),
+    ];
+
+    for (name, write) in writers {
+        // Act
+        let before = observed.change_sets().len();
+        write().unwrap_or_else(|e| panic!("{name}: {e:?}"));
+
+        // Assert: one commit through the catalog, which staged the class once
+        assert_eq!(
+            observed.change_sets().len(),
+            before + 1,
+            "{name} did not commit through Catalog::commit"
+        );
+    }
+}

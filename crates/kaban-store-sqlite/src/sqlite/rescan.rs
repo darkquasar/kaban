@@ -61,96 +61,95 @@ impl SqliteStore {
         judge: &mut dyn RescanJudge,
     ) -> Result<RescanReport> {
         let mut conn = self.write();
-        let tx = conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .sql()?;
-        let limit = i64::try_from(batch.max(1)).unwrap_or(i64::MAX);
-        // the batch reads under the write lock, so a row judged here cannot be rewritten by
-        // another writer before its action lands, and every change after this batch's own
-        // writes is another writer's
-        let walk_key = format!("{WALK_SEQ_PREFIX}{policy_version}");
-        let certified = meta(&tx, IndexMeta::POLICY_HASH)?.as_deref() == Some(policy_version);
-        // a run (re)decides at its start, when the certification it follows names another
-        // policy now, or when its walk's own watermark is gone (another run of this policy
-        // completed and certified it)
-        let restart = match at {
-            RescanCursor::Start => true,
-            RescanCursor::Changes => !certified,
-            RescanCursor::Nodes(_) | RescanCursor::Edges(_) => meta(&tx, &walk_key)?.is_none(),
-            RescanCursor::Done => false,
-        };
-        let at = if restart {
-            let head = crate::changelog::head(&tx)?;
-            if certified && log_intact(&tx, head)? {
-                RescanCursor::Changes
-            } else {
-                // the walk watermark is the policy's, shared by every walk of it: a restart
-                // keeps an older walk's position (or the head, if it is past the head), so it
-                // never skips a change that walk has not judged yet
-                let kept = meta(&tx, &walk_key)?
-                    .and_then(|v| v.parse::<u64>().ok())
-                    .map_or(head, |w| w.min(head));
-                set_meta(&tx, &walk_key, kept)?;
-                RescanCursor::Nodes(0)
-            }
-        } else {
-            at
-        };
-        // the watermark this run reads and moves: the certified one in a run of the certified
-        // policy, the walk's own while it walks
-        let watermark_key = if at == RescanCursor::Changes {
-            IndexMeta::POLICY_SCAN_SEQ
-        } else {
-            walk_key.as_str()
-        };
-        let mut report = RescanReport {
-            cursor: at,
-            ..RescanReport::default()
-        };
-        if at == RescanCursor::Done {
-            return Ok(report);
-        }
-        let now = now_iso();
-        let log = catch_up(&tx, watermark_key, limit, judge, &now, &mut report)?;
-        let walk_done = match at {
-            RescanCursor::Nodes(after) => {
-                match walk_nodes(&tx, after, limit, judge, &now, &mut report)? {
-                    Some(last) => {
-                        report.cursor = RescanCursor::Nodes(last);
-                        false
-                    }
-                    None => walk_edges_from(&tx, 0, limit, judge, &mut report)?,
-                }
-            }
-            RescanCursor::Edges(after) => walk_edges_from(&tx, after, limit, judge, &mut report)?,
-            RescanCursor::Start | RescanCursor::Changes | RescanCursor::Done => true,
-        };
-        let watermark = match log {
-            CatchUp::CaughtUp => crate::changelog::head(&tx)?,
-            CatchUp::Behind { last } => last,
-        };
-        if walk_done && at != RescanCursor::Changes {
-            // the walk is complete: the database-wide marker (MD-19) and the watermark it
-            // certifies are recorded together in this same transaction; an equal value is
-            // left untouched
-            tx.execute(
-                "INSERT INTO index_meta(key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value WHERE value <> excluded.value",
-                params![IndexMeta::POLICY_HASH, policy_version],
-            ).sql()?;
-            set_meta(&tx, IndexMeta::POLICY_SCAN_SEQ, watermark)?;
-            tx.execute("DELETE FROM index_meta WHERE key = ?1", [&walk_key])
-                .sql()?;
-        } else {
-            set_meta(&tx, watermark_key, watermark)?;
-        }
-        if walk_done {
-            report.cursor = match log {
-                CatchUp::CaughtUp => RescanCursor::Done,
-                CatchUp::Behind { .. } => RescanCursor::Changes,
+        self.catalog.commit(&mut conn, kaban_core::Durability::Normal, |txn| {
+            let tx = txn.conn();
+            let limit = i64::try_from(batch.max(1)).unwrap_or(i64::MAX);
+            // the batch reads under the write lock, so a row judged here cannot be rewritten by
+            // another writer before its action lands, and every change after this batch's own
+            // writes is another writer's
+            let walk_key = format!("{WALK_SEQ_PREFIX}{policy_version}");
+            let certified = meta(tx, IndexMeta::POLICY_HASH)?.as_deref() == Some(policy_version);
+            // a run (re)decides at its start, when the certification it follows names another
+            // policy now, or when its walk's own watermark is gone (another run of this policy
+            // completed and certified it)
+            let restart = match at {
+                RescanCursor::Start => true,
+                RescanCursor::Changes => !certified,
+                RescanCursor::Nodes(_) | RescanCursor::Edges(_) => meta(tx, &walk_key)?.is_none(),
+                RescanCursor::Done => false,
             };
-        }
-        tx.commit().sql()?;
-        Ok(report)
+            let at = if restart {
+                let head = crate::changelog::head(tx)?;
+                if certified && log_intact(tx, head)? {
+                    RescanCursor::Changes
+                } else {
+                    // the walk watermark is the policy's, shared by every walk of it: a restart
+                    // keeps an older walk's position (or the head, if it is past the head), so it
+                    // never skips a change that walk has not judged yet
+                    let kept = meta(tx, &walk_key)?
+                        .and_then(|v| v.parse::<u64>().ok())
+                        .map_or(head, |w| w.min(head));
+                    set_meta(tx, &walk_key, kept)?;
+                    RescanCursor::Nodes(0)
+                }
+            } else {
+                at
+            };
+            // the watermark this run reads and moves: the certified one in a run of the certified
+            // policy, the walk's own while it walks
+            let watermark_key = if at == RescanCursor::Changes {
+                IndexMeta::POLICY_SCAN_SEQ
+            } else {
+                walk_key.as_str()
+            };
+            let mut report = RescanReport {
+                cursor: at,
+                ..RescanReport::default()
+            };
+            if at == RescanCursor::Done {
+                return Ok(report);
+            }
+            let now = now_iso();
+            let log = catch_up(tx, watermark_key, limit, judge, &now, &mut report)?;
+            let walk_done = match at {
+                RescanCursor::Nodes(after) => {
+                    match walk_nodes(tx, after, limit, judge, &now, &mut report)? {
+                        Some(last) => {
+                            report.cursor = RescanCursor::Nodes(last);
+                            false
+                        }
+                        None => walk_edges_from(tx, 0, limit, judge, &mut report)?,
+                    }
+                }
+                RescanCursor::Edges(after) => walk_edges_from(tx, after, limit, judge, &mut report)?,
+                RescanCursor::Start | RescanCursor::Changes | RescanCursor::Done => true,
+            };
+            let watermark = match log {
+                CatchUp::CaughtUp => crate::changelog::head(tx)?,
+                CatchUp::Behind { last } => last,
+            };
+            if walk_done && at != RescanCursor::Changes {
+                // the walk is complete: the database-wide marker (MD-19) and the watermark it
+                // certifies are recorded together in this same transaction; an equal value is
+                // left untouched
+                tx.execute(
+                    "INSERT INTO index_meta(key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value WHERE value <> excluded.value",
+                    params![IndexMeta::POLICY_HASH, policy_version],
+                ).sql()?;
+                set_meta(tx, IndexMeta::POLICY_SCAN_SEQ, watermark)?;
+                tx.execute("DELETE FROM index_meta WHERE key = ?1", [&walk_key])
+                    .sql()?;
+            } else {
+                set_meta(tx, watermark_key, watermark)?;
+            }
+            if walk_done {
+                report.cursor = match log {
+                    CatchUp::CaughtUp => RescanCursor::Done,
+                    CatchUp::Behind { .. } => RescanCursor::Changes,
+                };
+            }
+            Ok(report)
+        })
     }
 }
 

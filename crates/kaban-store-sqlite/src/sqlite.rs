@@ -19,7 +19,7 @@ mod nodes;
 mod rescan;
 
 use crate::anchors;
-use crate::catalog::{Catalog, capture};
+use crate::catalog::Catalog;
 use crate::changelog;
 use crate::connection::{CgRead, LiveGuard, NoFileBacking, prepare_database_files};
 use crate::connection::{database_file_modes, open_existing_as_is};
@@ -34,7 +34,6 @@ use crate::session;
 use crate::sql_error::SqlResultExt;
 use crate::tantivy::{self, Attach, Attached, SharedConnection};
 use crate::traverse;
-use kaban_core::Result;
 use kaban_core::{
     ActorId, BatchReport, Change, ChangeLogStore, Edge, FailurePatch, ForgetMode, ForgetOutcome,
     Hit, IndexMeta, IngestStore, Lease, LeaseStore, Lifecycle, LinkReq, MemoryStore, Method,
@@ -48,6 +47,7 @@ use kaban_core::{
     DatabaseFileModes, DocumentIndexSummary, FailedDocumentRow, MaintenanceOutcome,
     StoreCapabilities,
 };
+use kaban_core::{Durability, Result};
 use kaban_policy::{AuditSigner, KeySigner};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
@@ -293,6 +293,7 @@ impl SqliteStore {
         self.projector = Some(crate::projector_thread::ProjectorThread::start(
             index,
             Arc::clone(&self.conn),
+            self.catalog.outside_commits(),
             &db,
         )?);
         Ok(self)
@@ -385,11 +386,9 @@ impl SqliteStore {
         self.ontology = ontology;
         {
             let mut conn = self.write();
-            let tx = conn
-                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-                .sql()?;
-            crate::ident::deploy(&tx, &self.ontology, false)?;
-            tx.commit().sql()?;
+            self.catalog.commit(&mut conn, Durability::Normal, |txn| {
+                crate::ident::deploy(txn.conn(), &self.ontology, false)
+            })?;
         }
         // a redeployed projection is another binding (SS-09): the index is rebuilt under it
         // here (the write's own publication never rebuilds), then ranks with the new weights
@@ -434,9 +433,9 @@ impl SqliteStore {
     /// # Errors
     /// As [`Self::open`].
     pub fn open_as(path: &Path, keys_dir: &Path, actor: &ActorId) -> Result<Self> {
-        let (conn, db_id, report, live) = Self::open_file(path, actor, Self::CAPABILITIES)?;
-        let signer = Self::project_key(&conn, keys_dir, &db_id)?;
-        let catalog = Catalog::open(path, &conn)?;
+        let (mut conn, db_id, report, live) = Self::open_file(path, actor, Self::CAPABILITIES)?;
+        let catalog = Catalog::open(path, &mut conn)?;
+        let signer = Self::project_key(&catalog, &mut conn, keys_dir, &db_id)?;
         Self::assemble(
             conn,
             catalog,
@@ -445,7 +444,7 @@ impl SqliteStore {
             report,
             Some(live),
             Some(path),
-        )?
+        )
         .with_index_attached(Attach::Own)
     }
     /// The database's HMAC key: created with the project, required ever after. A project
@@ -454,7 +453,12 @@ impl SqliteStore {
     /// error. Until the record exists the key is opened or created (`O_EXCL`; concurrent first
     /// openers reuse the winner's), and the record is written only once the key file is in
     /// place, so a crash or a racing opener in between never leaves a project without a key.
-    fn project_key(conn: &Connection, keys_dir: &Path, db_id: &str) -> Result<KeySigner> {
+    fn project_key(
+        catalog: &Catalog,
+        conn: &mut Connection,
+        keys_dir: &Path,
+        db_id: &str,
+    ) -> Result<KeySigner> {
         let recorded: bool = conn
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM index_meta WHERE key = ?1)",
@@ -468,11 +472,14 @@ impl SqliteStore {
         }
         let signer = KeySigner::open_or_create(keys_dir, db_id)
             .map_err(|e| StoreError::Audit(Box::new(e)))?;
-        conn.execute(
-            "INSERT OR IGNORE INTO index_meta(key, value) VALUES (?1, 'created')",
-            [KEY_RECORDED],
-        )
-        .sql()?;
+        catalog.commit(conn, Durability::Normal, |txn| {
+            txn.conn()
+                .execute(
+                    "INSERT OR IGNORE INTO index_meta(key, value) VALUES (?1, 'created')",
+                    [KEY_RECORDED],
+                )
+                .sql()
+        })?;
         Ok(signer)
     }
     /// Open for verification: the key must already exist (never created here) and the
@@ -485,7 +492,7 @@ impl SqliteStore {
     /// when the key is missing or malformed or the database carries no `db_id` (nothing to
     /// verify).
     pub fn open_existing_key(path: &Path, keys_dir: &Path, actor: &ActorId) -> Result<Self> {
-        let (conn, live) = prepare_database_files(path, Self::CAPABILITIES)?;
+        let (mut conn, live) = prepare_database_files(path, Self::CAPABILITIES)?;
         configure_connection(&conn)?;
         crate::stamp::bind(&conn, actor)?;
         let version = Migrator::check(&conn)?;
@@ -507,7 +514,7 @@ impl SqliteStore {
         let signer = KeySigner::open_existing(keys_dir, &db_id)
             .map_err(|e| StoreError::Audit(Box::new(e)))?;
         let report = MigrationReport::unchanged(version);
-        let catalog = Catalog::open_as_is(path, &conn)?;
+        let catalog = Catalog::open_as_is(path, &mut conn)?;
         Self::assemble(
             conn,
             catalog,
@@ -516,7 +523,7 @@ impl SqliteStore {
             report,
             Some(live),
             Some(path),
-        )?
+        )
         .with_index_attached(Attach::Existing)
     }
     /// Open for `kaban doctor` (core-spec §7; M4-19): the database is read as it is, so the
@@ -550,7 +557,7 @@ impl SqliteStore {
         capabilities: StoreCapabilities,
     ) -> Result<(Self, DatabaseFileModes)> {
         let modes = database_file_modes(path)?;
-        let (conn, live) = open_existing_as_is(path, capabilities)?;
+        let (mut conn, live) = open_existing_as_is(path, capabilities)?;
         configure_connection(&conn)?;
         crate::stamp::bind(&conn, actor)?;
         let version = Migrator::check(&conn)?;
@@ -572,7 +579,7 @@ impl SqliteStore {
         let signer = KeySigner::open_existing(keys_dir, &db_id)
             .map_err(|e| StoreError::Audit(Box::new(e)))?;
         let report = MigrationReport::unchanged(version);
-        let catalog = Catalog::open_as_is(path, &conn)?;
+        let catalog = Catalog::open_as_is(path, &mut conn)?;
         let store = Self::assemble(
             conn,
             catalog,
@@ -581,7 +588,7 @@ impl SqliteStore {
             report,
             Some(live),
             Some(path),
-        )?
+        )
         .with_index_attached(Attach::Existing)?;
         Ok((store, modes))
     }
@@ -616,7 +623,7 @@ impl SqliteStore {
         actor: &ActorId,
         capabilities: StoreCapabilities,
     ) -> Result<Self> {
-        let (conn, live) = open_existing_as_is(path, capabilities)?;
+        let (mut conn, live) = open_existing_as_is(path, capabilities)?;
         configure_connection(&conn)?;
         crate::stamp::bind(&conn, actor)?;
         conn.busy_timeout(HOOK_BUSY_TIMEOUT).sql()?;
@@ -641,7 +648,7 @@ impl SqliteStore {
         let signer = KeySigner::open_existing(keys_dir, &db_id)
             .map_err(|e| StoreError::Audit(Box::new(e)))?;
         let report = MigrationReport::unchanged(version);
-        let catalog = Catalog::open_as_is(path, &conn)?;
+        let catalog = Catalog::open_as_is(path, &mut conn)?;
         let mut store = Self::assemble(
             conn,
             catalog,
@@ -650,7 +657,7 @@ impl SqliteStore {
             report,
             Some(live),
             Some(path),
-        )?;
+        );
         // a hook's write publishes its own page within its watchdog's share, or leaves the
         // receipt pending (spec 05 SS-10)
         store.publish_budget = tantivy::HOOK_PUBLISH_BUDGET;
@@ -661,10 +668,10 @@ impl SqliteStore {
     /// # Errors
     /// SQLite open/DDL errors.
     pub fn open_with_signer(path: &Path, signer: Arc<dyn AuditSigner>) -> Result<Self> {
-        let (conn, db_id, report, live) =
+        let (mut conn, db_id, report, live) =
             Self::open_file(path, &ActorId::default(), Self::CAPABILITIES)?;
-        let catalog = Catalog::open(path, &conn)?;
-        Self::assemble(conn, catalog, db_id, signer, report, Some(live), Some(path))?
+        let catalog = Catalog::open(path, &mut conn)?;
+        Self::assemble(conn, catalog, db_id, signer, report, Some(live), Some(path))
             .with_index_attached(Attach::Own)
     }
     /// An in-memory store with an ephemeral random HMAC key (tests); the writer is `local`.
@@ -682,8 +689,8 @@ impl SqliteStore {
         let mut conn = Connection::open_in_memory().sql()?;
         let (db_id, report) = Self::init_schema(&mut conn, actor)?;
         let signer = KeySigner::ephemeral().map_err(|e| StoreError::Audit(Box::new(e)))?;
-        let catalog = Catalog::in_memory(&conn)?;
-        Self::assemble(conn, catalog, db_id, Arc::new(signer), report, None, None)?
+        let catalog = Catalog::in_memory(&mut conn)?;
+        Self::assemble(conn, catalog, db_id, Arc::new(signer), report, None, None)
             .with_index_attached(Attach::Own)
     }
     /// Open the database file with owner-only permissions (core-spec S5; see
@@ -708,10 +715,7 @@ impl SqliteStore {
         Ok((conn, db_id, report, live))
     }
     /// The store over a configured connection whose writer is bound, admitted and published,
-    /// and its catalog: the connection gets the catalog's capture triggers here.
-    ///
-    /// # Errors
-    /// SQLite errors of the capture triggers.
+    /// and its catalog, attached to that connection.
     pub(crate) fn assemble(
         conn: Connection,
         catalog: Catalog,
@@ -720,9 +724,8 @@ impl SqliteStore {
         migration: MigrationReport,
         live: Option<LiveGuard>,
         path: Option<&Path>,
-    ) -> Result<Self> {
-        capture::install(&conn)?;
-        Ok(Self {
+    ) -> Self {
+        Self {
             conn: Arc::new(Mutex::new(conn)),
             catalog,
             db_id,
@@ -739,7 +742,7 @@ impl SqliteStore {
             receipt: std::sync::atomic::AtomicU64::new(0),
             path: path.map(Path::to_path_buf),
             _live: live,
-        })
+        }
     }
     /// The assembled store with its text index (spec 05 OWN-M; `crate::tantivy`): a file
     /// store's index beside the database, admitted or rebuilt as `attach` says, then caught
@@ -1304,7 +1307,7 @@ impl SchemaStore for SqliteStore {
                 "a description is required",
             ));
         }
-        let conn = self.lock();
+        let mut conn = self.lock();
         for k in def.from_kinds.iter().chain(def.to_kinds.iter()) {
             if !Self::kind_exists(&conn, k)? {
                 return Err(StoreError::UnknownKind(k.clone()));
@@ -1318,7 +1321,10 @@ impl SchemaStore for SqliteStore {
             name: ontology::normalise_stored(&def.name),
             ..def
         };
-        if !ontology::extend(&conn, &def, &now_iso())? {
+        let extended = self.catalog.commit(&mut conn, Durability::Normal, |txn| {
+            ontology::extend(txn.conn(), &def, &now_iso())
+        })?;
+        if !extended {
             return Err(StoreError::Builtin(def.name));
         }
         Ok(def)
@@ -1327,8 +1333,10 @@ impl SchemaStore for SqliteStore {
 
 impl SessionStore for SqliteStore {
     fn session_edit_record(&self, edit: &SessionEdit) -> Result<()> {
-        let conn = self.lock();
-        session::record(&conn, edit)
+        let mut conn = self.lock();
+        self.catalog.commit(&mut conn, Durability::Normal, |txn| {
+            session::record(txn.conn(), edit)
+        })
     }
     fn session_edits(
         &self,
@@ -1341,8 +1349,10 @@ impl SessionStore for SqliteStore {
         session::list(&conn, session_id, kind, after_ts, limit)
     }
     fn session_edits_prune(&self, older_than_ts: i64, limit: usize) -> Result<u64> {
-        let conn = self.lock();
-        session::prune(&conn, older_than_ts, limit)
+        let mut conn = self.lock();
+        self.catalog.commit(&mut conn, Durability::Normal, |txn| {
+            session::prune(txn.conn(), older_than_ts, limit)
+        })
     }
     fn pending_failures(&self, q: &PendingFailuresQuery) -> Result<Vec<Node>> {
         let conn = self.lock();
@@ -1355,19 +1365,17 @@ impl SessionStore for SqliteStore {
         ctx: &WriteCtx,
     ) -> Result<Node> {
         let mut conn = self.write();
-        let tx = conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .sql()?;
-        let node = session::update_failure_props(
-            &tx,
-            id.as_str(),
-            ctx.workspace_id.as_str(),
-            patch,
-            &now_iso(),
-        )?;
-        changelog::record_terminal(&tx, ctx)?;
-        tx.commit().sql()?;
-        Ok(node)
+        self.catalog.commit(&mut conn, ctx.durability, |txn| {
+            let node = session::update_failure_props(
+                txn.conn(),
+                id.as_str(),
+                ctx.workspace_id.as_str(),
+                patch,
+                &now_iso(),
+            )?;
+            changelog::record_terminal(txn.conn(), ctx)?;
+            Ok(node)
+        })
     }
 }
 
@@ -1382,21 +1390,15 @@ impl ChangeLogStore for SqliteStore {
     fn changes_ack(&self, consumer: &str, upto: u64, fence: u64) -> Result<()> {
         let mut conn = self.write();
         // a write path: BEGIN IMMEDIATE like every other (N4, prep brief risk 7)
-        let tx = conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .sql()?;
-        changelog::ack(&tx, consumer, upto, fence)?;
-        tx.commit().sql()?;
-        Ok(())
+        self.catalog.commit(&mut conn, Durability::Normal, |txn| {
+            changelog::ack(txn.conn(), consumer, upto, fence)
+        })
     }
     fn changes_register(&self, consumer: &str, fence: u64) -> Result<u64> {
         let mut conn = self.write();
-        let tx = conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .sql()?;
-        let cursor = changelog::register(&tx, consumer, fence)?;
-        tx.commit().sql()?;
-        Ok(cursor)
+        self.catalog.commit(&mut conn, Durability::Normal, |txn| {
+            changelog::register(txn.conn(), consumer, fence)
+        })
     }
     fn changes_lag_by_consumer(&self) -> Result<std::collections::BTreeMap<String, u64>> {
         changelog::lag_by_consumer(&self.lock())
@@ -1405,12 +1407,9 @@ impl ChangeLogStore for SqliteStore {
         // the prune floor is the slowest cursor: this process's own publication first
         self.publish_before_read();
         let mut conn = self.write();
-        let tx = conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .sql()?;
-        let deleted = changelog::prune(&tx, tail)?;
-        tx.commit().sql()?;
-        Ok(deleted)
+        self.catalog.commit(&mut conn, Durability::Normal, |txn| {
+            changelog::prune(txn.conn(), tail)
+        })
     }
 }
 
@@ -1419,30 +1418,21 @@ impl LeaseStore for SqliteStore {
         let mut conn = self.write();
         // one BEGIN IMMEDIATE per acquisition (core-spec F15): the fence increment and the
         // read-back are atomic against every other process
-        let tx = conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .sql()?;
-        let lease = leases::acquire(&tx, name, owner, ttl_s)?;
-        tx.commit().sql()?;
-        Ok(lease)
+        self.catalog.commit(&mut conn, Durability::Normal, |txn| {
+            leases::acquire(txn.conn(), name, owner, ttl_s)
+        })
     }
     fn lease_renew(&self, lease: &Lease, ttl_s: u32) -> Result<()> {
         let mut conn = self.write();
-        let tx = conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .sql()?;
-        leases::renew(&tx, lease, ttl_s)?;
-        tx.commit().sql()?;
-        Ok(())
+        self.catalog.commit(&mut conn, Durability::Normal, |txn| {
+            leases::renew(txn.conn(), lease, ttl_s)
+        })
     }
     fn lease_release(&self, lease: &Lease) -> Result<()> {
         let mut conn = self.write();
-        let tx = conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .sql()?;
-        leases::release(&tx, lease)?;
-        tx.commit().sql()?;
-        Ok(())
+        self.catalog.commit(&mut conn, Durability::Normal, |txn| {
+            leases::release(txn.conn(), lease)
+        })
     }
 }
 
@@ -1469,12 +1459,9 @@ impl IngestStore for SqliteStore {
     }
     fn job_claim(&self, request: kaban_core::JobClaimRequest) -> Result<Option<kaban_core::Lease>> {
         let mut conn = self.write();
-        let tx = conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .sql()?;
-        let lease = crate::jobs::claim(&tx, request)?;
-        tx.commit().sql()?;
-        Ok(lease)
+        self.catalog.commit(&mut conn, Durability::Normal, |txn| {
+            crate::jobs::claim(txn.conn(), request)
+        })
     }
     fn job_holder(
         &self,
@@ -1484,19 +1471,21 @@ impl IngestStore for SqliteStore {
         renew: bool,
     ) -> Result<()> {
         let mut conn = self.write();
-        let tx = conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .sql()?;
-        let row = crate::jobs::get(&tx, job, workspace)?
-            .ok_or_else(|| StoreError::NotFound("job_revoked".into()))?;
-        crate::jobs::holder(&tx, &row, fence, renew)?;
-        tx.commit().sql()
+        self.catalog.commit(&mut conn, Durability::Normal, |txn| {
+            let row = crate::jobs::get(txn.conn(), job, workspace)?
+                .ok_or_else(|| StoreError::NotFound("job_revoked".into()))?;
+            crate::jobs::holder(txn.conn(), &row, fence, renew)
+        })
     }
     fn jobs_exhausted(&self, workspace: &WorkspaceId, attempts: u32) -> Result<u64> {
         crate::jobs::exhausted(&self.lock(), workspace, attempts)
     }
     fn jobs_prune(&self, workspace: &WorkspaceId, now: i64, limit: u32) -> Result<u32> {
-        crate::jobs::prune(&self.lock(), workspace, now, limit)
+        // the leases and the jobs go in one commit (atomic since spec 11 T5)
+        let mut conn = self.lock();
+        self.catalog.commit(&mut conn, Durability::Normal, |txn| {
+            crate::jobs::prune(txn.conn(), workspace, now, limit)
+        })
     }
     fn job_submit(
         &self,
@@ -1511,24 +1500,18 @@ impl IngestStore for SqliteStore {
     }
     fn job_open(&self, job: &kaban_core::IngestJob) -> Result<kaban_core::IngestJob> {
         let mut conn = self.write();
-        let tx = conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .sql()?;
-        let row = crate::jobs::open(&tx, job)?;
-        tx.commit().sql()?;
-        Ok(row)
+        self.catalog.commit(&mut conn, Durability::Normal, |txn| {
+            crate::jobs::open(txn.conn(), job)
+        })
     }
     fn job_open_checked(
         &self,
         request: kaban_core::JobOpenRequest,
     ) -> Result<kaban_core::IngestJob> {
         let mut conn = self.write();
-        let tx = conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .sql()?;
-        let row = crate::jobs::open_checked(&tx, &request)?;
-        tx.commit().sql()?;
-        Ok(row)
+        self.catalog.commit(&mut conn, Durability::Normal, |txn| {
+            crate::jobs::open_checked(txn.conn(), &request)
+        })
     }
     fn job_get(
         &self,
@@ -1538,7 +1521,10 @@ impl IngestStore for SqliteStore {
         crate::jobs::get(&self.lock(), job, workspace)
     }
     fn job_mark_stale(&self, job: &kaban_core::JobId, workspace: &WorkspaceId) -> Result<bool> {
-        crate::jobs::mark_stale(&self.lock(), job, workspace)
+        let mut conn = self.lock();
+        self.catalog.commit(&mut conn, Durability::Normal, |txn| {
+            crate::jobs::mark_stale(txn.conn(), job, workspace)
+        })
     }
     fn artifact_diagnostics(
         &self,
@@ -1698,12 +1684,14 @@ impl IngestStore for SqliteStore {
         Ok(summary)
     }
     fn set_index_meta(&self, key: &str, value: &str) -> Result<()> {
-        let conn = self.lock();
-        conn.execute(
-            "INSERT INTO index_meta(key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            params![key, value],
-        ).sql()?;
-        Ok(())
+        let mut conn = self.lock();
+        self.catalog.commit(&mut conn, Durability::Normal, |txn| {
+            txn.conn().execute(
+                "INSERT INTO index_meta(key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                params![key, value],
+            ).sql()?;
+            Ok(())
+        })
     }
 
     // C4.2 doctor checks (M4-19): see `doctor.rs`
@@ -1727,7 +1715,8 @@ impl IngestStore for SqliteStore {
     }
     fn vacuum(&self) -> Result<MaintenanceOutcome> {
         let conn = self.lock();
-        doctor::vacuum(&conn)
+        // VACUUM cannot run in a transaction: the catalog's one admitted exception
+        self.catalog.outside_commit(|| doctor::vacuum(&conn))
     }
     /// The explicit maintenance pass (spec 05 SS-03): the database hygiene (the TRUNCATE
     /// checkpoint). The store's own adapter merges its segments as it commits, so it has

@@ -36,48 +36,46 @@ impl SqliteStore {
         ctx: &WriteCtx,
     ) -> Result<RememberOutcome> {
         let mut conn = self.write();
-        let tx = conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .sql()?;
-        let workspace_id = n
-            .workspace_id
-            .as_deref()
-            .unwrap_or(WorkspaceId::DEFAULT)
-            .to_owned();
-        let tenant = self.tenant(&workspace_id);
-        // an undeclared kind is refused before anything is written (PC-14: no discovery)
-        let stored_kind = Self::place(&tx, &n.kind)?;
-        let hash = content_hash(&workspace_id, &stored_kind, &n.text);
-        // dedup is on active rows only (OD-16): a tombstone is never returned as `existing`
-        if let Some(existing) = Self::active_by_hash(&tx, &hash)? {
-            // m2 N5: a retry still attaches its links (and refs); metadata differences are
-            // reported, not applied
-            let links_created = Self::attach_links(&tx, &tenant, &existing.id, links)?;
-            Self::attach_refs(&tx, &tenant, &existing.id, refs)?;
-            let fields_ignored = ignored_fields(&n, &existing);
-            changelog::record_terminal(&tx, ctx)?;
-            tx.commit().sql()?;
-            return Ok(RememberOutcome::Existing {
-                node: existing,
-                links_created,
-                fields_ignored,
-            });
-        }
-        let id = Self::insert_node(&tx, &tenant, &stored_kind, &n, &hash)?;
-        // a new node has no edges yet, so every distinct link is an insert; the API reports
-        // the distinct count (review R1-8)
-        Self::attach_links(&tx, &tenant, &id, links)?;
-        Self::attach_refs(&tx, &tenant, &id, refs)?;
-        let node = tx
-            .query_row(
-                &format!("SELECT {NODE_COLS} FROM node WHERE id=?"),
-                [&id],
-                row_node,
-            )
-            .sql()?;
-        changelog::record_terminal(&tx, ctx)?;
-        tx.commit().sql()?;
-        Ok(RememberOutcome::Created(node))
+        self.catalog.commit(&mut conn, ctx.durability, |txn| {
+            let tx = txn.conn();
+            let workspace_id = n
+                .workspace_id
+                .as_deref()
+                .unwrap_or(WorkspaceId::DEFAULT)
+                .to_owned();
+            let tenant = self.tenant(&workspace_id);
+            // an undeclared kind is refused before anything is written (PC-14: no discovery)
+            let stored_kind = Self::place(tx, &n.kind)?;
+            let hash = content_hash(&workspace_id, &stored_kind, &n.text);
+            // dedup is on active rows only (OD-16): a tombstone is never returned as `existing`
+            if let Some(existing) = Self::active_by_hash(tx, &hash)? {
+                // m2 N5: a retry still attaches its links (and refs); metadata differences are
+                // reported, not applied
+                let links_created = Self::attach_links(tx, &tenant, &existing.id, links)?;
+                Self::attach_refs(tx, &tenant, &existing.id, refs)?;
+                let fields_ignored = ignored_fields(&n, &existing);
+                changelog::record_terminal(tx, ctx)?;
+                return Ok(RememberOutcome::Existing {
+                    node: existing,
+                    links_created,
+                    fields_ignored,
+                });
+            }
+            let id = Self::insert_node(tx, &tenant, &stored_kind, &n, &hash)?;
+            // a new node has no edges yet, so every distinct link is an insert; the API reports
+            // the distinct count (review R1-8)
+            Self::attach_links(tx, &tenant, &id, links)?;
+            Self::attach_refs(tx, &tenant, &id, refs)?;
+            let node = tx
+                .query_row(
+                    &format!("SELECT {NODE_COLS} FROM node WHERE id=?"),
+                    [&id],
+                    row_node,
+                )
+                .sql()?;
+            changelog::record_terminal(tx, ctx)?;
+            Ok(RememberOutcome::Created(node))
+        })
     }
     /// Create the inline links of a `remember` around node `id`; returns how many edges were
     /// actually inserted (a link that already existed, or a duplicate inside `links`, is
