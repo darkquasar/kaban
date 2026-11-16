@@ -428,17 +428,20 @@ impl Layer {
     }
 }
 
-/// Seal `r` as a new layer over `parent`, the base and layers this layer extends (sediment in
-/// `parent` is not part of the chain the layer is opened on). The layer stores the net change
-/// per edge, node and fact, every list sorted, plus the cumulative union of touched nodes over
-/// the chain.
+/// Seal `r` as a new layer over the chain of `parent`: its base and layers. The sediment of
+/// `parent` is not part of that chain and is ignored, so a caller may seal a batch from a loaded
+/// view that still holds the same batch (or any other) as sediment. The layer stores the net
+/// change per edge, node and fact, every list sorted, plus the cumulative union of touched nodes
+/// over the chain.
 ///
 /// A node removal in `r` is a deletion barrier ([`crate::NodeOp`]): the layer materialises a
 /// tombstone for every edge of the node (both directions, presence not applied) and every fact
-/// of the node that survives in `parent`, before `r`'s own edge and fact records apply. So a
-/// later re-add never shows data from before the removal.
+/// of the node that survives in the chain, before `r`'s own edge and fact records apply. So a
+/// later re-add never shows data from before the removal. The id domain is the chain's domain
+/// widened by `r`.
 #[must_use]
 pub fn seal(parent: &View<'_>, r: &Records) -> Vec<u8> {
+    let parent = parent.chain();
     let mut net = Net::default();
     let removed: BTreeSet<u32> = r
         .nodes

@@ -89,6 +89,18 @@ impl<'a> View<'a> {
         self.raw_reads.load(Ordering::SeqCst)
     }
 
+    /// The base and layers of this view without its sediment: the chain a layer sealed over
+    /// this view is opened on (writer paths).
+    pub(crate) fn chain(&self) -> View<'a> {
+        View {
+            base: self.base,
+            layers: self.layers,
+            sediment: Sediment::empty(),
+            union: self.union,
+            raw_reads: AtomicU64::new(0),
+        }
+    }
+
     /// The sealed layers, oldest first.
     pub(crate) fn layers(&self) -> &'a [Layer] {
         self.layers

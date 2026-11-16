@@ -57,7 +57,8 @@ pub(crate) struct Sediment<'a> {
     facts: Vec<SedFact<'a>>,
     /// Whether any node is removed in the sediment.
     barriers: bool,
-    _lease: BudgetLease,
+    /// The charge of the vectors; `None` for the empty sediment of a chain-only reader.
+    _lease: Option<BudgetLease>,
 }
 
 /// Total length of one stream over every batch.
@@ -187,8 +188,20 @@ impl<'a> Sediment<'a> {
             inc,
             facts,
             barriers,
-            _lease: charge.into_lease(),
+            _lease: Some(charge.into_lease()),
         })
+    }
+
+    /// No sediment: nothing is allocated or charged.
+    pub(crate) fn empty() -> Self {
+        Self {
+            nodes: Vec::new(),
+            out: Vec::new(),
+            inc: Vec::new(),
+            facts: Vec::new(),
+            barriers: false,
+            _lease: None,
+        }
     }
 
     /// The newest membership change of `id` in the sediment.
