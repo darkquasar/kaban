@@ -32,13 +32,17 @@ pub struct IndexRows {
 }
 
 impl IndexRows {
-    /// Open the read-only connection on the database file at `db`.
+    /// Open the read-only connection on the database file at `db`. A file no store of this
+    /// process holds is probed first, as every open is (spec 11 CMP-01): an older or foreign
+    /// database is refused before SQLite reads it.
     ///
     /// # Errors
-    /// The file cannot be opened read-only (missing, unreadable, not a database), or the
-    /// database is bound to a body dictionary this binary does not ship (`StoreError::Migration`,
-    /// spec 05 SS-17).
+    /// `StoreError::SchemaUnsupported` or `StoreError::NotAKabanProject` for a file the probe
+    /// refuses, `StoreError::FileMode` for a symlink or non-regular file, the file cannot be
+    /// opened read-only (missing, unreadable, not a database), or the database is bound to a
+    /// body dictionary this binary does not ship (`StoreError::Migration`, spec 05 SS-17).
     pub fn open(db: &Path) -> Result<Self> {
+        crate::connection::probe_unregistered(db)?;
         let flags = OpenFlags::SQLITE_OPEN_READ_ONLY
             | OpenFlags::SQLITE_OPEN_URI
             | OpenFlags::SQLITE_OPEN_NO_MUTEX;

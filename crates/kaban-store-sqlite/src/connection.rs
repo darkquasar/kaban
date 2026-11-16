@@ -700,6 +700,29 @@ fn probe_version(path: &Path, meta: Option<&std::fs::Metadata>) -> Result<()> {
     }
 }
 
+/// The format check of a read-only connection opened apart from a store
+/// ([`IndexRows::open`](crate::index_rows::IndexRows::open), a public entry point; spec 11
+/// CMP-01): a file a store or hold of this process already holds was probed when it was
+/// registered and is not probed again (no descriptor may be opened on it); any other file is
+/// probed, under the registry lock like an open, before SQLite reads it, so an older or
+/// foreign database is refused before a read-only connection can create its `-shm` or
+/// replay its `-wal`.
+///
+/// # Errors
+/// `StoreError::FileMode` when the path is a symlink or not a regular file; the refusals of
+/// [`probe_version`].
+pub(crate) fn probe_unregistered(path: &Path) -> Result<()> {
+    let live = live_stores();
+    let meta = regular_file_metadata(path).map_err(StoreError::FileMode)?;
+    if meta
+        .as_ref()
+        .is_some_and(|meta| live.iter().any(|entry| entry.ident == file_ident(meta)))
+    {
+        return Ok(());
+    }
+    probe_version(path, meta.as_ref())
+}
+
 /// Whether `e` is an SQLite failure that an immutable read of a main file can meet while
 /// another process checkpoints into it (a torn read): busy or locked, an I/O error, "not a
 /// database" or corrupt. Everything else, a refusal included, is the file's state.
