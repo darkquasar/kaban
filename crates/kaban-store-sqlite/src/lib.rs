@@ -12,6 +12,12 @@
 
 mod anchors;
 mod body_codec;
+// T5 Step 1: the catalog's signatures with empty bodies; Step 3 wires them into the store
+#[expect(
+    dead_code,
+    reason = "T5 Step 3 routes the store's writers and readers through the catalog"
+)]
+mod catalog;
 mod changelog;
 mod connection;
 mod doctor;
@@ -34,6 +40,11 @@ mod tantivy;
 mod traverse;
 
 pub use connection::{ExclusiveHold, exclusive_hold};
+
+/// Test access to the catalog for the integration suites; not a supported interface.
+#[cfg(feature = "failpoints")]
+#[doc(hidden)]
+pub use catalog::testing as catalog_testing;
 
 /// Register `kaban_body(x)` on a connection of the caller's own: the decoded text of a body
 /// column (spec 05 OWN-M: every body is a tagged `BLOB`; a `SELECT text FROM node` reads bytes,

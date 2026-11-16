@@ -29,6 +29,7 @@ mod sink;
 mod store;
 pub mod text_index;
 mod validator;
+mod view;
 
 pub use artifact::{
     ArtifactDiagnostics, ArtifactKey, ArtifactSource, BuiltinProducer, DerivedArtifact,
@@ -53,9 +54,11 @@ pub use model::{
     RescanReport, TraverseDirection, TraverseQuery, TraverseResult, TypeDeclaration, TypeDef,
     WorkspaceFilter, WriteBatch,
 };
+// view names and commit ids (spec 11 T5)
 pub use validator::{
     Error as PropsError, Keyword, Schema, SchemaError, ValidatorLimits, first_error_text, validate,
 };
+pub use view::{CommitSha, InvalidCommitSha, InvalidViewName, ViewName};
 // hook session scratch, briefing and failure pairing (core-plan C4.3/C4.4; M4-12 to M4-17)
 pub use model::{
     EvidenceRun, FailurePatch, PendingFailuresQuery, PendingScope, SessionEdit, SessionEditKind,
