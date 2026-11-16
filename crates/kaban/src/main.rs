@@ -469,6 +469,9 @@ fn assemble_api_with(
 /// 4; help and version exit 0 (M4-2). Nothing is returned to Rust's top-level reporter, which
 /// would print a whole error chain (review RM-1).
 fn main() -> ExitCode {
+    // links kaban-vtab's startup constructor, which installed the SQLite allocator adapter
+    // before main; the call does nothing at run time
+    kaban_vtab::bootstrap::ensure_linked();
     // first: a panic anywhere below prints one fixed line, never its payload (RD3-2); the
     // `hook` subcommand replaces it with its own line as before
     #[cfg(feature = "ingest")]

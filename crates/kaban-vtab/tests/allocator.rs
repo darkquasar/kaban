@@ -8,7 +8,7 @@ mod fresh;
 use std::sync::{Arc, Barrier};
 use std::thread;
 
-use fresh::{Block, configured_allocator, fresh_test, initialize_sqlite, installed_runtime};
+use fresh::{Block, fresh_test, initialize_sqlite, installed_runtime};
 use kaban_core::query_budget::QueryBudget;
 use kaban_vtab::test_hooks;
 use rusqlite::Connection;
@@ -68,10 +68,10 @@ fresh_test! {
 #[cfg(not(feature = "process-bootstrap"))]
 fresh_test! {
     fn the_wrapper_keeps_the_original_roundup_and_size_contract() {
-        let original = configured_allocator().unwrap();
+        let original = fresh::configured_allocator().unwrap();
         // SAFETY: fresh process, single thread, no SQLite entry yet.
         unsafe { kaban_vtab::initialize_for_embedding() }.unwrap();
-        let wrapper = configured_allocator().unwrap();
+        let wrapper = fresh::configured_allocator().unwrap();
         let (malloc, free, size, roundup) = (
             wrapper.xMalloc.unwrap(),
             wrapper.xFree.unwrap(),

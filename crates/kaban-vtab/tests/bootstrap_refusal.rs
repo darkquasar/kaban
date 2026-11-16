@@ -28,9 +28,10 @@ static EARLY_SQLITE_USER: extern "C" fn() = early_sqlite_user;
 
 #[test]
 fn a_hook_using_sqlite_before_the_bootstrap_aborts_startup_by_name() {
-    if fresh::is_child(CASE) {
-        panic!("startup was not refused: the test body ran");
-    }
+    assert!(
+        !fresh::is_child(CASE),
+        "startup was not refused: the test body ran"
+    );
     let output = fresh::spawn_child(CASE);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(

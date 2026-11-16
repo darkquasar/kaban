@@ -167,7 +167,7 @@ pub(crate) fn inject_panic() {
 
 /// The budget of this thread's active scope. Never panics: a slot that is gone (thread teardown)
 /// or borrowed reads as unscoped.
-fn current_budget() -> Option<QueryBudget> {
+pub(crate) fn current_budget() -> Option<QueryBudget> {
     CURRENT
         .try_with(|slot| slot.try_borrow().ok().and_then(|budget| budget.clone()))
         .ok()

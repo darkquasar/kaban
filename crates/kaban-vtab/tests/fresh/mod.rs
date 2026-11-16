@@ -3,13 +3,13 @@
 //! SQLite's allocator can be configured once per process, before SQLite initializes, so every
 //! case runs in its own child process: the test re-executes its own binary with `--exact <name>`
 //! and an environment marker naming the case, and the child runs the body.
-#![allow(dead_code)] // each test binary uses a subset
+#![allow(dead_code, unused_macros, unused_imports)] // each test binary uses a subset
 #![allow(clippy::panic)] // a child past its time limit fails the case
 
 use std::ffi::c_void;
 use std::process::{Command, Output, Stdio};
-use std::time::{Duration, Instant};
 use std::ptr;
+use std::time::{Duration, Instant};
 
 use kaban_vtab::{Runtime, initialize_for_embedding};
 use rusqlite::ffi;

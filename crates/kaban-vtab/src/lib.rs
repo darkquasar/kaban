@@ -2,9 +2,14 @@
 //!
 //! A [`TableFunction`] is plain safe Rust: it declares its columns, costs candidate plans and
 //! produces rows. [`register`] installs it on a connection as an eponymous-only virtual table.
+//! A [`RequestScope`] charges a request's SQLite allocations and table-function scans to one
+//! `QueryBudget`; scans outside a scope are refused. The allocator adapter behind it is
+//! installed once per process, by [`initialize_for_embedding`] or, with the `process-bootstrap`
+//! feature, by the `bootstrap` module's startup constructor before `main`.
+//!
 //! This crate is the workspace's sole `unsafe` exception (see `docs/developer/SAFETY.md`): the
-//! `unsafe impl` blocks that meet rusqlite's virtual-table contracts live in the private
-//! `adapter` module.
+//! virtual-table glue, the allocator adapter, the embedding initializer, the request scope's
+//! connection settings and the startup constructor.
 
 #![deny(unsafe_op_in_unsafe_fn)]
 

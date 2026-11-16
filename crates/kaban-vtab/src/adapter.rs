@@ -13,6 +13,7 @@ use rusqlite::vtab::{
 };
 use rusqlite::{Error, ffi};
 
+use crate::allocator;
 use crate::{BoundArg, ColumnDef, ColumnKind, OrderTerm, Plan, PlanInput, Value};
 
 /// The rows a table function produces: each item is one row holding one value per result
@@ -29,7 +30,8 @@ pub trait TableFunction: Send + Sync + 'static {
     /// Cost one candidate plan whose required arguments are all bound.
     fn plan(&self, input: &PlanInput<'_>) -> Plan;
     /// Produce the rows for one scan. `args` holds one value per argument column in declaration
-    /// order ([`Value::Null`] when an optional argument is unbound).
+    /// order ([`Value::Null`] when an optional argument is unbound). `budget` is the budget of
+    /// the request scope the scan runs in: reserve through it before allocating working memory.
     ///
     /// # Errors
     /// An [`FnError`] refuses the scan; SQLite reports it as the statement's error.
@@ -60,8 +62,9 @@ const MAX_ARGUMENTS: usize = 31;
 
 /// Register `f` on `conn` as an eponymous-only virtual table named [`TableFunction::name`].
 ///
-/// Each scan hands [`TableFunction::rows`] a fresh, unbounded [`QueryBudget`] created by the
-/// adapter; request-scoped budgets replace it once the budget scope exists.
+/// Each scan hands [`TableFunction::rows`] the [`QueryBudget`] of the request scope active on the
+/// scanning thread (see [`crate::RequestScope`]); a scan with no active scope is refused with an
+/// error naming the function.
 ///
 /// # Errors
 /// A rusqlite error when `f` declares more than 31 argument columns, its name is not a valid C
@@ -415,8 +418,12 @@ unsafe impl VTabCursor for FunctionCursor<'_> {
             .collect();
         self.stop();
         self.rowid = 0;
-        // Placeholder until the budget scope exists: an unbounded budget per scan.
-        let budget = QueryBudget::new(u64::MAX, None);
+        // A scan runs only inside a request budget scope: it is charged to that scope's budget.
+        let Some(budget) = allocator::current_budget() else {
+            return Err(Error::ModuleError(format!(
+                "{name}: table function scanned outside a request budget scope"
+            )));
+        };
         let function: &dyn TableFunction = &*table.function;
         let rows = contain(name, "rows", || function.rows(&self.args, &budget))?
             .map_err(|error| refusal(&error))?;

@@ -68,7 +68,10 @@ fn bounded(conn: &rusqlite::Connection) -> rusqlite::Error {
     let outcome = single(conn, ENDLESS);
     let _ = done_tx.send(()); // the watchdog may have fired and gone
     let fired = watchdog.join().unwrap();
-    assert!(!fired, "the statement ran {WATCHDOG:?} uninterrupted: {outcome:?}");
+    assert!(
+        !fired,
+        "the statement ran {WATCHDOG:?} uninterrupted: {outcome:?}"
+    );
     outcome.unwrap_err()
 }
 
