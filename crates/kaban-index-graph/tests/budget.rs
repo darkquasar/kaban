@@ -13,9 +13,8 @@ use std::time::{Duration, Instant};
 
 use kaban_core::query_budget::QueryBudget;
 use kaban_index_graph::{
-    Attr, BUDGET_CHECK_INTERVAL, Base, Caps, Direction, EdgeOp, FactOp, GraphError, Layer,
-    LocalId, NodeOp, OpKind, Records, RelId, RelSelection, RowCap, View, build_base, expand, seal,
-    wcc,
+    Attr, BUDGET_CHECK_INTERVAL, Base, Caps, Direction, EdgeOp, FactOp, GraphError, Layer, LocalId,
+    NodeOp, OpKind, Records, RelId, RelSelection, RowCap, View, build_base, expand, seal, wcc,
 };
 use oracle::view;
 use tantivy::directory::OwnedBytes;
@@ -412,7 +411,11 @@ fn a_memory_limit_below_the_working_set_refuses_and_releases() {
     let small = QueryBudget::new(16 * 1024, None);
     let got = expand(&v, &[LocalId(0)], &all, Direction::Out, CAPS, &small);
     assert!(got.as_ref().is_err_and(is_memory), "{:?}", got.map(|_| ()));
-    assert_eq!(small.live_bytes(), 0, "nothing stays charged after a refusal");
+    assert_eq!(
+        small.live_bytes(),
+        0,
+        "nothing stays charged after a refusal"
+    );
     let got = wcc(&v, &all, RowCap(100_000), &small);
     assert!(got.as_ref().is_err_and(is_memory), "{:?}", got.map(|_| ()));
     assert_eq!(small.live_bytes(), 0);
@@ -444,7 +447,7 @@ fn cancellation_stops_a_low_output_traversal_within_the_interval() {
     let all = RelSelection::All;
     let free = QueryBudget::new(u64::MAX, None);
     let none = expand(&v, &[LocalId(0)], &all, Direction::Out, CAPS, &free).unwrap();
-    assert!(none.nodes.is_empty());
+    assert_eq!(none.nodes.len(), 0);
     drop(none);
     let start = v.raw_reads() + 3 * BUDGET_CHECK_INTERVAL;
     let (seen, end, rows, err) = cancel_mid_scan(&v, start, |b| {
@@ -454,16 +457,42 @@ fn cancellation_stops_a_low_output_traversal_within_the_interval() {
         }
     });
     assert_eq!(rows, 0);
-    assert!(matches!(err, GraphError::BudgetExceeded { limit: "cancelled", .. }), "{err:?}");
-    assert!(end <= seen + BUDGET_CHECK_INTERVAL, "expand: {} past", end - seen);
+    assert!(
+        matches!(
+            err,
+            GraphError::BudgetExceeded {
+                limit: "cancelled",
+                ..
+            }
+        ),
+        "{err:?}"
+    );
+    assert!(
+        end <= seen + BUDGET_CHECK_INTERVAL,
+        "expand: {} past",
+        end - seen
+    );
 
     let start = v.raw_reads() + 3 * BUDGET_CHECK_INTERVAL;
     let (seen, end, _, err) = cancel_mid_scan(&v, start, |b| match wcc(&v, &all, RowCap(10), b) {
         Ok(r) => (r.len(), None),
         Err(e) => (0, Some(e)),
     });
-    assert!(matches!(err, GraphError::BudgetExceeded { limit: "cancelled", .. }), "{err:?}");
-    assert!(end <= seen + BUDGET_CHECK_INTERVAL, "wcc: {} past", end - seen);
+    assert!(
+        matches!(
+            err,
+            GraphError::BudgetExceeded {
+                limit: "cancelled",
+                ..
+            }
+        ),
+        "{err:?}"
+    );
+    assert!(
+        end <= seen + BUDGET_CHECK_INTERVAL,
+        "wcc: {} past",
+        end - seen
+    );
 }
 
 #[test]
@@ -472,7 +501,17 @@ fn an_expired_budget_stops_a_traversal_before_it_reads() {
     let v = view(None, &[], &rs);
     let expired = QueryBudget::new(u64::MAX, Some(Duration::ZERO));
     std::thread::sleep(Duration::from_millis(2));
-    let got = expand(&v, &[LocalId(0)], &RelSelection::All, Direction::Out, CAPS, &expired);
-    assert!(matches!(got, Err(GraphError::BudgetExceeded { limit: "time", .. })));
+    let got = expand(
+        &v,
+        &[LocalId(0)],
+        &RelSelection::All,
+        Direction::Out,
+        CAPS,
+        &expired,
+    );
+    assert!(matches!(
+        got,
+        Err(GraphError::BudgetExceeded { limit: "time", .. })
+    ));
     assert_eq!(v.raw_reads(), 0);
 }

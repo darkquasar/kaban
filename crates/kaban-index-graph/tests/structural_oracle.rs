@@ -12,8 +12,8 @@ use std::collections::BTreeSet;
 use kaban_index_graph::{
     Attr, Base, Caps, Direction, EdgeOp, GraphError, Layer, LocalId, NodeOp, OpKind, Reached,
     Records, RelId, RelSelection, RowCap, View, build_base, closure, common_neighbours, degree,
-    expand, meet, reachable, refuse_not_planned, reverse_closure, seal, shortest_path,
-    topo_order, wcc,
+    expand, meet, reachable, refuse_not_planned, reverse_closure, seal, shortest_path, topo_order,
+    wcc,
 };
 use oracle::structural::{Expected, Graph};
 use oracle::{Fixture, IDS, Rng, budget, chain, view};
@@ -139,7 +139,11 @@ fn gra08_every_node_once_at_its_first_depth_and_every_edge_once() {
     assert_eq!(got.nodes, vec![(LocalId(2), 1), (LocalId(3), 2)]);
     let mut edges = got.edges.clone();
     edges.sort_unstable();
-    assert_eq!(edges, ids(&[(1, 0, 2), (2, 0, 3), (3, 0, 2)]), "each edge once");
+    assert_eq!(
+        edges,
+        ids(&[(1, 0, 2), (2, 0, 3), (3, 0, 2)]),
+        "each edge once"
+    );
     assert!(!got.truncated);
     let via_closure = closure(&v, &[LocalId(1)], &RelSelection::All, caps(3, 100), &b).unwrap();
     assert_eq!(*via_closure, *got);
@@ -165,7 +169,9 @@ fn gra08_every_node_once_at_its_first_depth_and_every_edge_once() {
     assert_eq!(both.edges.len(), 3, "{:?}", both.edges);
     assert_eq!(
         edge_set(&both),
-        ids(&[(1, 0, 2), (2, 0, 3), (3, 0, 2)]).into_iter().collect()
+        ids(&[(1, 0, 2), (2, 0, 3), (3, 0, 2)])
+            .into_iter()
+            .collect()
     );
 }
 
@@ -178,7 +184,10 @@ fn assert_reached(got: &Reached, want: &Expected, dir: Direction, ctx: &str) {
     let set = edge_set(got);
     assert_eq!(set.len(), got.edges.len(), "{ctx}: an edge reported twice");
     if want.truncated {
-        assert!(set.is_subset(&want.edges), "{ctx}: edges outside the result");
+        assert!(
+            set.is_subset(&want.edges),
+            "{ctx}: edges outside the result"
+        );
         for &(n, d) in &got.nodes {
             let parent = |m: LocalId| want.depth.get(&m.0) == Some(&(d - 1));
             let linked = set.iter().any(|&(s, _, t)| match dir {
@@ -255,7 +264,11 @@ fn reachable_and_shortest_path_equal_the_oracle() {
                     assert_eq!(got, g.reachable(s, d, c.depth, c.rows), "{ctx}: reachable");
                     let path = shortest_path(&v, src, dst, rels, c, &b).unwrap();
                     let want = g.shortest_path(s, d, c.depth, c.rows);
-                    assert_eq!(path.as_ref().map(|p| p.value().clone()), want, "{ctx}: path");
+                    assert_eq!(
+                        path.as_ref().map(|p| p.value().clone()),
+                        want,
+                        "{ctx}: path"
+                    );
                 }
             }
         }
@@ -315,11 +328,7 @@ fn degree_and_common_neighbours_equal_the_oracle() {
             }
             for (a, c) in pairs(&mut rng, 40) {
                 let got = common_neighbours(&v, LocalId(a), LocalId(c), rels, &b).unwrap();
-                assert_eq!(
-                    *got,
-                    g.common(a, c),
-                    "seed {seed} {rels:?} common {a} {c}"
-                );
+                assert_eq!(*got, g.common(a, c), "seed {seed} {rels:?} common {a} {c}");
             }
         }
     }
@@ -407,7 +416,10 @@ fn topo_order_is_valid_on_acyclic_views_and_names_a_cycle_otherwise() {
         totals.0 += o;
         totals.1 += c;
     }
-    assert!(totals.0 > 50 && totals.1 > 50, "both outcomes exercised: {totals:?}");
+    assert!(
+        totals.0 > 50 && totals.1 > 50,
+        "both outcomes exercised: {totals:?}"
+    );
 }
 
 #[test]
@@ -418,8 +430,17 @@ fn a_self_loop_is_a_cycle() {
         ..Records::default()
     }];
     let v = view(None, &[], &rs);
-    let got = topo_order(&v, &[LocalId(1)], &RelSelection::All, caps(3, 10), &budget());
-    assert_eq!(got.map(|o| o.value().clone()), Err(GraphError::Cycle { node: LocalId(2) }));
+    let got = topo_order(
+        &v,
+        &[LocalId(1)],
+        &RelSelection::All,
+        caps(3, 10),
+        &budget(),
+    );
+    assert_eq!(
+        got.map(|o| o.value().clone()),
+        Err(GraphError::Cycle { node: LocalId(2) })
+    );
 }
 
 #[test]
@@ -457,7 +478,9 @@ fn unplanned_functions_are_refused_by_name() {
     for name in ["", "Louvain", "pagerank", "betweenness "] {
         assert_eq!(
             refuse_not_planned(name),
-            GraphError::NotPlanned { function: "unknown" },
+            GraphError::NotPlanned {
+                function: "unknown"
+            },
             "{name:?}"
         );
     }
@@ -486,9 +509,16 @@ fn a_missing_cap_is_refused_before_any_neighbour_access() {
     let all = RelSelection::All;
     let src = [LocalId(0)];
     let (a, z) = (LocalId(0), LocalId(7));
-    for (bad, limit) in [(caps(0, 10), "depth"), (caps(3, 0), "rows"), (caps(0, 0), "depth")] {
+    for (bad, limit) in [
+        (caps(0, 10), "depth"),
+        (caps(3, 0), "rows"),
+        (caps(0, 0), "depth"),
+    ] {
         let before = v.raw_reads();
-        assert!(is_missing(&expand(&v, &src, &all, Direction::Both, bad, &b), limit));
+        assert!(is_missing(
+            &expand(&v, &src, &all, Direction::Both, bad, &b),
+            limit
+        ));
         assert!(is_missing(&closure(&v, &src, &all, bad, &b), limit));
         assert!(is_missing(&reverse_closure(&v, &src, &all, bad, &b), limit));
         assert!(is_missing(&reachable(&v, a, z, &all, bad, &b), limit));
@@ -532,28 +562,42 @@ fn a_hub_cannot_widen_a_capped_expand() {
     // Exactly the cap without more nodes is not a cut.
     let rs = hub_view_records(200);
     let v = view(None, &[], &rs);
-    let got = expand(&v, &[LocalId(0)], &RelSelection::All, Direction::Out, caps(2, 200), &b)
-        .unwrap();
+    let got = expand(
+        &v,
+        &[LocalId(0)],
+        &RelSelection::All,
+        Direction::Out,
+        caps(2, 200),
+        &b,
+    )
+    .unwrap();
     assert_eq!(got.nodes.len(), 200);
     assert!(!got.truncated);
 }
 
 #[test]
 fn structural_functions_hold_no_budget_after_returning_unless_the_result_lives() {
-    let f = chain(2, |r| r);
-    let v: View<'_> = f.view();
+    let fixture = chain(2, |r| r);
+    let graph: View<'_> = fixture.view();
     let b = kaban_core::query_budget::QueryBudget::new(u64::MAX, None);
-    let r = expand(&v, &[LocalId(3)], &RelSelection::All, Direction::Both, caps(3, 50), &b)
-        .unwrap();
-    assert!(!r.nodes.is_empty());
+    let r = expand(
+        &graph,
+        &[LocalId(3)],
+        &RelSelection::All,
+        Direction::Both,
+        caps(3, 50),
+        &b,
+    )
+    .unwrap();
+    assert_ne!(r.nodes.len(), 0);
     assert_eq!(b.live_bytes(), r.bytes(), "only the result stays charged");
     assert!(r.bytes() > 0);
     drop(r);
     assert_eq!(b.live_bytes(), 0);
-    let w = wcc(&v, &RelSelection::All, RowCap(1000), &b).unwrap();
+    let w = wcc(&graph, &RelSelection::All, RowCap(1000), &b).unwrap();
     assert_eq!(b.live_bytes(), w.bytes());
     let (rows, hold) = w.into_parts();
-    assert!(!rows.is_empty());
+    assert_ne!(rows.len(), 0);
     drop(rows);
     assert!(b.live_bytes() > 0, "the hold keeps the charge");
     drop(hold);

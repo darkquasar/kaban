@@ -79,7 +79,11 @@ fn the_newest_record_of_a_fact_wins() {
     let layers = vec![open_layer(layer)];
     let v = view::<Records>(Some(&base), &layers, &[]);
     assert_eq!(get(&v, 1, 0), Some(&b"layer"[..]));
-    assert_eq!(get(&v, 1, 1), Some(&b"kept"[..]), "other keys are untouched");
+    assert_eq!(
+        get(&v, 1, 1),
+        Some(&b"kept"[..]),
+        "other keys are untouched"
+    );
     let sediment = [
         Records {
             facts: vec![fact(1, 0, b"first")],
@@ -112,7 +116,11 @@ fn a_fact_removal_hides_older_values_until_set_again() {
     let v = view::<Records>(Some(&base), &layers, &[]);
     assert_eq!(get(&v, 1, 0), None);
     assert_eq!(get(&v, 1, 1), Some(&b"kept"[..]));
-    assert_eq!(get(&v, 2, 0), Some(&b"two"[..]), "removing an unset key changes nothing");
+    assert_eq!(
+        get(&v, 2, 0),
+        Some(&b"two"[..]),
+        "removing an unset key changes nothing"
+    );
     let again = [Records {
         facts: vec![fact(1, 0, b"again")],
         ..Records::default()
@@ -141,10 +149,18 @@ fn a_node_removal_deletes_its_facts_in_every_source() {
     let sed = [cycle2.clone(), drop3.clone(), back3.clone()];
     let v = view(Some(&base), &[], &sed);
     let check = |v: &View<'_>, ctx: &str| {
-        assert_eq!(get(v, 2, 0), None, "{ctx}: removed then re-added in one batch");
+        assert_eq!(
+            get(v, 2, 0),
+            None,
+            "{ctx}: removed then re-added in one batch"
+        );
         assert_eq!(get(v, 3, 0), None, "{ctx}: the old fact stays deleted");
         assert_eq!(get(v, 3, 1), Some(&b"new"[..]), "{ctx}: the new fact shows");
-        assert_eq!(get(v, 4, 9), Some(&b"four"[..]), "{ctx}: other nodes keep theirs");
+        assert_eq!(
+            get(v, 4, 9),
+            Some(&b"four"[..]),
+            "{ctx}: other nodes keep theirs"
+        );
     };
     check(&v, "sediment");
     // Sealed into layers.

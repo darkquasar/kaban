@@ -203,7 +203,11 @@ fn set_functions_collapse_equal_neighbour_runs() {
     let shared = common_neighbours(&v, LocalId(1), LocalId(4), &all, &b).unwrap();
     assert_eq!(*shared, vec![LocalId(1)]);
     let shared = common_neighbours(&v, LocalId(1), LocalId(5), &all, &b).unwrap();
-    assert_eq!(*shared, vec![LocalId(1)], "1 once despite five edges between 1 and 5");
+    assert_eq!(
+        *shared,
+        vec![LocalId(1)],
+        "1 once despite five edges between 1 and 5"
+    );
     let shared = common_neighbours(&v, LocalId(1), LocalId(1), &all, &b).unwrap();
     assert_eq!(
         *shared,
@@ -213,7 +217,10 @@ fn set_functions_collapse_equal_neighbour_runs() {
     // Degree counts edges, not neighbours: the self-loop counts once per direction.
     assert_eq!(degree(&v, LocalId(1), &all, Direction::Out, &b).unwrap(), 7);
     assert_eq!(degree(&v, LocalId(1), &all, Direction::In, &b).unwrap(), 3);
-    assert_eq!(degree(&v, LocalId(1), &all, Direction::Both, &b).unwrap(), 10);
+    assert_eq!(
+        degree(&v, LocalId(1), &all, Direction::Both, &b).unwrap(),
+        10
+    );
     let r1 = RelSelection::only(vec![RelId(1)]);
     assert_eq!(degree(&v, LocalId(1), &r1, Direction::Out, &b).unwrap(), 1);
 }

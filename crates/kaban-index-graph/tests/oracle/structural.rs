@@ -221,7 +221,12 @@ impl Graph {
 
     /// The set a topological order covers: the present `nodes` and what they reach within the
     /// caps; `None` when the rows cap cuts it.
-    pub(crate) fn topo_set(&self, nodes: &[LocalId], depth: u8, rows: u32) -> Option<BTreeSet<u32>> {
+    pub(crate) fn topo_set(
+        &self,
+        nodes: &[LocalId],
+        depth: u8,
+        rows: u32,
+    ) -> Option<BTreeSet<u32>> {
         let e = self.expand(nodes, Direction::Out, depth, rows);
         if e.truncated {
             return None;
