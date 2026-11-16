@@ -4,9 +4,11 @@
 //! `schema_type`. Recall's text seeds come from the store's own text index
 //! (the Tantivy adapter it opens, admits or rebuilds at open and projects every commit into,
 //! spec 05 SS-07 and OWN-M; `tantivy`); an open that attaches none has no text index and
-//! refuses what needs one. Every open runs the forward-only [`Migrator`] (core-spec §7):
-//! pre-migration backup, one write lock for the whole run with a savepoint per migration,
-//! refuse-newer; migration 0013 needs the database to itself.
+//! refuses what needs one. Every file open first probes the main file's schema version
+//! without writing (spec 11 CMP-01): a fresh project is created at the one supported version
+//! ([`LATEST_SCHEMA_VERSION`]), a project at that version opens, and a file at any other
+//! version is refused untouched.
+//! There is no migration and no backup (OD-1).
 
 mod anchors;
 mod body_codec;
