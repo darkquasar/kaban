@@ -14,6 +14,7 @@ use std::marker::PhantomData;
 use std::ops::Deref;
 use std::path::Path;
 use std::ptr;
+use std::time::{Duration, Instant};
 
 use kaban_core::query_budget::{BudgetExceeded, Limit, QueryBudget};
 use rusqlite::{Connection, ErrorCode, OpenFlags, ffi};
@@ -89,13 +90,18 @@ impl RequestScope {
         })
     }
 
-    /// Classify a SQLite error raised inside this request: `SQLITE_NOMEM` or `SQLITE_INTERRUPT`
-    /// become [`QueryError::Limit`] only when this budget actually exceeded a limit; every other
-    /// error, and a genuine out-of-memory or interrupt, is kept as [`QueryError::Sqlite`].
+    /// Classify a SQLite error raised inside this request: `SQLITE_NOMEM`, `SQLITE_INTERRUPT` or
+    /// `SQLITE_BUSY` become [`QueryError::Limit`] only when this budget actually exceeded a limit
+    /// (the busy handler gives up a lock wait once it has); every other error, and a genuine
+    /// out-of-memory, interrupt or busy, is kept as [`QueryError::Sqlite`].
     #[must_use]
     pub fn translate(&self, error: rusqlite::Error) -> QueryError {
         match error.sqlite_error_code() {
-            Some(ErrorCode::OutOfMemory | ErrorCode::OperationInterrupted) => {
+            Some(
+                ErrorCode::OutOfMemory
+                | ErrorCode::OperationInterrupted
+                | ErrorCode::DatabaseBusy,
+            ) => {
                 match self.budget.check() {
                     Err(exceeded) => QueryError::Limit(exceeded),
                     Ok(()) => QueryError::Sqlite(error),
@@ -105,15 +111,36 @@ impl RequestScope {
         }
     }
 
-    /// Lookaside off, worker threads off, and a progress handler that interrupts a statement
-    /// once the budget's deadline passed or the request was cancelled (or a limit was recorded).
+    /// Lookaside off, worker threads off, a progress handler that interrupts a statement once
+    /// the budget's deadline passed or the request was cancelled (or a limit was recorded), and a
+    /// busy handler in place of rusqlite's default 5 s busy timeout: a lock wait retries every
+    /// [`BUSY_PAUSE`] only while the budget holds, for at most [`BUSY_WAIT`].
     fn configure(&self, conn: &mut Connection) -> rusqlite::Result<()> {
         disable_lookaside(conn)?;
         conn.set_limit(rusqlite::limits::Limit::SQLITE_LIMIT_WORKER_THREADS, 0)?;
         let budget = self.budget.clone();
-        conn.progress_handler(PROGRESS_STEPS, Some(move || budget.check().is_err()))
+        conn.progress_handler(PROGRESS_STEPS, Some(move || budget.check().is_err()))?;
+        let budget = self.budget.clone();
+        let mut waiting_since = Instant::now();
+        conn.busy_handler(Some(move |attempt: i32| {
+            if attempt == 0 {
+                waiting_since = Instant::now();
+            }
+            if budget.check().is_err() || waiting_since.elapsed() >= BUSY_WAIT {
+                return false;
+            }
+            std::thread::sleep(BUSY_PAUSE);
+            true
+        }))
     }
 }
+
+/// The longest one lock wait lasts under a healthy budget before SQLite reports `SQLITE_BUSY`.
+const BUSY_WAIT: Duration = Duration::from_secs(1);
+
+/// The pause between two attempts to take a lock; it bounds how late a deadline or a
+/// cancellation ends a lock wait.
+const BUSY_PAUSE: Duration = Duration::from_millis(5);
 
 /// Whether `path`, read as SQLite reads a `file:` URI (this build interprets them whatever the
 /// open flags say), carries a `cache` query parameter other than `private`. Names and values are

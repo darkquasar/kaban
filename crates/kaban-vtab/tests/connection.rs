@@ -7,11 +7,12 @@
 mod fresh;
 
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use fresh::{fresh_test, initialize_sqlite, installed_runtime, query_flags};
-use kaban_core::query_budget::QueryBudget;
+use kaban_core::query_budget::{BudgetExceeded, Limit, QueryBudget};
 use kaban_vtab::{QueryError, RequestScope};
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::{Connection, ErrorCode, OpenFlags};
 
 /// A database file of this case, removed first and when the guard drops.
 struct TempDb(PathBuf);
@@ -78,5 +79,80 @@ fresh_test! {
         drop(private);
         drop(scope);
         drop(holder);
+    }
+}
+
+/// A database whose other connection, unscoped, holds an exclusive lock until it drops.
+fn locked(case: &str) -> (TempDb, Connection) {
+    let db = TempDb::new(case);
+    let holder = Connection::open(&db.0).unwrap();
+    holder
+        .execute_batch("CREATE TABLE t(x); INSERT INTO t VALUES (1); BEGIN EXCLUSIVE;")
+        .unwrap();
+    (db, holder)
+}
+
+/// Read `t` through a query connection under `budget` while the lock is held; return the
+/// translated error and how long the statement waited.
+fn blocked_read(runtime: kaban_vtab::Runtime, db: &TempDb, budget: &QueryBudget) -> (QueryError, Duration) {
+    let scope = RequestScope::enter(runtime, budget).unwrap();
+    let conn = scope.open_query_connection(&db.0, query_flags()).unwrap();
+    let started = Instant::now();
+    let error = single(&conn, "SELECT count(*) FROM t").unwrap_err();
+    let waited = started.elapsed();
+    (scope.translate(error), waited)
+}
+
+/// Well under rusqlite's default 5 s busy timeout.
+const PROMPT: Duration = Duration::from_secs(2);
+
+fresh_test! {
+    fn a_deadline_during_a_lock_wait_ends_promptly_as_the_time_limit() {
+        let runtime = installed_runtime();
+        initialize_sqlite();
+        let (db, _holder) = locked("deadline");
+        let budget = QueryBudget::new(u64::MAX, Some(Duration::from_millis(100)));
+        let (error, waited) = blocked_read(runtime, &db, &budget);
+        assert!(waited < PROMPT, "the lock wait outlived the deadline: {waited:?}");
+        assert!(
+            matches!(error, QueryError::Limit(BudgetExceeded { limit: Limit::Time, .. })),
+            "{error:?}"
+        );
+    }
+}
+
+fresh_test! {
+    fn a_cancellation_during_a_lock_wait_ends_promptly_as_cancelled() {
+        let runtime = installed_runtime();
+        initialize_sqlite();
+        let (db, _holder) = locked("cancel");
+        let budget = QueryBudget::new(u64::MAX, None);
+        let canceller = budget.clone();
+        let timer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            canceller.cancel();
+        });
+        let (error, waited) = blocked_read(runtime, &db, &budget);
+        timer.join().unwrap();
+        assert!(waited < PROMPT, "the lock wait outlived the cancellation: {waited:?}");
+        assert!(
+            matches!(error, QueryError::Limit(BudgetExceeded { limit: Limit::Cancelled, .. })),
+            "{error:?}"
+        );
+    }
+}
+
+fresh_test! {
+    fn a_lock_held_past_a_bounded_wait_with_a_healthy_budget_stays_busy() {
+        let runtime = installed_runtime();
+        initialize_sqlite();
+        let (db, _holder) = locked("busy");
+        let budget = QueryBudget::new(u64::MAX, None);
+        let (error, waited) = blocked_read(runtime, &db, &budget);
+        assert!(waited < Duration::from_secs(3), "the bounded lock wait ran {waited:?}");
+        assert!(
+            matches!(&error, QueryError::Sqlite(e) if e.sqlite_error_code() == Some(ErrorCode::DatabaseBusy)),
+            "{error:?}"
+        );
     }
 }
