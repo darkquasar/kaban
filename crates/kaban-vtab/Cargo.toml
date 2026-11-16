@@ -19,6 +19,11 @@ test-hooks = []
 kaban-core.workspace = true
 rusqlite = { workspace = true, features = ["vtab"] }
 
+[dev-dependencies]
+# The tests' fault injection in every build of them, including the workspace run, where feature
+# unification also turns `process-bootstrap` on. Only test builds see it.
+kaban-vtab = { workspace = true, features = ["test-hooks"] }
+
 # The one crate allowed `unsafe` (QRY-07, OD-7; docs/developer/SAFETY.md). It does not inherit the
 # workspace lint table (`[lints] workspace = false` is not valid Cargo, so the key is omitted) and
 # restates every workspace lint except `unsafe_code`.
