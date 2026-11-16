@@ -887,3 +887,139 @@ fn a_database_name_with_uri_characters_is_one_file_to_the_probe_and_the_open() {
         );
     }
 }
+
+/// The schema version recorded in the main file of `db` alone (the refusal probe's read), or
+/// `None` when the main file has none.
+fn main_file_version(db: &std::path::Path) -> Option<String> {
+    let probe = Connection::open_with_flags(
+        format!("{}?mode=ro&immutable=1", crate::connection::sqlite_uri(db)),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+    )
+    .ok()?;
+    probe
+        .query_row(
+            "SELECT value FROM index_meta WHERE key = 'schema_version'",
+            [],
+            |r| r.get(0),
+        )
+        .ok()
+}
+
+/// Whether `err` is the refused publication of a new project's version (spec 11 CMP-01).
+fn is_unpublished(err: &StoreError) -> bool {
+    matches!(
+        err,
+        StoreError::Backend { source }
+            if source
+                .driver()
+                .downcast_ref::<crate::connection::VersionUnpublished>()
+                .is_some()
+    )
+}
+
+/// An empty WAL-mode database at `d` (a fresh project to the probe) and a reader holding a
+/// read transaction on it: while that transaction lasts no checkpoint can copy a frame into
+/// the main file (the reader reads the main file alone).
+fn fresh_file_with_blocking_reader(d: &Scratch) -> Connection {
+    let raw = Connection::open(d.db()).unwrap();
+    let mode: String = raw
+        .query_row("PRAGMA journal_mode = WAL", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(mode, "wal");
+    raw.execute_batch("BEGIN").unwrap();
+    let tables: i64 = raw
+        .query_row("SELECT count(*) FROM sqlite_master", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(tables, 0, "nothing created yet");
+    raw
+}
+
+/// Spec 11 CMP-01: a creation whose TRUNCATE checkpoint cannot complete (a reader blocks it
+/// for the whole publication window) is not reported as success with its version only in
+/// the `-wal`: the open fails. Once the reader is gone (its close folds the log into the main
+/// file) the project reopens as the v14 project it is.
+#[test]
+fn a_creation_whose_checkpoint_stays_blocked_is_not_reported_as_success() {
+    let d = Scratch::new("blocked-publication");
+    let reader = fresh_file_with_blocking_reader(&d);
+    match SqliteStore::open(&d.db(), &d.keys()) {
+        Ok(store) => {
+            let in_main_file = main_file_version(&d.db());
+            drop(store);
+            panic!(
+                "expected error: the creation reported success, main-file version {in_main_file:?}"
+            );
+        }
+        Err(err) => assert!(
+            is_unpublished(&err),
+            "the open failed on its publication: {err:?}"
+        ),
+    }
+    reader.execute_batch("COMMIT").unwrap();
+    drop(reader);
+    let reopened = SqliteStore::open(&d.db(), &d.keys()).unwrap();
+    assert_eq!(
+        main_file_version(&d.db()),
+        Some(crate::LATEST_SCHEMA_VERSION.to_string()),
+        "the version is in the main file"
+    );
+    assert_eq!(
+        reopened.migration().from,
+        crate::LATEST_SCHEMA_VERSION,
+        "reopened as the v14 project, not created again"
+    );
+}
+
+/// Spec 11 CMP-01, two first openers: a second opener that arrives after the creator
+/// committed its schema and seeds but before the creator published them into the main file
+/// (held there by [`super::BEFORE_PUBLICATION`]) does not return with the version only in the
+/// `-wal`: when it succeeds, the main file holds v14. The creator then finishes as well.
+#[test]
+fn a_second_first_opener_never_succeeds_before_the_version_is_in_the_main_file() {
+    let d = Scratch::new("two-first-openers");
+    let (at_publication, creator_paused) = std::sync::mpsc::channel::<()>();
+    let (go_on, resume) = std::sync::mpsc::channel::<()>();
+    let creator = {
+        let (db, keys) = (d.db(), d.keys());
+        std::thread::spawn(move || {
+            super::BEFORE_PUBLICATION.with(|seam| {
+                *seam.borrow_mut() = Some(Box::new(move || {
+                    at_publication.send(()).unwrap();
+                    // the second opener runs now; never wait for it forever
+                    let _ = resume.recv_timeout(std::time::Duration::from_secs(20));
+                }));
+            });
+            SqliteStore::open(&db, &keys).map(|store| store.migration().from)
+        })
+    };
+    creator_paused
+        .recv_timeout(std::time::Duration::from_secs(20))
+        .expect("the creator reached its publication");
+    let second = SqliteStore::open(&d.db(), &d.keys());
+    let in_main_file = main_file_version(&d.db());
+    go_on.send(()).unwrap();
+    let second_from = second
+        .as_ref()
+        .map(|store| store.migration().from)
+        .map_err(ToString::to_string);
+    drop(second);
+    assert_eq!(
+        second_from.as_ref().ok(),
+        Some(&crate::LATEST_SCHEMA_VERSION),
+        "the second opener opened the creator's project: {second_from:?}"
+    );
+    assert_eq!(
+        in_main_file,
+        Some(crate::LATEST_SCHEMA_VERSION.to_string()),
+        "the second opener succeeded before the version was in the main file"
+    );
+    assert_eq!(
+        creator.join().unwrap().unwrap(),
+        0,
+        "the creator created it"
+    );
+    assert_eq!(
+        main_file_version(&d.db()),
+        Some(crate::LATEST_SCHEMA_VERSION.to_string())
+    );
+}

@@ -65,6 +65,14 @@ fn shipped_ontology() -> Arc<Ontology> {
     }))
 }
 
+#[cfg(test)]
+thread_local! {
+    /// A test's pause in an open on this thread after its schema and seeds are committed and
+    /// before they are published into the main file (the two-first-openers interleaving).
+    pub(crate) static BEFORE_PUBLICATION: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 /// How long a hook's connection waits for a lock (M4-6): well inside the host's 2 s budget,
 /// unlike the server's 5 s.
 const HOOK_BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
@@ -471,6 +479,8 @@ impl SqliteStore {
         let version = Migrator::check(&conn)?;
         // the bodies are served only under their own dictionary (SS-17, t7-4)
         crate::body_codec::verify(&conn)?;
+        // a project another opener created after this open's probe: published first (CMP-01)
+        live.publish(&conn)?;
         let db_id: Option<String> = conn
             .query_row(
                 "SELECT value FROM index_meta WHERE key = 'db_id'",
@@ -532,6 +542,8 @@ impl SqliteStore {
         let version = Migrator::check(&conn)?;
         // the bodies are served only under their own dictionary (SS-17, t7-4)
         crate::body_codec::verify(&conn)?;
+        // a project another opener created after this open's probe: published first (CMP-01)
+        live.publish(&conn)?;
         let db_id: Option<String> = conn
             .query_row(
                 "SELECT value FROM index_meta WHERE key = 'db_id'",
@@ -595,6 +607,10 @@ impl SqliteStore {
         let version = Migrator::check(&conn)?;
         // a hook writes bodies: only under the dictionary the database records (SS-17, t7-4)
         crate::body_codec::verify(&conn)?;
+        // a project another opener created after this open's probe: published first
+        // (CMP-01), then the hook's own lock wait again
+        live.publish(&conn)?;
+        conn.busy_timeout(HOOK_BUSY_TIMEOUT).sql()?;
         let db_id: Option<String> = conn
             .query_row(
                 "SELECT value FROM index_meta WHERE key = 'db_id'",
@@ -661,6 +677,14 @@ impl SqliteStore {
     ) -> Result<(Connection, String, MigrationReport, LiveGuard)> {
         let (mut conn, live) = prepare_database_files(path, capabilities)?;
         let (db_id, report) = Self::init_schema(&mut conn, actor)?;
+        #[cfg(test)]
+        if let Some(seam) = BEFORE_PUBLICATION.with(|seam| seam.borrow_mut().take()) {
+            seam();
+        }
+        // a created project, or one another opener created while this one was admitted,
+        // ends with its version in the main file (spec 11 CMP-01): a reader of the main file
+        // alone (the refusal probe) never mistakes it for empty
+        live.publish(&conn)?;
         Ok((conn, db_id, report, live))
     }
     /// The store over a configured connection whose writer is bound.
@@ -743,12 +767,6 @@ impl SqliteStore {
             )
             .sql()?;
         tx.commit().sql()?;
-        if report.from == 0 {
-            // a created project ends with its version in the main file (spec 11 CMP-01): a
-            // reader of the main file alone (the refusal probe) never mistakes it for empty
-            conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
-                .sql()?;
-        }
         Ok((db_id, report))
     }
 

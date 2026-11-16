@@ -185,6 +185,11 @@ struct LiveEntry {
     owner: OwnerLock,
     /// An [`ExclusiveHold`] of this process is live on the file (one at a time).
     exclusive: bool,
+    /// The file's schema version is known to be in its main file (spec 11 CMP-01): the probe
+    /// of whoever registered the entry read it there, or an open of this process has since
+    /// published it ([`LiveGuard::publish`]). `false` for a file that was a fresh project to
+    /// that probe.
+    published: bool,
     /// Of `stores`, how many are openers waiting for another process's exclusive hold
     /// ([`LiftedPresence`]): not using the database. The process's presence mark is lifted
     /// only while every store of the process on the file is such a waiter (T8c review
@@ -221,6 +226,7 @@ impl LiveGuard {
         live: &mut Vec<LiveEntry>,
         ident: FileIdent,
         owner: Option<OwnerLock>,
+        probed: Option<Probed>,
     ) -> Result<Self> {
         match (live.iter_mut().find(|entry| entry.ident == ident), owner) {
             (Some(entry), _) => entry.stores += 1,
@@ -230,6 +236,7 @@ impl LiveGuard {
                 owner,
                 exclusive: false,
                 waiting: 0,
+                published: probed == Some(Probed::Current),
             }),
             (None, None) => {
                 return Err(StoreError::FileMode(std::io::Error::other(
@@ -240,6 +247,100 @@ impl LiveGuard {
         Ok(Self(ident))
     }
 }
+
+impl LiveGuard {
+    /// Make sure the file's schema version is in its main file before the open that holds
+    /// this guard succeeds (spec 11 CMP-01): nothing to do when the registry entry says it is;
+    /// otherwise (the open's probe found a fresh project: this open created it, or another
+    /// opener did while this one was admitted) [`publish_version`] runs on `conn`, the
+    /// database's own connection, and the entry records the outcome. Every first opener
+    /// therefore returns only once a reader of the main file alone (the probe) sees the
+    /// version, and a concurrent second opener cannot outrun the creator's checkpoint.
+    ///
+    /// # Errors
+    /// The errors of [`publish_version`]; the open must fail with them.
+    pub(crate) fn publish(&self, conn: &Connection) -> Result<()> {
+        let published = live_stores()
+            .iter()
+            .find(|entry| entry.ident == self.0)
+            .is_some_and(|entry| entry.published);
+        if published {
+            return Ok(());
+        }
+        // the checkpoint can wait: never under the registry lock
+        publish_version(conn)?;
+        if let Some(entry) = live_stores().iter_mut().find(|entry| entry.ident == self.0) {
+            entry.published = true;
+        }
+        Ok(())
+    }
+}
+
+/// How long [`publish_version`] keeps trying to complete its checkpoint: the usual lock wait
+/// of a connection (`schema::BUSY_TIMEOUT`).
+pub(crate) const PUBLISH_WINDOW: std::time::Duration = crate::schema::BUSY_TIMEOUT;
+
+/// How long one checkpoint attempt of [`publish_version`] waits for readers before it is
+/// tried again (a concurrent checkpointer is never waited for by SQLite itself).
+const PUBLISH_ATTEMPT_WAIT: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Fold the log into the main file with `wal_checkpoint(TRUNCATE)` until the result row says
+/// every frame is in the main file: `busy` 0, or every frame of the log checkpointed. A busy
+/// result (a reader still on an older snapshot, another checkpointer) is tried again every
+/// [`PROBE_RETRY_INTERVAL`] for [`PUBLISH_WINDOW`]; then the open fails rather than succeed
+/// with the version in the `-wal` only. The connection's lock wait is back at
+/// `schema::BUSY_TIMEOUT` afterwards.
+///
+/// # Errors
+/// `StoreError::Backend` ([`VersionUnpublished`]) when the window passes with the checkpoint
+/// still incomplete; SQLite errors of the checkpoint.
+fn publish_version(conn: &Connection) -> Result<()> {
+    conn.busy_timeout(PUBLISH_ATTEMPT_WAIT).sql()?;
+    let deadline = std::time::Instant::now() + PUBLISH_WINDOW;
+    let outcome = loop {
+        let checkpoint = conn
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, i64>(2)?,
+                ))
+            })
+            .sql();
+        match checkpoint {
+            Ok((busy, log, checkpointed)) if busy == 0 || (log >= 0 && checkpointed == log) => {
+                break Ok(());
+            }
+            Ok(_) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(PROBE_RETRY_INTERVAL);
+            }
+            Ok(_) => {
+                break Err(StoreError::Backend {
+                    source: kaban_core::BackendSource::new(VersionUnpublished),
+                });
+            }
+            Err(e) => break Err(e),
+        }
+    };
+    conn.busy_timeout(crate::schema::BUSY_TIMEOUT).sql()?;
+    outcome
+}
+
+/// The checkpoint that puts a new project's schema version into the main file did not
+/// complete within [`PUBLISH_WINDOW`]: the open is refused (spec 11 CMP-01).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct VersionUnpublished;
+
+impl std::fmt::Display for VersionUnpublished {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(
+            "the project's schema version could not be checkpointed into the main database file \
+             (another connection kept reading the database); try again once it has closed",
+        )
+    }
+}
+
+impl std::error::Error for VersionUnpublished {}
 
 impl Drop for LiveGuard {
     fn drop(&mut self) {
@@ -450,7 +551,7 @@ pub fn exclusive_hold(path: &Path) -> Result<Option<ExclusiveHold>> {
     // a file no store of this process holds is probed like every open (CMP-01) before its
     // owner file is created: a registered entry means a probed file, so no open under the
     // hold skips the probe for an older or foreign database
-    probe_version(path, Some(&meta))?;
+    let probed = probe_version(path, Some(&meta))?;
     let owner = OwnerLock {
         file: OwnerLock::open(path)?,
         sole: false,
@@ -464,6 +565,7 @@ pub fn exclusive_hold(path: &Path) -> Result<Option<ExclusiveHold>> {
         owner,
         exclusive: true,
         waiting: 0,
+        published: probed == Probed::Current,
     });
     Ok(Some(ExclusiveHold(ident)))
 }
@@ -653,6 +755,16 @@ fn file_ident(meta: &std::fs::Metadata) -> FileIdent {
     (meta.dev(), meta.ino())
 }
 
+/// What [`probe_version`] admitted a file as.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Probed {
+    /// The main file holds the latest schema version.
+    Current,
+    /// No kaban schema in the main file and no non-empty `-wal`: a fresh project, whose
+    /// version an open must publish into the main file ([`LiveGuard::publish`]).
+    Fresh,
+}
+
 /// The version probe every file open runs first (spec 11 CMP-01, PR-04; unified-db-plan
 /// Task 4), before anything is created, tightened, locked or written: the main file alone is
 /// read through `file:<db>?mode=ro&immutable=1`, which takes no lock and creates no `-wal` or
@@ -682,7 +794,7 @@ fn file_ident(meta: &std::fs::Metadata) -> FileIdent {
 /// last outcome is then returned as it is. A readable schema at another version is refused at
 /// once. The callers hold the in-process registry lock across the probe, so on those two
 /// outcomes another open in this process waits for the window too.
-fn probe_version(path: &Path, meta: Option<&std::fs::Metadata>) -> Result<()> {
+fn probe_version(path: &Path, meta: Option<&std::fs::Metadata>) -> Result<Probed> {
     let deadline = std::time::Instant::now() + PROBE_RETRY_WINDOW;
     let mut meta = meta.cloned();
     loop {
@@ -690,7 +802,7 @@ fn probe_version(path: &Path, meta: Option<&std::fs::Metadata>) -> Result<()> {
         let pending = match &outcome {
             Err(StoreError::NotAKabanProject { .. }) => true,
             Err(e) => transient_read_failure(e),
-            Ok(()) => false,
+            Ok(_) => false,
         };
         let now = std::time::Instant::now();
         if !pending || now >= deadline {
@@ -721,7 +833,7 @@ pub(crate) fn probe_unregistered(path: &Path) -> Result<()> {
     {
         return Ok(());
     }
-    probe_version(path, meta.as_ref())
+    probe_version(path, meta.as_ref()).map(drop)
 }
 
 /// Whether `e` is an SQLite failure that an immutable read of a main file can meet while
@@ -746,7 +858,7 @@ fn transient_read_failure(e: &StoreError) -> bool {
 }
 
 /// One read of [`probe_version`]: its rule, without the retry.
-fn probe_once(path: &Path, meta: Option<&std::fs::Metadata>) -> Result<()> {
+fn probe_once(path: &Path, meta: Option<&std::fs::Metadata>) -> Result<Probed> {
     use crate::schema::{LATEST_SCHEMA_VERSION, Migrator};
     let found = match meta {
         Some(meta) if meta.len() > 0 => {
@@ -761,7 +873,7 @@ fn probe_once(path: &Path, meta: Option<&std::fs::Metadata>) -> Result<()> {
         _ => Some(0),
     };
     match found {
-        Some(LATEST_SCHEMA_VERSION) => Ok(()),
+        Some(LATEST_SCHEMA_VERSION) => Ok(Probed::Current),
         Some(0) => {
             let mut wal = path.as_os_str().to_owned();
             wal.push("-wal");
@@ -769,7 +881,7 @@ fn probe_once(path: &Path, meta: Option<&std::fs::Metadata>) -> Result<()> {
                 Some(wal) if wal.len() > 0 => Err(StoreError::NotAKabanProject {
                     supported: LATEST_SCHEMA_VERSION,
                 }),
-                _ => Ok(()),
+                _ => Ok(Probed::Fresh),
             }
         }
         other => Err(Migrator::unsupported(other)),
@@ -862,9 +974,11 @@ pub(crate) fn prepare_database_files(
     let meta = regular_file_metadata(path).map_err(StoreError::FileMode)?;
     // the version probe first (CMP-01): an older file is refused before it is created,
     // tightened, admitted or opened
-    if !meta.as_ref().is_some_and(|meta| known_live(meta, &live)) {
-        probe_version(path, meta.as_ref())?;
-    }
+    let probed = if meta.as_ref().is_some_and(|meta| known_live(meta, &live)) {
+        None
+    } else {
+        Some(probe_version(path, meta.as_ref())?)
+    };
     let already_live = match meta {
         Some(ref meta) if known_live(meta, &live) => true,
         Some(ref meta) => {
@@ -918,7 +1032,7 @@ pub(crate) fn prepare_database_files(
         | OpenFlags::SQLITE_OPEN_URI
         | OpenFlags::SQLITE_OPEN_NO_MUTEX;
     let conn = Connection::open_with_flags(sqlite_uri(path), flags).sql()?;
-    let guard = LiveGuard::register(&mut live, ident, owner)?;
+    let guard = LiveGuard::register(&mut live, ident, owner, probed)?;
     drop(live);
     Ok((conn, guard))
 }
@@ -996,15 +1110,17 @@ pub(crate) fn open_existing_as_is(
     let ident = file_ident(&meta);
     // the version probe before the admission and the open (CMP-01), as in
     // [`prepare_database_files`]
-    if !live.iter().any(|entry| entry.ident == ident) {
-        probe_version(path, Some(&meta))?;
-    }
+    let probed = if live.iter().any(|entry| entry.ident == ident) {
+        None
+    } else {
+        Some(probe_version(path, Some(&meta))?)
+    };
     let owner = admit_open(&live, ident, path, capabilities)?;
     let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
         | OpenFlags::SQLITE_OPEN_NO_MUTEX
         | OpenFlags::SQLITE_OPEN_URI;
     let conn = Connection::open_with_flags(sqlite_uri(path), flags).sql()?;
-    let guard = LiveGuard::register(&mut live, ident, owner)?;
+    let guard = LiveGuard::register(&mut live, ident, owner, probed)?;
     drop(live);
     Ok((conn, guard))
 }
