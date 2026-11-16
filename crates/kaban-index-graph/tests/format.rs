@@ -10,7 +10,7 @@ use kaban_index_graph::{
     Base, Direction, EdgeOp, GraphError, Layer, LocalId, NodeOp, OpKind, Records, RelId,
     RelSelection, View, build_base, fold, seal,
 };
-use oracle::{Oracle, Rng, random_records};
+use oracle::{Oracle, Rng, budget, nodes, random_records, rows, selected, view};
 use tantivy::directory::OwnedBytes;
 
 const IDS: u32 = 120;
@@ -46,7 +46,7 @@ fn fixture(seed: u64) -> Fixture {
     let base = open_base(build_base(&base_recs, domain));
     let mut layers: Vec<Layer> = Vec::new();
     for r in &layer_recs {
-        let bytes = seal(&View::new(Some(&base), &layers, &[]), r);
+        let bytes = seal(&view::<Records>(Some(&base), &layers, &[]), r);
         layers.push(Layer::open(OwnedBytes::new(bytes)).expect("layer opens"));
     }
     let mut all = vec![base_recs];
@@ -76,11 +76,7 @@ fn selections() -> Vec<RelSelection> {
 
 /// Every probe of `view` equals `oracle`, for ids past the generated range too.
 fn assert_view_matches(view: &View<'_>, oracle: &Oracle, ctx: &str) {
-    assert_eq!(
-        view.nodes().collect::<Vec<_>>(),
-        oracle.nodes(),
-        "{ctx}: nodes"
-    );
+    assert_eq!(nodes(view), oracle.nodes(), "{ctx}: nodes");
     for id in 0..IDS + 3 {
         let n = LocalId(id);
         assert_eq!(view.contains(n), oracle.contains(n), "{ctx}: contains {id}");
@@ -93,7 +89,7 @@ fn assert_view_matches(view: &View<'_>, oracle: &Oracle, ctx: &str) {
         }
         for rels in &selections() {
             for dir in [Direction::Out, Direction::In, Direction::Both] {
-                let got: Vec<_> = view.neighbours(n, rels, dir).collect();
+                let got = rows(view, n, rels, dir);
                 let want = oracle.neighbours(n, rels, dir);
                 assert_eq!(got, want, "{ctx}: neighbours {id} {rels:?} {dir:?}");
                 let keys: Vec<_> = got.iter().map(|&(m, r, _)| (m, r)).collect();
@@ -117,8 +113,8 @@ fn assert_view_matches(view: &View<'_>, oracle: &Oracle, ctx: &str) {
 fn layered_view_equals_the_oracle_on_every_node() {
     for seed in 0..SEEDS {
         let f = fixture(seed);
-        let view = View::new(Some(&f.base), &f.layers, &f.sediment);
-        assert_view_matches(&view, &f.oracle, &format!("seed {seed}"));
+        let v = view(Some(&f.base), &f.layers, &f.sediment);
+        assert_view_matches(&v, &f.oracle, &format!("seed {seed}"));
     }
 }
 
@@ -126,8 +122,8 @@ fn layered_view_equals_the_oracle_on_every_node() {
 fn sediment_only_view_equals_the_oracle() {
     for seed in 0..4 {
         let f = fixture(seed);
-        let view = View::new(None, &[], &f.all);
-        assert_view_matches(&view, &f.oracle, &format!("sediment seed {seed}"));
+        let v = view(None, &[], &f.all);
+        assert_view_matches(&v, &f.oracle, &format!("sediment seed {seed}"));
     }
 }
 
@@ -136,11 +132,15 @@ fn every_prefix_of_the_chain_equals_the_oracle() {
     let f = fixture(3);
     let mut oracle = Oracle::default();
     oracle.apply(&f.all[0]);
-    assert_view_matches(&View::new(Some(&f.base), &[], &[]), &oracle, "base only");
+    assert_view_matches(
+        &view::<Records>(Some(&f.base), &[], &[]),
+        &oracle,
+        "base only",
+    );
     for depth in 1..=f.layers.len() {
         oracle.apply(&f.all[depth]);
-        let view = View::new(Some(&f.base), &f.layers[..depth], &[]);
-        assert_view_matches(&view, &oracle, &format!("depth {depth}"));
+        let v = view::<Records>(Some(&f.base), &f.layers[..depth], &[]);
+        assert_view_matches(&v, &oracle, &format!("depth {depth}"));
     }
 }
 
@@ -161,7 +161,7 @@ fn busiest(oracle: &Oracle) -> LocalId {
 fn fold_omitting_a_node_drops_it_its_edges_and_its_facts() {
     for seed in 0..SEEDS {
         let f = fixture(seed);
-        let view = View::new(Some(&f.base), &f.layers, &f.sediment);
+        let v = view(Some(&f.base), &f.layers, &f.sediment);
         let n = busiest(&f.oracle);
         assert!(
             !f.oracle
@@ -169,11 +169,11 @@ fn fold_omitting_a_node_drops_it_its_edges_and_its_facts() {
                 .is_empty(),
             "seed {seed}: the omitted node has edges"
         );
-        let folded = open_base(fold(&view, &[n]));
+        let folded = open_base(fold(&v, &[n]));
         let mut purged = f.oracle.clone();
         purged.purge(n);
         let ctx = format!("fold seed {seed}");
-        assert_view_matches(&View::new(Some(&folded), &[], &[]), &purged, &ctx);
+        assert_view_matches(&view::<Records>(Some(&folded), &[], &[]), &purged, &ctx);
 
         // Re-adding the node must not resurrect anything: the bytes no longer hold its edges
         // or facts, they were not merely hidden by presence.
@@ -186,7 +186,7 @@ fn fold_omitting_a_node_drops_it_its_edges_and_its_facts() {
         }];
         purged.apply(&readd[0]);
         let ctx = format!("fold+readd seed {seed}");
-        assert_view_matches(&View::new(Some(&folded), &[], &readd), &purged, &ctx);
+        assert_view_matches(&view(Some(&folded), &[], &readd), &purged, &ctx);
     }
 }
 
@@ -195,10 +195,12 @@ fn records_round_trip_through_the_sediment_blob() {
     for seed in 0..SEEDS {
         let mut rng = Rng::new(seed);
         let r = random_records(&mut rng, IDS, 50, 30);
-        assert_eq!(Records::decode(&r.encode()), Ok(r), "seed {seed}");
+        let decoded = Records::decode(&r.encode(), &budget()).unwrap();
+        assert_eq!(decoded.records(), &r, "seed {seed}");
     }
     let empty = Records::default();
-    assert_eq!(Records::decode(&empty.encode()), Ok(empty));
+    let decoded = Records::decode(&empty.encode(), &budget()).unwrap();
+    assert_eq!(decoded.records(), &empty);
 }
 
 #[test]
@@ -230,19 +232,19 @@ fn truncated_or_padded_bytes_are_corrupt() {
     let blob = f.all[1].encode();
     for len in 0..blob.len() {
         assert!(
-            is_corrupt(&Records::decode(&blob[..len])),
+            is_corrupt(&Records::decode(&blob[..len], &budget())),
             "records prefix {len}"
         );
     }
     let mut padded = blob.clone();
     padded.push(0);
     assert!(
-        is_corrupt(&Records::decode(&padded)),
+        is_corrupt(&Records::decode(&padded, &budget())),
         "records trailing byte"
     );
 
     let base_bytes = build_base(&f.all[0], 200);
-    let layer_bytes = seal(&View::new(Some(&f.base), &[], &[]), &f.all[1]);
+    let layer_bytes = seal(&view::<Records>(Some(&f.base), &[], &[]), &f.all[1]);
     for (name, bytes) in [("base", &base_bytes), ("layer", &layer_bytes)] {
         assert!(bytes.len() > 64, "{name} has content");
         for len in (0..bytes.len()).step_by(7).chain([bytes.len() - 1]) {
@@ -307,7 +309,7 @@ fn without_section(bytes: &[u8], tag: u32) -> Vec<u8> {
 fn an_extent_without_presence_is_corrupt() {
     let f = fixture(4);
     let base_bytes = build_base(&f.all[0], 200);
-    let layer_bytes = seal(&View::new(Some(&f.base), &[], &[]), &f.all[1]);
+    let layer_bytes = seal(&view::<Records>(Some(&f.base), &[], &[]), &f.all[1]);
     // Sanity: dropping nothing keeps the bytes valid.
     assert!(Base::open(OwnedBytes::new(without_section(&base_bytes, 99))).is_ok());
     assert!(Layer::open(OwnedBytes::new(without_section(&layer_bytes, 99))).is_ok());
@@ -316,4 +318,23 @@ fn an_extent_without_presence_is_corrupt() {
     assert!(is_corrupt(&base.map(|_| ())), "base without presence");
     let layer = Layer::open(OwnedBytes::new(without_section(&layer_bytes, presence)));
     assert!(is_corrupt(&layer.map(|_| ())), "layer without presence");
+}
+
+#[test]
+fn relation_selection_is_sorted_deduplicated_and_exact() {
+    let empty = RelSelection::only(Vec::new());
+    assert_eq!(empty, RelSelection::Only(Vec::new()));
+    let ids = [65_535, 64, 0, 63, 64, 0, 65_535];
+    let some = RelSelection::only(ids.iter().map(|&r| RelId(r)).collect());
+    assert_eq!(
+        some,
+        RelSelection::Only(vec![RelId(0), RelId(63), RelId(64), RelId(65_535)])
+    );
+    for r in 0..=u16::MAX {
+        let want = ids.contains(&r);
+        assert_eq!(some.contains(RelId(r)), want, "rel {r}");
+        assert_eq!(selected(&some, r), want, "oracle rel {r}");
+        assert!(!empty.contains(RelId(r)), "empty selects {r}");
+        assert!(RelSelection::All.contains(RelId(r)), "all misses {r}");
+    }
 }

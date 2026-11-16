@@ -1,7 +1,9 @@
 //! Change records: the sediment blob format and the input of `seal`.
 
+use kaban_core::query_budget::{BudgetLease, QueryBudget};
 use tantivy::directory::OwnedBytes;
 
+use crate::charge::Charge;
 use crate::error::GraphError;
 use crate::id::{LocalId, RelId};
 
@@ -38,7 +40,16 @@ pub struct EdgeOp {
     pub attr: Attr,
 }
 
-/// One node membership change, independent of the node's edges.
+/// One node membership change.
+///
+/// Adding a node changes only its membership. Removing a node is also a deletion barrier: every
+/// edge with the node as an endpoint (either direction) and every fact of the node recorded
+/// before the removal is deleted, so a later re-add starts with no edges and no facts. Within
+/// one [`Records`] batch the node stream applies first, then the edge and fact streams: a batch
+/// that removes and re-adds a node, or removes it, still keeps its own edges and facts of that
+/// node (hidden while the node is absent). The barrier holds wherever sediment, [`crate::seal`]
+/// and [`crate::fold`] boundaries fall between batches: identical histories give identical
+/// views. A producer that re-emits a node must emit its current edges and facts again.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NodeOp {
     /// The node.
@@ -60,7 +71,8 @@ pub struct FactOp {
     pub payload: Vec<u8>,
 }
 
-/// A batch of change records, applied in order: edges, nodes and facts are independent streams.
+/// A batch of change records: the node stream applies first (removals are barriers, see
+/// [`NodeOp`]), then the edge and fact streams, each in order; the newest record per key wins.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Records {
     /// Edge changes in order.
@@ -121,12 +133,16 @@ impl Records {
         out
     }
 
-    /// Decode a sediment blob.
+    /// Decode a sediment blob into query-owned records. Every vector and fact payload is
+    /// reserved against `budget` (its capacity plus allocation metadata) before it is
+    /// allocated; the charge stays live as long as the returned [`DecodedRecords`] and is
+    /// released on drop or on error.
     ///
     /// # Errors
     /// [`GraphError::Corrupt`] on a bad header, truncation, overflow, an unknown kind or
-    /// trailing bytes.
-    pub fn decode(bytes: &[u8]) -> Result<Records, GraphError> {
+    /// trailing bytes; [`GraphError::BudgetExceeded`] when `budget` refuses a reservation.
+    pub fn decode(bytes: &[u8], budget: &QueryBudget) -> Result<DecodedRecords, GraphError> {
+        let mut charge = Charge::new(budget)?;
         let mut r = Reader::new(bytes);
         if r.take(RECORDS_MAGIC.len(), "records magic")? != RECORDS_MAGIC {
             return Err(corrupt("records magic"));
@@ -135,7 +151,7 @@ impl Records {
             return Err(corrupt("records version"));
         }
         let count = r.count(EDGE_BYTES, "edge records")?;
-        let mut edges = Vec::with_capacity(count);
+        let mut edges = charge.vec(count)?;
         for _ in 0..count {
             edges.push(EdgeOp {
                 src: LocalId(r.u32("edge src")?),
@@ -149,7 +165,7 @@ impl Records {
             });
         }
         let count = r.count(NODE_BYTES, "node records")?;
-        let mut nodes = Vec::with_capacity(count);
+        let mut nodes = charge.vec(count)?;
         for _ in 0..count {
             nodes.push(NodeOp {
                 node: LocalId(r.u32("node id")?),
@@ -157,13 +173,14 @@ impl Records {
             });
         }
         let count = r.count(FACT_FIXED_BYTES, "fact records")?;
-        let mut facts = Vec::with_capacity(count);
+        let mut facts = charge.vec(count)?;
         for _ in 0..count {
             let node = LocalId(r.u32("fact node")?);
             let key = r.u8("fact key")?;
             let kind = kind_from(r.u8("fact kind")?)?;
             let len = r.count(1, "fact payload")?;
-            let payload = r.take(len, "fact payload")?.to_vec();
+            let mut payload = charge.vec(len)?;
+            payload.extend_from_slice(r.take(len, "fact payload")?);
             facts.push(FactOp {
                 node,
                 key,
@@ -172,11 +189,41 @@ impl Records {
             });
         }
         r.finish("records")?;
-        Ok(Records {
-            edges,
-            nodes,
-            facts,
+        Ok(DecodedRecords {
+            records: Records {
+                edges,
+                nodes,
+                facts,
+            },
+            _lease: charge.into_lease(),
         })
+    }
+}
+
+impl AsRef<Records> for Records {
+    fn as_ref(&self) -> &Records {
+        self
+    }
+}
+
+/// Records decoded for a query, holding their budget charge while they live.
+#[derive(Debug)]
+pub struct DecodedRecords {
+    records: Records,
+    _lease: BudgetLease,
+}
+
+impl DecodedRecords {
+    /// The decoded records.
+    #[must_use]
+    pub fn records(&self) -> &Records {
+        &self.records
+    }
+}
+
+impl AsRef<Records> for DecodedRecords {
+    fn as_ref(&self) -> &Records {
+        &self.records
     }
 }
 

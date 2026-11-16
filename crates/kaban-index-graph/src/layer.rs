@@ -24,7 +24,7 @@ use tantivy::directory::OwnedBytes;
 use crate::error::GraphError;
 use crate::facts::{FactEntry, Facts};
 use crate::op::{Attr, OpKind, Reader, Records, column, corrupt, kind_byte, kind_from, put_len};
-use crate::presence::{IdIndex, Presence, parse_bits, test_bit, write_bits};
+use crate::presence::{IdIndex, Presence, check_kinds, parse_bits, test_bit, write_bits};
 use crate::view::View;
 
 const MAGIC: &[u8; 4] = b"KBXG";
@@ -37,6 +37,15 @@ const TAG_IN: u32 = 3;
 const TAG_FACTS: u32 = 4;
 const TAG_UNION_OUT: u32 = 5;
 const TAG_UNION_IN: u32 = 6;
+/// Section tags in their mandatory order; a base has the first four.
+const SECTION_TAGS: [u32; 6] = [
+    TAG_PRESENCE,
+    TAG_OUT,
+    TAG_IN,
+    TAG_FACTS,
+    TAG_UNION_OUT,
+    TAG_UNION_IN,
+];
 /// Largest id domain: every `u32` id.
 const MAX_DOMAIN: u64 = 1 << 32;
 
@@ -46,7 +55,8 @@ pub(crate) type EdgeEntry = (u32, u16, OpKind, Attr);
 /// Edge changes keyed by (node, neighbour, relation), so iteration is list order.
 pub(crate) type EdgeMap = BTreeMap<(u32, u32, u16), (OpKind, Attr)>;
 
-/// The net change of a batch of records: the last record per edge, node and fact wins.
+/// The net change of a batch of records: the last record per edge, node and fact wins. Node
+/// removal barriers are applied by the callers that have older data ([`seal`]).
 #[derive(Debug, Default)]
 pub(crate) struct Net<'p> {
     pub(crate) nodes: BTreeMap<u32, OpKind>,
@@ -154,7 +164,7 @@ impl Edges {
                 .checked_mul(width)
                 .ok_or_else(|| corrupt("edge columns"))
         };
-        Ok(Self {
+        let edges = Self {
             nbrs: r.slice(file, len(4)?, "edge neighbours")?,
             rels: r.slice(file, len(2)?, "edge relations")?,
             kinds: r.slice(file, len(1)?, "edge kinds")?,
@@ -163,7 +173,37 @@ impl Edges {
             index,
             offsets,
             entries,
-        })
+        };
+        edges.validate(domain)?;
+        Ok(edges)
+    }
+
+    /// One pass over the section: offsets start at zero and never decrease, every kind is
+    /// known, and every list strictly ascends by (neighbour, relation) with neighbours below
+    /// `domain`.
+    fn validate(&self, domain: u64) -> Result<(), GraphError> {
+        check_kinds(&self.kinds, "edge kinds")?;
+        let mut start = 0usize;
+        for (i, &o) in self.offsets.as_chunks::<8>().0.iter().enumerate() {
+            let end =
+                usize::try_from(u64::from_le_bytes(o)).map_err(|_| corrupt("edge offsets"))?;
+            if (i == 0 && end != 0) || end < start || end > self.entries {
+                return Err(corrupt("edge offsets"));
+            }
+            let mut prev: Option<(u32, u16)> = None;
+            for e in start..end {
+                let key = column::<4>(&self.nbrs, e)
+                    .map(u32::from_le_bytes)
+                    .zip(column::<2>(&self.rels, e).map(u16::from_le_bytes))
+                    .ok_or_else(|| corrupt("edge columns"))?;
+                if u64::from(key.0) >= domain || prev.is_some_and(|p| p >= key) {
+                    return Err(corrupt("edge list order or domain"));
+                }
+                prev = Some(key);
+            }
+            start = end;
+        }
+        Ok(())
     }
 
     /// The entry range of `node`'s list; `None` when untouched or inconsistent.
@@ -303,59 +343,56 @@ impl Extent {
         if domain > MAX_DOMAIN || (kind == KIND_BASE) != (depth == 0) {
             return Err(corrupt("extent header"));
         }
-        let nsections = usize::try_from(r.u32("section count")?)
-            .ok()
-            .filter(|&n| n.saturating_mul(12) <= r.remaining())
-            .ok_or_else(|| corrupt("section table"))?;
-        let mut table = Vec::with_capacity(nsections);
-        for _ in 0..nsections {
-            let tag = r.u32("section tag")?;
-            let len =
-                usize::try_from(r.u64("section length")?).map_err(|_| corrupt("section length"))?;
-            table.push((tag, len));
-        }
-        let mut presence = None;
-        let mut out = None;
-        let mut inc = None;
-        let mut facts = None;
-        let mut union_out = None;
-        let mut union_in = None;
-        for (tag, len) in table {
-            let mut s = r.sub(len, "section")?;
-            let dup = match tag {
-                TAG_PRESENCE => presence
-                    .replace(Presence::parse(&mut s, file, domain)?)
-                    .is_some(),
-                TAG_OUT => out.replace(Edges::parse(&mut s, file, domain)?).is_some(),
-                TAG_IN => inc.replace(Edges::parse(&mut s, file, domain)?).is_some(),
-                TAG_FACTS => facts.replace(Facts::parse(&mut s, file)?).is_some(),
-                TAG_UNION_OUT if kind == KIND_LAYER => union_out
-                    .replace(parse_union(&mut s, file, domain)?)
-                    .is_some(),
-                TAG_UNION_IN if kind == KIND_LAYER => union_in
-                    .replace(parse_union(&mut s, file, domain)?)
-                    .is_some(),
-                _ => return Err(corrupt("section tag")),
-            };
-            if dup {
-                return Err(corrupt("duplicate section"));
-            }
-            s.finish("section length")?;
-        }
-        r.finish("extent length")?;
-        let missing = |what: &str| corrupt(&format!("missing {what} section"));
-        let union = match (union_out, union_in) {
-            (Some(o), Some(i)) => Some((o, i)),
-            (None, None) if kind == KIND_BASE => None,
-            _ => return Err(missing("union")),
+        // This version has exactly four base sections or six layer sections, in tag order;
+        // the count is checked before anything is read or allocated from it.
+        let expected = if kind == KIND_BASE {
+            4
+        } else {
+            SECTION_TAGS.len()
         };
+        if usize::try_from(r.u32("section count")?).ok() != Some(expected) {
+            return Err(corrupt("section count"));
+        }
+        let mut lens = [0usize; SECTION_TAGS.len()];
+        for (len, &want) in lens.iter_mut().zip(&SECTION_TAGS).take(expected) {
+            if r.u32("section tag")? != want {
+                return Err(corrupt("section tag or order"));
+            }
+            *len =
+                usize::try_from(r.u64("section length")?).map_err(|_| corrupt("section length"))?;
+        }
+        let mut section = |i: usize| r.sub(lens[i], "section");
+        let mut s = section(0)?;
+        let presence = Presence::parse(&mut s, file, domain)?;
+        s.finish("section length")?;
+        let mut s = section(1)?;
+        let out = Edges::parse(&mut s, file, domain)?;
+        s.finish("section length")?;
+        let mut s = section(2)?;
+        let inc = Edges::parse(&mut s, file, domain)?;
+        s.finish("section length")?;
+        let mut s = section(3)?;
+        let facts = Facts::parse(&mut s, file, domain)?;
+        s.finish("section length")?;
+        let union = if kind == KIND_LAYER {
+            let mut s = section(4)?;
+            let o = parse_union(&mut s, file, domain)?;
+            s.finish("section length")?;
+            let mut s = section(5)?;
+            let i = parse_union(&mut s, file, domain)?;
+            s.finish("section length")?;
+            Some((o, i))
+        } else {
+            None
+        };
+        r.finish("extent length")?;
         Ok(Self {
             depth,
             domain,
-            presence: presence.ok_or_else(|| missing("presence"))?,
-            out: out.ok_or_else(|| missing("outgoing edge"))?,
-            inc: inc.ok_or_else(|| missing("incoming edge"))?,
-            facts: facts.ok_or_else(|| missing("fact"))?,
+            presence,
+            out,
+            inc,
+            facts,
             union,
         })
     }
@@ -377,8 +414,13 @@ impl Layer {
     ///
     /// # Errors
     /// [`GraphError::Corrupt`] when the bytes are not a well-formed layer: truncated, padded,
-    /// a base, an unknown or duplicate section, or a missing presence, edge, fact or union
-    /// section.
+    /// a base, a section count other than six, sections out of tag order, or a broken section
+    /// invariant. Opening validates every section in one pass over its bytes (O(bytes)): an
+    /// unknown kind byte; sorted ids, neighbour lists or fact keys that do not strictly ascend;
+    /// list or payload offsets that do not start at zero or decrease; ids at or past the
+    /// domain; bitvector bits set past the domain; a bit-index count or rank sample that does
+    /// not match the bits. After a successful open every lookup is exact, so corruption is never
+    /// read as absence.
     pub fn open(bytes: OwnedBytes) -> Result<Layer, GraphError> {
         Ok(Layer {
             extent: Extent::open(bytes, KIND_LAYER)?,
@@ -386,11 +428,38 @@ impl Layer {
     }
 }
 
-/// Seal `r` as a new layer over `parent`; the layer stores the net change per edge, node and
-/// fact, every list sorted, plus the cumulative union of touched nodes over the chain.
+/// Seal `r` as a new layer over `parent`, the base and layers this layer extends (sediment in
+/// `parent` is not part of the chain the layer is opened on). The layer stores the net change
+/// per edge, node and fact, every list sorted, plus the cumulative union of touched nodes over
+/// the chain.
+///
+/// A node removal in `r` is a deletion barrier ([`crate::NodeOp`]): the layer materialises a
+/// tombstone for every edge of the node (both directions, presence not applied) and every fact
+/// of the node that survives in `parent`, before `r`'s own edge and fact records apply. So a
+/// later re-add never shows data from before the removal.
 #[must_use]
 pub fn seal(parent: &View<'_>, r: &Records) -> Vec<u8> {
     let mut net = Net::default();
+    let removed: BTreeSet<u32> = r
+        .nodes
+        .iter()
+        .filter(|op| op.kind == OpKind::Remove)
+        .map(|op| op.node.0)
+        .collect();
+    let gone = (OpKind::Remove, Attr::default());
+    for &n in &removed {
+        for (m, rel, _) in parent.alive(n, true) {
+            net.out.insert((n, m, rel), gone);
+            net.inc.insert((m, n, rel), gone);
+        }
+        for (m, rel, _) in parent.alive(n, false) {
+            net.inc.insert((n, m, rel), gone);
+            net.out.insert((m, n, rel), gone);
+        }
+        for key in parent.alive_fact_keys(n) {
+            net.facts.insert((n, key), (OpKind::Remove, &[]));
+        }
+    }
     net.apply(r);
     let domain = parent.domain().max(net.domain());
     let depth = u32::try_from(parent.layers().len() + 1).unwrap_or(u32::MAX);

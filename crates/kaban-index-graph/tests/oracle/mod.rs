@@ -1,11 +1,14 @@
 //! A plain edge-list oracle: records applied in order to sets and maps, read back naively.
 
 #![allow(dead_code)] // each test binary uses a different part of the oracle
+#![allow(clippy::unwrap_used)] // test code: failures are the assertion
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use kaban_core::query_budget::QueryBudget;
 use kaban_index_graph::{
-    Attr, Direction, EdgeOp, FactOp, LocalId, NodeOp, OpKind, Records, RelId, RelSelection,
+    Attr, Base, Direction, EdgeOp, FactOp, Layer, LocalId, NodeOp, OpKind, Records, RelId,
+    RelSelection, View,
 };
 
 /// The merged state of base, layer and sediment records applied in order.
@@ -17,8 +20,23 @@ pub(crate) struct Oracle {
 }
 
 impl Oracle {
-    /// Apply `r`: edges, nodes and facts in order; the newest record wins.
+    /// Apply `r`: first the node stream, where a removal deletes every edge touching the node
+    /// and every fact of the node so far (the deletion barrier), then edges and facts in order;
+    /// the newest record wins.
     pub(crate) fn apply(&mut self, r: &Records) {
+        for n in &r.nodes {
+            match n.kind {
+                OpKind::Add => {
+                    self.nodes.insert(n.node.0);
+                }
+                OpKind::Remove => {
+                    self.nodes.remove(&n.node.0);
+                    self.edges
+                        .retain(|&(s, _, d), _| s != n.node.0 && d != n.node.0);
+                    self.facts.retain(|&(m, _), _| m != n.node.0);
+                }
+            }
+        }
         for e in &r.edges {
             let key = (e.src.0, e.rel.0, e.dst.0);
             match e.kind {
@@ -27,16 +45,6 @@ impl Oracle {
                 }
                 OpKind::Remove => {
                     self.edges.remove(&key);
-                }
-            }
-        }
-        for n in &r.nodes {
-            match n.kind {
-                OpKind::Add => {
-                    self.nodes.insert(n.node.0);
-                }
-                OpKind::Remove => {
-                    self.nodes.remove(&n.node.0);
                 }
             }
         }
@@ -90,7 +98,7 @@ impl Oracle {
         let inc = matches!(dir, Direction::In | Direction::Both);
         let mut rows: Vec<(u32, u16, u8, Attr)> = Vec::new();
         for (&(s, r, d), &attr) in &self.edges {
-            if !rels.contains(RelId(r)) {
+            if !selected(rels, r) {
                 continue;
             }
             if out && s == n.0 && self.nodes.contains(&d) {
@@ -105,6 +113,47 @@ impl Oracle {
             .map(|(m, r, _, attr)| (LocalId(m), RelId(r), attr))
             .collect()
     }
+}
+
+/// Whether `rels` selects `rel`, by a plain linear scan (independent of the crate's search).
+pub(crate) fn selected(rels: &RelSelection, rel: u16) -> bool {
+    match rels {
+        RelSelection::All => true,
+        RelSelection::Only(ids) => ids.iter().any(|id| id.0 == rel),
+    }
+}
+
+/// A budget that never refuses.
+pub(crate) fn budget() -> QueryBudget {
+    QueryBudget::new(u64::MAX, None)
+}
+
+/// A view that must build under an unbounded budget.
+pub(crate) fn view<'a, R: AsRef<Records>>(
+    base: Option<&'a Base>,
+    layers: &'a [Layer],
+    sediment: &'a [R],
+) -> View<'a> {
+    View::new(base, layers, sediment, &budget()).unwrap()
+}
+
+/// Every row of one accessor call, under an unbounded budget.
+pub(crate) fn rows(
+    view: &View<'_>,
+    n: LocalId,
+    rels: &RelSelection,
+    dir: Direction,
+) -> Vec<(LocalId, RelId, Attr)> {
+    let b = budget();
+    view.neighbours(n, rels, dir, &b)
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+/// Every present node, under an unbounded budget.
+pub(crate) fn nodes(view: &View<'_>) -> Vec<LocalId> {
+    let b = budget();
+    view.nodes(&b).collect::<Result<_, _>>().unwrap()
 }
 
 /// splitmix64: a seeded, dependency-free generator for test fixtures.

@@ -3,6 +3,7 @@
 //! functions over it. The crate is pure: no SQL, no I/O and no `unsafe` code.
 
 mod base;
+mod charge;
 mod error;
 mod facts;
 mod id;
@@ -10,6 +11,7 @@ mod layer;
 mod op;
 mod paths;
 mod presence;
+mod sediment;
 mod structure;
 mod traverse;
 mod view;
@@ -18,8 +20,8 @@ pub use base::{Base, build_base, fold};
 pub use error::GraphError;
 pub use id::{Direction, LocalId, RelId, RelSelection, StableOrder, TieRank};
 pub use layer::{Layer, seal};
-pub use op::{Attr, EdgeOp, FactOp, NodeOp, OpKind, Records};
+pub use op::{Attr, DecodedRecords, EdgeOp, FactOp, NodeOp, OpKind, Records};
 pub use paths::{meet, shortest_path};
 pub use structure::{common_neighbours, degree, refuse_not_planned, topo_order, wcc};
 pub use traverse::{Caps, Reached, RowCap, closure, expand, reachable, reverse_closure};
-pub use view::View;
+pub use view::{BUDGET_CHECK_INTERVAL, View};

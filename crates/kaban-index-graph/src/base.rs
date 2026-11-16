@@ -3,7 +3,7 @@
 use tantivy::directory::OwnedBytes;
 
 use crate::error::GraphError;
-use crate::id::{Direction, LocalId, RelSelection};
+use crate::id::LocalId;
 use crate::layer::{Extent, KIND_BASE, Net};
 use crate::op::{OpKind, Records};
 use crate::view::View;
@@ -19,7 +19,8 @@ impl Base {
     ///
     /// # Errors
     /// [`GraphError::Corrupt`] when the bytes are not a well-formed base: truncated, padded, a
-    /// layer, an unknown or duplicate section, or a missing presence, edge or fact section.
+    /// layer, a section count other than four, sections out of tag order, or any invariant of
+    /// a section broken (see [`crate::Layer::open`]).
     pub fn open(bytes: OwnedBytes) -> Result<Base, GraphError> {
         Ok(Base {
             extent: Extent::open(bytes, KIND_BASE)?,
@@ -27,8 +28,10 @@ impl Base {
     }
 }
 
-/// Build a base from `r` applied in order to an empty graph, over the id domain `0..n` (widened
-/// to cover every id in `r`). Only surviving nodes, edges and facts are stored.
+/// Build a base from `r` applied in order to an empty graph. The id domain is `n` widened to
+/// one past the highest id that survives in the net change (removed nodes, edges and facts are
+/// dropped first, so ids named only by removals do not widen it). Only surviving nodes, edges
+/// and facts are stored.
 #[must_use]
 pub fn build_base(r: &Records, n: u32) -> Vec<u8> {
     let mut net = Net::default();
@@ -41,25 +44,34 @@ pub fn build_base(r: &Records, n: u32) -> Vec<u8> {
     Extent::write(KIND_BASE, 0, domain, &net, None)
 }
 
-/// Flatten `view` into base bytes, dropping the `omit` nodes, their edges and their facts (the
-/// purge path). Edges with an absent endpoint are not written.
+/// Flatten `view` into base bytes, dropping the `omit` nodes, their edges (both directions)
+/// and their facts (the purge path). Everything else that survives is written, including the
+/// edges and facts of absent nodes that no removal deleted, so folding at any point of a
+/// history never changes a later view (MED-02); presence still hides them.
 #[must_use]
 pub fn fold(view: &View<'_>, omit: &[LocalId]) -> Vec<u8> {
     let mut omit = omit.to_vec();
     omit.sort_unstable();
-    let kept = |n: LocalId| omit.binary_search(&n).is_err();
+    let kept = |n: u32| omit.binary_search(&LocalId(n)).is_err();
     let mut net = Net::default();
-    for n in view.nodes().filter(|&n| kept(n)) {
-        net.nodes.insert(n.0, OpKind::Add);
-        for (m, rel, attr) in view.neighbours(n, &RelSelection::All, Direction::Out) {
+    for n in view.present(None).filter_map(Result::ok) {
+        if kept(n.0) {
+            net.nodes.insert(n.0, OpKind::Add);
+        }
+    }
+    for n in view.listed(true).into_iter().filter(|&n| kept(n)) {
+        for (m, rel, attr) in view.alive(n, true) {
             if kept(m) {
-                net.out.insert((n.0, m.0, rel.0), (OpKind::Add, attr));
-                net.inc.insert((m.0, n.0, rel.0), (OpKind::Add, attr));
+                net.out.insert((n, m, rel), (OpKind::Add, attr));
+                net.inc.insert((m, n, rel), (OpKind::Add, attr));
             }
         }
     }
-    net.facts = view.merged_facts();
-    net.facts
-        .retain(|&(n, _), (k, _)| *k == OpKind::Add && net.nodes.contains_key(&n));
+    net.facts = view
+        .alive_facts()
+        .into_iter()
+        .filter(|&((n, _), _)| kept(n))
+        .map(|(k, p)| (k, (OpKind::Add, p)))
+        .collect();
     Extent::write(KIND_BASE, 0, view.domain(), &net, None)
 }

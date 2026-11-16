@@ -58,7 +58,10 @@ impl IdIndex {
         }
     }
 
-    /// Parse an index over `domain` from `r`, slicing columns out of `file`.
+    /// Parse an index over `domain` from `r`, slicing columns out of `file`, and validate it in
+    /// one pass over its bytes: sorted ids strictly ascend below `domain`; a bitvector has no
+    /// bit set past `domain`, its population equals `count` and every rank sample equals the
+    /// population of the words before its block. Lookups on a parsed index are therefore exact.
     pub(crate) fn parse(
         r: &mut Reader<'_>,
         file: &OwnedBytes,
@@ -68,7 +71,18 @@ impl IdIndex {
         match mode {
             SORTED => {
                 let count = r.count(4, "sorted index")?;
-                let ids = r.slice(file, count * 4, "sorted index")?;
+                let len = count
+                    .checked_mul(4)
+                    .ok_or_else(|| corrupt("sorted index"))?;
+                let ids = r.slice(file, len, "sorted index")?;
+                let mut prev: Option<u32> = None;
+                for &chunk in ids.as_chunks::<4>().0 {
+                    let id = u32::from_le_bytes(chunk);
+                    if u64::from(id) >= domain || prev.is_some_and(|p| p >= id) {
+                        return Err(corrupt("sorted index order or domain"));
+                    }
+                    prev = Some(id);
+                }
                 Ok(Self::Sorted { ids, count })
             }
             BITS => {
@@ -77,7 +91,32 @@ impl IdIndex {
                 let (words, nbits) = parse_bits(r, file, domain)?;
                 let nwords = words.len() / 8;
                 let nsamples = nwords.div_ceil(WORDS_PER_SAMPLE);
-                let samples = r.slice(file, nsamples * 8, "rank samples")?;
+                let len = nsamples
+                    .checked_mul(8)
+                    .ok_or_else(|| corrupt("rank samples"))?;
+                let samples = r.slice(file, len, "rank samples")?;
+                let mut total = 0u64;
+                for (block, sample) in words
+                    .chunks(8 * WORDS_PER_SAMPLE)
+                    .zip(samples.as_chunks::<8>().0)
+                {
+                    let sample = u64::from_le_bytes(*sample);
+                    if sample != total {
+                        return Err(corrupt("rank sample"));
+                    }
+                    let ones: u64 = block
+                        .as_chunks::<8>()
+                        .0
+                        .iter()
+                        .map(|&w| u64::from(u64::from_le_bytes(w).count_ones()))
+                        .sum();
+                    total = total
+                        .checked_add(ones)
+                        .ok_or_else(|| corrupt("rank sample"))?;
+                }
+                if u64::try_from(count).ok() != Some(total) {
+                    return Err(corrupt("bit index count"));
+                }
                 Ok(Self::Bits {
                     words,
                     samples,
@@ -96,7 +135,8 @@ impl IdIndex {
         }
     }
 
-    /// The rank of `id`, or `None` when untouched (or the index is inconsistent).
+    /// The rank of `id`, or `None` when untouched. Arithmetic is checked; the index was
+    /// validated at parse, so a checked failure cannot hide a recorded id.
     pub(crate) fn rank(&self, id: u32) -> Option<usize> {
         match self {
             Self::Sorted { ids, count } => {
@@ -130,9 +170,10 @@ impl IdIndex {
                 let block = w / WORDS_PER_SAMPLE;
                 let mut rank = u64::from_le_bytes(column::<8>(samples, block)?);
                 for i in block * WORDS_PER_SAMPLE..w {
-                    rank += u64::from(u64::from_le_bytes(column::<8>(words, i)?).count_ones());
+                    let ones = u64::from_le_bytes(column::<8>(words, i)?).count_ones();
+                    rank = rank.checked_add(u64::from(ones))?;
                 }
-                rank += u64::from((word & (bit - 1)).count_ones());
+                rank = rank.checked_add(u64::from((word & (bit - 1)).count_ones()))?;
                 let rank = usize::try_from(rank).ok()?;
                 (rank < *count).then_some(rank)
             }
@@ -210,7 +251,8 @@ pub(crate) fn write_bits(out: &mut Vec<u8>, ids: &[u32], nbits: u64) -> Vec<u64>
     words
 }
 
-/// Parse a bitvector written by [`write_bits`]; its size must equal `domain`.
+/// Parse a bitvector written by [`write_bits`]; its size must equal `domain` and the bits past
+/// it in the last word must be clear.
 pub(crate) fn parse_bits(
     r: &mut Reader<'_>,
     file: &OwnedBytes,
@@ -224,7 +266,18 @@ pub(crate) fn parse_bits(
     let len = nwords
         .checked_mul(8)
         .ok_or_else(|| corrupt("bitvector size"))?;
-    Ok((r.slice(file, len, "bitvector")?, nbits))
+    let words = r.slice(file, len, "bitvector")?;
+    let used = nbits % 64;
+    if used != 0
+        && let Some(last) = words
+            .len()
+            .checked_sub(8)
+            .and_then(|at| column::<8>(&words[at..], 0))
+        && u64::from_le_bytes(last) >> used != 0
+    {
+        return Err(corrupt("bitvector padding"));
+    }
+    Ok((words, nbits))
 }
 
 /// Whether bit `id` is set in a bitvector of `nbits` bits.
@@ -258,6 +311,7 @@ impl Presence {
     ) -> Result<Self, GraphError> {
         let index = IdIndex::parse(r, file, domain)?;
         let kinds = r.slice(file, index.len(), "presence kinds")?;
+        check_kinds(&kinds, "presence kinds")?;
         Ok(Self { index, kinds })
     }
 
@@ -268,10 +322,38 @@ impl Presence {
     }
 
     /// Touched ids ascending with their change.
-    pub(crate) fn iter(&self) -> impl Iterator<Item = (u32, OpKind)> + '_ {
-        self.index
-            .iter()
-            .enumerate()
-            .filter_map(|(rank, id)| Some((id, kind_from(*self.kinds.get(rank)?).ok()?)))
+    pub(crate) fn iter(&self) -> PresenceIter<'_> {
+        PresenceIter {
+            ids: self.index.iter(),
+            kinds: &self.kinds,
+            rank: 0,
+        }
     }
+}
+
+/// Touched ids of a presence section ascending with their change.
+#[derive(Debug)]
+pub(crate) struct PresenceIter<'p> {
+    ids: IdIter<'p>,
+    kinds: &'p [u8],
+    rank: usize,
+}
+
+impl Iterator for PresenceIter<'_> {
+    type Item = (u32, OpKind);
+
+    fn next(&mut self) -> Option<(u32, OpKind)> {
+        let id = self.ids.next()?;
+        let kind = kind_from(*self.kinds.get(self.rank)?).ok()?;
+        self.rank += 1;
+        Some((id, kind))
+    }
+}
+
+/// Refuse any byte that is not a known [`OpKind`].
+pub(crate) fn check_kinds(kinds: &[u8], what: &str) -> Result<(), GraphError> {
+    for &k in kinds {
+        kind_from(k).map_err(|_| corrupt(what))?;
+    }
+    Ok(())
 }

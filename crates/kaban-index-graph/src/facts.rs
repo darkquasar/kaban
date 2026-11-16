@@ -7,6 +7,7 @@ use tantivy::directory::OwnedBytes;
 
 use crate::error::GraphError;
 use crate::op::{OpKind, Reader, column, corrupt, kind_byte, kind_from, put_len};
+use crate::presence::check_kinds;
 
 /// One fact change as written.
 pub(crate) type FactEntry<'p> = ((u32, u8), OpKind, &'p [u8]);
@@ -42,7 +43,14 @@ impl Facts {
         }
     }
 
-    pub(crate) fn parse(r: &mut Reader<'_>, file: &OwnedBytes) -> Result<Self, GraphError> {
+    /// Parse a fact section and validate it in one pass: (node, key) strictly ascend with every
+    /// node below `domain`, every kind is known and payload offsets start at zero and never
+    /// decrease.
+    pub(crate) fn parse(
+        r: &mut Reader<'_>,
+        file: &OwnedBytes,
+        domain: u64,
+    ) -> Result<Self, GraphError> {
         let count = r.count(4 + 1 + 1 + 8, "facts")?;
         let nodes = r.slice(file, count * 4, "fact nodes")?;
         let keys = r.slice(file, count, "fact keys")?;
@@ -53,14 +61,53 @@ impl Facts {
             .and_then(|t| usize::try_from(t).ok())
             .ok_or_else(|| corrupt("fact payload"))?;
         let payload = r.slice(file, total, "fact payload")?;
-        Ok(Self {
+        check_kinds(&kinds, "fact kinds")?;
+        let facts = Self {
             count,
             nodes,
             keys,
             kinds,
             offsets,
             payload,
-        })
+        };
+        let mut prev: Option<(u32, u8)> = None;
+        for i in 0..count {
+            let key = facts.key_at(i).ok_or_else(|| corrupt("fact keys"))?;
+            if u64::from(key.0) >= domain || prev.is_some_and(|p| p >= key) {
+                return Err(corrupt("fact order or domain"));
+            }
+            prev = Some(key);
+        }
+        let mut last = 0u64;
+        for (i, &o) in facts.offsets.as_chunks::<8>().0.iter().enumerate() {
+            let o = u64::from_le_bytes(o);
+            if (i == 0 && o != 0) || o < last {
+                return Err(corrupt("fact offsets"));
+            }
+            last = o;
+        }
+        Ok(facts)
+    }
+
+    /// The entries of `node`, in key order.
+    pub(crate) fn of_node(&self, node: u32) -> impl Iterator<Item = FactEntry<'_>> + '_ {
+        let first = self.partition(|(n, _)| n < node);
+        let end = self.partition(|(n, _)| n <= node);
+        (first..end).filter_map(|i| self.entry(i))
+    }
+
+    /// The first index whose key fails `before` (keys are sorted).
+    fn partition(&self, before: impl Fn((u32, u8)) -> bool) -> usize {
+        let (mut lo, mut hi) = (0usize, self.count);
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            if self.key_at(mid).is_some_and(&before) {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        lo
     }
 
     fn key_at(&self, i: usize) -> Option<(u32, u8)> {
