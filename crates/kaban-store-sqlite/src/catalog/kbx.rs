@@ -36,16 +36,17 @@ fn beside(db_path: &Path, name: &str) -> PathBuf {
     db_path.with_file_name(name)
 }
 
-/// Create the container, the allocation lock and the pins directory beside `db_path` where
-/// they are missing, owner-only (core-spec S5), and open none of them for longer: an existing
-/// one is kept as it is. A symlink or an entry of the wrong type is refused.
+/// Create the container, the allocation lock and the pins directory in the directory of
+/// `beside` (the database or the container) where they are missing, owner-only (core-spec
+/// S5), and open none of them for longer: an existing one is kept as it is. A symlink or an
+/// entry of the wrong type is refused.
 ///
 /// # Errors
 /// `StoreError::FileMode` with the I/O error.
-pub(crate) fn create_artefacts(db_path: &Path) -> Result<()> {
-    create_file(&kbx_path(db_path)).map_err(StoreError::FileMode)?;
-    create_file(&alloc_path(db_path)).map_err(StoreError::FileMode)?;
-    create_dir(&pins_dir(db_path)).map_err(StoreError::FileMode)
+pub(crate) fn create_artefacts(beside: &Path) -> Result<()> {
+    create_file(&kbx_path(beside)).map_err(StoreError::FileMode)?;
+    create_file(&alloc_path(beside)).map_err(StoreError::FileMode)?;
+    create_dir(&pins_dir(beside)).map_err(StoreError::FileMode)
 }
 
 fn create_file(path: &Path) -> io::Result<()> {

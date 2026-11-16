@@ -14,7 +14,7 @@ use kaban_core::MemoryStore;
 use kaban_store_sqlite::SqliteStore;
 use kaban_store_sqlite::catalog_testing::{self, ObservedOp};
 use rusqlite::{Connection, OpenFlags};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// The database the pinning role opens (set only for the child process).
 const PIN_DB: &str = "KABAN_T5_PIN_DB";
@@ -127,6 +127,73 @@ fn a_fresh_project_opens_with_its_catalog_beside_the_database() {
         "the pins are a directory"
     );
     drop(store);
+}
+
+/// Whether the project at `db` recorded its key (`index_meta` `hmac_key`).
+fn key_recorded(db: &Path) -> bool {
+    let raw = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    raw.query_row(
+        "SELECT EXISTS(SELECT 1 FROM index_meta WHERE key = 'hmac_key')",
+        [],
+        |r| r.get(0),
+    )
+    .unwrap()
+}
+
+fn assert_no_catalog_artefact(dir: &Path, what: &str) {
+    let entries = listing(dir);
+    for name in CATALOG_ARTEFACTS {
+        assert!(!entries.contains_key(name), "{what}: {name} was created");
+    }
+}
+
+#[test]
+fn a_fresh_project_whose_key_cannot_be_created_gains_no_catalog_artefact() {
+    // Arrange: the keys directory is a regular file
+    let s = Scratch::new("kaban-t5-commit", "fresh-key-refused");
+    std::fs::write(s.keys(), b"not a directory").unwrap();
+
+    // Act
+    let err = SqliteStore::open(&s.db(), &s.keys()).unwrap_err();
+
+    // Assert: the key refusal, no catalog artefact and no key record
+    assert!(matches!(err, kaban_core::StoreError::Audit(_)), "{err:?}");
+    assert_no_catalog_artefact(&s.0, "fresh project");
+    assert!(!key_recorded(&s.db()), "a key was recorded without its file");
+}
+
+#[test]
+fn a_project_whose_recorded_key_is_lost_or_malformed_gains_no_catalog_artefact() {
+    for malformed in [false, true] {
+        // Arrange: a project that recorded its key, then lost its key and its artefacts
+        let s = Scratch::new("kaban-t5-commit", &format!("lost-key-{malformed}"));
+        drop(SqliteStore::open(&s.db(), &s.keys()).unwrap());
+        assert!(key_recorded(&s.db()));
+        for entry in std::fs::read_dir(s.keys()).unwrap() {
+            let path = entry.unwrap().path();
+            if malformed {
+                std::fs::write(&path, b"short").unwrap();
+            } else {
+                std::fs::remove_file(&path).unwrap();
+            }
+        }
+        for name in CATALOG_ARTEFACTS {
+            let path = s.0.join(name);
+            if path.is_dir() {
+                std::fs::remove_dir(&path).unwrap();
+            } else {
+                std::fs::remove_file(&path).unwrap();
+            }
+        }
+
+        // Act
+        let err = SqliteStore::open(&s.db(), &s.keys()).unwrap_err();
+
+        // Assert: refused for its key, no artefact recreated, the record kept
+        assert!(matches!(err, kaban_core::StoreError::Audit(_)), "{err:?}");
+        assert_no_catalog_artefact(&s.0, &format!("malformed {malformed}"));
+        assert!(key_recorded(&s.db()));
+    }
 }
 
 #[test]

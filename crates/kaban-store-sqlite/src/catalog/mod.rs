@@ -79,17 +79,29 @@ impl Catalog {
     /// Create or open `kaban.kbx`, `kaban.kbx.alloc` and `kaban.kbx.pins/` beside `db_path`
     /// and check that the database on `conn` holds the catalog tables, then take `conn` as the
     /// writer connection (its capture triggers; [`Self::attach_writer`]). Called only once the
-    /// open admitted the database and published its version (spec 11 CMP-01): a refused
-    /// project never gains a catalog artefact. The hole-punch probe (KER-11) arrives with the
+    /// open admitted the database and published its version (spec 11 CMP-01) and, where it
+    /// admits a key, after the key ([`Self::create_artefacts`]): a refused project never gains
+    /// a catalog artefact. The hole-punch probe (KER-11) arrives with the
     /// container I/O (T5 Step 5); until then reclamation is not degraded.
     ///
     /// # Errors
     /// `StoreError::FileMode` for an artefact that cannot be created or is not of its type;
     /// SQLite errors (a database without the catalog tables among them).
     pub(crate) fn open(db_path: &Path, conn: &mut Connection) -> Result<Self> {
-        reclaim_floor(conn)?;
-        kbx::create_artefacts(db_path)?;
-        Self::with_container(kbx::kbx_path(db_path)).attach_writer(conn)
+        let catalog = Self::open_as_is(db_path, conn)?;
+        catalog.create_artefacts()?;
+        Ok(catalog)
+    }
+
+    /// Create the container, the allocation lock and the pins directory where they are
+    /// missing. An open that admits a key calls it only after the key's admission, so a
+    /// project refused for its key gains no catalog artefact (the catalog itself attaches
+    /// before, through [`Self::open_as_is`]: the key record commits through it).
+    ///
+    /// # Errors
+    /// `StoreError::FileMode` for an artefact that cannot be created or is not of its type.
+    pub(crate) fn create_artefacts(&self) -> Result<()> {
+        kbx::create_artefacts(&self.kbx)
     }
 
     /// [`Self::open`] for an open that serves the database as it is (verification, doctor, a
