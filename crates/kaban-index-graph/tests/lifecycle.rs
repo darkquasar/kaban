@@ -254,3 +254,70 @@ fn a_depth_mismatch_disables_the_union_shortcut() {
     );
     assert_matches(&v, &oracle, 4, "depth mismatch");
 }
+
+/// END-MAJ-01: `seal` reads tombstones and the domain from the parent's base and layers only;
+/// the parent's sediment is not part of the chain the layer opens on, so it cannot change the
+/// sealed bytes.
+#[test]
+fn sealing_ignores_the_parent_sediment() {
+    let base = open_base(build_base(
+        &Records {
+            nodes: vec![node(1, OpKind::Add), node(2, OpKind::Add)],
+            edges: vec![edge(1, 0, 2, 5), edge(2, 0, 1, 6)],
+            facts: vec![fact(1, 0, b"old"), fact(2, 0, b"keep")],
+        },
+        0,
+    ));
+    // R removes and re-adds node 1 with nothing of its own.
+    let r = Records {
+        nodes: vec![node(1, OpKind::Remove), node(1, OpKind::Add)],
+        ..Records::default()
+    };
+    let other = Records {
+        nodes: vec![node(2, OpKind::Remove), node(900, OpKind::Add)],
+        edges: vec![edge(2, 0, 1, 9)],
+        facts: vec![fact(1, 1, b"sediment")],
+    };
+    let sediments: [Vec<Records>; 4] = [
+        vec![],
+        vec![r.clone()],
+        vec![other.clone()],
+        vec![other, r.clone()],
+    ];
+    let chain_only = seal(&view::<Records>(Some(&base), &[], &[]), &r);
+    for (i, sediment) in sediments.iter().enumerate() {
+        let sealed = seal(&view(Some(&base), &[], sediment), &r);
+        assert_eq!(
+            sealed, chain_only,
+            "sediment variant {i} changed the sealed layer"
+        );
+    }
+
+    // The review's case: R both in the parent's sediment and sealed. Reopened over the base,
+    // node 1 has no old edge (either direction) and no old fact.
+    let parent_sediment = vec![r.clone()];
+    let layer = open_layer(seal(&view(Some(&base), &[], &parent_sediment), &r));
+    let layers = [layer];
+    let v = view::<Records>(Some(&base), &layers, &[]);
+    let mut oracle = Oracle::default();
+    oracle.apply(&Records {
+        nodes: vec![node(1, OpKind::Add), node(2, OpKind::Add)],
+        edges: vec![edge(1, 0, 2, 5), edge(2, 0, 1, 6)],
+        facts: vec![fact(1, 0, b"old"), fact(2, 0, b"keep")],
+    });
+    oracle.apply(&r);
+    assert_matches(&v, &oracle, 4, "sealed over sediment holding R");
+    assert_eq!(v.fact(LocalId(1), 0), None);
+    assert!(rows(&v, LocalId(1), &RelSelection::All, Direction::Both).is_empty());
+
+    // Re-adding edges and a fact after the barrier shows only the new data.
+    let readd = Records {
+        edges: vec![edge(1, 0, 2, 50)],
+        facts: vec![fact(1, 0, b"new")],
+        ..Records::default()
+    };
+    let more = vec![readd.clone()];
+    let v = view(Some(&base), &layers, &more);
+    oracle.apply(&readd);
+    assert_matches(&v, &oracle, 4, "re-added after the barrier");
+}
