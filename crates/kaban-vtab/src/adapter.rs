@@ -71,18 +71,9 @@ const MAX_ARGUMENTS: usize = 31;
 /// string, or SQLite refuses the module.
 pub fn register(conn: &rusqlite::Connection, f: Arc<dyn TableFunction>) -> rusqlite::Result<()> {
     const MODULE: Module<'static, FunctionTable> = Module::eponymous_only_module();
-    let name = f.name();
-    let arguments = f
-        .columns()
-        .iter()
-        .filter(|column| column.argument.is_some())
-        .count();
-    if arguments > MAX_ARGUMENTS {
-        return Err(Error::ModuleError(format!(
-            "{name}: {arguments} argument columns declared, at most {MAX_ARGUMENTS} are supported"
-        )));
-    }
-    conn.create_module(name, &MODULE, Some(f))
+    let registered = Registered::new(f)?;
+    let name = registered.name;
+    conn.create_module(name, &MODULE, Some(Arc::new(registered)))
 }
 
 /// Run a call into the table function, turning a panic into an error so it never unwinds into C.
@@ -128,12 +119,18 @@ fn schema(columns: &[ColumnDef]) -> rusqlite::Result<CString> {
         .map_err(|e| Error::ModuleError(format!("column declaration: {e}")))
 }
 
-/// One connection's instance of a registered table function.
-#[repr(C)]
-struct FunctionTable {
-    /// The SQLite base object; must stay the first field (rusqlite's `VTab` contract).
-    base: ffi::sqlite3_vtab,
+/// The immutable state of one registered function: the function and what registration read and
+/// validated from it. It is allocated once by [`register`], apart from every SQLite object, and
+/// shared (`Arc`) by each connection's [`FunctionTable`] and each [`FunctionCursor`]; nothing
+/// mutates it after construction, so references to it never alias a value SQLite writes.
+struct Registered {
     function: Arc<dyn TableFunction>,
+    /// The SQL name, read once at registration.
+    name: &'static str,
+    /// Every declared column, read once at registration.
+    columns: &'static [ColumnDef],
+    /// The `CREATE TABLE` statement SQLite reads the declared columns from.
+    schema: CString,
     /// For each declared column, where its value comes from.
     slots: Vec<Slot>,
     /// The declared column index of each argument, in declaration order.
@@ -142,17 +139,47 @@ struct FunctionTable {
     results: usize,
 }
 
-impl FunctionTable {
+impl Registered {
+    /// Read and validate `function`'s declaration once.
+    fn new(function: Arc<dyn TableFunction>) -> rusqlite::Result<Self> {
+        let name = function.name();
+        let columns = function.columns();
+        let mut slots = Vec::with_capacity(columns.len());
+        let mut arguments = Vec::new();
+        let mut results = 0;
+        for (index, column) in columns.iter().enumerate() {
+            if column.argument.is_some() {
+                slots.push(Slot::Argument(arguments.len()));
+                arguments.push(index);
+            } else {
+                slots.push(Slot::Result(results));
+                results += 1;
+            }
+        }
+        if arguments.len() > MAX_ARGUMENTS {
+            return Err(Error::ModuleError(format!(
+                "{name}: {} argument columns declared, at most {MAX_ARGUMENTS} are supported",
+                arguments.len()
+            )));
+        }
+        let schema = schema(columns)?;
+        Ok(Self {
+            function,
+            name,
+            columns,
+            schema,
+            slots,
+            arguments,
+            results,
+        })
+    }
+
     fn column_name(&self, column: usize) -> &'static str {
-        self.function
-            .columns()
-            .get(column)
-            .map_or("?", |column| column.name)
+        self.columns.get(column).map_or("?", |column| column.name)
     }
 
     fn is_required(&self, column: usize) -> bool {
-        self.function
-            .columns()
+        self.columns
             .get(column)
             .and_then(|column| column.argument)
             .is_some_and(|argument| argument.required)
@@ -168,12 +195,24 @@ impl FunctionTable {
     }
 }
 
+/// One connection's instance of a registered table function: the SQLite base object SQLite
+/// writes to (`nRef`, `zErrMsg`) and a handle on the shared [`Registered`] state.
+#[repr(C)]
+struct FunctionTable {
+    /// The SQLite base object; must stay the first field (rusqlite's `VTab` contract).
+    base: ffi::sqlite3_vtab,
+    registered: Arc<Registered>,
+}
+
 // SAFETY: rusqlite's `VTab` contract requires the implementing struct to be `#[repr(C)]` with
 // `ffi::sqlite3_vtab` as its first field, because rusqlite casts the `sqlite3_vtab` pointer SQLite
 // passes back to `*mut FunctionTable`. `FunctionTable` is `#[repr(C)]` and `base` is its first
-// field. No method unwinds: calls into the table function run under `contain`.
+// field. No reference into a `FunctionTable` outlives the callback that created it: a cursor holds
+// only the separately allocated `Registered` state, so SQLite's writes to `base` (`nRef` after
+// `xOpen`, `zErrMsg` on an error) and rusqlite's `&mut` per `xOpen` alias nothing a cursor reads
+// (docs/developer/SAFETY.md, cursor ownership).
 unsafe impl<'vtab> VTab<'vtab> for FunctionTable {
-    type Aux = Arc<dyn TableFunction>;
+    type Aux = Arc<Registered>;
     type Cursor = FunctionCursor<'vtab>;
 
     fn connect(
@@ -184,40 +223,24 @@ unsafe impl<'vtab> VTab<'vtab> for FunctionTable {
         _table_name: &[u8],
         _args: &[&[u8]],
     ) -> rusqlite::Result<(Cow<'static, CStr>, Self)> {
-        let function = aux.cloned().ok_or_else(|| {
+        let registered = aux.cloned().ok_or_else(|| {
             Error::ModuleError("table function registered without an implementation".to_owned())
         })?;
-        let columns = function.columns();
-        let mut slots = Vec::with_capacity(columns.len());
-        let mut arguments = Vec::new();
-        let mut results = 0;
-        for (index, column) in columns.iter().enumerate() {
-            if column.argument.is_some() {
-                slots.push(Slot::Argument(arguments.len()));
-                arguments.push(index);
-            } else {
-                slots.push(Slot::Result(results));
-                results += 1;
-            }
-        }
-        let schema = schema(columns)?;
         Ok((
-            Cow::Owned(schema),
+            Cow::Owned(registered.schema.clone()),
             Self {
                 base: ffi::sqlite3_vtab::default(),
-                function,
-                slots,
-                arguments,
-                results,
+                registered,
             },
         ))
     }
 
     fn best_index(&self, info: &mut IndexInfo) -> rusqlite::Result<bool> {
-        let name = self.function.name();
+        let registered = &*self.registered;
+        let name = registered.name;
         // The first usable equality constraint per argument, and whether an unusable one exists.
-        let mut usable: Vec<Option<usize>> = vec![None; self.arguments.len()];
-        let mut unusable = vec![false; self.arguments.len()];
+        let mut usable: Vec<Option<usize>> = vec![None; registered.arguments.len()];
+        let mut unusable = vec![false; registered.arguments.len()];
         let mut limit_known = false;
         for (index, constraint) in info.constraints().enumerate() {
             match constraint.operator() {
@@ -225,7 +248,7 @@ unsafe impl<'vtab> VTab<'vtab> for FunctionTable {
                     limit_known |= constraint.is_usable();
                 }
                 IndexConstraintOp::SQLITE_INDEX_CONSTRAINT_EQ => {
-                    let Some(position) = self.argument_position(constraint.column()) else {
+                    let Some(position) = registered.argument_position(constraint.column()) else {
                         continue;
                     };
                     if !constraint.is_usable() {
@@ -241,11 +264,11 @@ unsafe impl<'vtab> VTab<'vtab> for FunctionTable {
         // A required argument nothing binds can never be satisfied: refuse by name. One bound
         // only by an unusable constraint may be bound in another loop order: SQLITE_CONSTRAINT.
         let unbound_required = |position: &usize| {
-            usable[*position].is_none() && self.is_required(self.arguments[*position])
+            usable[*position].is_none() && registered.is_required(registered.arguments[*position])
         };
-        let mut unbound = (0..self.arguments.len()).filter(unbound_required);
+        let mut unbound = (0..registered.arguments.len()).filter(unbound_required);
         if let Some(missing) = unbound.clone().find(|position| !unusable[*position]) {
-            let argument = self.column_name(self.arguments[missing]);
+            let argument = registered.column_name(registered.arguments[missing]);
             return Err(Error::ModuleError(format!(
                 "{name}: missing required argument {argument}"
             )));
@@ -266,18 +289,17 @@ unsafe impl<'vtab> VTab<'vtab> for FunctionTable {
             idx_num |= 1 << position;
             assignments.push((constraint, argv_index));
             bound.push(BoundArg {
-                name: self.column_name(self.arguments[position]),
+                name: registered.column_name(registered.arguments[position]),
                 value: info.rhs_value(constraint).ok().flatten().map(Value::from),
             });
         }
 
         // An order on a column the function cannot name (the rowid) is never consumed.
-        let columns = self.function.columns();
         let order_by: Option<Vec<OrderTerm>> = info
             .order_bys()
             .map(|term| {
                 let column = usize::try_from(term.column()).ok()?;
-                columns.get(column).map(|column| OrderTerm {
+                registered.columns.get(column).map(|column| OrderTerm {
                     name: column.name,
                     desc: term.is_order_by_desc(),
                 })
@@ -290,7 +312,7 @@ unsafe impl<'vtab> VTab<'vtab> for FunctionTable {
             order_by: &order_by,
             limit_known,
         };
-        let plan = contain(name, "plan", || self.function.plan(&input))?;
+        let plan = contain(name, "plan", || registered.function.plan(&input))?;
 
         for (constraint, argv_index) in assignments {
             let mut usage = info.constraint_usage(constraint);
@@ -315,13 +337,18 @@ unsafe impl<'vtab> VTab<'vtab> for FunctionTable {
     }
 
     fn open(&'vtab mut self) -> rusqlite::Result<FunctionCursor<'vtab>> {
+        // Only the shared `Registered` allocation is borrowed for `'vtab`, never `self`: the
+        // reference points into the `Arc`'s own heap block, and the cursor keeps that block alive
+        // with its own handle.
+        let table: &'vtab Self = self;
         Ok(FunctionCursor {
             base: ffi::sqlite3_vtab_cursor::default(),
-            table: self,
+            registered: &table.registered,
             args: Vec::new(),
             rows: None,
             current: None,
             rowid: 0,
+            _keep: Arc::clone(&table.registered),
         })
     }
 }
@@ -331,26 +358,30 @@ unsafe impl<'vtab> VTab<'vtab> for FunctionTable {
 struct FunctionCursor<'vtab> {
     /// The SQLite base object; must stay the first field (rusqlite's `VTabCursor` contract).
     base: ffi::sqlite3_vtab_cursor,
-    table: &'vtab FunctionTable,
+    /// The registered function's shared state, inside the `Arc` block `_keep` holds.
+    registered: &'vtab Registered,
     /// The scan's arguments, one per argument column.
     args: Vec<Value>,
     rows: Option<Rows<'vtab>>,
     /// The current row; `None` at end of scan.
     current: Option<Vec<Value>>,
     rowid: i64,
+    /// Keeps the `Registered` block alive for as long as the cursor, whatever order SQLite
+    /// disconnects the table and closes cursors in. Declared last: dropped after `rows`.
+    _keep: Arc<Registered>,
 }
 
 impl FunctionCursor<'_> {
     /// Move to the next row, ending the scan on exhaustion or error.
     fn advance(&mut self) -> rusqlite::Result<()> {
-        let table = self.table;
-        let name = table.function.name();
+        let registered = self.registered;
+        let name = registered.name;
         let next = match self.rows.as_mut() {
             Some(rows) => contain(name, "rows", || rows.next()),
             None => Ok(None),
         };
         match next {
-            Ok(Some(Ok(row))) if row.len() == table.results => {
+            Ok(Some(Ok(row))) if row.len() == registered.results => {
                 self.current = Some(row);
                 self.rowid += 1;
                 Ok(())
@@ -360,7 +391,7 @@ impl FunctionCursor<'_> {
                 Err(Error::ModuleError(format!(
                     "{name}: a row holds {} values but {} result columns are declared",
                     row.len(),
-                    table.results
+                    registered.results
                 )))
             }
             Ok(Some(Err(error))) => {
@@ -396,7 +427,7 @@ impl Drop for FunctionCursor<'_> {
 // SAFETY: rusqlite's `VTabCursor` contract requires the implementing struct to be `#[repr(C)]` with
 // `ffi::sqlite3_vtab_cursor` as its first field, because rusqlite casts the cursor pointer SQLite
 // passes back to `*mut FunctionCursor`. `FunctionCursor` is `#[repr(C)]` and `base` is its first
-// field. No method unwinds: calls into the table function and its rows run under `contain`.
+// field. It holds no reference into the `sqlite3_vtab` allocation (see the `VTab` impl above).
 unsafe impl VTabCursor for FunctionCursor<'_> {
     fn filter(
         &mut self,
@@ -404,10 +435,10 @@ unsafe impl VTabCursor for FunctionCursor<'_> {
         _idx_str: Option<&str>,
         args: &Filters<'_>,
     ) -> rusqlite::Result<()> {
-        let table = self.table;
-        let name = table.function.name();
+        let registered = self.registered;
+        let name = registered.name;
         let mut supplied = args.iter();
-        self.args = (0..table.arguments.len())
+        self.args = (0..registered.arguments.len())
             .map(|position| {
                 if (idx_num >> position) & 1 == 1 {
                     supplied.next().map_or(Value::Null, Value::from)
@@ -424,7 +455,7 @@ unsafe impl VTabCursor for FunctionCursor<'_> {
                 "{name}: table function scanned outside a request budget scope"
             )));
         };
-        let function: &dyn TableFunction = &*table.function;
+        let function: &'_ dyn TableFunction = &*registered.function;
         let rows = contain(name, "rows", || function.rows(&self.args, &budget))?
             .map_err(|error| refusal(&error))?;
         self.rows = Some(rows);
@@ -442,7 +473,7 @@ unsafe impl VTabCursor for FunctionCursor<'_> {
     fn column(&self, ctx: &mut Context, i: c_int) -> rusqlite::Result<()> {
         let slot = usize::try_from(i)
             .ok()
-            .and_then(|column| self.table.slots.get(column));
+            .and_then(|column| self.registered.slots.get(column));
         let value = match slot {
             Some(Slot::Result(k)) => self.current.as_ref().and_then(|row| row.get(*k)),
             Some(Slot::Argument(k)) => self.args.get(*k),

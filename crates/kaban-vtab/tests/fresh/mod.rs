@@ -183,3 +183,33 @@ impl Block {
         unsafe { ffi::sqlite3_free(self.0.as_ptr()) }
     }
 }
+
+/// The flags a request's in-memory query connection opens with.
+pub(crate) fn query_flags() -> rusqlite::OpenFlags {
+    use rusqlite::OpenFlags;
+    OpenFlags::SQLITE_OPEN_READ_WRITE
+        | OpenFlags::SQLITE_OPEN_CREATE
+        | OpenFlags::SQLITE_OPEN_NO_MUTEX
+        | OpenFlags::SQLITE_OPEN_URI
+}
+
+/// Run `body` on a request's in-memory query connection with `functions` registered, inside an
+/// unbounded request scope; returns the budget so callers can check what stays charged.
+pub(crate) fn with_query(
+    functions: Vec<std::sync::Arc<dyn kaban_vtab::TableFunction>>,
+    body: impl FnOnce(&rusqlite::Connection),
+) -> kaban_core::query_budget::QueryBudget {
+    let runtime = installed_runtime();
+    let budget = kaban_core::query_budget::QueryBudget::new(u64::MAX, None);
+    let scope = kaban_vtab::RequestScope::enter(runtime, &budget);
+    let conn = scope
+        .open_query_connection(std::path::Path::new(":memory:"), query_flags())
+        .unwrap();
+    for f in functions {
+        kaban_vtab::register(&conn, f).unwrap();
+    }
+    body(&conn);
+    conn.close().unwrap();
+    drop(scope);
+    budget
+}
