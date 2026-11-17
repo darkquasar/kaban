@@ -389,8 +389,9 @@ impl Drop for SafetyLevel<'_> {
 /// The writer guard of test builds: a commit hook on the writer connection that refuses
 /// (rolls back) every commit outside [`Catalog::commit`] and [`Catalog::outside_commit`], so an
 /// autocommit row write or a transaction the catalog did not open fails where it runs. It
-/// sees this connection only: another connection's writes (the projector's own, a test's raw
-/// connection) and the open-time writes before the catalog attaches are not its.
+/// sees this connection only: another connection's writes (a test's raw connection) and the
+/// open-time writes before the catalog attaches are not its. The serving projector commits on
+/// this connection, admitted through [`Catalog::outside_commits`] until T7 removes it.
 ///
 /// # Errors
 /// SQLite errors registering the hook.

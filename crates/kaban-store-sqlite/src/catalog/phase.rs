@@ -8,10 +8,10 @@
 //!                 BatchChanges        (authorizer)      (authorizer)      generation checked
 //! ```
 //!
-//! | phase   | may read                    | may write                         |
-//! |---------|-----------------------------|-----------------------------------|
-//! | Writer  | anything                    | anything (canonical rows captured) |
-//! | Derived | the transaction, [`Reader`] | [`DERIVED_TABLES`], `Derived::execute` |
+//! | phase   | may read                    | may write                                 |
+//! |---------|-----------------------------|-------------------------------------------|
+//! | Writer  | anything                    | anything (canonical rows are captured)    |
+//! | Derived | the transaction, [`Reader`] | [`DERIVED_TABLES`], `Derived::execute`    |
 //! | Stage   | the transaction, [`Reader`] | [`STAGING_TABLES`], `Stage::put_sediment` |
 //!
 //! The restricted phases (Derived, Stage) reach the connection only through their handles
