@@ -501,6 +501,115 @@ mod tests {
         }
     }
 
+    /// `sql` on `conn` is refused by a capture guard: nothing changed, nothing queued.
+    fn assert_guard_refuses(conn: &Connection, sql: &str) {
+        let snapshot = |conn: &Connection| -> Vec<(i64, String)> {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT rid, id FROM node UNION ALL SELECT rowid, id || ':' || src || '>' || dst
+                     FROM edge ORDER BY 1, 2",
+                )
+                .unwrap();
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+                .map(std::result::Result::unwrap)
+                .collect()
+        };
+        let before = snapshot(conn);
+        reset(conn).unwrap();
+
+        let out = conn.execute(sql, []);
+
+        let err = out.expect_err(&format!("{sql} was admitted"));
+        assert!(
+            err.to_string().contains("catalog_capture_refused"),
+            "{sql}: refused by something else: {err}"
+        );
+        assert_eq!(snapshot(conn), before, "{sql}");
+        assert!(drain(conn).unwrap().is_empty(), "{sql}");
+    }
+
+    #[test]
+    fn a_node_identity_change_is_refused_however_the_statement_spells_the_rowid() {
+        for column in ["rid", "rowid", "_rowid_", "oid", "ROWID", "\"rid\""] {
+            for sql in [
+                format!("UPDATE node SET {column} = 9 WHERE rid = 3"),
+                format!("UPDATE node SET {column} = {column} + 6, kind = 'Idea' WHERE rid = 3"),
+                format!("UPDATE OR REPLACE node SET {column} = 1 WHERE rid = 3"),
+            ] {
+                // Arrange: node 3 has no edge, so no foreign key refuses the change first
+                let conn = two_nodes_one_edge();
+                conn.execute(
+                    "INSERT INTO node(rid, id, kind, lifecycle) VALUES (3, 'n3', 'Fact', 'active')",
+                    [],
+                )
+                .unwrap();
+
+                // Act, Assert
+                assert_guard_refuses(&conn, &sql);
+            }
+        }
+    }
+
+    #[test]
+    fn an_edge_write_that_would_replace_another_edge_by_its_rowid_is_refused() {
+        for column in ["rowid", "_rowid_", "oid"] {
+            for sql in [
+                // a new identity at the rowid of edge `a`: REPLACE would delete `a` unseen
+                format!(
+                    "INSERT OR REPLACE INTO edge({column}, id, src, dst, rel, producer)
+                     VALUES ((SELECT rowid FROM edge WHERE id = 'a'), 'q', 2, 1, 'OTHER', 'x')"
+                ),
+                format!(
+                    "REPLACE INTO edge({column}, id, src, dst, rel, producer)
+                     VALUES ((SELECT rowid FROM edge WHERE id = 'a'), 'q', 2, 2, 'OTHER', 'x')"
+                ),
+                // edge `c` moved onto the rowid of edge `a`
+                format!(
+                    "UPDATE OR REPLACE edge SET {column} = (SELECT rowid FROM edge WHERE id = 'a')
+                     WHERE id = 'c'"
+                ),
+                format!("UPDATE edge SET {column} = 77 WHERE id = 'c'"),
+            ] {
+                // Arrange
+                let conn = two_nodes_one_edge();
+                conn.execute(
+                    "INSERT INTO edge(id, src, dst, rel, producer) VALUES ('c', 2, 1, 'RELATES_TO', 'x')",
+                    [],
+                )
+                .unwrap();
+
+                // Act, Assert
+                assert_guard_refuses(&conn, &sql);
+            }
+        }
+    }
+
+    #[test]
+    fn an_edge_first_writer_no_op_and_a_stamp_are_admitted_and_capture_nothing() {
+        // Arrange
+        let conn = two_nodes_one_edge();
+
+        // Act: the first writer's insert-or-ignore of an existing identity, then a stamp
+        conn.execute_batch(
+            "INSERT INTO edge(id, src, dst, rel, producer) VALUES ('z', 1, 2, 'RELATES_TO', 'rules')
+               ON CONFLICT DO NOTHING;
+             INSERT OR IGNORE INTO edge(id, src, dst, rel, producer)
+               VALUES ('a', 1, 2, 'RELATES_TO', 'rules');
+             UPDATE edge SET actor_id = 'x' WHERE id = 'a';
+             UPDATE node SET actor_id = 'x' WHERE rid = 1;",
+        )
+        .unwrap();
+        let changes = drain(&conn).unwrap();
+
+        // Assert
+        assert!(changes.is_empty(), "{changes:?}");
+        let producer: String = conn
+            .query_row("SELECT producer FROM edge WHERE id = 'a'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(producer, "authored");
+    }
+
     #[test]
     fn a_replaced_edge_identity_is_captured_as_a_delete_and_an_insert() {
         // Arrange
