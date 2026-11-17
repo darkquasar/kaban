@@ -4,7 +4,6 @@
 
 use std::cell::Cell;
 use std::convert::Infallible;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use kaban_core::query_budget::{BudgetExceeded, BudgetLease, GrowError, QueryBudget};
 
@@ -306,24 +305,6 @@ impl<T> std::ops::DerefMut for Grow<'_, T> {
     }
 }
 
-/// Metered work units done in this process so far (instrumentation): every unit counted by a
-/// budgeted [`Ticker`], published at its interval boundaries and when it is dropped.
-static WORK_UNITS: AtomicU64 = AtomicU64::new(0);
-
-/// Metered units of query work done in this process so far, for tests and diagnostics of the
-/// bounded-work contract (PC-17).
-///
-/// A unit is one bounded step of query work: one source entry advanced or compared in a merge,
-/// one bitvector word visited, one cursor prepared, one loop iteration of a structural function,
-/// one decoded record, one validated entry or one sort step. Every budgeted loop of this crate
-/// counts its units here; the count is published every [`BUDGET_CHECK_INTERVAL`] units and when
-/// the counting loop ends, so it can lag the work by less than one interval per live loop. The
-/// counter is process-wide: concurrent queries add to the same count.
-#[must_use]
-pub fn work_units() -> u64 {
-    WORK_UNITS.load(Ordering::SeqCst)
-}
-
 /// The metered loop a unit of work belongs to. Every unit names its loop, so test
 /// instrumentation can request a cancellation inside one named loop and see which loop's check
 /// refused; production code ignores it.
@@ -386,8 +367,7 @@ pub(crate) enum Phase {
 }
 
 /// Counts units of work and checks the budget once every [`BUDGET_CHECK_INTERVAL`] units,
-/// starting before the first unit. A ticker without a budget (writer paths) neither checks nor
-/// publishes.
+/// starting before the first unit. A ticker without a budget (writer paths) never checks.
 ///
 /// Iterator sources that cannot return an error use [`Ticker::step`]: once a check fails the
 /// ticker remembers the breach, every later step refuses, and the owning loop reports the breach
@@ -396,7 +376,6 @@ pub(crate) enum Phase {
 pub(crate) struct Ticker<'b> {
     budget: Option<&'b QueryBudget>,
     units: Cell<u64>,
-    published: Cell<u64>,
     failed: Cell<Option<BudgetExceeded>>,
 }
 
@@ -410,7 +389,6 @@ impl<'b> Ticker<'b> {
         Self {
             budget,
             units: Cell::new(0),
-            published: Cell::new(0),
             failed: Cell::new(None),
         }
     }
@@ -429,16 +407,14 @@ impl<'b> Ticker<'b> {
             return Err(e.into());
         }
         let units = self.units.get();
-        if units.is_multiple_of(BUDGET_CHECK_INTERVAL) {
-            self.publish();
-            if let Some(budget) = self.budget
-                && let Err(e) = budget.check()
-            {
-                self.failed.set(Some(e));
-                #[cfg(test)]
-                crate::probe::refused(budget, phase);
-                return Err(e.into());
-            }
+        if units.is_multiple_of(BUDGET_CHECK_INTERVAL)
+            && let Some(budget) = self.budget
+            && let Err(e) = budget.check()
+        {
+            self.failed.set(Some(e));
+            #[cfg(test)]
+            crate::probe::refused(budget, phase);
+            return Err(e.into());
         }
         self.units.set(units + 1);
         #[cfg(test)]
@@ -496,14 +472,6 @@ impl<'b> Ticker<'b> {
             None => Ok(()),
         }
     }
-
-    fn publish(&self) {
-        if self.budget.is_some() {
-            let units = self.units.get();
-            WORK_UNITS.fetch_add(units - self.published.get(), Ordering::SeqCst);
-            self.published.set(units);
-        }
-    }
 }
 
 /// The iterator of [`Ticker::each`].
@@ -528,11 +496,5 @@ impl<I: Iterator> Iterator for Each<'_, '_, I> {
             return Some(Err(e));
         }
         Some(Ok(item))
-    }
-}
-
-impl Drop for Ticker<'_> {
-    fn drop(&mut self) {
-        self.publish();
     }
 }

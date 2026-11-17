@@ -159,6 +159,76 @@ mod tests {
             "only the watched budget is cancelled"
         );
     }
+
+    /// A hub 0 > 1..=50 over present nodes, as prepared sediment.
+    fn hub() -> crate::PreparedSediment {
+        let free = QueryBudget::new(u64::MAX, None);
+        let r = crate::Records {
+            nodes: (0..=50)
+                .map(|n| crate::NodeOp {
+                    node: crate::LocalId(n),
+                    kind: crate::OpKind::Add,
+                })
+                .collect(),
+            edges: (1..=50)
+                .map(|m| crate::EdgeOp {
+                    src: crate::LocalId(0),
+                    rel: crate::RelId(0),
+                    dst: crate::LocalId(m),
+                    kind: crate::OpKind::Add,
+                    attr: crate::Attr::default(),
+                })
+                .collect(),
+            ..crate::Records::default()
+        };
+        crate::PreparedSediment::prepare(&[r], &free).unwrap()
+    }
+
+    /// GRA-04: a missing cap is refused before any neighbour access, and a view over prepared
+    /// sediment does no sediment work: the instrumented calls count no unit at all.
+    #[test]
+    fn cap_refusals_and_views_over_prepared_sediment_count_no_unit() {
+        use crate::{Caps, Direction, LocalId, RelSelection, RowCap, View};
+        let prepared = hub();
+        let b = QueryBudget::new(u64::MAX, None);
+        let ((), report) = watch(&b, None, || {
+            View::new(None, &[], &prepared, &b).unwrap();
+        });
+        assert_eq!(
+            report.total(),
+            0,
+            "a view over prepared sediment: {report:?}"
+        );
+        let v = View::new(None, &[], &prepared, &b).unwrap();
+        let all = RelSelection::All;
+        let src = [LocalId(0)];
+        let (a, z) = (LocalId(0), LocalId(7));
+        let caps = |depth, rows| Caps { depth, rows };
+        for bad in [caps(0, 10), caps(3, 0), caps(0, 0)] {
+            let (missing, report) = watch(&b, None, || {
+                [
+                    crate::expand(&v, &src, &all, Direction::Both, bad, &b).is_err(),
+                    crate::closure(&v, &src, &all, bad, &b).is_err(),
+                    crate::reverse_closure(&v, &src, &all, bad, &b).is_err(),
+                    crate::reachable(&v, a, z, &all, bad, &b).is_err(),
+                    crate::shortest_path(&v, a, z, &all, bad, &b).is_err(),
+                    crate::meet(&v, a, z, &all, bad, &b).is_err(),
+                    crate::topo_order(&v, &src, &all, bad, &b).is_err(),
+                ]
+            });
+            assert!(missing.iter().all(|&e| e), "{bad:?}: refused");
+            assert_eq!(report.total(), 0, "{bad:?}: no neighbour access");
+        }
+        let (got, report) = watch(&b, None, || crate::wcc(&v, &all, RowCap(0), &b).is_err());
+        assert!(got);
+        assert_eq!(report.total(), 0, "RowCap(0): no neighbour access");
+        // Sanity: the same call with caps does read, and the probe sees it.
+        let (got, report) = watch(&b, None, || {
+            crate::expand(&v, &src, &all, Direction::Out, caps(1, 10), &b).is_ok()
+        });
+        assert!(got);
+        assert!(report.units_in(Phase::Merge) > 0, "{report:?}");
+    }
 }
 
 /// The owner's cancellation rule (END-MAJ-02/03, POST-MAJ-01, POST-MED-03/04): every internal
@@ -598,8 +668,9 @@ mod cancellation {
                 }),
             ),
             (
+                // The first advance of the bitmap source crosses the empty words, while priming.
                 "a presence scan over empty bitmap words",
-                Phase::Merge,
+                Phase::MergePrime,
                 first,
                 Box::new(|b| drain(words.nodes(b))),
             ),

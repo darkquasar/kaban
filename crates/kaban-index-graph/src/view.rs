@@ -29,14 +29,14 @@ use crate::sediment::{EMPTY, PreparedSediment, SedEdge, SedNode};
 
 /// Units of work between two budget checks of one metered loop (an accessor iterator, a
 /// structural function's loop, decoding, validation or preparation). A unit is bounded: one
-/// cursor prepared, one source compared or advanced by one entry in a merge, one bitvector word
-/// visited, one record decoded or validated, 4 KiB of fact payload copied, 256 kind bytes
-/// validated, one loop iteration of a structural function, one union-find step or one sift of
-/// a sort (at most 2 log2(n) comparisons); apart from those fixed-size chunks none costs more
-/// than a binary search over one section or prepared sediment stream, plus a presence probe
-/// over the chain for a row's neighbour. A
-/// cancellation or deadline is therefore seen within this many units of each live loop, and
-/// [`crate::work_units`] counts them.
+/// cursor prepared, one source compared or advanced by one entry in a merge or set up or primed
+/// for one, one bitvector word visited, one record counted, decoded, copied or validated, one
+/// batch or layer visited (empty ones included), 4 KiB of fact payload or of a growing vector
+/// moved, 256 kind bytes validated, one loop iteration of a structural function, one union-find
+/// step or one sift of a sort (at most 2 log2(n) comparisons); apart from those fixed-size
+/// chunks none costs more than a binary search over one section or prepared sediment stream,
+/// plus a presence probe over the chain for a row's neighbour. A cancellation or deadline is
+/// therefore seen within this many units of each live loop.
 pub const BUDGET_CHECK_INTERVAL: u64 = 256;
 
 /// A read view: a base, sealed layers oldest first, then a prepared sediment.

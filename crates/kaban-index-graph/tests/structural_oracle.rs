@@ -13,10 +13,10 @@ use kaban_index_graph::{
     Attr, Base, Caps, Direction, EdgeOp, GraphError, Layer, LocalId, NodeOp, OpKind, Reached,
     Records, RelId, RelSelection, RowCap, View, build_base, closure, common_neighbours, degree,
     expand, meet, reachable, refuse_not_planned, reverse_closure, seal, shortest_path, topo_order,
-    wcc, work_units,
+    wcc,
 };
 use oracle::structural::{Expected, Graph};
-use oracle::{Fixture, IDS, Rng, budget, chain, serial, view};
+use oracle::{Fixture, IDS, Rng, budget, chain, view};
 use tantivy::directory::OwnedBytes;
 
 const SEEDS: u64 = 6;
@@ -687,10 +687,13 @@ fn is_missing(r: &Result<impl std::fmt::Debug, GraphError>, limit: &str) -> bool
 
 #[test]
 fn a_missing_cap_is_refused_before_any_neighbour_access() {
-    let _serial = serial();
     let rs = hub_view_records(50);
     let v = view(None, &[], &rs);
+    // The accessor checks the budget before its first read, so under a cancelled budget any
+    // neighbour access would refuse as cancelled: a cap refusal here came before any access.
+    // (The crate's unit tests also count the units of each such call: none.)
     let b = budget();
+    b.cancel();
     let all = RelSelection::All;
     let src = [LocalId(0)];
     let (a, z) = (LocalId(0), LocalId(7));
@@ -699,7 +702,6 @@ fn a_missing_cap_is_refused_before_any_neighbour_access() {
         (caps(3, 0), "rows"),
         (caps(0, 0), "depth"),
     ] {
-        let before = work_units();
         assert!(is_missing(
             &expand(&v, &src, &all, Direction::Both, bad, &b),
             limit
@@ -710,14 +712,16 @@ fn a_missing_cap_is_refused_before_any_neighbour_access() {
         assert!(is_missing(&shortest_path(&v, a, z, &all, bad, &b), limit));
         assert!(is_missing(&meet(&v, a, z, &all, bad, &b), limit));
         assert!(is_missing(&topo_order(&v, &src, &all, bad, &b), limit));
-        assert_eq!(work_units(), before, "{bad:?}: no raw read");
     }
-    let before = work_units();
     assert!(is_missing(&wcc(&v, &all, RowCap(0), &b), "rows"));
-    assert_eq!(work_units(), before, "RowCap(0): no raw read");
-    // Sanity: the same calls with caps do read.
-    expand(&v, &src, &all, Direction::Out, caps(1, 10), &b).unwrap();
-    assert!(work_units() > before);
+    // Sanity: the same call with caps reaches the budget and refuses.
+    assert!(matches!(
+        expand(&v, &src, &all, Direction::Out, caps(1, 10), &b),
+        Err(GraphError::BudgetExceeded {
+            limit: "cancelled",
+            ..
+        })
+    ));
 }
 
 #[test]
