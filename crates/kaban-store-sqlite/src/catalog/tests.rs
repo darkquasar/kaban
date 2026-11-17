@@ -1186,3 +1186,235 @@ fn a_pin_on_a_connection_with_an_open_transaction_is_refused_by_name() {
     assert!(!conn.is_autocommit());
     conn.execute_batch("ROLLBACK").unwrap();
 }
+
+// One owner per published range (END-MAJ-01): an appended range is published at most once, only
+// by the catalog of the container it was appended to, and never over a range a catalog row
+// already names; retiring one extent never releases bytes another live extent owns.
+
+/// Whether `T` is `Clone`, decided at compile time and observed at run time (autoref probing:
+/// the by-value candidate applies only when the bound holds).
+struct CloneProbe<T>(std::marker::PhantomData<T>);
+
+trait Cloneable {
+    fn is_clone(&self) -> bool {
+        true
+    }
+}
+
+impl<T: Clone> Cloneable for CloneProbe<T> {}
+
+trait NotCloneable {
+    fn is_clone(&self) -> bool {
+        false
+    }
+}
+
+impl<T> NotCloneable for &CloneProbe<T> {}
+
+/// The driver's text of a refused store error.
+fn driver_text(err: &StoreError) -> String {
+    let StoreError::Backend { source } = err else {
+        panic!("expected a refusal behind Backend, got {err:?}");
+    };
+    source.driver().to_string()
+}
+
+/// The container ranges `(offset, len)` the catalog rows of `store` name, in id order.
+fn kbx_rows(store: &SqliteStore) -> Vec<(i64, i64)> {
+    let conn = store.lock();
+    let mut stmt = conn
+        .prepare("SELECT kbx_offset, kbx_len FROM cat_extent WHERE kbx_offset IS NOT NULL ORDER BY id")
+        .unwrap();
+    stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .map(std::result::Result::unwrap)
+        .collect()
+}
+
+/// The raw bytes of `store`'s container at `range`.
+fn raw_range(fs: &FileStore, (offset, len): (u64, u64)) -> Vec<u8> {
+    let raw = std::fs::read(fs.dir.join("kaban.kbx")).unwrap();
+    raw[usize::try_from(offset).unwrap()..usize::try_from(offset + len).unwrap()].to_vec()
+}
+
+/// The container range of the pinned test-class extent `id` and its bytes through the pin.
+fn pinned_extent(store: &SqliteStore, id: u64) -> Option<((u64, u64), Vec<u8>)> {
+    let budget = kaban_core::query_budget::QueryBudget::new(u64::MAX, None);
+    let pin = store.catalog().pin(&mut store.lock(), &budget).unwrap();
+    let extents = pin.extents(ExtentClass::Test);
+    let e = extents.iter().find(|e| e.id.0 == id)?;
+    let super::class::ExtentLocation::Kbx { offset, len } = e.location else {
+        panic!("extent {id} is not in the container");
+    };
+    Some(((offset, len), pin.bytes(e).unwrap().as_slice().to_vec()))
+}
+
+#[test]
+fn an_unpublished_extent_cannot_be_copied_so_one_append_is_published_at_most_once() {
+    // Act: whether a second token for the same range can be made from the first
+    let cloneable = (&CloneProbe::<super::kbx::Unpublished>(std::marker::PhantomData)).is_clone();
+
+    // Assert: it cannot; `Txn::publish` takes the token by value, so publishing it consumes it
+    assert!(
+        !cloneable,
+        "Unpublished is Clone: one append can be published as two extents"
+    );
+}
+
+#[test]
+fn a_token_appended_to_another_container_is_refused_by_name() {
+    // Arrange: two projects; a range appended to the first's container
+    let first = FileStore::new("foreign-a");
+    let second = FileStore::new("foreign-b");
+    let token = first
+        .store
+        .catalog()
+        .append_extent(ExtentClass::Test, &[7_u8; 64])
+        .unwrap();
+
+    // Act: the second project's commit publishes it
+    let out = second
+        .store
+        .catalog()
+        .commit(&mut second.store.lock(), Durability::Normal, |txn| {
+            txn.publish(token)
+        });
+
+    // Assert: refused by name, and the second catalog names no range
+    let err = out.expect_err("a token of another container was published");
+    let text = driver_text(&err);
+    assert!(
+        text.contains("catalog_publish_refused") && text.contains("another container"),
+        "{text}"
+    );
+    assert_eq!(kbx_rows(&second.store), []);
+}
+
+#[test]
+fn a_range_that_overlaps_a_range_a_catalog_row_names_is_refused() {
+    // Arrange: a catalog row that already names the first GiB of the container (what a corrupt
+    // or replayed row would name), then a fresh append inside it
+    let fs = FileStore::new("overlap");
+    let store = &fs.store;
+    store
+        .catalog()
+        .commit(&mut store.lock(), Durability::Normal, |txn| {
+            let generation = txn.generation()?.0;
+            txn.conn()
+                .execute(
+                    "INSERT INTO cat_extent(class, generation, kbx_offset, kbx_len)
+                     VALUES ('test', ?1, 0, 1073741824)",
+                    [i64::try_from(generation).unwrap()],
+                )
+                .map_err(|e| StoreError::Backend {
+                    source: kaban_core::BackendSource::new(e),
+                })
+        })
+        .unwrap();
+    let token = store
+        .catalog()
+        .append_extent(ExtentClass::Test, &[5_u8; 64])
+        .unwrap();
+
+    // Act
+    let out = store
+        .catalog()
+        .commit(&mut store.lock(), Durability::Normal, |txn| {
+            txn.publish(token)
+        });
+
+    // Assert: refused by name; only the first row names a range
+    let err = out.expect_err("an overlapping range was published");
+    let text = driver_text(&err);
+    assert!(
+        text.contains("catalog_publish_refused") && text.contains("overlaps"),
+        "{text}"
+    );
+    assert_eq!(kbx_rows(store), [(0, 1_073_741_824)]);
+}
+
+#[test]
+fn retiring_one_published_extent_never_releases_the_bytes_of_another() {
+    use super::testing::{reclaim, retire};
+
+    // Arrange: two extents, each appended and published on its own
+    let fs = FileStore::new("one-owner");
+    let store = &fs.store;
+    let publish = |fill: u8| {
+        let token = store
+            .catalog()
+            .append_extent(ExtentClass::Test, &[fill; 8192])
+            .unwrap();
+        store
+            .catalog()
+            .commit(&mut store.lock(), Durability::Normal, |txn| {
+                txn.publish(token)
+            })
+            .unwrap()
+            .0
+    };
+    let doomed = publish(3);
+    let keeper = publish(4);
+    let (doomed_at, _) = pinned_extent(store, doomed).unwrap();
+
+    // Act
+    retire(store, &[doomed]).unwrap();
+    let reclaimed = reclaim(store).unwrap();
+
+    // Assert: the doomed range alone was released; the keeper reads its own bytes
+    assert_eq!(reclaimed.punched, [doomed]);
+    assert_eq!(raw_range(&fs, doomed_at), vec![0_u8; 8192]);
+    let (_, bytes) = pinned_extent(store, keeper).unwrap();
+    assert_eq!(bytes, vec![4_u8; 8192]);
+}
+
+#[test]
+fn a_range_whose_publication_rolled_back_stays_unowned_and_is_never_released() {
+    use super::testing::{reclaim, retire};
+
+    // Arrange: a publication whose commit fails after publishing, so it rolls back
+    let fs = FileStore::new("rolled-back");
+    let store = &fs.store;
+    let leaked = store
+        .catalog()
+        .append_extent(ExtentClass::Test, &[9_u8; 8192])
+        .unwrap();
+    let out = store
+        .catalog()
+        .commit(&mut store.lock(), Durability::Normal, |txn| {
+            txn.publish(leaked)?;
+            Err::<(), _>(StoreError::NotFound("a writer that fails after publishing".into()))
+        });
+    assert!(out.is_err());
+    let rows_after_rollback = kbx_rows(store);
+    // the leaked range: the container's first 8 KiB (the token itself is gone)
+    let leaked_at = (0, 8192);
+
+    // Act: later extents are published, one retired and reclaimed
+    let publish = |fill: u8| {
+        let token = store
+            .catalog()
+            .append_extent(ExtentClass::Test, &[fill; 8192])
+            .unwrap();
+        store
+            .catalog()
+            .commit(&mut store.lock(), Durability::Normal, |txn| {
+                txn.publish(token)
+            })
+            .unwrap()
+            .0
+    };
+    let doomed = publish(3);
+    let keeper = publish(4);
+    retire(store, &[doomed]).unwrap();
+    let reclaimed = reclaim(store).unwrap();
+
+    // Assert: no row named the rolled-back range, the later ranges lie beyond it, and
+    // reclamation released the doomed range only: the unowned bytes stay for T6's verify
+    assert_eq!(rows_after_rollback, []);
+    assert_eq!(reclaimed.punched, [doomed]);
+    assert_eq!(raw_range(&fs, leaked_at), vec![9_u8; 8192]);
+    let (keeper_at, bytes) = pinned_extent(store, keeper).unwrap();
+    assert!(keeper_at.0 >= 8192, "{keeper_at:?}");
+    assert_eq!(bytes, vec![4_u8; 8192]);
+}
