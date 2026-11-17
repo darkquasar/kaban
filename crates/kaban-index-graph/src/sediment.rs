@@ -18,24 +18,41 @@
 //!
 //! A run holds four streams (nodes by id, outgoing and incoming edges by (node, neighbour,
 //! relation), facts by (node, key)), each sorted and compacted to its newest surviving record
-//! per key, with the run's own barriers applied. [`PreparedSediment::extend`] prepares the new
-//! batches as one run, appends it and then merges by size tier, with this exact rule: let `s`
-//! be the size of the new run (records over its four streams); walking from the newest older
-//! run backwards, a run of size `o` joins the merge while `2 * s >= o`, and `s` grows by `o`
-//! each time. The joined runs are combined by one k-way merge into one run. Afterwards each run
-//! is more than twice the size of the merged run after it, so the runs shrink geometrically
-//! towards the newest and there are at most about log2(records) + 1 of them.
+//! per key, with the run's own barriers applied. Each run carries a merge weight: a fresh
+//! run's weight is its size when it is built (records over its four streams), a merged run's
+//! weight is the sum of its inputs' weights. A run's weight therefore counts every record it was
+//! built from, including those its compaction later dropped (an overwritten or deleted key), and
+//! never shrinks; the total weight W of a value is at most N, the records appended to it over
+//! the four streams (an edge counts once per direction).
+//! [`PreparedSediment::extend`] prepares the new batches as one run, appends it and then merges
+//! by weight tier, with this exact rule: let `s` be the weight of the new run; walking from the
+//! newest older run backwards, a run of weight `o` joins the merge while `2 * s >= o`, and `s`
+//! grows by `o` each time. The joined runs are combined by one k-way merge into one run.
+//! Afterwards each run's weight is more than twice the weight of the run after it, so the
+//! weights shrink geometrically towards the newest and there are at most log2(W) + 1 runs.
 //!
-//! A run of size `o` joins a merge only together with newer runs of total size at least `o / 2`,
-//! so each time a record already in a run is moved by a merge, the run it lands in is at least
-//! 1.5 times as large as the one it left. Each record is therefore moved at most
-//! 1 + log1.5(N) (about 1 + 1.71 log2 N) times over N appended records: O(log N) moves per
-//! appended record, amortised. Compaction only removes records (an overwritten or deleted key),
-//! which are never moved again.
+//! What is guaranteed, in records: a run of weight `o` joins a merge only together with newer
+//! runs of total weight at least `o / 2`, so a record moved by a merge lands in a run whose
+//! weight is at least 1.5 times the weight of the run it left. A record starts in a run of
+//! weight at least 1 and no weight exceeds W, so a merge moves each record at most log1.5(W)
+//! (about 1.71 log2 W) times, whatever compaction drops: with its first copy into its fresh run,
+//! at most N (1 + 1.71 log2 N) record copies over N appended records, O(log N) per appended
+//! record, amortised. A merge also reads the records it drops, and each record is dropped at most
+//! once, so its reads add at most N. Compacted sizes would not give this: a run whose records are
+//! overwritten over and over keeps its size, so with sizes in the rule an older survivor would
+//! move on every extension.
+//!
+//! In payload bytes: a fact's payload is copied with its record and only then, so each appended
+//! payload byte is copied at most 1 + 1.71 log2 N times, and the payload bytes copied over P
+//! appended payload bytes are at most P (1 + 1.71 log2 N). The bound counts appended bytes, not
+//! the bytes alive: a large payload that survives is copied by every merge it takes part in, at
+//! most that many times, while the record count of its run may stay small.
 //!
 //! The run count is also capped by [`MAX_SEDIMENT_RUNS`]: while an extension would leave more,
-//! the two adjacent runs with the smallest combined size are merged, so a read never merges more
-//! than that many sediment sources. Only adjacent runs are ever merged, which keeps batch order.
+//! the two adjacent runs with the smallest combined weight are merged, so a read never merges
+//! more than that many sediment sources. These fallback merges are outside the bound above; with
+//! weights doubling from run to run they need W above 2^32 records. Only adjacent runs are ever
+//! merged, which keeps batch order.
 //!
 //! A merge is a k-way merge of already sorted streams through a heap of the run heads: per key
 //! the newest run wins, a node keeps the newest of its removals, and an edge or fact is kept
@@ -125,6 +142,9 @@ pub(crate) struct SedFact {
 pub(crate) struct Run {
     /// The batch sequence numbers this run covers.
     span: Range<usize>,
+    /// The merge weight: the records of the fresh runs this run was merged from, counted when
+    /// each was built (see the module documentation, "Runs and merging").
+    weight: usize,
     nodes: Vec<SedNode>,
     /// The ids removed in this run (a barrier), ascending.
     removed: Vec<u32>,
@@ -142,7 +162,7 @@ pub(crate) struct Run {
 /// Build it once with [`PreparedSediment::prepare`], borrow it from every [`crate::View`] that
 /// reads the same batches (a view does no sediment work at construction), and when newer
 /// batches arrive call [`PreparedSediment::extend`], which returns a new value sharing the old
-/// runs and adding one (merging runs by size tier, see the module documentation). The old value
+/// runs and adding one (merging runs by weight tier, see the module documentation). The old value
 /// is unchanged, so views over it stay correct while they live. [`PreparedSediment::seal`]
 /// writes a prefix of the runs as a layer and returns the rest.
 ///
@@ -382,9 +402,11 @@ impl Run {
             return Ok(None);
         }
         let span = first..first + batches.len();
+        let weight = nodes.len() + out.len() + inc.len() + facts.len();
         charge
             .share(|lease| Self {
                 span,
+                weight,
                 nodes,
                 removed,
                 out,
@@ -477,8 +499,10 @@ impl Run {
         drop(merge);
         drop(scratch);
 
+        let weight = runs.iter().fold(0usize, |w, r| w.saturating_add(r.weight));
         charge.share(|lease| Self {
             span,
+            weight,
             nodes,
             removed,
             out,
@@ -506,9 +530,9 @@ impl Run {
         seal_over(parent, &self.removed, own)
     }
 
-    /// Records over the four streams: the size the merge rule compares.
-    fn size(&self) -> usize {
-        self.nodes.len() + self.out.len() + self.inc.len() + self.facts.len()
+    /// The merge weight the weight-tier rule compares.
+    fn weight(&self) -> usize {
+        self.weight
     }
 
     /// The newest change of `id` in this run.
@@ -595,8 +619,9 @@ impl Run {
     }
 }
 
-/// Where the size-tier rule starts merging `sizes` (oldest first, the newest last): the first
-/// index of the suffix that merges, or the last index when nothing merges.
+/// Where the weight-tier rule starts merging runs of merge weights `sizes` (oldest first, the
+/// newest last): the first index of the suffix that merges, or the last index when nothing
+/// merges.
 fn tier_start(sizes: &[usize]) -> usize {
     let Some(&newest) = sizes.last() else {
         return 0;
@@ -641,7 +666,7 @@ impl PreparedSediment {
     /// unchanged, so views over it stay valid.
     ///
     /// Work: `batches` are prepared as one new run (sorting only them), which shares `self`'s
-    /// runs and then merges with the newest of them by the size-tier rule and the run limit
+    /// runs and then merges with the newest of them by the weight-tier rule and the run limit
     /// (see the module documentation): O(log N) record moves per appended record, amortised,
     /// over N records. The new run, every merge output and the run list are reserved on
     /// `budget` before they are built and stay charged while the new value lives; runs shared
@@ -672,10 +697,10 @@ impl PreparedSediment {
         if let Some(fresh) = fresh {
             runs.push(fresh);
             let start = {
-                // Size-selection scratch, charged only while it lives.
+                // Weight-selection scratch, charged only while it lives.
                 let mut scratch = Charge::new(budget)?;
                 let mut sizes: Vec<usize> = scratch.vec(runs.len())?;
-                sizes.extend(runs.iter().map(|r| r.size()));
+                sizes.extend(runs.iter().map(|r| r.weight()));
                 tier_start(&sizes)
             };
             if start + 1 < runs.len() {
@@ -686,7 +711,7 @@ impl PreparedSediment {
         }
         while runs.len() > limit.max(1) {
             let at = (0..runs.len() - 1)
-                .min_by_key(|&i| runs[i].size() + runs[i + 1].size())
+                .min_by_key(|&i| runs[i].weight().saturating_add(runs[i + 1].weight()))
                 .unwrap_or(0);
             runs[at] = Run::merge(&runs[at..at + 2], budget)?;
             runs.remove(at + 1);
