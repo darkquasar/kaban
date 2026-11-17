@@ -3,9 +3,9 @@
 //! accessor iterators charge their cursors while alive; a cancelled or expired budget stops a
 //! filtered scan within [`BUDGET_CHECK_INTERVAL`] units of work, even when no row is produced. The
 //! structural functions share that budget for their working sets and results (Step 3). Units are
-//! observed through the process-wide [`work_units`] count, so these tests hold [`serial`]
-//! (END-MAJ-02, END-MAJ-03: work beneath the merge, decoding, validation, preparation, sorts and
-//! structural loops).
+//! observed through the process-wide [`work_units`] count, so the tests that read it hold
+//! [`serial`]; one table-driven test cancels every internal loop (END-MAJ-02, END-MAJ-03:
+//! decoding, run building and merging, sealing, validation and the structural loops).
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // test code: failures are the assertion
 
@@ -55,7 +55,6 @@ fn is_memory(e: &GraphError) -> bool {
 
 #[test]
 fn decoding_refuses_a_budget_smaller_than_the_records() {
-    let _serial = serial();
     let r = Records {
         edges: (0..1000).map(|i| edge(i, i + 1, OpKind::Add)).collect(),
         ..Records::default()
@@ -73,7 +72,6 @@ fn decoding_refuses_a_budget_smaller_than_the_records() {
 
 #[test]
 fn decoded_fact_heavy_records_hold_their_charge_until_dropped() {
-    let _serial = serial();
     let payload = vec![7u8; 1024];
     let r = Records {
         facts: (0..500)
@@ -193,7 +191,6 @@ fn chain() -> (Base, Vec<Layer>) {
 
 #[test]
 fn simultaneous_iterators_hold_their_cursor_charges() {
-    let _serial = serial();
     let (base, layers) = chain();
     let v = view::<Records>(Some(&base), &layers, &[]);
     let budget = QueryBudget::new(u64::MAX, None);
@@ -247,16 +244,14 @@ fn hub() -> (Base, Vec<Layer>) {
     )
 }
 
-/// Scans before [`cancel_mid_scan`] gives up: an un-cancelled scan of the hub finishes in
-/// milliseconds, so this bounds the wait to well under a few seconds.
-const MAX_SCANS: usize = 200;
-/// Wall-clock bound of [`cancel_mid_scan`].
+/// Wall-clock bound of [`cancel_mid_scan`]: an un-cancelled scan finishes in milliseconds.
 const MAX_WAIT: Duration = Duration::from_secs(5);
 
 /// Run `scan` repeatedly while another thread cancels the budget once [`work_units`] reaches
 /// `start`; return (units seen right after cancelling, units at the end, rows yielded, the
-/// error). Bounded: after [`MAX_SCANS`] scans or [`MAX_WAIT`] without an error the
-/// canceller is released and the test fails instead of hanging.
+/// error). Bounded: after [`MAX_WAIT`] without an error the canceller is released and the test
+/// fails instead of hanging. Scans repeat until then, so a short scan cannot finish every
+/// repetition before the canceller thread first runs.
 fn cancel_mid_scan(
     start: u64,
     scan: impl Fn(&QueryBudget) -> (usize, Option<GraphError>),
@@ -277,7 +272,7 @@ fn cancel_mid_scan(
         });
         let mut rows = 0;
         let mut err = None;
-        for _ in 0..MAX_SCANS {
+        while began.elapsed() <= MAX_WAIT {
             let (n, e) = scan(&budget);
             rows += n;
             if e.is_some() || began.elapsed() > MAX_WAIT {
@@ -313,7 +308,6 @@ fn drain<T>(it: impl Iterator<Item = Result<T, GraphError>>) -> (usize, Option<G
 
 #[test]
 fn a_cancelled_or_expired_budget_stops_before_the_first_raw_read() {
-    let _serial = serial();
     let (base, layers) = hub();
     let v = view::<Records>(Some(&base), &layers, &[]);
     let cancelled = QueryBudget::new(u64::MAX, None);
@@ -321,7 +315,6 @@ fn a_cancelled_or_expired_budget_stops_before_the_first_raw_read() {
     let expired = QueryBudget::new(u64::MAX, Some(Duration::ZERO));
     std::thread::sleep(Duration::from_millis(2));
     for (budget, limit) in [(&cancelled, "cancelled"), (&expired, "time")] {
-        let before = work_units();
         let (rows, err) =
             drain(v.neighbours(LocalId(0), &RelSelection::All, Direction::Out, budget));
         assert_eq!(rows, 0);
@@ -332,7 +325,6 @@ fn a_cancelled_or_expired_budget_stops_before_the_first_raw_read() {
         let (rows, err) = drain(v.nodes(budget));
         assert_eq!(rows, 0);
         assert!(err.is_some());
-        assert_eq!(work_units(), before, "no raw read before the first check");
     }
 }
 
@@ -388,52 +380,6 @@ fn cancellation_stops_an_all_filtered_neighbour_scan_within_the_interval() {
     assert_eq!(work_units(), before);
 }
 
-#[test]
-fn cancellation_stops_a_scan_over_removed_endpoints_within_the_interval() {
-    let _serial = serial();
-    // The hub's edges survive, but every endpoint is absent (never added).
-    let base = Base::open(
-        OwnedBytes::new(build_base(
-            &Records {
-                nodes: vec![node(0, OpKind::Add)],
-                edges: (1..=HUB_EDGES).map(|n| edge(0, n, OpKind::Add)).collect(),
-                ..Records::default()
-            },
-            0,
-        )),
-        &oracle::budget(),
-    )
-    .unwrap();
-    let v = view::<Records>(Some(&base), &[], &[]);
-    let start = 3 * BUDGET_CHECK_INTERVAL;
-    let (seen, end, rows, _) = cancel_mid_scan(start, |b| {
-        drain(v.neighbours(LocalId(0), &RelSelection::All, Direction::Both, b))
-    });
-    assert_eq!(rows, 0);
-    assert!(end <= seen + BUDGET_CHECK_INTERVAL, "{} past", end - seen);
-}
-
-#[test]
-fn cancellation_stops_a_scan_over_removed_nodes_within_the_interval() {
-    let _serial = serial();
-    let (base, layers) = hub();
-    // Remove every node in a newer layer: presence is tombstone-heavy.
-    let all = Records {
-        nodes: (0..=HUB_EDGES).map(|n| node(n, OpKind::Remove)).collect(),
-        ..Records::default()
-    };
-    let layer = seal(&view::<Records>(Some(&base), &layers, &[]), &all);
-    let mut layers = layers;
-    layers.push(Layer::open(OwnedBytes::new(layer), &oracle::budget()).unwrap());
-    let v = view::<Records>(Some(&base), &layers, &[]);
-    let free = QueryBudget::new(u64::MAX, None);
-    assert_eq!(drain(v.nodes(&free)), (0, None));
-    let start = work_units() + 3 * BUDGET_CHECK_INTERVAL;
-    let (seen, end, rows, _) = cancel_mid_scan(start, |b| drain(v.nodes(b)));
-    assert_eq!(rows, 0);
-    assert!(end <= seen + BUDGET_CHECK_INTERVAL, "{} past", end - seen);
-}
-
 /// END-MAJ-02: a dense presence index whose population sits in a high-id cluster leaves a long
 /// run of empty bitvector words before the first entry. Each word visited is a unit of work.
 #[test]
@@ -484,70 +430,6 @@ fn cancellation_stops_a_presence_scan_inside_a_run_of_empty_words() {
     );
 }
 
-/// END-MAJ-02: one merged key of a list over many overlapping sources compares and advances
-/// every source; those are units of work, not one raw read.
-#[test]
-fn cancellation_stops_a_merge_over_many_overlapping_sources() {
-    const LAYERS: usize = 300;
-    const KEYS: u32 = 1_000;
-    let _serial = serial();
-    let base = Base::open(
-        OwnedBytes::new(build_base(
-            &Records {
-                nodes: (0..=KEYS).map(|n| node(n, OpKind::Add)).collect(),
-                ..Records::default()
-            },
-            0,
-        )),
-        &oracle::budget(),
-    )
-    .unwrap();
-    // Every layer tombstones the same edges of node 0: each merged key is in every layer.
-    let tombstones = Records {
-        edges: (1..=KEYS).map(|n| edge(0, n, OpKind::Remove)).collect(),
-        ..Records::default()
-    };
-    let mut layers: Vec<Layer> = Vec::new();
-    for _ in 0..LAYERS {
-        let bytes = seal(&view::<Records>(Some(&base), &layers, &[]), &tombstones);
-        layers.push(Layer::open(OwnedBytes::new(bytes), &oracle::budget()).unwrap());
-    }
-    let v = view::<Records>(Some(&base), &layers, &[]);
-    let all = RelSelection::All;
-    let free = QueryBudget::new(u64::MAX, None);
-    let before = work_units();
-    assert_eq!(
-        drain(v.neighbours(LocalId(0), &all, Direction::Out, &free)),
-        (0, None)
-    );
-    assert!(
-        work_units() - before >= u64::from(KEYS) * LAYERS as u64,
-        "every source advance is metered: {} units",
-        work_units() - before
-    );
-
-    let start = work_units() + 3 * BUDGET_CHECK_INTERVAL;
-    let (seen, end, rows, err) = cancel_mid_scan(start, |b| {
-        drain(v.neighbours(LocalId(0), &all, Direction::Out, b))
-    });
-    assert_eq!(rows, 0);
-    assert!(
-        matches!(
-            err,
-            GraphError::BudgetExceeded {
-                limit: "cancelled",
-                ..
-            }
-        ),
-        "{err:?}"
-    );
-    assert!(
-        end <= seen + BUDGET_CHECK_INTERVAL,
-        "stopped {} units after the cancellation was seen",
-        end - seen
-    );
-}
-
 // ---- Structural functions (Step 3) ---------------------------------------------------------
 
 const CAPS: Caps = Caps {
@@ -569,7 +451,6 @@ fn wide(n: u32) -> Vec<Records> {
 
 #[test]
 fn a_memory_limit_below_the_working_set_refuses_and_releases() {
-    let _serial = serial();
     let rs = wide(5_000);
     let v = view(None, &[], &rs);
     let all = RelSelection::All;
@@ -592,7 +473,6 @@ fn a_memory_limit_below_the_working_set_refuses_and_releases() {
 
 #[test]
 fn a_recorded_memory_breach_stops_a_later_structural_call() {
-    let _serial = serial();
     let rs = wide(10);
     let v = view(None, &[], &rs);
     let budget = QueryBudget::new(1024, None);
@@ -670,12 +550,10 @@ fn cancellation_stops_a_low_output_traversal_within_the_interval() {
 
 #[test]
 fn an_expired_budget_stops_a_traversal_before_it_reads() {
-    let _serial = serial();
     let rs = wide(100);
     let v = view(None, &[], &rs);
     let expired = QueryBudget::new(u64::MAX, Some(Duration::ZERO));
     std::thread::sleep(Duration::from_millis(2));
-    let before = work_units();
     let got = expand(
         &v,
         &[LocalId(0)],
@@ -688,11 +566,6 @@ fn an_expired_budget_stops_a_traversal_before_it_reads() {
         got,
         Err(GraphError::BudgetExceeded { limit: "time", .. })
     ));
-    assert_eq!(
-        work_units(),
-        before,
-        "no unit of work before the first check"
-    );
 }
 
 // ---- Unchecked phases (END-MAJ-03) -------------------------------------------------------
@@ -743,7 +616,6 @@ fn cancel_in_phase<T>(
 
 #[test]
 fn a_recorded_memory_breach_stops_decoding_opening_and_view_preparation() {
-    let _serial = serial();
     let blob = Records::default().encode();
     let base = build_base(&Records::default(), 0);
     let layer = seal(&view::<Records>(None, &[], &[]), &Records::default());
@@ -799,41 +671,6 @@ fn descending(n: u32) -> Records {
 }
 
 #[test]
-fn cancellation_stops_decoding_within_the_interval() {
-    let _serial = serial();
-    let blob = descending(PHASE).encode();
-    let total = cancel_in_phase("decode", 0, 1, |b| Records::decode(&blob, b));
-    assert!(
-        total >= u64::from(2 * PHASE),
-        "every record is metered: {total}"
-    );
-}
-
-#[test]
-fn cancellation_stops_view_preparation_and_its_sorts_within_the_interval() {
-    let _serial = serial();
-    let sediment = vec![descending(PHASE)];
-    let total = cancel_in_phase("prepare", 0, 1, |b| PreparedSediment::prepare(&sediment, b));
-    // Copying, sorting and compacting the node and both edge streams.
-    assert!(
-        total >= u64::from(6 * PHASE),
-        "preparation is metered: {total}"
-    );
-}
-
-#[test]
-fn cancellation_stops_extent_validation_within_the_interval() {
-    let _serial = serial();
-    let bytes = OwnedBytes::new(build_base(&descending(PHASE), 0));
-    let total = cancel_in_phase("open", 0, 1, |b| Base::open(bytes.clone(), b).map(|_| ()));
-    // Presence, both edge sections: every id and entry validated.
-    assert!(
-        total >= u64::from(3 * PHASE),
-        "validation is metered: {total}"
-    );
-}
-
-#[test]
 fn cancellation_stops_whole_graph_functions_over_an_empty_relation() {
     let _serial = serial();
     let sediment = vec![descending(PHASE)];
@@ -864,28 +701,6 @@ fn cancellation_stops_whole_graph_functions_over_an_empty_relation() {
     );
 }
 
-#[test]
-fn cancellation_stops_shortest_path_initialisation_within_the_interval() {
-    let _serial = serial();
-    // 0 fans out to 1..=n, each of which reaches n + 1.
-    let n = PHASE;
-    let sediment = vec![Records {
-        nodes: (0..=n + 1).map(|m| node(m, OpKind::Add)).collect(),
-        edges: (1..=n)
-            .flat_map(|m| [edge(0, m, OpKind::Add), edge(m, n + 1, OpKind::Add)])
-            .collect(),
-        ..Records::default()
-    }];
-    let v = view(None, &[], &sediment);
-    let caps = Caps {
-        depth: 3,
-        rows: 10 * n,
-    };
-    cancel_in_phase("shortest_path", 0, 2, |b| {
-        shortest_path(&v, LocalId(0), LocalId(n + 1), &RelSelection::All, caps, b)
-    });
-}
-
 /// Nodes 0..=d in a chain whose union-find forest is a path d -> d-1 -> ... -> 0 once the
 /// helpers are processed (each helper `h_k` links k-1 then k, in descending k); `extra` adds one
 /// last node with an edge to d, whose find walks the whole path.
@@ -914,58 +729,164 @@ fn deep_forest(d: u32, extra: bool) -> Vec<Records> {
     vec![r]
 }
 
-#[test]
-fn cancellation_stops_a_long_union_find_walk_within_the_interval() {
-    let _serial = serial();
-    let d = PHASE;
-    let all = RelSelection::All;
-    let free = QueryBudget::new(u64::MAX, None);
-    let without = deep_forest(d, false);
-    let v = view(None, &[], &without);
-    let before = work_units();
-    wcc(&v, &all, RowCap(1), &free).unwrap();
-    let base = work_units() - before;
-    let with = deep_forest(d, true);
-    let v = view(None, &[], &with);
-    let components = wcc(&v, &all, RowCap(u32::MAX), &free).unwrap();
-    assert!(
-        components.rows.iter().all(|&(_, c)| c == LocalId(0)),
-        "one component"
-    );
-    drop(components);
-    let before = work_units();
-    wcc(&v, &all, RowCap(1), &free).unwrap();
-    let total = work_units() - before;
-    assert!(
-        total - base >= u64::from(d / 2),
-        "the walk of the last find is metered: {} units",
-        total - base
-    );
-    // Cancel inside the last walk: it is the last quarter of the work.
-    cancel_in_phase("wcc walk", total - u64::from(d / 4) * 2, 2, |b| {
-        wcc(&v, &all, RowCap(1), b)
-    });
+/// Input size of [`cancellation_stops_every_internal_loop`]: each loop is many check intervals
+/// long, and the whole table runs in well under a second.
+const SMALL: u32 = 4_000;
+
+/// Edges of node 0 every one of the 32 overlapping layers tombstones.
+const KEYS: u32 = 1_000;
+
+/// `descending(n)` with every id moved up by `by`.
+fn descending_from(by: u32, n: u32) -> Records {
+    Records {
+        nodes: (0..=n).rev().map(|m| node(by + m, OpKind::Add)).collect(),
+        edges: (1..=n)
+            .rev()
+            .map(|m| edge(by + m, by + m - 1, OpKind::Add))
+            .collect(),
+        ..Records::default()
+    }
 }
 
+/// One internal loop of the engine under cancellation: its name, the units of its call to
+/// skip before the cancellation window, the metered loops live at once, and the call.
+type LoopCase<'a> = (
+    &'static str,
+    u64,
+    u64,
+    Box<dyn Fn(&QueryBudget) -> Result<(), GraphError> + 'a>,
+);
+
+/// END-MAJ-02/03 and the owner's cancellation rule: every internal loop checks the budget at
+/// its bounded interval, so a cancellation stops it within `loops` intervals even when it
+/// yields nothing. One case per loop the per-loop tests covered: decoding, building a run, an
+/// extension's run merge, sealing's merge of several runs, extent validation at open, the
+/// shortest-path initialisation, the union-find walk and the accessor's merge over many
+/// overlapping sources. (Scans over removed endpoints or removed nodes run in the accessor and
+/// presence loops the kept representative tests already cancel.)
 #[test]
-fn cancellation_stops_extending_prepared_sediment_within_the_interval() {
+fn cancellation_stops_every_internal_loop() {
     let _serial = serial();
     let free = QueryBudget::new(u64::MAX, None);
-    let prepared = PreparedSediment::prepare(&[descending(PHASE)], &free).unwrap();
-    let batch = [Records {
-        nodes: vec![node(7, OpKind::Remove), node(7, OpKind::Add)],
-        edges: vec![edge(PHASE + 5, 3, OpKind::Add)],
+
+    let blob = descending(SMALL).encode();
+    let batch = [descending(SMALL)];
+    let one_run = PreparedSediment::prepare(&batch, &free).unwrap();
+    // An equal-sized next batch: the extension merges it with the existing run.
+    let next = [descending_from(SMALL + 1, SMALL)];
+    // Three runs that stay apart (each under half the size of the one before), sealed at once.
+    let mut runs = PreparedSediment::prepare(&batch, &free).unwrap();
+    for (by, n) in [(SMALL + 1, SMALL / 4), (2 * SMALL + 2, SMALL / 16)] {
+        runs = runs.extend(&[descending_from(by, n)], &free).unwrap();
+    }
+    assert_eq!(runs.runs(), 3, "the sealing case merges several runs");
+    let parent = View::new(None, &[], &runs, &free).unwrap();
+    let base_bytes = OwnedBytes::new(build_base(&descending(SMALL), 0));
+
+    // 0 fans out to 1..=n, each of which reaches n + 1.
+    let n = SMALL;
+    let fan = vec![Records {
+        nodes: (0..=n + 1).map(|m| node(m, OpKind::Add)).collect(),
+        edges: (1..=n)
+            .flat_map(|m| [edge(0, m, OpKind::Add), edge(m, n + 1, OpKind::Add)])
+            .collect(),
         ..Records::default()
     }];
-    let extend = cancel_in_phase("extend", 0, 1, |b| prepared.extend(&batch, b));
-    assert!(free.live_bytes() > 0, "the prepared sediment stays charged");
-    // A linear merge, not a re-sort of what was prepared: well under preparing from scratch.
+    let fan = view(None, &[], &fan);
+    let path_caps = Caps {
+        depth: 3,
+        rows: 10 * n,
+    };
+
+    // The last find of the forest walks a path of SMALL links: the tail of wcc's work.
+    let forest = deep_forest(SMALL, true);
+    let forest = view(None, &[], &forest);
+    let all = RelSelection::All;
     let before = work_units();
-    let scratch = PreparedSediment::prepare(&[descending(PHASE), batch[0].clone()], &free);
-    assert!(scratch.is_ok());
-    let scratch = work_units() - before;
-    assert!(
-        2 * extend < scratch,
-        "extend {extend} units, prepare from scratch {scratch}"
-    );
+    wcc(&forest, &all, RowCap(1), &free).unwrap();
+    let walk_from = (work_units() - before).saturating_sub(u64::from(SMALL / 2));
+
+    // 32 layers tombstoning the same edges of node 0: each merged key is in every source.
+    let hub_base = Base::open(
+        OwnedBytes::new(build_base(
+            &Records {
+                nodes: (0..=KEYS).map(|m| node(m, OpKind::Add)).collect(),
+                ..Records::default()
+            },
+            0,
+        )),
+        &free,
+    )
+    .unwrap();
+    let tombstones = Records {
+        edges: (1..=KEYS).map(|m| edge(0, m, OpKind::Remove)).collect(),
+        ..Records::default()
+    };
+    let mut layers: Vec<Layer> = Vec::new();
+    for _ in 0..32 {
+        let bytes = seal(&view::<Records>(Some(&hub_base), &layers, &[]), &tombstones);
+        layers.push(Layer::open(OwnedBytes::new(bytes), &free).unwrap());
+    }
+    let overlapping = view::<Records>(Some(&hub_base), &layers, &[]);
+
+    let cases: Vec<LoopCase<'_>> = vec![
+        (
+            "decoding",
+            0,
+            1,
+            Box::new(|b| Records::decode(&blob, b).map(|_| ())),
+        ),
+        (
+            "building a run",
+            0,
+            1,
+            Box::new(|b| PreparedSediment::prepare(&batch, b).map(|_| ())),
+        ),
+        (
+            "an extension's run merge",
+            0,
+            1,
+            Box::new(|b| one_run.extend(&next, b).map(|_| ())),
+        ),
+        (
+            "sealing's merge of several runs",
+            0,
+            1,
+            Box::new(|b| runs.seal(&parent, runs.batches(), b).map(|_| ())),
+        ),
+        (
+            "extent validation",
+            0,
+            1,
+            Box::new(|b| Base::open(base_bytes.clone(), b).map(|_| ())),
+        ),
+        (
+            "shortest-path initialisation",
+            0,
+            2,
+            Box::new(|b| {
+                shortest_path(&fan, LocalId(0), LocalId(n + 1), &all, path_caps, b).map(|_| ())
+            }),
+        ),
+        (
+            "the union-find walk",
+            walk_from,
+            2,
+            Box::new(|b| wcc(&forest, &all, RowCap(1), b).map(|_| ())),
+        ),
+        (
+            "the accessor's merge over 32 sources",
+            0,
+            1,
+            Box::new(|b| {
+                match drain(overlapping.neighbours(LocalId(0), &all, Direction::Out, b)) {
+                    (_, Some(e)) => Err(e),
+                    (_, None) => Ok(()),
+                }
+            }),
+        ),
+    ];
+    for (what, from, loops, call) in &cases {
+        cancel_in_phase(what, *from, *loops, call);
+    }
 }

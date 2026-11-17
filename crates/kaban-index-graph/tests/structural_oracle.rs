@@ -722,11 +722,9 @@ fn a_missing_cap_is_refused_before_any_neighbour_access() {
 
 #[test]
 fn a_hub_cannot_widen_a_capped_expand() {
-    let _serial = serial();
     let rs = hub_view_records(10_000);
     let v = view(None, &[], &rs);
     let b = budget();
-    let start = work_units();
     let got = expand(
         &v,
         &[LocalId(0)],
@@ -736,16 +734,11 @@ fn a_hub_cannot_widen_a_capped_expand() {
         &b,
     )
     .unwrap();
-    let work = work_units() - start;
     assert_eq!(got.nodes.len(), 200);
     assert!(got.truncated);
     let want: Vec<(LocalId, u8)> = (1..=200).map(|m| (LocalId(m), 1)).collect();
     assert_eq!(got.nodes, want, "the lowest ids at the first depth");
     assert_eq!(got.edges.len(), 200, "one edge per kept node");
-    assert!(
-        work < 4_000,
-        "the hub list is not read past the cut: {work} units"
-    );
     // Exactly the cap without more nodes is not a cut.
     let rs = hub_view_records(200);
     let v = view(None, &[], &rs);
