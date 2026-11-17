@@ -131,8 +131,9 @@ impl Catalog {
     /// `StoreError::StorageFatal` for a failed sync; the probe's open or lock errors.
     pub(crate) fn create_artefacts(&mut self) -> Result<()> {
         kbx::create_artefacts(&self.kbx)?;
-        self.container =
-            Some(kbx::ContainerId::at(&self.kbx).map_err(|e| kbx::failed("identify", &self.kbx, e))?);
+        self.container = Some(
+            kbx::ContainerId::at(&self.kbx).map_err(|e| kbx::failed("identify", &self.kbx, e))?,
+        );
         if self.reclamation.is_none() {
             self.reclamation = Some(io::probe_hole_punch(&self.kbx)?);
         }

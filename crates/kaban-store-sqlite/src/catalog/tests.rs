@@ -1229,7 +1229,9 @@ fn driver_text(err: &StoreError) -> String {
 fn kbx_rows(store: &SqliteStore) -> Vec<(i64, i64)> {
     let conn = store.lock();
     let mut stmt = conn
-        .prepare("SELECT kbx_offset, kbx_len FROM cat_extent WHERE kbx_offset IS NOT NULL ORDER BY id")
+        .prepare(
+            "SELECT kbx_offset, kbx_len FROM cat_extent WHERE kbx_offset IS NOT NULL ORDER BY id",
+        )
         .unwrap();
     stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
         .unwrap()
@@ -1258,6 +1260,10 @@ fn pinned_extent(store: &SqliteStore, id: u64) -> Option<((u64, u64), Vec<u8>)> 
 #[test]
 fn an_unpublished_extent_cannot_be_copied_so_one_append_is_published_at_most_once() {
     // Arrange: the probe tells a Clone type
+    #[expect(
+        clippy::needless_borrow,
+        reason = "the same probe expression as for the probed type, whose borrow is needed"
+    )]
     let probe_sees_clone = (&CloneProbe::<String>(std::marker::PhantomData)).is_clone();
     assert!(probe_sees_clone, "the probe does not tell a Clone type");
 
@@ -1393,7 +1399,9 @@ fn a_range_whose_publication_rolled_back_stays_unowned_and_is_never_released() {
         .catalog()
         .commit(&mut store.lock(), Durability::Normal, |txn| {
             txn.publish(leaked)?;
-            Err::<(), _>(StoreError::NotFound("a writer that fails after publishing".into()))
+            Err::<(), _>(StoreError::NotFound(
+                "a writer that fails after publishing".into(),
+            ))
         });
     assert!(out.is_err());
     let rows_after_rollback = kbx_rows(store);

@@ -103,7 +103,10 @@ mod tests {
     fn a_sync_failure_inside_sqlite_is_storage_fatal_naming_its_operation() {
         for code in [ffi::SQLITE_IOERR_FSYNC, ffi::SQLITE_IOERR_DIR_FSYNC] {
             for (op, err) in [
-                ("catalog_commit", store_error_at("catalog_commit", failure(code))),
+                (
+                    "catalog_commit",
+                    store_error_at("catalog_commit", failure(code)),
+                ),
                 (SQLITE_SYNC, backend_error(failure(code))),
             ] {
                 let StoreError::StorageFatal { op: named, source } = &err else {

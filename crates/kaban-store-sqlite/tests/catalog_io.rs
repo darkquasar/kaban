@@ -12,6 +12,7 @@
 
 #![cfg(feature = "failpoints")]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // test code: failures are the assertion
+#![allow(clippy::print_stderr)] // the visible skip markers where the file system punches no holes
 
 mod common;
 
@@ -331,7 +332,11 @@ fn a_punch_refused_after_a_successful_probe_zero_fills_syncs_and_reports_degrade
         "zero-fill freed blocks: {:?}",
         r.blocks
     );
-    assert_eq!(faults.sync_calls("reclaim_ranges"), 1, "the zero-fill was not synced");
+    assert_eq!(
+        faults.sync_calls("reclaim_ranges"),
+        1,
+        "the zero-fill was not synced"
+    );
     assert_eq!(
         (r.outcome.punched_bytes, r.outcome.zero_filled_bytes),
         (0, EXTENT_LEN as u64),
