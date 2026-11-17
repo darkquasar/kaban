@@ -280,13 +280,13 @@ fn removed_ids(
 }
 
 impl Run {
-    /// Prepare `batches` numbered from sequence number `first` as one run: copy, sort and
-    /// compact their streams and apply their barriers. `None` when they hold no record.
+    /// Prepare `batches` numbered from sequence number `first` as one shared run: copy, sort
+    /// and compact their streams and apply their barriers. `None` when they hold no record.
     fn build<R: AsRef<Records>>(
         batches: &[R],
         first: usize,
         budget: &QueryBudget,
-    ) -> Result<Option<Self>, GraphError> {
+    ) -> Result<Option<Arc<Self>>, GraphError> {
         let mut charge = Charge::new(budget)?;
         let t = Ticker::new(budget);
 
@@ -381,22 +381,27 @@ impl Run {
         if nodes.is_empty() && out.is_empty() && facts.is_empty() {
             return Ok(None);
         }
-        Ok(Some(Self {
-            span: first..first + batches.len(),
-            nodes,
-            removed,
-            out,
-            inc,
-            facts,
-            arena,
-            _lease: charge.into_lease(),
-        }))
+        let span = first..first + batches.len();
+        charge
+            .share(|lease| Self {
+                span,
+                nodes,
+                removed,
+                out,
+                inc,
+                facts,
+                arena,
+                _lease: lease,
+            })
+            .map(Some)
     }
 
-    /// Merge adjacent `runs` (oldest first, at least one) into one run by a k-way merge of their
-    /// sorted streams: per key the newest run wins, a node keeps its newest removal, and an
-    /// edge or fact older than the last removal of one of its nodes is dropped. No sorting.
-    pub(crate) fn merge(runs: &[Arc<Run>], budget: &QueryBudget) -> Result<Self, GraphError> {
+    /// Merge adjacent `runs` (oldest first, at least one) into one shared run by a k-way merge of
+    /// their sorted streams: per key the newest run wins, a node keeps its newest removal, and an
+    /// edge or fact older than the last removal of one of its nodes is dropped. No sorting. The
+    /// run holds the charge of what it retains; the merge's sources, heads and heap are charged
+    /// to a scratch charge released with them.
+    pub(crate) fn merge(runs: &[Arc<Run>], budget: &QueryBudget) -> Result<Arc<Self>, GraphError> {
         let mut charge = Charge::new(budget)?;
         let t = Ticker::new(budget);
         let sum = |len: fn(&Run) -> usize| runs.iter().map(|r| len(r)).sum::<usize>();
@@ -406,12 +411,13 @@ impl Run {
         };
 
         let mut nodes: Vec<SedNode> = charge.vec(sum(|r| r.nodes.len()))?;
-        let mut sources = charge.vec(runs.len())?;
+        let mut scratch = Charge::new(budget)?;
+        let mut sources = scratch.vec(runs.len())?;
         sources.extend(
             runs.iter()
                 .map(|r| Slice::new(&r.nodes, |n: &SedNode| n.id)),
         );
-        let mut merge = NewestWins::new(sources, Some(&mut charge), &t)?;
+        let mut merge = NewestWins::new(sources, Some(&mut scratch), &t)?;
         loop {
             let mut barrier = None;
             let next = merge.next_with(&t, |_, n| barrier = n.barrier.or(barrier));
@@ -420,16 +426,18 @@ impl Run {
             nodes.push(SedNode { barrier, ..*n });
         }
         drop(merge);
+        drop(scratch);
         let removed = removed_ids(&nodes, &mut charge, &t)?;
 
         let mut edges = |side: fn(&Run) -> &[SedEdge]| {
             let mut merged: Vec<SedEdge> = charge.vec(runs.iter().map(|r| side(r).len()).sum())?;
-            let mut sources = charge.vec(runs.len())?;
+            let mut scratch = Charge::new(budget)?;
+            let mut sources = scratch.vec(runs.len())?;
             sources.extend(
                 runs.iter()
                     .map(|r| Slice::new(side(r), |e: &SedEdge| e.key)),
             );
-            let mut merge = NewestWins::new(sources, Some(&mut charge), &t)?;
+            let mut merge = NewestWins::new(sources, Some(&mut scratch), &t)?;
             loop {
                 let next = merge.next(&t);
                 t.stopped()?;
@@ -446,12 +454,13 @@ impl Run {
 
         let mut arena: Vec<u8> = charge.vec(sum(|r| r.arena.len()))?;
         let mut facts: Vec<SedFact> = charge.vec(sum(|r| r.facts.len()))?;
-        let mut sources = charge.vec(runs.len())?;
+        let mut scratch = Charge::new(budget)?;
+        let mut sources = scratch.vec(runs.len())?;
         sources.extend(
             runs.iter()
                 .map(|r| Slice::new(&r.facts, |f: &SedFact| f.key)),
         );
-        let mut merge = NewestWins::new(sources, Some(&mut charge), &t)?;
+        let mut merge = NewestWins::new(sources, Some(&mut scratch), &t)?;
         loop {
             let next = merge.next(&t);
             t.stopped()?;
@@ -466,8 +475,9 @@ impl Run {
             }
         }
         drop(merge);
+        drop(scratch);
 
-        Ok(Self {
+        charge.share(|lease| Self {
             span,
             nodes,
             removed,
@@ -475,7 +485,7 @@ impl Run {
             inc,
             facts,
             arena,
-            _lease: charge.into_lease(),
+            _lease: lease,
         })
     }
 
@@ -660,22 +670,25 @@ impl PreparedSediment {
         let mut runs: Vec<Arc<Run>> = charge.vec(self.runs.len() + usize::from(fresh.is_some()))?;
         runs.extend(self.runs.iter().cloned());
         if let Some(fresh) = fresh {
-            runs.push(Arc::new(fresh));
-            let mut sizes: Vec<usize> = charge.vec(runs.len())?;
-            sizes.extend(runs.iter().map(|r| r.size()));
-            let start = tier_start(&sizes);
+            runs.push(fresh);
+            let start = {
+                // Size-selection scratch, charged only while it lives.
+                let mut scratch = Charge::new(budget)?;
+                let mut sizes: Vec<usize> = scratch.vec(runs.len())?;
+                sizes.extend(runs.iter().map(|r| r.size()));
+                tier_start(&sizes)
+            };
             if start + 1 < runs.len() {
                 let merged = Run::merge(&runs[start..], budget)?;
                 runs.truncate(start);
-                runs.push(Arc::new(merged));
+                runs.push(merged);
             }
         }
         while runs.len() > limit.max(1) {
             let at = (0..runs.len() - 1)
                 .min_by_key(|&i| runs[i].size() + runs[i + 1].size())
                 .unwrap_or(0);
-            let merged = Run::merge(&runs[at..at + 2], budget)?;
-            runs[at] = Arc::new(merged);
+            runs[at] = Run::merge(&runs[at..at + 2], budget)?;
             runs.remove(at + 1);
         }
         Ok(Self {

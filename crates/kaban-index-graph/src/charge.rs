@@ -2,8 +2,10 @@
 //! the caller's [`QueryBudget`] before it is allocated, and the charge lives as long as the
 //! collection that owns it.
 
+use std::alloc::Layout;
 use std::cell::Cell;
 use std::convert::Infallible;
+use std::sync::Arc;
 
 use kaban_core::query_budget::{BudgetExceeded, BudgetLease, GrowError, QueryBudget};
 
@@ -53,6 +55,35 @@ impl Charge {
     /// The lease holding every charge made so far.
     pub(crate) fn into_lease(self) -> BudgetLease {
         self.lease
+    }
+
+    /// Share the value `build` makes from this charge's lease: the shared allocation of the
+    /// `Arc` (its two reference counts and the value) is reserved on the lease first, so the
+    /// value holds the charge of everything it owns, itself included, while it lives.
+    pub(crate) fn share<T>(
+        mut self,
+        build: impl FnOnce(BudgetLease) -> T,
+    ) -> Result<Arc<T>, GraphError> {
+        let overflow = GraphError::BudgetExceeded {
+            limit: "memory",
+            value: u64::MAX,
+        };
+        // `Arc<T>` allocates its reference counts and `T` in one `repr(C)` block.
+        let layout = Layout::new::<[usize; 2]>()
+            .extend(Layout::new::<T>())
+            .map_err(|_| overflow.clone())?
+            .0
+            .pad_to_align();
+        let size = u64::try_from(layout.size()).map_err(|_| overflow.clone())?;
+        let align = u64::try_from(layout.align()).map_err(|_| overflow)?;
+        let charge = QueryBudget::allocation_charge(size, align)?;
+        self.lease
+            .grow_with(charge, || Ok::<_, Infallible>(()))
+            .map_err(|e| match e {
+                GrowError::Budget(b) => GraphError::from(b),
+                GrowError::Alloc(never) => match never {},
+            })?;
+        Ok(Arc::new(build(self.lease)))
     }
 }
 
