@@ -24,7 +24,7 @@ pub use id::{Direction, LocalId, RelId, RelSelection, StableOrder, TieRank};
 pub use layer::{Layer, seal};
 pub use op::{Attr, DecodedRecords, EdgeOp, FactOp, NodeOp, OpKind, Records};
 pub use paths::{meet, shortest_path};
-pub use sediment::{MAX_SEDIMENT_RUNS, PreparedSediment};
+pub use sediment::{MAX_SEDIMENT_RUNS, PreparedSediment, Sealed};
 pub use structure::{Components, common_neighbours, degree, refuse_not_planned, topo_order, wcc};
 pub use traverse::{Caps, Reached, RowCap, closure, expand, reachable, reverse_closure};
 pub use view::{BUDGET_CHECK_INTERVAL, View};

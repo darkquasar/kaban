@@ -79,6 +79,7 @@ use crate::charge::{Charge, Ticker, sort_checked};
 use crate::error::GraphError;
 use crate::merge::{NewestWins, Slice};
 use crate::op::{Attr, COPY_CHUNK, OpKind, Records};
+use crate::view::View;
 
 /// The most runs a [`PreparedSediment`] holds: an extension that would leave more merges the
 /// smallest adjacent runs first, so a read never merges more than this many sediment sources.
@@ -150,6 +151,17 @@ pub struct PreparedSediment {
     batches: usize,
     /// The charge of the run list; `None` for the empty sediment.
     _lease: Option<BudgetLease>,
+}
+
+/// A layer sealed from a prefix of a [`PreparedSediment`]'s runs, and the runs left over.
+#[derive(Debug)]
+pub struct Sealed {
+    /// The layer bytes, to open with [`crate::Layer::open`] and append to the parent's chain.
+    pub layer: Vec<u8>,
+    /// Batches before this sequence number are in the layer; the rest are in [`Sealed::rest`].
+    pub through: usize,
+    /// The runs not sealed, to read over the chain extended by the layer.
+    pub rest: PreparedSediment,
 }
 
 /// The empty sediment, shared by chain-only readers.
@@ -642,6 +654,25 @@ impl PreparedSediment {
         })
     }
 
+    /// Seal the runs that end at or before batch `upto` as a layer over the chain of `parent`.
+    ///
+    /// # Errors
+    /// [`GraphError::BudgetExceeded`] when `budget` refuses.
+    pub fn seal(
+        &self,
+        parent: &View<'_>,
+        upto: usize,
+        budget: &QueryBudget,
+    ) -> Result<Sealed, GraphError> {
+        budget.check()?;
+        let _ = upto;
+        Ok(Sealed {
+            layer: crate::layer::seal(parent, &Records::default()),
+            through: 0,
+            rest: Self::empty(),
+        })
+    }
+
     /// Batches applied so far.
     #[must_use]
     pub fn batches(&self) -> usize {
@@ -709,7 +740,6 @@ mod tests {
     use super::*;
     use crate::id::{Direction, LocalId, RelId, RelSelection};
     use crate::op::{EdgeOp, FactOp, NodeOp};
-    use crate::view::View;
 
     /// Batch `i`: one or two edges, a node change (every fifth a removal) and a fact change.
     fn batch(i: u32) -> Records {

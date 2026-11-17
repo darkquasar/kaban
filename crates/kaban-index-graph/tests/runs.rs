@@ -1,7 +1,9 @@
 //! Prepared sediment as immutable sorted runs (T9 A1): any sequence of extensions answers as
 //! preparing the same batches from scratch and as the oracle, at every prefix; values built
 //! earlier stay correct after later extensions; the run count stays within its limit; and a
-//! refused or cancelled extension leaves the value it extends usable.
+//! refused or cancelled extension leaves the value it extends usable. Sealing a prefix of the
+//! runs as a layer (T9 A1, missing decision 1: batch chronology) answers as the value unsealed,
+//! and the remainder read over the extended chain still answers as the oracle.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // test code: failures are the assertion
 
@@ -281,4 +283,148 @@ fn a_refused_or_cancelled_extension_leaves_the_value_usable() {
     let mut want = want;
     want.apply(&big[0]);
     assert_matches(&v, &want, IDS + 2, "extended after the refusals");
+}
+
+/// Build a value from `h` by extensions of one to three batches.
+fn extended(h: &[Records], seed: u64) -> PreparedSediment {
+    let b = budget();
+    let mut rng = Rng::new(seed + 31);
+    let mut value = PreparedSediment::empty();
+    let mut done = 0;
+    while done < h.len() {
+        let group = (1 + usize::try_from(rng.below(3)).unwrap()).min(h.len() - done);
+        value = value.extend(&h[done..done + group], &b).unwrap();
+        done += group;
+    }
+    value
+}
+
+/// The chain's layers followed by `layer`.
+fn with_layer(c: &Chain, layer: Vec<u8>) -> Vec<Layer> {
+    let mut layers = c.layers.clone();
+    layers.push(Layer::open(OwnedBytes::new(layer), &budget()).unwrap());
+    layers
+}
+
+#[test]
+fn sealing_a_prepared_value_answers_as_the_value_unsealed() {
+    let b = budget();
+    for seed in 0..3 {
+        let c = chain(seed);
+        let h = history(seed);
+        let value = extended(&h, seed);
+        assert!(
+            value.runs() > 1,
+            "seed {seed}: the fixture holds several runs"
+        );
+        let want = oracle_after(&c, &h);
+        let unsealed = View::new(Some(&c.base), &c.layers, &value, &b).unwrap();
+        assert_matches(&unsealed, &want, IDS + 2, &format!("seed {seed} unsealed"));
+        let sealed = value.seal(&unsealed, h.len(), &b).unwrap();
+        assert_eq!(sealed.through, h.len(), "seed {seed}: everything is sealed");
+        assert_eq!(sealed.rest.runs(), 0, "seed {seed}: nothing is left");
+        let layers = with_layer(&c, sealed.layer);
+        let v = View::new(Some(&c.base), &layers, &sealed.rest, &b).unwrap();
+        assert_matches(&v, &want, IDS + 2, &format!("seed {seed} sealed"));
+    }
+}
+
+#[test]
+fn sealing_a_prefix_leaves_a_remainder_that_extends_over_the_new_chain() {
+    let b = budget();
+    for seed in 0..3 {
+        let c = chain(seed);
+        let h = history(seed);
+        let (now, later) = h.split_at(38);
+        let value = extended(now, seed);
+        let unsealed = View::new(Some(&c.base), &c.layers, &value, &b).unwrap();
+        for upto in [0, 1, 5, 17, 30, 37, 38] {
+            let ctx = format!("seed {seed} sealed up to {upto}");
+            let sealed = value.seal(&unsealed, upto, &b).unwrap();
+            assert!(sealed.through <= upto, "{ctx}: through {}", sealed.through);
+            assert_eq!(sealed.rest.batches(), now.len(), "{ctx}: batches");
+            // The layer holds exactly the batches before `through`.
+            let layers = with_layer(&c, sealed.layer);
+            let only = View::new(Some(&c.base), &layers, &EMPTY, &b).unwrap();
+            let sealed_part = oracle_after(&c, &now[..sealed.through]);
+            assert_matches(&only, &sealed_part, IDS + 2, &format!("{ctx}, layer alone"));
+            let v = View::new(Some(&c.base), &layers, &sealed.rest, &b).unwrap();
+            assert_matches(&v, &oracle_after(&c, now), IDS + 2, &ctx);
+            // The remainder keeps extending over the new chain.
+            let rest = sealed.rest.extend(later, &b).unwrap();
+            let v = View::new(Some(&c.base), &layers, &rest, &b).unwrap();
+            assert_matches(
+                &v,
+                &oracle_after(&c, &h),
+                IDS + 2,
+                &format!("{ctx}, extended"),
+            );
+        }
+    }
+}
+
+static EMPTY: PreparedSediment = PreparedSediment::empty();
+
+#[test]
+fn a_removal_and_readd_split_across_runs_is_sealed_without_resurrection() {
+    let b = budget();
+    let base_recs = Records {
+        nodes: (1..=4).map(|n| node(n, OpKind::Add)).collect(),
+        edges: vec![edge(1, 0, 2), edge(2, 0, 1), edge(3, 7, 1)],
+        facts: vec![fact(1, 0, b"base")],
+    };
+    let base = Base::open(OwnedBytes::new(build_base(&base_recs, 0)), &b).unwrap();
+    // Run 1: a large batch adding more of node 1. Run 2: node 1 removed among unrelated edges.
+    // Run 3: node 1 re-added with one edge and a fact. The sizes keep them separate runs.
+    let filler = |from: u32, n: u32| (from..from + n).map(|i| edge(20 + i, 0, 21 + i)).collect();
+    let mut first = Records {
+        nodes: vec![node(1, OpKind::Add)],
+        edges: vec![edge(1, 7, 3), edge(4, 0, 1)],
+        facts: vec![fact(1, 1, b"older")],
+    };
+    first.edges.extend::<Vec<_>>(filler(0, 30));
+    let removal = Records {
+        nodes: vec![node(1, OpKind::Remove)],
+        edges: filler(40, 6),
+        ..Records::default()
+    };
+    let readd = Records {
+        nodes: vec![node(1, OpKind::Add)],
+        edges: vec![edge(1, 7, 2)],
+        facts: vec![fact(1, 0, b"new")],
+    };
+    let h = [first, removal, readd];
+    let mut value = PreparedSediment::prepare(&h[..1], &b).unwrap();
+    for r in &h[1..] {
+        value = value.extend(std::slice::from_ref(r), &b).unwrap();
+    }
+    assert_eq!(
+        value.runs(),
+        3,
+        "the removal and the re-add sit in different runs"
+    );
+    let mut oracle = Oracle::default();
+    oracle.apply(&base_recs);
+    for r in &h {
+        oracle.apply(r);
+    }
+    let parent = View::new(Some(&base), &[], &value, &b).unwrap();
+    for upto in 0..=3 {
+        let ctx = format!("sealed up to {upto}");
+        let sealed = value.seal(&parent, upto, &b).unwrap();
+        assert_eq!(sealed.through, upto, "{ctx}: runs end at every batch");
+        let layers = [Layer::open(OwnedBytes::new(sealed.layer), &b).unwrap()];
+        let v = View::new(Some(&base), &layers, &sealed.rest, &b).unwrap();
+        assert_matches(&v, &oracle, 72, &ctx);
+        assert_eq!(
+            v.fact(LocalId(1), 1),
+            None,
+            "{ctx}: the older fact stays deleted"
+        );
+        let both: Vec<(u32, u16)> = rows(&v, LocalId(1), &RelSelection::All, Direction::Both)
+            .into_iter()
+            .map(|(m, r, _)| (m.0, r.0))
+            .collect();
+        assert_eq!(both, vec![(2, 7)], "{ctx}: only the re-added edge");
+    }
 }
