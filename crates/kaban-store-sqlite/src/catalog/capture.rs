@@ -20,6 +20,13 @@
 //! existing edge identity, which the store's upsert shares its BEFORE trigger with, is
 //! captured instead: the replaced row's last values are kept before the insert
 //! (`cat_replaced`) and queued as its delete.
+//!
+//! The identity guards judge values, not the statement's spelling (END-MED-02): SQLite matches
+//! an `UPDATE OF` column list against the names a statement writes, so `SET rowid`, `_rowid_`
+//! or `oid` would pass a list naming `rid`. The rowid guards (`cat_guard_node_rid`,
+//! `cat_guard_edge_rowid`) fire for every update and refuse any change of the rowid; the edge
+//! insert guard refuses a rowid that another identity holds (an edge's implicit rowid is a
+//! uniqueness a REPLACE resolves by deleting).
 
 use kaban_core::Result;
 use rusqlite::{Connection, Row};
@@ -155,25 +162,31 @@ fn capture_ddl() -> String {
                      WHERE content_hash = new.content_hash AND lifecycle = 'active')) BEGIN
            SELECT RAISE(ABORT, 'catalog_capture_refused: a node insert would replace a row');
          END;
+         CREATE TEMP TRIGGER IF NOT EXISTS cat_guard_node_rid BEFORE UPDATE ON main.node
+             WHEN new.rid IS NOT old.rid BEGIN
+           SELECT RAISE(ABORT, 'catalog_capture_refused: a node update would change its rid');
+         END;
          CREATE TEMP TRIGGER IF NOT EXISTS cat_guard_node_bu
-             BEFORE UPDATE OF rid, id, content_hash, lifecycle ON main.node
-             WHEN new.rid IS NOT old.rid
-               OR (new.id IS NOT old.id AND EXISTS (SELECT 1 FROM main.node WHERE id = new.id))
+             BEFORE UPDATE OF id, content_hash, lifecycle ON main.node
+             WHEN (new.id IS NOT old.id AND EXISTS (SELECT 1 FROM main.node WHERE id = new.id))
                OR (new.lifecycle = 'active' AND EXISTS (
                      SELECT 1 FROM main.node
                      WHERE content_hash = new.content_hash AND lifecycle = 'active'
                        AND rid <> old.rid)) BEGIN
-           SELECT RAISE(ABORT,
-             'catalog_capture_refused: a node update would change its rid or replace a row');
+           SELECT RAISE(ABORT, 'catalog_capture_refused: a node update would replace a row');
          END;
          CREATE TEMP TRIGGER IF NOT EXISTS cat_guard_edge_bi BEFORE INSERT ON main.edge BEGIN
            SELECT RAISE(ABORT, 'catalog_capture_refused: an edge insert would replace another edge')
-             WHERE EXISTS (SELECT 1 FROM main.edge WHERE id = new.id
+             WHERE EXISTS (SELECT 1 FROM main.edge WHERE (id = new.id OR rowid = new.rowid)
                            AND NOT (src = new.src AND dst = new.dst AND rel = new.rel));
            DELETE FROM temp.cat_replaced;
            INSERT INTO temp.cat_replaced(src, dst, rel, producer)
              SELECT src, dst, rel, producer FROM main.edge
              WHERE src = new.src AND dst = new.dst AND rel = new.rel;
+         END;
+         CREATE TEMP TRIGGER IF NOT EXISTS cat_guard_edge_rowid BEFORE UPDATE ON main.edge
+             WHEN new.rowid IS NOT old.rowid BEGIN
+           SELECT RAISE(ABORT, 'catalog_capture_refused: an edge update would change its rowid');
          END;
          CREATE TEMP TRIGGER IF NOT EXISTS cat_guard_edge_bu
              BEFORE UPDATE OF id, src, dst, rel ON main.edge
