@@ -33,6 +33,9 @@ use super::phase::{Phase, Phases, Reader, Staged};
 use super::tables::{ExtentId, Generation, SedimentSeq, sql_int, uint};
 use crate::sql_error::SqlResultExt;
 
+/// The operation a failed sync of a catalog commit names (`StoreError::StorageFatal`).
+pub(crate) const COMMIT: &str = "catalog_commit";
+
 /// The writer phase's handle on the open writer transaction: the writer closure's statements.
 /// It holds no change set (the set is frozen only after the closure) and stages nothing.
 pub(crate) struct Txn<'c> {
@@ -295,7 +298,9 @@ impl Catalog {
     /// Any error rolls rows and sediment back.
     ///
     /// # Errors
-    /// The closure's, the hook's, a class's or SQLite's error.
+    /// The closure's, the hook's, a class's or SQLite's error; `StoreError::StorageFatal`
+    /// ([`COMMIT`]) when SQLite fails to sync the commit: never retried, and whether it reached
+    /// the disk is unknown (a WAL frame written before the failed sync may be recovered).
     pub(crate) fn commit<T>(
         &self,
         conn: &mut Connection,
@@ -360,7 +365,9 @@ impl Catalog {
         staged.check(&txn.tx)?;
         drop(phase);
         let admitted = Admitted::enter(&self.committing);
-        let committed = txn.tx.commit().sql();
+        // a failed sync of the commit is fatal (END-MED-01): never retried, the caller learns
+        // only that the outcome on disk is unknown
+        let committed = txn.tx.commit().sql_at(COMMIT);
         drop(admitted);
         committed?;
         Ok(out)

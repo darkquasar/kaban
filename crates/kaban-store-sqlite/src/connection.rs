@@ -276,6 +276,10 @@ impl LiveGuard {
     }
 }
 
+/// The operation a failed sync of [`publish_version`]'s checkpoint names
+/// (`StoreError::StorageFatal`: the open fails and the checkpoint is not tried again).
+const PUBLISH_VERSION: &str = "publish_version";
+
 /// How long [`publish_version`] keeps trying to complete its checkpoint: the usual lock wait
 /// of a connection (`schema::BUSY_TIMEOUT`).
 pub(crate) const PUBLISH_WINDOW: std::time::Duration = crate::schema::BUSY_TIMEOUT;
@@ -293,7 +297,8 @@ const PUBLISH_ATTEMPT_WAIT: std::time::Duration = std::time::Duration::from_mill
 ///
 /// # Errors
 /// `StoreError::Backend` ([`VersionUnpublished`]) when the window passes with the checkpoint
-/// still incomplete; SQLite errors of the checkpoint.
+/// still incomplete; `StoreError::StorageFatal` ([`PUBLISH_VERSION`]) for a failed sync of the
+/// checkpoint; SQLite errors of the checkpoint.
 fn publish_version(conn: &Connection) -> Result<()> {
     conn.busy_timeout(PUBLISH_ATTEMPT_WAIT).sql()?;
     let deadline = std::time::Instant::now() + PUBLISH_WINDOW;
@@ -306,7 +311,7 @@ fn publish_version(conn: &Connection) -> Result<()> {
                     r.get::<_, i64>(2)?,
                 ))
             })
-            .sql();
+            .sql_at(PUBLISH_VERSION);
         match checkpoint {
             Ok((busy, log, checkpointed)) if busy == 0 || (log >= 0 && checkpointed == log) => {
                 break Ok(());
