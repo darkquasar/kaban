@@ -78,11 +78,6 @@ impl PinLock {
             std::thread::sleep(LOCK_RETRY);
         }
     }
-
-    /// The locked generation.
-    pub(crate) fn generation(&self) -> u64 {
-        self.generation
-    }
 }
 
 impl Drop for PinLock {

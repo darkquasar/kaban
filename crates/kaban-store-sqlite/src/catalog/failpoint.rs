@@ -4,6 +4,13 @@
 
 /// A window of the pin protocol.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(
+    not(feature = "failpoints"),
+    expect(
+        unreachable_pub,
+        reason = "public for the race tests (`catalog_testing::Window`, `failpoints` only)"
+    )
+)]
 pub enum Window {
     /// A reader has read its candidate generation and holds no pin lock yet.
     ReaderCandidate,
@@ -17,7 +24,7 @@ pub enum Window {
 }
 
 #[cfg(any(test, feature = "failpoints"))]
-pub(crate) use hooks::{Failpoints, Hook};
+pub(crate) use hooks::Failpoints;
 
 #[cfg(any(test, feature = "failpoints"))]
 mod hooks {

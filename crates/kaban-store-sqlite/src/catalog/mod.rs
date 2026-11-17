@@ -13,8 +13,11 @@
 //!   +----------+          +-------------+          +-------------+
 //! ```
 //!
-//! T5 Step 3 delivers the commit entry, capture, sediment and a pin of the committed rows; the
-//! pin protocol of PC-8 (Step 4) and the container I/O (Steps 4, 5) refuse until delivered.
+//! A pin follows PC-8 (`pin`, `pins`): it locks a candidate generation in `kaban.kbx.pins/`,
+//! then builds itself from a fresh read transaction that checks `reclaim_floor`, so reclamation
+//! never destroys bytes a live pin can reach. Extents are appended outside the writer lock
+//! (`kbx`) and published by a commit (`commit::Txn::publish`). T5 Step 5 adds the fatal sync
+//! and the hole-punch probe (`io`).
 
 pub(crate) mod capture;
 pub(crate) mod class;

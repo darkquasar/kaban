@@ -23,6 +23,7 @@ use super::Catalog;
 use super::class::{ExtentClass, ExtentLocation};
 use super::failpoint::Window;
 use super::kbx::{Mapping, failed};
+use super::pins::PinLock;
 use super::tables::{ExtentId, ExtentRef, Generation, SedimentRow, SedimentSeq, uint};
 use crate::rows::bad_enum;
 use crate::sql_error::SqlResultExt;
@@ -80,6 +81,9 @@ pub(crate) struct Pin {
     sediment: ByClass<SedimentRow>,
     /// The copy's charge against the reader's budget, released with the pin.
     _copy: BudgetLease,
+    /// The lock at the candidate generation that keeps reclamation off what the pin can
+    /// reach (PC-8); `None` for an in-memory database, which has no container.
+    _lock: Option<PinLock>,
 }
 
 #[expect(
@@ -182,17 +186,15 @@ fn settle<T>(budget: &QueryBudget, out: Result<T>) -> Result<T> {
 }
 
 impl Catalog {
-    /// Pin the generation the read transaction sees and run `f` with that transaction; both
-    /// end on every exit. Acquisition and execution share `budget`: a statement of `f` is
-    /// interrupted once it is cancelled or past its deadline, and then the budget's error is
-    /// the outcome even when `f` returned `Ok`.
-    ///
-    /// Not yet the race-free acquisition of PC-8: the pin lock and the `reclaim_floor` retry
-    /// arrive with reclamation (T5 Step 4). Until then nothing reclaims, so the transaction's
-    /// snapshot alone is the pinned generation.
+    /// Pin by PC-8 and run `f` with the pin's own read transaction, held open while `f`
+    /// evaluates rows and indexes; the transaction and the pin lock end on every exit.
+    /// Acquisition and execution share `budget`: a statement of `f` is interrupted once it is
+    /// cancelled or past its deadline, and then the budget's error is the outcome even when
+    /// `f` returned `Ok`.
     ///
     /// # Errors
-    /// The closure's, the budget's or SQLite's error.
+    /// [`OuterTransaction`] when `conn` already has a transaction open; the closure's, the
+    /// budget's, the pin lock's or SQLite's error.
     pub(crate) fn with_snapshot<T>(
         &self,
         conn: &mut Connection,
@@ -200,10 +202,7 @@ impl Catalog {
         f: impl FnOnce(&Transaction<'_>, &Pin) -> Result<T>,
     ) -> Result<T> {
         let conn = Interruptible::new(conn, budget)?;
-        self.failpoint(Window::ReaderCandidate);
-        self.failpoint(Window::ReaderLocked);
-        let out = self.read(conn.conn(), |tx| {
-            let pin = self.load(tx, budget)?;
+        let out = self.acquire(conn.conn(), budget, |tx, pin| {
             let out = f(tx, &pin);
             drop(pin);
             settle(budget, out)
@@ -212,30 +211,88 @@ impl Catalog {
     }
 
     /// Pin as [`Self::with_snapshot`] does, copy every index input under `budget`, end the
-    /// transaction and return the detached pin.
+    /// transaction and return the detached pin. It keeps its candidate's pin lock (and the
+    /// container's mapping) until it is dropped, after the store that took it if need be; it
+    /// serves no statement that reads live rows.
     ///
     /// # Errors
-    /// The budget's or SQLite's error.
+    /// [`OuterTransaction`] when `conn` already has a transaction open; the budget's, the pin
+    /// lock's or SQLite's error.
     pub(crate) fn pin(&self, conn: &mut Connection, budget: &QueryBudget) -> Result<Pin> {
         let conn = Interruptible::new(conn, budget)?;
-        self.failpoint(Window::ReaderCandidate);
-        self.failpoint(Window::ReaderLocked);
-        let out = self.read(conn.conn(), |tx| self.load(tx, budget));
+        let out = self.acquire(conn.conn(), budget, |_, pin| Ok(pin));
         settle(budget, out)
     }
 
+    /// PC-8 acquisition, then `f` over the pin and the transaction it was built from:
+    ///
+    /// 1. read a candidate generation g;
+    /// 2. lock `kaban.kbx.pins/<g>` shared ([`PinLock`]);
+    /// 3. begin a fresh read transaction and read `reclaim_floor` F and the actual generation
+    ///    h in it (its first read, so its snapshot starts after the lock);
+    /// 4. `g < F`: a reclamation passed the candidate before the lock, so its punch may have
+    ///    destroyed what g saw: end the transaction, unlock and retry from h; otherwise copy
+    ///    the pin from that transaction ([`Self::load`]), reporting h and keeping the lock at
+    ///    g as the conservative guard, and run `f` before the transaction ends.
+    ///
+    /// Every round checks `budget`; every early exit (an error, a retry, an unwind) drops the
+    /// transaction (rolled back) and the lock.
+    fn acquire<T, F>(&self, conn: &Connection, budget: &QueryBudget, f: F) -> Result<T>
+    where
+        F: FnOnce(&Transaction<'_>, Pin) -> Result<T>,
+    {
+        if !conn.is_autocommit() {
+            return Err(StoreError::Backend {
+                source: BackendSource::new(OuterTransaction),
+            });
+        }
+        let mut candidate = self.read(conn, latest_generation)?;
+        let mut f = f;
+        loop {
+            budget.check().map_err(budget_exceeded)?;
+            self.failpoint(Window::ReaderCandidate);
+            let lock = self
+                .pins
+                .as_ref()
+                .map(|pins| PinLock::acquire(pins, candidate, budget))
+                .transpose()?;
+            self.failpoint(Window::ReaderLocked);
+            let attempt = self.read(conn, move |tx| {
+                let (floor, actual) = floor_and_latest(tx)?;
+                if candidate < floor {
+                    return Ok(Attempt::Retry {
+                        candidate: actual.max(floor),
+                        f,
+                    });
+                }
+                self.failpoint(Window::ReaderInTransaction);
+                let pin = self.load(tx, budget, Generation(actual), lock)?;
+                f(tx, pin).map(Attempt::Pinned)
+            })?;
+            match attempt {
+                Attempt::Pinned(out) => return Ok(out),
+                Attempt::Retry {
+                    candidate: next,
+                    f: back,
+                } => {
+                    self.retried();
+                    candidate = next;
+                    f = back;
+                }
+            }
+        }
+    }
+
     /// The pinned generation's inputs as `tx` sees them: counted, charged to `budget`, then
-    /// copied into exactly the reserved capacity (PC-17).
-    fn load(&self, tx: &Transaction<'_>, budget: &QueryBudget) -> Result<Pin> {
+    /// copied into exactly the reserved capacity (PC-17), with `lock` the pin's guard.
+    fn load(
+        &self,
+        tx: &Transaction<'_>,
+        budget: &QueryBudget,
+        generation: Generation,
+        lock: Option<PinLock>,
+    ) -> Result<Pin> {
         budget.check().map_err(budget_exceeded)?;
-        let generation = tx
-            .query_row(
-                "SELECT COALESCE(max(generation), 0) FROM cat_generation",
-                [],
-                |r| uint(r, 0),
-            )
-            .sql()?;
-        self.failpoint(Window::ReaderInTransaction);
         let plan = CopyPlan::count(tx, &self.kbx)?;
         let copy = budget.reserve(plan.charge).map_err(budget_exceeded)?;
         let kbx = self.kbx.clone();
@@ -243,12 +300,13 @@ impl Catalog {
         let sediment = self.copy_sediment(tx, budget, &plan.sediment)?;
         budget.check().map_err(budget_exceeded)?;
         Ok(Pin {
-            generation: Generation(generation),
+            generation,
             kbx,
             mapping: Arc::clone(&self.mapping),
             extents,
             sediment,
             _copy: copy,
+            _lock: lock,
         })
     }
 
@@ -441,3 +499,45 @@ pub(super) fn budget_exceeded(e: BudgetExceeded) -> StoreError {
         source: BackendSource::new(e),
     }
 }
+
+/// One round of [`Catalog::acquire`]: the closure's outcome, or the candidate to retry from
+/// with the closure handed back.
+enum Attempt<T, F> {
+    Pinned(T),
+    Retry { candidate: u64, f: F },
+}
+
+/// The latest generation `tx` sees.
+fn latest_generation(tx: &Transaction<'_>) -> Result<u64> {
+    tx.query_row(
+        "SELECT COALESCE(max(generation), 0) FROM cat_generation",
+        [],
+        |r| uint(r, 0),
+    )
+    .sql()
+}
+
+/// `reclaim_floor` and the latest generation, in one statement of `tx`.
+fn floor_and_latest(tx: &Transaction<'_>) -> Result<(u64, u64)> {
+    tx.query_row(
+        "SELECT (SELECT value FROM cat_meta WHERE key = 'reclaim_floor'),
+                (SELECT COALESCE(max(generation), 0) FROM cat_generation)",
+        [],
+        |r| Ok((uint(r, 0)?, uint(r, 1)?)),
+    )
+    .sql()
+}
+
+/// A snapshot or pin asked of a connection that already has a transaction open: PC-8 pins
+/// only from a fresh read transaction begun after its lock, never inside a competing outer
+/// one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct OuterTransaction;
+
+impl std::fmt::Display for OuterTransaction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("catalog: a pin needs a connection without an open transaction")
+    }
+}
+
+impl std::error::Error for OuterTransaction {}

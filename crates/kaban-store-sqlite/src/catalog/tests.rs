@@ -864,3 +864,35 @@ fn a_span_beyond_the_container_is_refused_and_a_span_inside_it_reads() {
         );
     }
 }
+
+#[test]
+fn a_pin_on_a_connection_with_an_open_transaction_is_refused_by_name() {
+    use super::pin::OuterTransaction;
+    use kaban_core::query_budget::QueryBudget;
+
+    // Arrange: the connection is inside a transaction the catalog did not open
+    let store = SqliteStore::open_memory().unwrap();
+    let budget = QueryBudget::new(u64::MAX, None);
+    let mut conn = store.lock();
+    conn.execute_batch("SAVEPOINT outer").unwrap();
+
+    // Act
+    let pinned = store.catalog().pin(&mut conn, &budget).map(|_| ());
+    let snapshot = store
+        .catalog()
+        .with_snapshot(&mut conn, &budget, |_, _| Ok(()));
+
+    // Assert: both refuse with the named error, and the outer transaction is left as it was
+    for out in [pinned, snapshot] {
+        let err = out.expect_err("a pin ran inside an outer transaction");
+        let StoreError::Backend { source } = &err else {
+            panic!("{err:?}");
+        };
+        assert!(
+            source.driver().downcast_ref::<OuterTransaction>().is_some(),
+            "{err:?}"
+        );
+    }
+    assert!(!conn.is_autocommit());
+    conn.execute_batch("ROLLBACK").unwrap();
+}

@@ -769,3 +769,80 @@ fn a_pin_lock_left_by_a_killed_process_neither_blocks_reclamation_nor_survives_i
         "a stale lock file survived"
     );
 }
+
+#[test]
+fn a_reader_locking_a_stale_candidate_during_the_rescan_makes_the_reclamation_retry() {
+    // Arrange: a reader that read its candidate g, then a reclamation that retired the extent
+    // and committed floor g + 1 before the reader locks g, and re-scans while it holds g
+    let s = Scratch::new("kaban-t5-pin", "rescan-race");
+    let reader = SqliteStore::open(&s.db(), &s.keys()).unwrap();
+    let ids = catalog_testing::append_and_publish_all(
+        &reader,
+        &[pattern(255, EXTENT_LEN), pattern(17, EXTENT_LEN)],
+    )
+    .unwrap();
+    let (keeper, doomed) = (ids[0], ids[1]);
+    let reclaimer = Arc::new(Reclaimer::thread(&s));
+    let rescanned = Arc::new(Mutex::new(None));
+    let (paused, resumed) = (
+        Arc::new(AtomicBool::new(true)),
+        Arc::new(AtomicBool::new(true)),
+    );
+    let (once, r) = (Arc::clone(&paused), Arc::clone(&reclaimer));
+    catalog_testing::set_failpoint(
+        &reader,
+        Window::ReaderCandidate,
+        Some(Arc::new(move || {
+            if once.swap(false, Ordering::AcqRel) {
+                r.command(Command::ReclaimPaused(doomed));
+                assert_eq!(r.reply(), Reply::Floor);
+            }
+        })),
+    );
+    let (once, r, seen) = (
+        Arc::clone(&resumed),
+        Arc::clone(&reclaimer),
+        Arc::clone(&rescanned),
+    );
+    catalog_testing::set_failpoint(
+        &reader,
+        Window::ReaderLocked,
+        Some(Arc::new(move || {
+            if once.swap(false, Ordering::AcqRel) {
+                r.command(Command::Resume);
+                *seen.lock().unwrap_or_else(PoisonError::into_inner) = Some(r.done());
+            }
+        })),
+    );
+
+    // Act
+    let pin = catalog_testing::pin(&reader, &budget()).unwrap();
+
+    // Assert: the re-scan saw the stale lock below its floor and zeroed nothing; the reader
+    // retried past the floor and holds only intact bytes; with the pin gone the extent goes
+    let rescanned = rescanned
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .take();
+    assert_eq!(
+        rescanned,
+        Some(Reply::Done {
+            punched: 0,
+            race_retry: true
+        })
+    );
+    assert_eq!(catalog_testing::pin_retries(&reader), 1);
+    assert!(!read_intact(pin.view(), keeper, doomed, 0));
+    drop(pin);
+    for window in [Window::ReaderCandidate, Window::ReaderLocked] {
+        catalog_testing::set_failpoint(&reader, window, None);
+    }
+    reclaimer.command(Command::Reclaim(0));
+    assert_eq!(
+        reclaimer.done(),
+        Reply::Done {
+            punched: 1,
+            race_retry: false
+        }
+    );
+}

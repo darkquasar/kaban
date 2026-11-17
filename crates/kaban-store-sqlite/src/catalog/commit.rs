@@ -261,7 +261,7 @@ impl Catalog {
     /// The closure's or SQLite's error.
     #[expect(
         clippy::unused_self,
-        reason = "the one read primitive is the catalog's: Step 4 takes its pin lock here"
+        reason = "the one read primitive is the catalog's: its pins and snapshots build on it"
     )]
     pub(crate) fn read<T>(
         &self,
