@@ -54,6 +54,19 @@ pub(crate) enum Reclamation {
     ZeroFill,
 }
 
+/// What one release of reclaimed ranges did ([`super::Catalog::reclaim_ranges`], KER-11): the
+/// bytes whose blocks a keep-size punch freed, and the bytes overwritten with zeros instead
+/// (they read as zeros, but their blocks stay allocated: never counted as reclaimed space).
+/// A mixed outcome (both nonzero) is a release whose punches the file system began refusing
+/// part way; its zero-filled part is degraded reclamation like a whole zero-filled one.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct Released {
+    /// Bytes released by punching: their space is reclaimed.
+    pub(crate) punched: u64,
+    /// Bytes released by zero-filling: no space is reclaimed.
+    pub(crate) zero_filled: u64,
+}
+
 /// Sync `file`'s data (`fdatasync`) for the operation `op`, once.
 ///
 /// # Errors
@@ -141,7 +154,12 @@ pub(crate) fn release(
         return Ok(());
     };
     if mode == Reclamation::Punch {
-        match punch(file, offset, len) {
+        let punched = if faults::release_punch_refused(kbx) {
+            Err(rustix::io::Errno::OPNOTSUPP)
+        } else {
+            punch(file, offset, len)
+        };
+        match punched {
             Ok(()) => return Ok(()),
             Err(e) if refused(e) => {}
             Err(e) => return Err(failed("punch a reclaimed range of", kbx, e)),
@@ -213,6 +231,7 @@ pub(crate) mod faults {
         failing: Vec<&'static str>,
         skipping: bool,
         no_punch: bool,
+        no_release_punch: bool,
         calls: HashMap<&'static str, u64>,
     }
 
@@ -247,6 +266,12 @@ pub(crate) mod faults {
         with(kbx, |faults| faults.no_punch).unwrap_or(false)
     }
 
+    /// Whether a release in the container `kbx` must find its punch refused (as a file system
+    /// that stops punching after the open's probe).
+    pub(super) fn release_punch_refused(kbx: &Path) -> bool {
+        with(kbx, |faults| faults.no_release_punch).unwrap_or(false)
+    }
+
     /// Start injecting under `dir` (replacing an earlier registration of it).
     pub(crate) fn install(dir: &Path) {
         let mut registry = REGISTRY.lock().unwrap_or_else(PoisonError::into_inner);
@@ -256,6 +281,7 @@ pub(crate) mod faults {
             failing: Vec::new(),
             skipping: false,
             no_punch: false,
+            no_release_punch: false,
             calls: HashMap::new(),
         });
     }
@@ -281,6 +307,10 @@ pub(crate) mod faults {
     /// Make the hole-punch probe under `dir` find no hole punching.
     pub(crate) fn no_punch(dir: &Path) {
         with(dir, |faults| faults.no_punch = true);
+    }
+    /// Make every later release under `dir` find its punch refused.
+    pub(crate) fn no_release_punch(dir: &Path) {
+        with(dir, |faults| faults.no_release_punch = true);
     }
     /// How many syncs of `op` under `dir` were attempted.
     pub(crate) fn sync_calls(dir: &Path, op: &str) -> u64 {
@@ -308,6 +338,12 @@ mod faults {
 
     #[inline]
     pub(super) fn punch_refused(kbx: &Path) -> bool {
+        let _ = kbx;
+        false
+    }
+
+    #[inline]
+    pub(super) fn release_punch_refused(kbx: &Path) -> bool {
         let _ = kbx;
         false
     }

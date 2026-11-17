@@ -299,6 +299,10 @@ pub struct Reclaimed {
     /// Whether its re-scan found a live pin below the floor (`pin_race_retry`): then it
     /// released nothing.
     pub pin_race_retry: bool,
+    /// The released bytes whose blocks a punch freed (reclaimed space).
+    pub punched_bytes: u64,
+    /// The released bytes overwritten with zeros instead (no space reclaimed).
+    pub zero_filled_bytes: u64,
 }
 
 /// Reclaim `store`'s container by T6's two-phase rule (PC-8), releasing ranges through the
@@ -346,6 +350,8 @@ pub fn reclaim(store: &SqliteStore) -> Result<Reclaimed> {
             floor,
             punched: Vec::new(),
             pin_race_retry: true,
+            punched_bytes: 0,
+            zero_filled_bytes: 0,
         });
     }
     let doomed = catalog.read(&store.lock(), |tx| {
@@ -367,7 +373,7 @@ pub fn reclaim(store: &SqliteStore) -> Result<Reclaimed> {
         .iter()
         .map(|&(_, offset, len)| (offset, len))
         .collect();
-    catalog.reclaim_ranges(&ranges)?;
+    let released = catalog.reclaim_ranges(&ranges)?;
     let punched: Vec<u64> = doomed.into_iter().map(|(id, _, _)| id).collect();
     catalog.commit(&mut store.lock(), Durability::Normal, |txn| {
         for id in &punched {
@@ -384,6 +390,8 @@ pub fn reclaim(store: &SqliteStore) -> Result<Reclaimed> {
         floor,
         punched,
         pin_race_retry: false,
+        punched_bytes: released.punched,
+        zero_filled_bytes: released.zero_filled,
     })
 }
 
@@ -420,6 +428,11 @@ impl IoFaults {
     pub fn no_punch(&self) {
         io::faults::no_punch(&self.0);
     }
+    /// Make every later release of a reclaimed range find its punch refused, as a file
+    /// system that stops punching after the open's probe found it punching.
+    pub fn no_release_punch(&self) {
+        io::faults::no_release_punch(&self.0);
+    }
     /// How many syncs of `op` were attempted since [`Self::install`], failed ones included.
     #[must_use]
     pub fn sync_calls(&self, op: &str) -> u64 {
@@ -433,8 +446,8 @@ impl Drop for IoFaults {
     }
 }
 
-/// Whether `store`'s catalog reclaims by zero-filling because its open's probe found no hole
-/// punching (KER-11).
+/// Whether `store`'s catalog reclaims by zero-filling (KER-11): its open's probe found no hole
+/// punching, or a release found its punch refused since.
 #[must_use]
 pub fn degraded_reclamation(store: &SqliteStore) -> bool {
     store.catalog().degraded_reclamation()

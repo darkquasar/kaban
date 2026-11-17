@@ -288,10 +288,10 @@ impl Catalog {
         not(feature = "failpoints"),
         expect(dead_code, reason = "T6's reclamation releases through it")
     )]
-    pub(crate) fn reclaim_ranges(&self, ranges: &[(u64, u64)]) -> Result<()> {
+    pub(crate) fn reclaim_ranges(&self, ranges: &[(u64, u64)]) -> Result<io::Released> {
         if ranges.is_empty() {
             // nothing released, nothing to sync
-            return Ok(());
+            return Ok(io::Released::default());
         }
         let Some(mode) = self.reclamation else {
             return Err(kbx::failed(
@@ -307,7 +307,8 @@ impl Catalog {
         for &(offset, len) in ranges {
             io::release(&file, &self.kbx, offset, len, mode)?;
         }
-        io::sync_data(&file, &self.kbx, io::RECLAIM)
+        io::sync_data(&file, &self.kbx, io::RECLAIM)?;
+        Ok(io::Released::default())
     }
 
     /// Append `bytes` to the container outside the writer lock: reserve a range under a short

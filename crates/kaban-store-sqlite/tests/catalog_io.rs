@@ -160,6 +160,8 @@ struct Reclaim {
     doomed: Vec<u8>,
     /// The keeper's bytes after.
     keeper: Vec<u8>,
+    /// What the reclamation reported.
+    outcome: catalog_testing::Reclaimed,
 }
 
 /// Publish a keeper and a doomed extent, retire and reclaim the doomed one, and read the
@@ -189,6 +191,7 @@ fn reclaim_one(store: &SqliteStore, kbx: &Path) -> Reclaim {
         blocks: (before.blocks(), after.blocks()),
         doomed: range(doomed_at),
         keeper: range(keeper_at),
+        outcome: reclaimed,
     }
 }
 
@@ -207,6 +210,11 @@ fn a_forced_no_punch_probe_degrades_reclamation_to_zero_fill_and_the_container_n
     // Assert: degraded, the range zero-filled in place (its blocks stay allocated, so
     // nothing counts as reclaimed space) and the container neither shrank nor grew
     assert!(degraded, "a no-punch probe did not degrade reclamation");
+    assert_eq!(
+        (r.outcome.punched_bytes, r.outcome.zero_filled_bytes),
+        (0, EXTENT_LEN as u64),
+        "the zero-filled bytes were not reported as such"
+    );
     assert_eq!(r.doomed, vec![0; EXTENT_LEN], "{:?}", r.len);
     assert_eq!(r.keeper, pattern(4, EXTENT_LEN));
     assert_eq!(
@@ -246,6 +254,55 @@ fn with_hole_punching_a_reclaimed_range_reads_as_zeros_its_blocks_are_freed_and_
         r.blocks.1 < r.blocks.0,
         "the reclaimed range was not punched: blocks {:?}",
         r.blocks
+    );
+    assert_eq!(
+        (r.outcome.punched_bytes, r.outcome.zero_filled_bytes),
+        (EXTENT_LEN as u64, 0),
+        "the punched bytes were not reported as such"
+    );
+}
+
+#[test]
+fn a_punch_refused_after_a_successful_probe_zero_fills_syncs_and_reports_degraded_reclamation() {
+    // Arrange: the open's probe finds hole punching, then the file system refuses the punch of
+    // a release (as one remounted or replaced under a live catalog)
+    let s = Scratch::new("kaban-t5-io", "late-no-punch");
+    let faults = IoFaults::install(&s.0);
+    let store = SqliteStore::open(&s.db(), &s.keys()).unwrap();
+    if catalog_testing::degraded_reclamation(&store) {
+        eprintln!(
+            "skipped: the scratch file system does not punch holes, so no probe can succeed \
+             before the refused punch (the forced-fallback test covers zero-fill)"
+        );
+        return;
+    }
+    faults.no_release_punch();
+
+    // Act
+    let r = reclaim_one(&store, &s.0.join("kaban.kbx"));
+
+    // Assert: the range was zero-filled in place and synced, the keeper and the length kept,
+    // no byte reported as punched, and the catalog now reports degraded reclamation
+    assert_eq!(r.doomed, vec![0; EXTENT_LEN]);
+    assert_eq!(r.keeper, pattern(4, EXTENT_LEN));
+    assert_eq!(
+        r.len.0, r.len.1,
+        "reclamation changed the container's length"
+    );
+    assert!(
+        r.blocks.1 >= r.blocks.0,
+        "zero-fill freed blocks: {:?}",
+        r.blocks
+    );
+    assert_eq!(faults.sync_calls("reclaim_ranges"), 1, "the zero-fill was not synced");
+    assert_eq!(
+        (r.outcome.punched_bytes, r.outcome.zero_filled_bytes),
+        (0, EXTENT_LEN as u64),
+        "zero-filled bytes were reported as reclaimed space"
+    );
+    assert!(
+        catalog_testing::degraded_reclamation(&store),
+        "a refused punch left reclamation reported as not degraded"
     );
 }
 
