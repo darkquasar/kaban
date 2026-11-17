@@ -251,6 +251,31 @@ fn pairs(rng: &mut Rng, n: usize) -> Vec<(u32, u32)> {
     v
 }
 
+/// Compare a crate outcome with the oracle's: the same answer, or a refusal naming the same cap
+/// with that cap's value (C5: a cut search never reads as a complete answer).
+fn assert_outcome<T: PartialEq + std::fmt::Debug>(
+    got: Result<T, GraphError>,
+    want: Result<T, &'static str>,
+    c: Caps,
+    ctx: &str,
+) {
+    match want {
+        Ok(want) => assert_eq!(got.unwrap(), want, "{ctx}"),
+        Err(cap) => {
+            let max = if cap == "rows" {
+                u64::from(c.rows)
+            } else {
+                u64::from(c.depth)
+            };
+            assert_eq!(
+                got.err(),
+                Some(GraphError::CapExceeded { limit: cap, max }),
+                "{ctx}: refused naming {cap}"
+            );
+        }
+    }
+}
+
 #[test]
 fn reachable_and_shortest_path_equal_the_oracle() {
     let b = budget();
@@ -263,19 +288,153 @@ fn reachable_and_shortest_path_equal_the_oracle() {
                 for (s, d) in pairs(&mut rng, 25) {
                     let ctx = format!("seed {seed} {rels:?} {c:?} {s}->{d}");
                     let (src, dst) = (LocalId(s), LocalId(d));
-                    let got = reachable(&v, src, dst, rels, c, &b).unwrap();
-                    assert_eq!(got, g.reachable(s, d, c.depth, c.rows), "{ctx}: reachable");
-                    let path = shortest_path(&v, src, dst, rels, c, &b).unwrap();
+                    let got = reachable(&v, src, dst, rels, c, &b);
+                    let want = g.reachable(s, d, c.depth, c.rows);
+                    assert_outcome(got, want, c, &format!("{ctx}: reachable"));
+                    let path = shortest_path(&v, src, dst, rels, c, &b)
+                        .map(|p| p.map(|p| p.value().clone()));
                     let want = g.shortest_path(s, d, c.depth, c.rows);
-                    assert_eq!(
-                        path.as_ref().map(|p| p.value().clone()),
-                        want,
-                        "{ctx}: path"
-                    );
+                    assert_outcome(path, want, c, &format!("{ctx}: path"));
                 }
             }
         }
     }
+}
+
+/// 1 > {2, 3, 4}, 4 > 9, 3 > 5 > 6, and an isolated 7.
+fn fan() -> [Records; 1] {
+    [Records {
+        nodes: [1, 2, 3, 4, 5, 6, 7, 9].map(node).to_vec(),
+        edges: vec![
+            edge(1, 0, 2),
+            edge(1, 0, 3),
+            edge(1, 0, 4),
+            edge(4, 0, 9),
+            edge(3, 0, 5),
+            edge(5, 0, 6),
+        ],
+        ..Records::default()
+    }]
+}
+
+fn refused(limit: &'static str, max: u64) -> Option<GraphError> {
+    Some(GraphError::CapExceeded { limit, max })
+}
+
+#[test]
+fn a_rows_cut_never_reads_as_unreachable() {
+    let rs = fan();
+    let v = view(None, &[], &rs);
+    let (b, all) = (budget(), RelSelection::All);
+    let r = |dst: u32, c: Caps| reachable(&v, LocalId(1), LocalId(dst), &all, c, &b);
+    // Rows 2 keeps {2, 3} of level one: 4 is dropped and 9 lies behind it.
+    for dst in [4, 9, 7] {
+        assert_eq!(r(dst, caps(3, 2)).err(), refused("rows", 2), "dst {dst}");
+    }
+    assert_eq!(r(2, caps(3, 2)), Ok(true), "a kept node is reached");
+    assert_eq!(r(3, caps(3, 2)), Ok(true), "a kept node is reached");
+    // Uncut: everything 1 reaches lies within depth 3 and 6 rows.
+    assert_eq!(r(9, caps(3, 6)), Ok(true));
+    assert_eq!(r(7, caps(3, 6)), Ok(false), "a settled search says unreachable");
+}
+
+#[test]
+fn a_depth_bound_with_nodes_beyond_it_is_refused_not_false() {
+    let rs = fan();
+    let v = view(None, &[], &rs);
+    let (b, all) = (budget(), RelSelection::All);
+    let r = |dst: u32, c: Caps| reachable(&v, LocalId(1), LocalId(dst), &all, c, &b);
+    // Depth 2 reaches 5 but not 6, which lies one hop past the bound.
+    assert_eq!(r(6, caps(2, 100)).err(), refused("depth", 2));
+    assert_eq!(r(7, caps(2, 100)).err(), refused("depth", 2));
+    assert_eq!(r(5, caps(2, 100)), Ok(true));
+    // Depth 3 sees everything: 7 is settled as unreachable.
+    assert_eq!(r(7, caps(3, 100)), Ok(false));
+    // A last level whose lists only lead back to seen nodes is no cut: 1 <-> 2.
+    let ring = [Records {
+        nodes: [1, 2, 3].map(node).to_vec(),
+        edges: vec![edge(1, 0, 2), edge(2, 0, 1)],
+        ..Records::default()
+    }];
+    let v = view(None, &[], &ring);
+    assert_eq!(
+        reachable(&v, LocalId(1), LocalId(3), &all, caps(1, 10), &b),
+        Ok(false)
+    );
+}
+
+#[test]
+fn shortest_path_refuses_when_a_cut_hides_the_path() {
+    let rs = fan();
+    let v = view(None, &[], &rs);
+    let (b, all) = (budget(), RelSelection::All);
+    let p = |dst: u32, c: Caps| {
+        shortest_path(&v, LocalId(1), LocalId(dst), &all, c, &b).map(|p| p.map(|p| p.value().clone()))
+    };
+    // The path 1 > 4 > 9 runs through 4, which rows 2 drops.
+    assert_eq!(p(9, caps(4, 2)).err(), refused("rows", 2));
+    assert_eq!(p(7, caps(4, 2)).err(), refused("rows", 2));
+    // 1 > 3 > 5 > 6 is three hops: depth 2 cannot settle it.
+    assert_eq!(p(6, caps(2, 100)).err(), refused("depth", 2));
+    // A cut at the level where dst is kept hides nothing: every shallower level is complete.
+    assert_eq!(p(3, caps(4, 2)), Ok(Some(vec![LocalId(1), LocalId(3)])));
+    assert_eq!(
+        p(6, caps(3, 100)),
+        Ok(Some(vec![LocalId(1), LocalId(3), LocalId(5), LocalId(6)]))
+    );
+    assert_eq!(p(7, caps(3, 100)), Ok(None), "settled: no path");
+}
+
+#[test]
+fn meet_refuses_when_a_cut_could_hide_a_minimum() {
+    let (b, all) = (budget(), RelSelection::All);
+    // Both 1 and 2 point to 3 and 4: rows 1 keeps only 3 on each side, yet 4 ties with it.
+    let twin = [Records {
+        nodes: [1, 2, 3, 4].map(node).to_vec(),
+        edges: vec![edge(1, 0, 3), edge(1, 0, 4), edge(2, 0, 3), edge(2, 0, 4)],
+        ..Records::default()
+    }];
+    let v = view(None, &[], &twin);
+    let m = |c: Caps| meet(&v, LocalId(1), LocalId(2), &all, c, &b).map(|r| r.value().clone());
+    assert_eq!(m(caps(1, 1)).err(), refused("rows", 1));
+    assert_eq!(m(caps(1, 2)), Ok(vec![LocalId(3), LocalId(4)]));
+    // 1 > 3 > 5 and 2 > 4 > 5: depth 1 finds no common node, but one lies past the bound.
+    let far = [Records {
+        nodes: [1, 2, 3, 4, 5].map(node).to_vec(),
+        edges: vec![edge(1, 0, 3), edge(3, 0, 5), edge(2, 0, 4), edge(4, 0, 5)],
+        ..Records::default()
+    }];
+    let v = view(None, &[], &far);
+    let m = |c: Caps| meet(&v, LocalId(1), LocalId(2), &all, c, &b).map(|r| r.value().clone());
+    assert_eq!(m(caps(1, 10)).err(), refused("depth", 1));
+    assert_eq!(m(caps(2, 10)), Ok(vec![LocalId(5)]));
+    // 1 > 2 > 7 > 8: the minimum 2 (summed depth 1) is below anything past depth 1, so it is
+    // the exact answer although both searches stop short of the whole graph.
+    let line = [Records {
+        nodes: [1, 2, 7, 8].map(node).to_vec(),
+        edges: vec![edge(1, 0, 2), edge(2, 0, 7), edge(7, 0, 8)],
+        ..Records::default()
+    }];
+    let v = view(None, &[], &line);
+    let got = meet(&v, LocalId(1), LocalId(2), &all, caps(1, 10), &b).map(|r| r.value().clone());
+    assert_eq!(got, Ok(vec![LocalId(2)]));
+}
+
+#[test]
+fn wcc_flags_rows_left_out() {
+    let three = [Records {
+        nodes: [1, 2, 3].map(node).to_vec(),
+        edges: vec![edge(2, 0, 3)],
+        ..Records::default()
+    }];
+    let v = view(None, &[], &three);
+    let (b, all) = (budget(), RelSelection::All);
+    let got = wcc(&v, &all, RowCap(2), &b).unwrap();
+    assert_eq!(got.rows, vec![(LocalId(1), LocalId(1)), (LocalId(2), LocalId(2))]);
+    assert!(got.truncated, "a third member exists");
+    let got = wcc(&v, &all, RowCap(3), &b).unwrap();
+    assert_eq!(got.rows.len(), 3);
+    assert!(!got.truncated, "exactly the cap is not a cut");
 }
 
 #[test]
@@ -354,18 +513,12 @@ fn meet_equals_the_oracle() {
             for c in cap_grid() {
                 for (x, y) in pairs(&mut rng, 15) {
                     let got = meet(&v, LocalId(x), LocalId(y), rels, c, &b);
-                    let want = g.meet(x, y, c.depth, c.rows);
                     let ctx = format!("seed {seed} {rels:?} {c:?} meet {x} {y}");
-                    if want.len() > c.rows as usize {
-                        assert!(
-                            matches!(got, Err(GraphError::CapExceeded { limit: "rows", .. })),
-                            "{ctx}: more minima than rows are refused: {got:?}"
-                        );
-                        continue;
+                    if let Ok(got) = &got {
+                        assert!(got.len() <= c.rows as usize, "{ctx}: the result is capped");
                     }
-                    let got = got.unwrap();
-                    assert!(got.len() <= c.rows as usize, "{ctx}: the result is capped");
-                    assert_eq!(*got, want, "{ctx}");
+                    let got = got.map(|r| r.value().clone());
+                    assert_outcome(got, g.meet(x, y, c.depth, c.rows), c, &ctx);
                 }
             }
         }
@@ -469,7 +622,9 @@ fn wcc_equals_the_oracle_with_the_lowest_member_as_component() {
         for (rels, g) in &graphs(&f) {
             for cap in [1, 10, 10_000] {
                 let got = wcc(&v, rels, RowCap(cap), &b).unwrap();
-                assert_eq!(*got, g.wcc(cap), "seed {seed} {rels:?} cap {cap}");
+                let (rows, truncated) = g.wcc(cap);
+                assert_eq!(got.rows, rows, "seed {seed} {rels:?} cap {cap}");
+                assert_eq!(got.truncated, truncated, "seed {seed} {rels:?} cap {cap}");
             }
         }
     }
@@ -616,9 +771,9 @@ fn structural_functions_hold_no_budget_after_returning_unless_the_result_lives()
     assert_eq!(b.live_bytes(), 0);
     let w = wcc(&graph, &RelSelection::All, RowCap(1000), &b).unwrap();
     assert_eq!(b.live_bytes(), w.bytes());
-    let (rows, hold) = w.into_parts();
-    assert_ne!(rows.len(), 0);
-    drop(rows);
+    let (components, hold) = w.into_parts();
+    assert_ne!(components.rows.len(), 0);
+    drop(components);
     assert!(b.live_bytes() > 0, "the hold keeps the charge");
     drop(hold);
     assert_eq!(b.live_bytes(), 0);

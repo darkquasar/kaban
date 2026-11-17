@@ -648,7 +648,7 @@ fn cancellation_stops_a_low_output_traversal_within_the_interval() {
 
     let start = work_units() + 3 * BUDGET_CHECK_INTERVAL;
     let (seen, end, _, err) = cancel_mid_scan(start, |b| match wcc(&v, &all, RowCap(10), b) {
-        Ok(r) => (r.len(), None),
+        Ok(r) => (r.rows.len(), None),
         Err(e) => (0, Some(e)),
     });
     assert!(
@@ -929,7 +929,7 @@ fn cancellation_stops_a_long_union_find_walk_within_the_interval() {
     let v = view(None, &[], &with);
     let components = wcc(&v, &all, RowCap(u32::MAX), &free).unwrap();
     assert!(
-        components.iter().all(|&(_, c)| c == LocalId(0)),
+        components.rows.iter().all(|&(_, c)| c == LocalId(0)),
         "one component"
     );
     drop(components);

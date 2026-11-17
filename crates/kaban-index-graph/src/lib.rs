@@ -24,6 +24,6 @@ pub use layer::{Layer, seal};
 pub use op::{Attr, DecodedRecords, EdgeOp, FactOp, NodeOp, OpKind, Records};
 pub use paths::{meet, shortest_path};
 pub use sediment::PreparedSediment;
-pub use structure::{common_neighbours, degree, refuse_not_planned, topo_order, wcc};
+pub use structure::{Components, common_neighbours, degree, refuse_not_planned, topo_order, wcc};
 pub use traverse::{Caps, Reached, RowCap, closure, expand, reachable, reverse_closure};
 pub use view::{BUDGET_CHECK_INTERVAL, View};

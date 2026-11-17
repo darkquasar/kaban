@@ -280,8 +280,21 @@ fn find(parent: &mut [u32], mut x: usize, t: &Ticker<'_>) -> Result<usize, Graph
     }
 }
 
+/// The result of [`wcc`]: an ascending prefix of the (node, component) rows and whether rows
+/// were left out.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Components {
+    /// (node, component) for the lowest present nodes, ascending by node; the component id is
+    /// the component's lowest member, computed over the whole graph.
+    pub rows: Vec<(LocalId, LocalId)>,
+    /// Whether more present nodes existed than the cap returned: the rows are then a prefix,
+    /// not the whole graph, and must not be counted as all components or all members.
+    pub truncated: bool,
+}
+
 /// Weakly connected components as (node, component) for every present node in ascending id
-/// order, the component id being its lowest member; the first `cap` rows are returned.
+/// order, the component id being its lowest member; the first `cap` rows are returned and
+/// [`Components::truncated`] says whether more existed.
 ///
 /// Work: the present nodes are listed once from presence, then each outgoing list is read once
 /// into a union-find over their positions (path halving, the lower root kept, so a root is
@@ -295,7 +308,7 @@ pub fn wcc(
     rels: &RelSelection,
     cap: RowCap,
     budget: &QueryBudget,
-) -> Result<Charged<Vec<(LocalId, LocalId)>>, GraphError> {
+) -> Result<Charged<Components>, GraphError> {
     if cap.0 == 0 {
         return Err(GraphError::CapMissing { limit: "rows" });
     }
@@ -339,8 +352,12 @@ pub fn wcc(
         };
         out.push((n, c))?;
     }
-    let (out, lease) = out.into_parts();
-    Ok(Charged::new(out, Hold::new(lease, None)))
+    let (rows, lease) = out.into_parts();
+    let components = Components {
+        rows,
+        truncated: false,
+    };
+    Ok(Charged::new(components, Hold::new(lease, None)))
 }
 
 /// The refusal for a function that is not planned (GRA-01): `betweenness`, `louvain`,

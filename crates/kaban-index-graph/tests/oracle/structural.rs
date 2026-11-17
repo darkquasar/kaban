@@ -146,28 +146,65 @@ impl Graph {
         dist
     }
 
-    /// Whether `dst` is `src` (present) or among the nodes reached within the caps.
-    pub(crate) fn reachable(&self, src: u32, dst: u32, depth: u8, rows: u32) -> bool {
-        if src == dst {
-            return self.nodes.contains(&src);
+    /// The cap that cut the outgoing search from `src` within the caps, with the shallowest
+    /// depth a node it did not keep can have: `rows` when more nodes lie within `depth` than
+    /// `rows` (the floor is the depth of the first dropped node), `depth` when nodes lie past
+    /// the depth bound (floor `depth + 1`); `None` when the search saw everything `src` reaches.
+    fn cut(&self, src: u32, depth: u8, rows: u32) -> Option<(&'static str, u16)> {
+        let all = self.expand(&[LocalId(src)], Direction::Out, depth, u32::MAX);
+        if let Some(&(_, d)) = all.nodes.get(usize::try_from(rows).unwrap()) {
+            return Some(("rows", u16::from(d)));
         }
-        self.expand(&[LocalId(src)], Direction::Out, depth, rows)
-            .nodes
-            .iter()
-            .any(|&(n, _)| n.0 == dst)
+        let far = self
+            .distances(src, Direction::Out)
+            .values()
+            .any(|&d| d > usize::from(depth));
+        far.then_some(("depth", u16::from(depth) + 1))
     }
 
-    /// The lexicographically smallest shortest path from `src` to a `dst` reachable within the
-    /// caps: at every step the lowest-id successor that is still on a shortest path.
+    /// Whether `dst` is reachable from `src` (zero hops when equal and present), or the cap
+    /// that kept the search from settling it: `true` when `dst` is among the nodes reached
+    /// within the caps, `false` only when the search saw everything `src` reaches.
+    pub(crate) fn reachable(
+        &self,
+        src: u32,
+        dst: u32,
+        depth: u8,
+        rows: u32,
+    ) -> Result<bool, &'static str> {
+        if src == dst {
+            return Ok(self.nodes.contains(&src));
+        }
+        let reached = self
+            .expand(&[LocalId(src)], Direction::Out, depth, rows)
+            .nodes
+            .iter()
+            .any(|&(n, _)| n.0 == dst);
+        if reached {
+            return Ok(true);
+        }
+        match self.cut(src, depth, rows) {
+            Some((cap, _)) => Err(cap),
+            None => {
+                let far = self.distances(src, Direction::Out);
+                assert!(!far.contains_key(&dst), "an uncut search saw every reachable node");
+                Ok(false)
+            }
+        }
+    }
+
+    /// The lexicographically smallest shortest path from `src` to `dst` (at every step the
+    /// lowest-id successor still on a shortest path), `None` when `dst` is unreachable, or the
+    /// cap that kept the search from settling it, as [`Self::reachable`] decides.
     pub(crate) fn shortest_path(
         &self,
         src: u32,
         dst: u32,
         depth: u8,
         rows: u32,
-    ) -> Option<Vec<LocalId>> {
-        if !self.reachable(src, dst, depth, rows) {
-            return None;
+    ) -> Result<Option<Vec<LocalId>>, &'static str> {
+        if !self.reachable(src, dst, depth, rows)? {
+            return Ok(None);
         }
         let from = self.distances(src, Direction::Out);
         let to = self.distances(dst, Direction::In);
@@ -175,13 +212,17 @@ impl Graph {
         let mut path = vec![LocalId(src)];
         let mut cur = src;
         for step in 1..=len {
-            cur = self
+            let Some(next) = self
                 .adj(cur, Direction::Out)
                 .into_iter()
-                .find(|m| from.get(m) == Some(&step) && to.get(m) == Some(&(len - step)))?;
+                .find(|m| from.get(m) == Some(&step) && to.get(m) == Some(&(len - step)))
+            else {
+                return Ok(None);
+            };
+            cur = next;
             path.push(LocalId(cur));
         }
-        Some(path)
+        Ok(Some(path))
     }
 
     /// Distinct neighbours shared by `a` and `b`, ignoring direction.
@@ -192,21 +233,50 @@ impl Graph {
     }
 
     /// Nodes reached from both `a` and `b` (each at depth 0 from itself) with the smallest
-    /// summed depth, ascending.
-    pub(crate) fn meet(&self, a: u32, b: u32, depth: u8, rows: u32) -> Vec<LocalId> {
-        let da = self.reached(a, depth, rows);
-        let db = self.reached(b, depth, rows);
-        let sums: BTreeMap<u32, u32> = da
-            .iter()
-            .filter_map(|(n, &x)| db.get(n).map(|&y| (*n, u32::from(x) + u32::from(y))))
-            .collect();
-        let Some(&best) = sums.values().min() else {
-            return Vec::new();
+    /// summed depth, ascending, or the refused cap: the cut cap when a node the bounded searches
+    /// missed could have a summed depth at most the found minimum (or nothing was found and a
+    /// search was cut), `rows` when more than `rows` nodes share the minimum.
+    ///
+    /// A missed node has a summed depth of at least the smallest cut floor, so a minimum below
+    /// it is the exact one; that is checked here against the unbounded distances.
+    pub(crate) fn meet(&self, a: u32, b: u32, depth: u8, rows: u32) -> Result<Vec<LocalId>, &'static str> {
+        let minima = |da: &BTreeMap<u32, usize>, db: &BTreeMap<u32, usize>| -> (Option<usize>, Vec<LocalId>) {
+            let sums: BTreeMap<u32, usize> = da
+                .iter()
+                .filter_map(|(n, &x)| db.get(n).map(|&y| (*n, x + y)))
+                .collect();
+            let best = sums.values().min().copied();
+            let out = sums
+                .into_iter()
+                .filter(|&(_, s)| Some(s) == best)
+                .map(|(n, _)| LocalId(n))
+                .collect();
+            (best, out)
         };
-        sums.into_iter()
-            .filter(|&(_, s)| s == best)
-            .map(|(n, _)| LocalId(n))
-            .collect()
+        let widen = |m: BTreeMap<u32, u8>| m.into_iter().map(|(n, d)| (n, usize::from(d))).collect();
+        let (best, found) = minima(&widen(self.reached(a, depth, rows)), &widen(self.reached(b, depth, rows)));
+        let low = [self.cut(a, depth, rows), self.cut(b, depth, rows)]
+            .into_iter()
+            .flatten()
+            .min_by_key(|&(_, floor)| floor);
+        if let Some((cap, floor)) = low
+            && best.is_none_or(|s| s >= usize::from(floor))
+        {
+            return Err(cap);
+        }
+        let present = |n: u32| -> BTreeMap<u32, usize> {
+            if self.nodes.contains(&n) {
+                self.distances(n, Direction::Out)
+            } else {
+                BTreeMap::new()
+            }
+        };
+        let (_, exact) = minima(&present(a), &present(b));
+        assert_eq!(found, exact, "a settled meet is the unbounded one");
+        if found.len() > usize::try_from(rows).unwrap() {
+            return Err("rows");
+        }
+        Ok(found)
     }
 
     /// Present `n` at 0 plus the reached nodes, within the caps.
@@ -270,8 +340,8 @@ impl Graph {
     }
 
     /// (node, lowest member of its weak component) for every present node, ascending, cut at
-    /// `rows`.
-    pub(crate) fn wcc(&self, rows: u32) -> Vec<(LocalId, LocalId)> {
+    /// `rows`, and whether the cut left rows out.
+    pub(crate) fn wcc(&self, rows: u32) -> (Vec<(LocalId, LocalId)>, bool) {
         let mut comp: BTreeMap<u32, u32> = BTreeMap::new();
         for &start in &self.nodes {
             if comp.contains_key(&start) {
@@ -289,9 +359,13 @@ impl Graph {
                 }
             }
         }
-        comp.into_iter()
-            .take(usize::try_from(rows).unwrap())
+        let rows = usize::try_from(rows).unwrap();
+        let truncated = comp.len() > rows;
+        let kept = comp
+            .into_iter()
+            .take(rows)
             .map(|(n, c)| (LocalId(n), LocalId(c)))
-            .collect()
+            .collect();
+        (kept, truncated)
     }
 }
