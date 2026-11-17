@@ -1,5 +1,5 @@
 //! The phases of one catalog commit and their enforcement (spec 11 T5; midpoint review
-//! MAJ-01): after the capture freeze no canonical row may change.
+//! MAJ-01, decision review C15): after the capture freeze no canonical row may change.
 //!
 //! ```text
 //!   Writer ===> drain (frozen once) ===> Derived ===> Stage ===> Writer ===> COMMIT
@@ -8,13 +8,26 @@
 //!                 BatchChanges        (authorizer)      (authorizer)      generation checked
 //! ```
 //!
-//! Two checks close the hook and staging phases. The writer connection's authorizer refuses
-//! a statement those phases prepare unless it reads, or writes a table of the phase
-//! ([`DERIVED_TABLES`], [`STAGING_TABLES`]); a savepoint or transaction statement is refused
-//! as well. A statement prepared earlier runs without a fresh authorization, so after each
-//! phase the capture queue must still be empty: a canonical change it holds came after the
-//! freeze. Either breach refuses the commit with [`CommitRefused`] and rolls it back; no
-//! second drain hides it.
+//! | phase   | may read                    | may write                         |
+//! |---------|-----------------------------|-----------------------------------|
+//! | Writer  | anything                    | anything (canonical rows captured) |
+//! | Derived | the transaction, [`Reader`] | [`DERIVED_TABLES`], `Derived::execute` |
+//! | Stage   | the transaction, [`Reader`] | [`STAGING_TABLES`], `Stage::put_sediment` |
+//!
+//! The restricted phases (Derived, Stage) reach the connection only through their handles
+//! (`commit::Derived`, `commit::Stage`), and every statement a handle runs is prepared in
+//! its phase, never taken from the connection's statement cache: SQLite authorizes a
+//! statement when it is prepared, so a statement the writer phase cached would otherwise run
+//! unjudged. The writer phase and everything outside a commit cache freely; nothing is
+//! flushed at a phase change.
+//!
+//! Three checks close the hook and staging phases. The writer connection's authorizer refuses
+//! a statement those phases prepare unless it reads, or writes a table of the phase; a
+//! savepoint or transaction statement is refused as well. A [`Reader`] statement must also be
+//! read-only. After each phase the capture queue must still be empty: a canonical change it
+//! holds came after the freeze (a test playing a broken handle with a raw connection is
+//! still caught there). Any breach refuses the commit with [`CommitRefused`] and rolls it
+//! back, even if the handle's caller swallowed the error; no second drain hides it.
 
 use std::fmt;
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -27,8 +40,12 @@ use rusqlite::{Connection, OptionalExtension, Params, Row, Statement};
 use super::tables::{Generation, SedimentSeq, sql_int, uint};
 use crate::sql_error::SqlResultExt;
 
-/// The tables the derived-row hook may write. T5 has no derived rows; T13 adds its rollup
-/// tables here.
+/// The tables the derived-row hook may write, by exact name (never a prefix: a listed name
+/// admits that one table of `main`). T5 has no derived rows: the list is empty, so the hook
+/// may only read. T13 adds exactly its rollup table (`rollup`) here, and nothing else: the
+/// declared-column tables (`col_<label>`) are canonical rows, written by the writer phase and
+/// captured (T13 extends the capture with their before/after values), never by the hook. The
+/// hook reads through `Derived::reader` and writes through `Derived::execute`.
 pub(crate) const DERIVED_TABLES: &[&str] = &[];
 
 /// The tables an index class's staging may insert into.
@@ -86,6 +103,13 @@ pub(crate) enum Refusal {
     /// The authorizer refused a statement of the phase (the action as SQLite named it).
     Statement(String),
     /// A statement sent through the phase's [`Reader`] is not read-only (its SQL).
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "constructed by the reader T7, T11 and T13 read through"
+        )
+    )]
     ReaderWrite(String),
     /// The capture queue held a canonical change made after the freeze.
     CanonicalChange,
@@ -270,12 +294,26 @@ impl Drop for PhaseGuard<'_> {
 /// statement cache, so the authorizer judges it in that phase; one that is not read-only is
 /// refused before it runs (`sqlite3_stmt_readonly`) and refuses the commit. Transaction and
 /// savepoint statements count as read-only there; the authorizer refuses them first.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "T7's, T11's and T13's classes and hook read through it"
+    )
+)]
 #[derive(Clone, Copy)]
 pub(crate) struct Reader<'t> {
     conn: &'t Connection,
     phases: &'t Phases,
 }
 
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "T7's, T11's and T13's classes and hook read through it"
+    )
+)]
 impl<'t> Reader<'t> {
     /// The reader of the transaction on `conn` in the phase `phases` holds.
     pub(super) fn new(conn: &'t Connection, phases: &'t Phases) -> Self {
@@ -291,15 +329,32 @@ impl<'t> Reader<'t> {
     pub(crate) fn prepare(&self, sql: &str) -> Result<ReadStatement<'t>> {
         let stmt = self.conn.prepare(sql).sql()?;
         if !stmt.readonly() {
-            return Err(self.phases.refuse(Refusal::ReaderWrite(sql.to_owned())).into());
+            return Err(self
+                .phases
+                .refuse(Refusal::ReaderWrite(sql.to_owned()))
+                .into());
         }
         Ok(ReadStatement(stmt))
     }
 }
 
 /// One read-only statement of a [`Reader`], run any number of times in its phase.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "T7's, T11's and T13's classes and hook read through it"
+    )
+)]
 pub(crate) struct ReadStatement<'t>(Statement<'t>);
 
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "T7's, T11's and T13's classes and hook read through it"
+    )
+)]
 impl ReadStatement<'_> {
     /// The first row for `params` through `f`, `None` when there is none.
     ///

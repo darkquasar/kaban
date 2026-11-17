@@ -262,7 +262,7 @@ fn a_derived_row_hook_that_writes_a_canonical_row_is_refused_and_rolled_back() {
         store
             .catalog()
             .set_test_derived_rows(Box::new(move |derived, _| {
-                let conn = derived.conn();
+                let conn = derived.conn_for_test();
                 let _ = if cached {
                     conn.prepare_cached(sql).and_then(|mut s| s.execute([ra]))
                 } else {
@@ -709,7 +709,7 @@ fn a_statement_the_writer_phase_cached_is_refused_in_the_hook_and_in_staging() {
             // Arrange: the writer phase prepares (and caches) a write of a canonical row or of
             // an uncaptured catalog row; the hook, or a class, then sends the same statement
             // through its handle and swallows the outcome (decision review C15)
-            let (store, [(a, ra), (b, _)]) = store_with_two_nodes();
+            let (store, [(_, ra), _]) = store_with_two_nodes();
             let extent = published_extent(&store);
             let (table, sql) = writes(ra, extent)[at].clone();
             let what = format!(

@@ -106,22 +106,16 @@ fn next_generation(conn: &Connection) -> Result<Generation> {
     .map(Generation)
 }
 
-/// The derived-row hook's handle: statements over the derived tables (T13's rollups), run
-/// after the change set is frozen.
+/// The derived-row hook's handle, after the change set is frozen: reads of the commit's rows
+/// ([`Self::reader`]) and statements over the derived tables ([`Self::execute`], T13's
+/// rollups). No raw connection: every statement is prepared in the hook phase, so a statement
+/// another phase prepared (and cached) never runs here unjudged.
 pub(crate) struct Derived<'t> {
     conn: &'t Connection,
     phases: &'t Phases,
 }
 
 impl<'t> Derived<'t> {
-    /// The transaction's connection, for statements over the derived tables.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "T13's rollup maintenance writes through it")
-    )]
-    pub(crate) fn conn(&self) -> &Connection {
-        self.conn
-    }
     /// The hook's reads of this commit's rows.
     #[cfg_attr(
         not(test),
@@ -130,21 +124,31 @@ impl<'t> Derived<'t> {
     pub(crate) fn reader(&self) -> Reader<'t> {
         Reader::new(self.conn, self.phases)
     }
-    /// Run the statement `sql` over the derived tables.
+    /// Run the statement `sql` over the derived tables ([`super::phase::DERIVED_TABLES`]): a
+    /// fresh preparation in the hook phase (never one the statement cache holds), so the
+    /// authorizer refuses a write of any other table, and the commit with it.
     ///
     /// # Errors
-    /// SQLite's.
+    /// SQLite's, the authorizer's refusal among them.
     #[cfg_attr(
         not(test),
         expect(dead_code, reason = "T13's rollup maintenance writes through it")
     )]
     pub(crate) fn execute(&self, sql: &str, params: impl Params) -> Result<usize> {
-        let _ = (sql, params);
-        Ok(0)
+        let mut stmt = self.conn.prepare(sql).sql()?;
+        stmt.execute(params).sql()
+    }
+    /// The connection itself, for a unit test that plays a hook breaking the phase contract
+    /// with a raw (and cached) statement: never reachable from production code.
+    #[cfg(test)]
+    pub(crate) fn conn_for_test(&self) -> &Connection {
+        self.conn
     }
 }
 
-/// An index class's handle in the staging phase: it stages sediment and nothing else.
+/// An index class's handle in the staging phase: it reads the commit's rows ([`Self::reader`])
+/// and stages sediment ([`Self::put_sediment`]), nothing else. No raw connection, as for
+/// [`Derived`].
 pub(crate) struct Stage<'t> {
     conn: &'t Connection,
     phases: &'t Phases,
@@ -154,7 +158,7 @@ pub(crate) struct Stage<'t> {
 impl<'t> Stage<'t> {
     /// The class's reads of this commit's rows.
     #[cfg_attr(
-        not(any(test, feature = "failpoints")),
+        not(test),
         expect(dead_code, reason = "T7's and T11's classes read through it")
     )]
     pub(crate) fn reader(&self) -> Reader<'t> {
