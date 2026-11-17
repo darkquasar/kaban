@@ -129,6 +129,19 @@ pub enum StoreError {
     /// world-readable database behind.
     #[error("database file could not be created or made owner-only (0600)")]
     FileMode(#[source] std::io::Error),
+    /// A sync of a store file to stable storage failed (spec 11 KER-11), so the operation
+    /// `op` it served was aborted: nothing it wrote is published or acknowledged, and the sync
+    /// is never retried in place (after a failed sync the kernel may have dropped the dirty
+    /// pages, so a later success would prove nothing). The process reports it; the text names
+    /// the operation, the source is the operating system's error.
+    #[error("storage_fatal: {op} could not sync to stable storage")]
+    StorageFatal {
+        /// The operation that synced (`append_extent`, `create_container`, ...).
+        op: &'static str,
+        /// The failed sync's error.
+        #[source]
+        source: std::io::Error,
+    },
     /// The database is at another schema version than the one this kaban serves (spec 05
     /// OWN-P: one schema, no migrations; an older and a newer file alike). It is left
     /// untouched: no upgrade path exists (spec 11 CMP-01, OD-1).
@@ -274,6 +287,11 @@ impl std::fmt::Debug for StoreError {
             Self::Json(e) => f.debug_tuple("Json").field(e).finish(),
             Self::Audit(e) => f.debug_tuple("Audit").field(e).finish(),
             Self::FileMode(e) => f.debug_tuple("FileMode").field(e).finish(),
+            Self::StorageFatal { op, source } => f
+                .debug_struct("StorageFatal")
+                .field("op", op)
+                .field("source", source)
+                .finish(),
             Self::SchemaUnsupported { found, supported } => f
                 .debug_struct("SchemaUnsupported")
                 .field("found", found)

@@ -6,6 +6,7 @@
 //! instead of punching, with hooks in the pin protocol's windows ([`Window`]).
 
 use std::os::unix::fs::FileExt;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use kaban_core::query_budget::QueryBudget;
@@ -13,6 +14,7 @@ use kaban_core::{Durability, Result};
 use rusqlite::Connection;
 
 pub use super::failpoint::Window;
+use super::io;
 use super::kbx::{Unpublished, failed, open_existing};
 use super::pins;
 use super::tables::{sql_int, uint};
@@ -202,6 +204,19 @@ impl PinView<'_> {
             .map(|e| e.id.0)
             .collect()
     }
+    /// Where the pinned test-class extent `id` lies in the container (`(offset, len)`), `None`
+    /// when the pin does not hold it or it is not in the container.
+    #[must_use]
+    pub fn span(&self, id: u64) -> Option<(u64, u64)> {
+        self.0
+            .extents(ExtentClass::Test)
+            .iter()
+            .find(|e| e.id.0 == id)
+            .and_then(|e| match e.location {
+                ExtentLocation::Kbx { offset, len } => Some((offset, len)),
+                ExtentLocation::File { .. } => None,
+            })
+    }
     /// A copy of the bytes of the pinned test-class extent `id`, `None` when the pin does not
     /// hold it.
     ///
@@ -378,6 +393,53 @@ pub fn reclaim(store: &SqliteStore) -> Result<Reclaimed> {
         punched,
         pin_race_retry: false,
     })
+}
+
+/// The I/O faults of every catalog whose artefacts lie under one directory (the catalog's I/O
+/// seam, `catalog::io`): failed syncs by operation, a probe that finds no hole punching, and a
+/// count of the syncs attempted. Removed when dropped. Each test injects under its own scratch
+/// directory, so concurrent tests do not see each other's faults.
+#[derive(Debug)]
+pub struct IoFaults(PathBuf);
+
+impl IoFaults {
+    /// Start injecting under `dir` (nothing fails until a fault is set).
+    #[must_use]
+    pub fn install(dir: &Path) -> Self {
+        io::faults::install(dir);
+        Self(dir.to_path_buf())
+    }
+    /// Fail every later sync of the operation `op` (`append_extent`, `create_container`,
+    /// `create_alloc_lock`, `create_dir_entries`, `reclaim_ranges`) with an I/O error.
+    pub fn fail_sync(&self, op: &'static str) {
+        io::faults::fail_sync(&self.0, op);
+    }
+    /// Let every later sync reach the file system again.
+    pub fn heal(&self) {
+        io::faults::heal(&self.0);
+    }
+    /// Make every later hole-punch probe find no hole punching.
+    pub fn no_punch(&self) {
+        io::faults::no_punch(&self.0);
+    }
+    /// How many syncs of `op` were attempted since [`Self::install`], failed ones included.
+    #[must_use]
+    pub fn sync_calls(&self, op: &str) -> u64 {
+        io::faults::sync_calls(&self.0, op)
+    }
+}
+
+impl Drop for IoFaults {
+    fn drop(&mut self) {
+        io::faults::remove(&self.0);
+    }
+}
+
+/// Whether `store`'s catalog reclaims by zero-filling because its open's probe found no hole
+/// punching (KER-11).
+#[must_use]
+pub fn degraded_reclamation(store: &SqliteStore) -> bool {
+    store.catalog().degraded_reclamation()
 }
 
 /// The test class: one sediment row per edge change; records every change set it is handed.

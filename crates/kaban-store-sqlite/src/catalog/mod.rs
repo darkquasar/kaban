@@ -239,9 +239,9 @@ impl Catalog {
     }
 
     /// Whether reclamation zero-fills because hole punching is unavailable (doctor reads it).
-    #[expect(
-        dead_code,
-        reason = "T5 Step 5 probes hole punching; T6's doctor reads the flag"
+    #[cfg_attr(
+        not(feature = "failpoints"),
+        expect(dead_code, reason = "T6's doctor and maintenance read the flag")
     )]
     pub(crate) fn degraded_reclamation(&self) -> bool {
         self.degraded_reclamation

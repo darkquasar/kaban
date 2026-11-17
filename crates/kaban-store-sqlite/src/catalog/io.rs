@@ -48,3 +48,35 @@ pub(crate) fn probe_hole_punch(file: &File) -> bool {
     let _ = file;
     false
 }
+
+/// The I/O faults a test injects under a directory (test builds only).
+#[cfg(any(test, feature = "failpoints"))]
+pub(crate) mod faults {
+    use std::path::Path;
+
+    /// Start injecting under `dir`.
+    pub(crate) fn install(dir: &Path) {
+        let _ = dir;
+    }
+    /// Stop injecting under `dir`.
+    pub(crate) fn remove(dir: &Path) {
+        let _ = dir;
+    }
+    /// Fail every later sync of `op` under `dir`.
+    pub(crate) fn fail_sync(dir: &Path, op: &'static str) {
+        let _ = (dir, op);
+    }
+    /// Let every later sync under `dir` reach the file system again.
+    pub(crate) fn heal(dir: &Path) {
+        let _ = dir;
+    }
+    /// Make the hole-punch probe under `dir` find no hole punching.
+    pub(crate) fn no_punch(dir: &Path) {
+        let _ = dir;
+    }
+    /// How many syncs of `op` under `dir` were attempted.
+    pub(crate) fn sync_calls(dir: &Path, op: &str) -> u64 {
+        let _ = (dir, op);
+        0
+    }
+}
