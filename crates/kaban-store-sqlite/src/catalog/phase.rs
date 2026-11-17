@@ -22,7 +22,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use kaban_core::{BackendSource, Result, StoreError};
 use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
-use rusqlite::{Connection, Params, Row};
+use rusqlite::{Connection, OptionalExtension, Params, Row, Statement};
 
 use super::tables::{Generation, SedimentSeq, sql_int, uint};
 use crate::sql_error::SqlResultExt;
@@ -85,6 +85,8 @@ impl fmt::Display for Phase {
 pub(crate) enum Refusal {
     /// The authorizer refused a statement of the phase (the action as SQLite named it).
     Statement(String),
+    /// A statement sent through the phase's [`Reader`] is not read-only (its SQL).
+    ReaderWrite(String),
     /// The capture queue held a canonical change made after the freeze.
     CanonicalChange,
     /// The staged sediment does not name the generation the commit publishes.
@@ -112,6 +114,10 @@ impl fmt::Display for CommitRefused {
             Refusal::Statement(action) => write!(
                 f,
                 "catalog_commit_refused: the {phase} phase may not run {action}"
+            ),
+            Refusal::ReaderWrite(sql) => write!(
+                f,
+                "catalog_commit_refused: the {phase} phase sent a write through its reader: {sql}"
             ),
             Refusal::CanonicalChange => write!(
                 f,
@@ -141,7 +147,7 @@ impl From<CommitRefused> for StoreError {
 #[derive(Debug, Default)]
 pub(crate) struct Phases {
     phase: AtomicU8,
-    refused: Mutex<Option<String>>,
+    refused: Mutex<Option<Refusal>>,
 }
 
 impl Phases {
@@ -151,11 +157,21 @@ impl Phases {
     fn set(&self, phase: Phase) {
         self.phase.store(phase.raw(), Ordering::Release);
     }
-    fn take_refused(&self) -> Option<String> {
+    fn take_refused(&self) -> Option<Refusal> {
         self.refused
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .take()
+    }
+    /// Record `refusal` as the current phase's breach (the first one wins) and return it as
+    /// the commit's refusal: the phase closes refused even if its caller swallows the error.
+    fn refuse(&self, refusal: Refusal) -> CommitRefused {
+        let phase = self.get();
+        self.refused
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get_or_insert_with(|| refusal.clone());
+        CommitRefused { phase, refusal }
     }
     /// The authorizer's answer for `ctx` in the current phase.
     fn authorize(&self, ctx: &AuthContext<'_>) -> Authorization {
@@ -165,10 +181,7 @@ impl Phases {
         if permitted(ctx, writable) {
             return Authorization::Allow;
         }
-        self.refused
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get_or_insert_with(|| format!("{:?}", ctx.action));
+        let _ = self.refuse(Refusal::Statement(format!("{:?}", ctx.action)));
         Authorization::Deny
     }
     /// Enter the writer phase of a commit; the phase returns to `Writer` however it ends.
@@ -221,12 +234,8 @@ impl PhaseGuard<'_> {
     /// [`CommitRefused`], else `out`'s error, else SQLite's.
     pub(crate) fn close(&self, conn: &Connection, out: Result<()>) -> Result<()> {
         let phase = self.0.get();
-        if let Some(action) = self.0.take_refused() {
-            return Err(CommitRefused {
-                phase,
-                refusal: Refusal::Statement(action),
-            }
-            .into());
+        if let Some(refusal) = self.0.take_refused() {
+            return Err(CommitRefused { phase, refusal }.into());
         }
         out?;
         let changed: bool = conn
@@ -253,7 +262,14 @@ impl Drop for PhaseGuard<'_> {
 }
 
 /// A restricted phase's reads of the commit's own transaction (decision review C15): the
-/// canonical rows as the writer closure left them, through read-only statements.
+/// canonical rows as the writer closure left them, through read-only statements. What a
+/// class or the derived-row hook reads of a changed row (its text, an edge's confidence and
+/// time) is read here, never through another connection, which would see the previous commit.
+///
+/// Every statement is prepared in the phase that runs it, never taken from the connection's
+/// statement cache, so the authorizer judges it in that phase; one that is not read-only is
+/// refused before it runs (`sqlite3_stmt_readonly`) and refuses the commit. Transaction and
+/// savepoint statements count as read-only there; the authorizer refuses them first.
 #[derive(Clone, Copy)]
 pub(crate) struct Reader<'t> {
     conn: &'t Connection,
@@ -266,18 +282,23 @@ impl<'t> Reader<'t> {
         Self { conn, phases }
     }
 
-    /// Prepare the read-only statement `sql`.
+    /// Prepare the read-only statement `sql` in this phase (a fresh preparation: never one
+    /// the statement cache holds).
     ///
     /// # Errors
-    /// [`CommitRefused`] for a statement that is not read-only; SQLite's.
+    /// [`CommitRefused`] for a statement that is not read-only (recorded: the commit is
+    /// refused even if the caller goes on); SQLite's, the authorizer's refusal among them.
     pub(crate) fn prepare(&self, sql: &str) -> Result<ReadStatement<'t>> {
-        let _ = (sql, self.conn, self.phases);
-        Ok(ReadStatement(std::marker::PhantomData))
+        let stmt = self.conn.prepare(sql).sql()?;
+        if !stmt.readonly() {
+            return Err(self.phases.refuse(Refusal::ReaderWrite(sql.to_owned())).into());
+        }
+        Ok(ReadStatement(stmt))
     }
 }
 
 /// One read-only statement of a [`Reader`], run any number of times in its phase.
-pub(crate) struct ReadStatement<'t>(std::marker::PhantomData<&'t Connection>);
+pub(crate) struct ReadStatement<'t>(Statement<'t>);
 
 impl ReadStatement<'_> {
     /// The first row for `params` through `f`, `None` when there is none.
@@ -289,8 +310,7 @@ impl ReadStatement<'_> {
         params: P,
         f: impl FnOnce(&Row<'_>) -> rusqlite::Result<T>,
     ) -> Result<Option<T>> {
-        let _ = (params, f);
-        Ok(None)
+        self.0.query_row(params, f).optional().sql()
     }
 
     /// Every row for `params` through `f`, in order.
@@ -302,8 +322,11 @@ impl ReadStatement<'_> {
         params: P,
         f: impl FnMut(&Row<'_>) -> rusqlite::Result<T>,
     ) -> Result<Vec<T>> {
-        let _ = (params, f);
-        Ok(Vec::new())
+        self.0
+            .query_map(params, f)
+            .sql()?
+            .collect::<rusqlite::Result<_>>()
+            .sql()
     }
 }
 
