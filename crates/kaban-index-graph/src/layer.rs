@@ -69,6 +69,35 @@ pub(crate) type EdgeEntry = (u32, u16, OpKind, Attr);
 /// Edge changes keyed by (node, neighbour, relation), so iteration is list order.
 pub(crate) type EdgeMap = BTreeMap<(u32, u32, u16), (OpKind, Attr)>;
 
+/// One edge row of a section: (node, neighbour, relation), change, attributes.
+pub(crate) type EdgeRow = ((u32, u32, u16), OpKind, Attr);
+
+/// The rows of an extent's sections, each sorted by its key and key-unique: presence by id,
+/// edges by (node, neighbour, relation), facts by (node, key).
+#[derive(Debug, Default)]
+pub(crate) struct Sections<'p> {
+    pub(crate) nodes: Vec<(u32, OpKind)>,
+    pub(crate) out: Vec<EdgeRow>,
+    pub(crate) inc: Vec<EdgeRow>,
+    pub(crate) facts: Vec<FactEntry<'p>>,
+}
+
+impl Sections<'_> {
+    /// The smallest domain covering every id named here.
+    fn domain(&self) -> u64 {
+        let top = [
+            self.nodes.last().map(|&(n, _)| n),
+            self.out.last().map(|&((s, _, _), _, _)| s),
+            self.inc.last().map(|&((d, _, _), _, _)| d),
+            self.facts.iter().map(|&((n, _), _, _)| n).max(),
+        ];
+        top.into_iter()
+            .flatten()
+            .max()
+            .map_or(0, |id| u64::from(id) + 1)
+    }
+}
+
 /// The net change of a batch of records: the last record per edge, node and fact wins. Node
 /// removal barriers are applied by the callers that have older data ([`seal`]).
 #[derive(Debug, Default)]
@@ -110,6 +139,17 @@ impl<'p> Net<'p> {
             .max()
             .map_or(0, |id| u64::from(id) + 1)
     }
+
+    /// The section rows of this net change, in key order (the maps iterate sorted).
+    pub(crate) fn sections(&self) -> Sections<'p> {
+        let edges = |map: &EdgeMap| map.iter().map(|(&k, &(o, a))| (k, o, a)).collect();
+        Sections {
+            nodes: self.nodes.iter().map(|(&n, &k)| (n, k)).collect(),
+            out: edges(&self.out),
+            inc: edges(&self.inc),
+            facts: self.facts.iter().map(|(&k, &(o, p))| (k, o, p)).collect(),
+        }
+    }
 }
 
 /// A parsed edge section of one direction.
@@ -126,10 +166,11 @@ pub(crate) struct Edges {
 }
 
 impl Edges {
-    fn write(out: &mut Vec<u8>, map: &EdgeMap, domain: u64) {
+    /// Write the section of `rows` (sorted and key-unique).
+    fn write(out: &mut Vec<u8>, rows: &[EdgeRow], domain: u64) {
         let mut nodes: Vec<u32> = Vec::new();
         let mut offsets: Vec<u64> = vec![0];
-        for (i, &(node, _, _)) in map.keys().enumerate() {
+        for (i, &((node, _, _), _, _)) in rows.iter().enumerate() {
             if nodes.last() != Some(&node) {
                 if !nodes.is_empty() {
                     offsets.push(i as u64);
@@ -138,23 +179,23 @@ impl Edges {
             }
         }
         if !nodes.is_empty() {
-            offsets.push(map.len() as u64);
+            offsets.push(rows.len() as u64);
         }
         IdIndex::write(out, &nodes, domain);
         for o in &offsets {
             out.extend_from_slice(&o.to_le_bytes());
         }
-        for &(_, nbr, _) in map.keys() {
+        for &((_, nbr, _), _, _) in rows {
             out.extend_from_slice(&nbr.to_le_bytes());
         }
-        for &(_, _, rel) in map.keys() {
+        for &((_, _, rel), _, _) in rows {
             out.extend_from_slice(&rel.to_le_bytes());
         }
-        out.extend(map.values().map(|&(kind, _)| kind_byte(kind)));
-        for (_, attr) in map.values() {
+        out.extend(rows.iter().map(|&(_, kind, _)| kind_byte(kind)));
+        for (_, _, attr) in rows {
             out.extend_from_slice(&attr.weight.to_le_bytes());
         }
-        for (_, attr) in map.values() {
+        for (_, _, attr) in rows {
             out.extend_from_slice(&attr.ts.to_le_bytes());
         }
     }
@@ -295,25 +336,23 @@ impl Extent {
         if out { &self.out } else { &self.inc }
     }
 
-    /// Write an extent of `kind` holding `net`; layers also carry the chain unions.
+    /// Write an extent of `kind` holding `rows`; layers also carry the chain unions.
     pub(crate) fn write(
         kind: u8,
         depth: u32,
         domain: u64,
-        net: &Net<'_>,
+        rows: &Sections<'_>,
         union: Option<(&[u32], &[u32])>,
     ) -> Vec<u8> {
         let mut sections: Vec<(u32, Vec<u8>)> = Vec::new();
         let mut buf = Vec::new();
-        let nodes: Vec<(u32, OpKind)> = net.nodes.iter().map(|(&n, &k)| (n, k)).collect();
-        Presence::write(&mut buf, &nodes, domain);
+        Presence::write(&mut buf, &rows.nodes, domain);
         sections.push((TAG_PRESENCE, std::mem::take(&mut buf)));
-        Edges::write(&mut buf, &net.out, domain);
+        Edges::write(&mut buf, &rows.out, domain);
         sections.push((TAG_OUT, std::mem::take(&mut buf)));
-        Edges::write(&mut buf, &net.inc, domain);
+        Edges::write(&mut buf, &rows.inc, domain);
         sections.push((TAG_IN, std::mem::take(&mut buf)));
-        let facts: Vec<FactEntry<'_>> = net.facts.iter().map(|(&k, &(o, p))| (k, o, p)).collect();
-        Facts::write(&mut buf, &facts);
+        Facts::write(&mut buf, &rows.facts);
         sections.push((TAG_FACTS, std::mem::take(&mut buf)));
         if let Some((out, inc)) = union {
             IdIndex::write(&mut buf, out, domain);
@@ -489,43 +528,83 @@ impl Layer {
 /// of the node that survives in the chain, before `r`'s own edge and fact records apply. So a
 /// later re-add never shows data from before the removal. The id domain is the chain's domain
 /// widened by `r`.
+///
+/// This is the single-batch entry, kept for writers that hold one decoded batch; it writes
+/// through the same tombstone and section path as [`crate::PreparedSediment::seal`], which
+/// seals several batches (runs) in order and is what a writer holding prepared sediment uses.
 #[must_use]
 pub fn seal(parent: &View<'_>, r: &Records) -> Vec<u8> {
-    let parent = parent.chain();
-    let mut net = Net::default();
     let removed: BTreeSet<u32> = r
         .nodes
         .iter()
         .filter(|op| op.kind == OpKind::Remove)
         .map(|op| op.node.0)
         .collect();
-    let gone = (OpKind::Remove, Attr::default());
-    for &n in &removed {
+    let removed: Vec<u32> = removed.into_iter().collect();
+    let mut net = Net::default();
+    net.apply(r);
+    seal_over(parent, &removed, net.sections())
+}
+
+/// Overlay `over` on `under` (both sorted and key-unique by `key`) by one linear merge: at an
+/// equal key the `over` row wins.
+fn overlay<T, K: Ord>(under: Vec<T>, over: Vec<T>, key: fn(&T) -> K) -> Vec<T> {
+    let mut merged = Vec::with_capacity(under.len() + over.len());
+    let mut under = under.into_iter().peekable();
+    for row in over {
+        while let Some(old) = under.next_if(|old| key(old) < key(&row)) {
+            merged.push(old);
+        }
+        under.next_if(|old| key(old) == key(&row));
+        merged.push(row);
+    }
+    merged.extend(under);
+    merged
+}
+
+/// Write `own` (the net change being sealed, each section sorted, newest record per key,
+/// barriers among its own records applied) as a layer over the chain of `parent`. Every
+/// `removed` node (ascending) is a barrier over the chain: its chain edges (both directions,
+/// presence not applied) and facts get tombstones, over which `own`'s rows apply. Only the
+/// tombstones are sorted (they come from scattered lists); `own` is merged as it is.
+pub(crate) fn seal_over(parent: &View<'_>, removed: &[u32], own: Sections<'_>) -> Vec<u8> {
+    let parent = parent.chain();
+    let gone = |key| (key, OpKind::Remove, Attr::default());
+    let (mut out, mut inc, mut facts) = (Vec::new(), Vec::new(), Vec::new());
+    for &n in removed {
         for (m, rel, _) in parent.alive(n, true) {
-            net.out.insert((n, m, rel), gone);
-            net.inc.insert((m, n, rel), gone);
+            out.push(gone((n, m, rel)));
+            inc.push(gone((m, n, rel)));
         }
         for (m, rel, _) in parent.alive(n, false) {
-            net.inc.insert((n, m, rel), gone);
-            net.out.insert((m, n, rel), gone);
+            inc.push(gone((n, m, rel)));
+            out.push(gone((m, n, rel)));
         }
         for key in parent.alive_fact_keys(n) {
-            net.facts.insert((n, key), (OpKind::Remove, &[]));
+            facts.push(((n, key), OpKind::Remove, &[][..]));
         }
     }
-    net.apply(r);
-    let domain = parent.domain().max(net.domain());
+    for tombs in [&mut out, &mut inc] {
+        tombs.sort_unstable_by_key(|&(k, _, _)| k);
+        tombs.dedup_by_key(|&mut (k, _, _)| k);
+    }
+    let rows = Sections {
+        nodes: own.nodes,
+        out: overlay(out, own.out, |&(k, _, _)| k),
+        inc: overlay(inc, own.inc, |&(k, _, _)| k),
+        facts: overlay(facts, own.facts, |&(k, _, _)| k),
+    };
+    let domain = parent.domain().max(rows.domain());
     let depth = u32::try_from(parent.layers().len() + 1).unwrap_or(u32::MAX);
-    let union = |out: bool| -> Vec<u32> {
+    let union = |side: &[EdgeRow], out: bool| -> Vec<u32> {
         let mut set: BTreeSet<u32> = parent
             .layers()
             .iter()
             .flat_map(|l| l.extent.edges(out).touched())
             .collect();
-        let own = if out { &net.out } else { &net.inc };
-        set.extend(own.keys().map(|&(n, _, _)| n));
+        set.extend(side.iter().map(|&((n, _, _), _, _)| n));
         set.into_iter().collect()
     };
-    let (out, inc) = (union(true), union(false));
-    Extent::write(KIND_LAYER, depth, domain, &net, Some((&out, &inc)))
+    let (out, inc) = (union(&rows.out, true), union(&rows.inc, false));
+    Extent::write(KIND_LAYER, depth, domain, &rows, Some((&out, &inc)))
 }

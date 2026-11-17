@@ -46,7 +46,7 @@ pub fn build_base(r: &Records, n: u32) -> Vec<u8> {
     net.inc.retain(|_, (k, _)| *k == OpKind::Add);
     net.facts.retain(|_, (k, _)| *k == OpKind::Add);
     let domain = u64::from(n).max(net.domain());
-    Extent::write(KIND_BASE, 0, domain, &net, None)
+    Extent::write(KIND_BASE, 0, domain, &net.sections(), None)
 }
 
 /// Flatten `view` into base bytes, dropping the `omit` nodes, their edges (both directions)
@@ -78,5 +78,5 @@ pub fn fold(view: &View<'_>, omit: &[LocalId]) -> Vec<u8> {
         .filter(|&((n, _), _)| kept(n))
         .map(|(k, p)| (k, (OpKind::Add, p)))
         .collect();
-    Extent::write(KIND_BASE, 0, view.domain(), &net, None)
+    Extent::write(KIND_BASE, 0, view.domain(), &net.sections(), None)
 }

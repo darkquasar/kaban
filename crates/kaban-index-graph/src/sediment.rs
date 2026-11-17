@@ -48,7 +48,9 @@
 //!   heapsort of that batch's records only, never of what was prepared before.
 //! - Queries never sort: [`crate::View::new`] over a prepared value does no sediment work, and
 //!   every read merges sorted lists.
-//! - Merging runs never sorts.
+//! - Merging runs never sorts, and [`PreparedSediment::seal`] never sorts the runs: it merges
+//!   them as they are. It sorts only the tombstones it derives from the chain for the removed
+//!   nodes, which are not part of any run.
 //! - A fresh process that rebuilds the value from stored batches prepares them (one run) or
 //!   extends batch by batch; either way each stored batch is sorted once.
 //!
@@ -65,8 +67,8 @@
 //! # Work
 //!
 //! Every copied record, payload chunk, sort sift, compaction step, merge step and heap push or
-//! pop is one unit of work, so a cancellation or deadline stops building, extending or merging
-//! within [`crate::BUDGET_CHECK_INTERVAL`] units. Every run, merge output and run list
+//! pop is one unit of work, so a cancellation or deadline stops building, extending, merging or
+//! sealing's merge within [`crate::BUDGET_CHECK_INTERVAL`] units. Every run, merge output and run list
 //! is reserved on the budget before it is built; a refused or cancelled extension returns the
 //! error and leaves the value it extends unchanged.
 
@@ -77,6 +79,7 @@ use kaban_core::query_budget::{BudgetLease, QueryBudget};
 
 use crate::charge::{Charge, Ticker, sort_checked};
 use crate::error::GraphError;
+use crate::layer::{Sections, seal_over};
 use crate::merge::{NewestWins, Slice};
 use crate::op::{Attr, COPY_CHUNK, OpKind, Records};
 use crate::view::View;
@@ -140,10 +143,11 @@ pub(crate) struct Run {
 /// reads the same batches (a view does no sediment work at construction), and when newer
 /// batches arrive call [`PreparedSediment::extend`], which returns a new value sharing the old
 /// runs and adding one (merging runs by size tier, see the module documentation). The old value
-/// is unchanged, so views over it stay correct while they live.
+/// is unchanged, so views over it stay correct while they live. [`PreparedSediment::seal`]
+/// writes a prefix of the runs as a layer and returns the rest.
 ///
-/// What sorts and when: each batch is sorted once, when it becomes a run; queries and run
-/// merges never sort the runs (see the module documentation, "What sorts, and when").
+/// What sorts and when: each batch is sorted once, when it becomes a run; queries, run merges
+/// and sealing never sort the runs (see the module documentation, "What sorts, and when").
 #[derive(Debug)]
 pub struct PreparedSediment {
     runs: Vec<Arc<Run>>,
@@ -465,6 +469,23 @@ impl Run {
         })
     }
 
+    /// This run written as a layer over the chain of `parent`: its rows as they are, its
+    /// removals as barriers over the chain.
+    fn seal(&self, parent: &View<'_>) -> Vec<u8> {
+        let rows = |side: &[SedEdge]| side.iter().map(|e| (e.key, e.kind, e.attr)).collect();
+        let own = Sections {
+            nodes: self.nodes.iter().map(|n| (n.id, n.kind)).collect(),
+            out: rows(&self.out),
+            inc: rows(&self.inc),
+            facts: self
+                .facts
+                .iter()
+                .map(|f| (f.key, f.kind, self.payload(f)))
+                .collect(),
+        };
+        seal_over(parent, &self.removed, own)
+    }
+
     /// Records over the four streams: the size the merge rule compares.
     fn size(&self) -> usize {
         self.nodes.len() + self.out.len() + self.inc.len() + self.facts.len()
@@ -654,10 +675,32 @@ impl PreparedSediment {
         })
     }
 
-    /// Seal the runs that end at or before batch `upto` as a layer over the chain of `parent`.
+    /// Seal the longest prefix of runs that ends at or before batch `upto` as one layer over
+    /// the chain of `parent` (its base and layers; its sediment is ignored, as by
+    /// [`crate::seal`]), and return the layer with the runs left over.
+    ///
+    /// The sealed runs are combined by one k-way merge of their sorted streams, as an
+    /// extension's merge does (batch order, newest record per key, each node's newest removal),
+    /// and written as the layer's sections without sorting them. Every node removed in the
+    /// sealed runs is a barrier over the chain: the layer gets a tombstone for each of its
+    /// chain edges (both directions, presence not applied) and chain facts, derived from the
+    /// chain only, under the runs' own records; those tombstones are the only rows sorted. The
+    /// unions take the density-chosen form, as [`crate::seal`] writes them.
+    ///
+    /// [`Sealed::through`] is the largest sequence number at most `upto` such that every batch
+    /// before it is in the layer: `upto` itself when a run ends there or no record lies between,
+    /// otherwise the first batch of the run that straddles `upto`. The leftover runs keep their
+    /// sequence numbers and are read, and extended, over the chain with the new layer appended:
+    /// their removals still delete the older records now in the layer. `self` is unchanged.
+    ///
+    /// The merge of the sealed runs and the leftover run list are reserved on `budget`,
+    /// metered and cancellable; the merge's charge is released when this returns. The layer
+    /// bytes and the section rows copied into them are writer memory, unbudgeted like
+    /// [`crate::seal`].
     ///
     /// # Errors
-    /// [`GraphError::BudgetExceeded`] when `budget` refuses.
+    /// [`GraphError::BudgetExceeded`] when `budget` refuses a reservation, already refuses at
+    /// entry or is cancelled or past its deadline while merging; nothing stays charged.
     pub fn seal(
         &self,
         parent: &View<'_>,
@@ -665,11 +708,25 @@ impl PreparedSediment {
         budget: &QueryBudget,
     ) -> Result<Sealed, GraphError> {
         budget.check()?;
-        let _ = upto;
+        let count = self.runs.iter().take_while(|r| r.span.end <= upto).count();
+        let next = self.runs.get(count).map_or(self.batches, |r| r.span.start);
+        let through = upto.min(next);
+        let layer = match &self.runs[..count] {
+            [] => seal_over(parent, &[], Sections::default()),
+            [one] => one.seal(parent),
+            many => Run::merge(many, budget)?.seal(parent),
+        };
+        let mut charge = Charge::new(budget)?;
+        let mut rest: Vec<Arc<Run>> = charge.vec(self.runs.len() - count)?;
+        rest.extend(self.runs[count..].iter().cloned());
         Ok(Sealed {
-            layer: crate::layer::seal(parent, &Records::default()),
-            through: 0,
-            rest: Self::empty(),
+            layer,
+            through,
+            rest: Self {
+                runs: rest,
+                batches: self.batches,
+                _lease: Some(charge.into_lease()),
+            },
         })
     }
 
