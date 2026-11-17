@@ -873,6 +873,132 @@ mod tests {
             .collect()
     }
 
+    /// The charge of a vector's allocation, as [`Charge::vec`] reserves it.
+    fn vec_charge<T>(v: &[T], capacity: usize) -> u64 {
+        let _ = v;
+        if capacity == 0 || size_of::<T>() == 0 {
+            return 0;
+        }
+        let bytes = u64::try_from(capacity * size_of::<T>()).unwrap();
+        QueryBudget::allocation_charge(bytes, align_of::<T>() as u64).unwrap()
+    }
+
+    /// Everything one run owns: its six vectors and the shared allocation of its `Arc` (the two
+    /// reference counts and the run itself).
+    fn run_charge(r: &Run) -> u64 {
+        let arc = std::alloc::Layout::new::<[usize; 2]>()
+            .extend(std::alloc::Layout::new::<Run>())
+            .unwrap()
+            .0
+            .pad_to_align();
+        vec_charge(&r.nodes, r.nodes.capacity())
+            + vec_charge(&r.removed, r.removed.capacity())
+            + vec_charge(&r.out, r.out.capacity())
+            + vec_charge(&r.inc, r.inc.capacity())
+            + vec_charge(&r.facts, r.facts.capacity())
+            + vec_charge(&r.arena, r.arena.capacity())
+            + QueryBudget::allocation_charge(arc.size() as u64, arc.align() as u64).unwrap()
+    }
+
+    /// The charge of a value's run list.
+    fn list_charge(s: &PreparedSediment) -> u64 {
+        vec_charge(&s.runs, s.runs.capacity())
+    }
+
+    fn records(ids: std::ops::Range<u32>) -> Records {
+        Records {
+            nodes: ids
+                .clone()
+                .map(|n| NodeOp {
+                    node: LocalId(n),
+                    kind: OpKind::Add,
+                })
+                .collect(),
+            edges: ids
+                .clone()
+                .map(|n| EdgeOp {
+                    src: LocalId(n),
+                    rel: RelId(0),
+                    dst: LocalId(n + 1),
+                    kind: OpKind::Add,
+                    attr: Attr::default(),
+                })
+                .collect(),
+            facts: ids
+                .map(|n| FactOp {
+                    node: LocalId(n),
+                    key: 0,
+                    kind: OpKind::Add,
+                    payload: vec![7; 40],
+                })
+                .collect(),
+        }
+    }
+
+    /// POST-MED-02: a run's charge is exactly what it retains, its shared allocation included.
+    #[test]
+    fn a_tiny_runs_charge_equals_what_it_retains() {
+        let b = QueryBudget::new(u64::MAX, None);
+        let value = PreparedSediment::prepare(&[records(0..1)], &b).unwrap();
+        assert_eq!(value.runs.len(), 1);
+        assert_eq!(
+            b.live_bytes(),
+            list_charge(&value) + run_charge(&value.runs[0])
+        );
+        drop(value);
+        assert_eq!(b.live_bytes(), 0);
+    }
+
+    /// POST-MED-02: a run shared by two values on two budgets stays charged once, to the budget
+    /// that built it, until its last holder drops, in either drop order.
+    #[test]
+    fn a_shared_run_is_charged_once_until_its_last_holder_drops() {
+        for older_first in [true, false] {
+            let (b1, b2) = (
+                QueryBudget::new(u64::MAX, None),
+                QueryBudget::new(u64::MAX, None),
+            );
+            let older = PreparedSediment::prepare(&[records(0..20)], &b1).unwrap();
+            // A small newer run stays apart: no merge.
+            let newer = older.extend(&[records(100..101)], &b2).unwrap();
+            assert_eq!(newer.runs.len(), 2, "the runs stay unmerged");
+            assert!(Arc::ptr_eq(&older.runs[0], &newer.runs[0]), "shared");
+            let shared = run_charge(&older.runs[0]);
+            assert_eq!(b1.live_bytes(), list_charge(&older) + shared);
+            assert_eq!(
+                b2.live_bytes(),
+                list_charge(&newer) + run_charge(&newer.runs[1])
+            );
+            if older_first {
+                drop(older);
+                assert_eq!(b1.live_bytes(), shared, "the shared run stays charged");
+                drop(newer);
+            } else {
+                drop(newer);
+                assert_eq!(b2.live_bytes(), 0);
+                drop(older);
+            }
+            assert_eq!((b1.live_bytes(), b2.live_bytes()), (0, 0), "no leak");
+        }
+    }
+
+    /// POST-MED-02: a merged value keeps no charge for the merge's scratch or the size
+    /// selection once they are freed.
+    #[test]
+    fn a_merged_values_charge_equals_what_it_retains() {
+        let b1 = QueryBudget::new(u64::MAX, None);
+        let older = PreparedSediment::prepare(&[records(0..20)], &b1).unwrap();
+        let b2 = QueryBudget::new(u64::MAX, None);
+        let merged = older.extend(&[records(20..40)], &b2).unwrap();
+        assert_eq!(merged.runs.len(), 1, "the equal-sized runs merge");
+        assert_eq!(
+            b2.live_bytes(),
+            list_charge(&merged) + run_charge(&merged.runs[0])
+        );
+        drop(merged);
+        assert_eq!(b2.live_bytes(), 0);
+    }
+
     #[test]
     fn a_run_limit_merges_adjacent_runs_and_keeps_every_answer() {
         let b = QueryBudget::new(u64::MAX, None);
