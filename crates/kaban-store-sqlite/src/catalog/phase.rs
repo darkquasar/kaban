@@ -21,8 +21,8 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use kaban_core::{BackendSource, Result, StoreError};
-use rusqlite::Connection;
 use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+use rusqlite::{Connection, Params, Row};
 
 use super::tables::{Generation, SedimentSeq, sql_int, uint};
 use crate::sql_error::SqlResultExt;
@@ -249,6 +249,61 @@ impl Drop for PhaseGuard<'_> {
     fn drop(&mut self) {
         self.0.set(Phase::Writer);
         let _ = self.0.take_refused();
+    }
+}
+
+/// A restricted phase's reads of the commit's own transaction (decision review C15): the
+/// canonical rows as the writer closure left them, through read-only statements.
+#[derive(Clone, Copy)]
+pub(crate) struct Reader<'t> {
+    conn: &'t Connection,
+    phases: &'t Phases,
+}
+
+impl<'t> Reader<'t> {
+    /// The reader of the transaction on `conn` in the phase `phases` holds.
+    pub(super) fn new(conn: &'t Connection, phases: &'t Phases) -> Self {
+        Self { conn, phases }
+    }
+
+    /// Prepare the read-only statement `sql`.
+    ///
+    /// # Errors
+    /// [`CommitRefused`] for a statement that is not read-only; SQLite's.
+    pub(crate) fn prepare(&self, sql: &str) -> Result<ReadStatement<'t>> {
+        let _ = (sql, self.conn, self.phases);
+        Ok(ReadStatement(std::marker::PhantomData))
+    }
+}
+
+/// One read-only statement of a [`Reader`], run any number of times in its phase.
+pub(crate) struct ReadStatement<'t>(std::marker::PhantomData<&'t Connection>);
+
+impl ReadStatement<'_> {
+    /// The first row for `params` through `f`, `None` when there is none.
+    ///
+    /// # Errors
+    /// SQLite's, `f`'s.
+    pub(crate) fn query_row<T, P: Params>(
+        &mut self,
+        params: P,
+        f: impl FnOnce(&Row<'_>) -> rusqlite::Result<T>,
+    ) -> Result<Option<T>> {
+        let _ = (params, f);
+        Ok(None)
+    }
+
+    /// Every row for `params` through `f`, in order.
+    ///
+    /// # Errors
+    /// SQLite's, `f`'s.
+    pub(crate) fn query_map<T, P: Params>(
+        &mut self,
+        params: P,
+        f: impl FnMut(&Row<'_>) -> rusqlite::Result<T>,
+    ) -> Result<Vec<T>> {
+        let _ = (params, f);
+        Ok(Vec::new())
     }
 }
 

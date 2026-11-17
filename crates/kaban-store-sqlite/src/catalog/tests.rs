@@ -469,6 +469,294 @@ fn a_panic_inside_an_outside_commit_withdraws_its_admission() {
     );
 }
 
+/// A changed edge's values a class reads while staging (T11's `Attr::weight` and `Attr::ts`).
+const EDGE_VALUES: &str =
+    "SELECT confidence, created_at FROM edge WHERE src = ?1 AND dst = ?2 AND rel = ?3";
+/// A changed node's values a class reads while staging (T7's text segment).
+const NODE_VALUES: &str = "SELECT summary, text FROM node WHERE rid = ?1";
+
+/// What a reading class or hook saw of one commit, read in that commit's transaction: each
+/// changed edge's `(confidence, created_at)` and each changed node's `(summary, body)`.
+#[derive(Debug, Default, Clone, PartialEq)]
+struct Seen {
+    edges: Vec<(Option<f64>, String)>,
+    nodes: Vec<(Option<String>, String)>,
+}
+
+/// Read the values of every change in `changes` through `reader`.
+fn read_changes(reader: super::phase::Reader<'_>, changes: &BatchChanges) -> Result<Seen> {
+    let mut edge = reader.prepare(EDGE_VALUES)?;
+    let mut node = reader.prepare(NODE_VALUES)?;
+    let mut seen = Seen::default();
+    for e in changes.edges() {
+        let values = edge.query_row(rusqlite::params![e.src, e.dst, e.rel], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })?;
+        seen.edges.extend(values);
+    }
+    for n in changes.nodes() {
+        let values = node.query_row([n.rid], |r| {
+            Ok((r.get(0)?, crate::body_codec::read_column(r, 1)?))
+        })?;
+        seen.nodes.extend(values);
+    }
+    Ok(seen)
+}
+
+#[test]
+fn a_class_and_the_derived_row_hook_read_the_rows_of_their_own_commit() {
+    // Arrange: a class and a hook that read every changed row; an edge committed at 0.25
+    let (store, [(a, ra), (b, rb)]) = store_with_two_nodes();
+    let staged = Arc::new(Mutex::new(Vec::new()));
+    let hooked = Arc::new(Mutex::new(Vec::new()));
+    let log = Arc::clone(&staged);
+    Scripted::install(
+        store.catalog(),
+        Box::new(move |txn, changes| {
+            let seen = read_changes(txn.reader(), changes)?;
+            // a class reads and stages in any order
+            txn.put_sediment(ExtentClass::Test, b"read")?;
+            log.lock().unwrap().push(seen);
+            Ok(())
+        }),
+    );
+    let log = Arc::clone(&hooked);
+    store
+        .catalog()
+        .set_test_derived_rows(Box::new(move |derived, changes| {
+            log.lock()
+                .unwrap()
+                .push(read_changes(derived.reader(), changes)?);
+            Ok(())
+        }));
+    store
+        .link(
+            &NodeId::parse(&a).unwrap(),
+            &NodeId::parse(&b).unwrap(),
+            "RELATES_TO",
+            Some(0.25),
+            None,
+            &ctx(),
+        )
+        .unwrap();
+    let first_at: String = store
+        .lock()
+        .query_row("SELECT created_at FROM edge", [], |r| r.get(0))
+        .unwrap();
+    let later = "2031-02-03T04:05:06Z";
+
+    // Act: one commit changes the edge's confidence and time and node a's summary and body
+    let body = crate::body_codec::encode(b"the tide turns at seven");
+    store
+        .catalog()
+        .commit(&mut store.lock(), Durability::Normal, |txn| {
+            let conn = txn.conn();
+            conn.execute(
+                "UPDATE edge SET confidence = 0.75, created_at = ?1 WHERE src = ?2 AND dst = ?3",
+                rusqlite::params![later, ra, rb],
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE node SET summary = 'at seven', text = ?1 WHERE rid = ?2",
+                rusqlite::params![body, ra],
+            )
+            .unwrap();
+            Ok(())
+        })
+        .unwrap();
+
+    // Assert: each commit's class and hook read that commit's values, never the previous ones
+    let first = Seen {
+        edges: vec![(Some(0.25), first_at)],
+        nodes: Vec::new(),
+    };
+    let second = Seen {
+        edges: vec![(Some(0.75), later.to_owned())],
+        nodes: vec![(
+            Some("at seven".to_owned()),
+            "the tide turns at seven".to_owned(),
+        )],
+    };
+    assert_eq!(
+        *staged.lock().unwrap(),
+        [first.clone(), second.clone()],
+        "staged"
+    );
+    assert_eq!(*hooked.lock().unwrap(), [first, second], "hooked");
+}
+
+/// The statement a test sends through a reader or a restricted handle, by table: a canonical
+/// row (`node`, captured), an uncaptured catalog row (`cat_extent`), a staging row.
+fn writes(rid: i64, extent: u64) -> [(&'static str, String); 3] {
+    [
+        (
+            "node",
+            format!("UPDATE node SET lifecycle = 'archived' WHERE rid = {rid}"),
+        ),
+        (
+            "cat_extent",
+            format!("DELETE FROM cat_extent WHERE id = {extent}"),
+        ),
+        (
+            "cat_sediment",
+            "INSERT INTO cat_sediment(class, generation, payload) VALUES ('test', 1, x'00')".into(),
+        ),
+    ]
+}
+
+/// Publish one cold-file extent of the test class; its id.
+fn published_extent(store: &SqliteStore) -> u64 {
+    store
+        .catalog()
+        .commit(&mut store.lock(), Durability::Normal, |txn| {
+            txn.publish(super::kbx::Unpublished {
+                class: ExtentClass::Test,
+                location: super::class::ExtentLocation::File {
+                    relpath: "cold/one".into(),
+                },
+            })
+        })
+        .unwrap()
+        .0
+}
+
+/// Nothing of a refused commit stayed: node `rid` active, extent `extent` published, no edge
+/// and no sediment.
+fn assert_rolled_back(store: &SqliteStore, rid: i64, extent: u64, what: &str) {
+    let conn = store.lock();
+    assert_eq!(
+        lifecycle(&conn, rid),
+        "active",
+        "{what}: the archive committed"
+    );
+    assert_eq!(
+        count(
+            &conn,
+            &format!("SELECT count(*) FROM cat_extent WHERE id = {extent}")
+        ),
+        1,
+        "{what}: the extent's row was deleted"
+    );
+    assert_eq!(
+        count(&conn, "SELECT count(*) FROM edge"),
+        0,
+        "{what}: the link committed"
+    );
+    assert_eq!(
+        count(&conn, "SELECT count(*) FROM cat_sediment"),
+        0,
+        "{what}: sediment committed"
+    );
+    assert_eq!(count(&conn, "SELECT count(*) FROM temp.cat_capture"), 0);
+}
+
+#[test]
+fn a_write_through_the_read_capability_is_refused_and_rolls_the_commit_back() {
+    for hook in [false, true] {
+        for at in 0..3 {
+            // Arrange: a class (or the hook) that sends a write through its reader and
+            // swallows the outcome; the class stages one legitimate row first
+            let (store, [(a, ra), (b, _)]) = store_with_two_nodes();
+            let extent = published_extent(&store);
+            let (table, sql) = writes(ra, extent)[at].clone();
+            let what = format!(
+                "{table} through the {} reader",
+                if hook { "hook's" } else { "class's" }
+            );
+            let class_sql = (!hook).then(|| sql.clone());
+            Scripted::install(
+                store.catalog(),
+                Box::new(move |txn, _| {
+                    txn.put_sediment(ExtentClass::Test, b"legitimate")?;
+                    if let Some(sql) = &class_sql {
+                        let _ = txn
+                            .reader()
+                            .prepare(sql)
+                            .and_then(|mut s| s.query_map([], |_| Ok(())));
+                    }
+                    Ok(())
+                }),
+            );
+            if hook {
+                store
+                    .catalog()
+                    .set_test_derived_rows(Box::new(move |derived, _| {
+                        let _ = derived
+                            .reader()
+                            .prepare(&sql)
+                            .and_then(|mut s| s.query_map([], |_| Ok(())));
+                        Ok(())
+                    }));
+            }
+
+            // Act
+            let out = link(&store, &a, &b);
+
+            // Assert
+            let Err(refused) = out else {
+                panic!("{what}: the commit was not refused");
+            };
+            assert_refused(&refused, &what);
+            assert_rolled_back(&store, ra, extent, &what);
+        }
+    }
+}
+
+#[test]
+fn a_statement_the_writer_phase_cached_is_refused_in_the_hook_and_in_staging() {
+    for staging in [false, true] {
+        for at in 0..2 {
+            // Arrange: the writer phase prepares (and caches) a write of a canonical row or of
+            // an uncaptured catalog row; the hook, or a class, then sends the same statement
+            // through its handle and swallows the outcome (decision review C15)
+            let (store, [(a, ra), (b, _)]) = store_with_two_nodes();
+            let extent = published_extent(&store);
+            let (table, sql) = writes(ra, extent)[at].clone();
+            let what = format!(
+                "{table} cached by the writer, run in the {}",
+                if staging { "staging" } else { "hook" }
+            );
+            let class_sql = staging.then(|| sql.clone());
+            Scripted::install(
+                store.catalog(),
+                Box::new(move |txn, _| {
+                    if let Some(sql) = &class_sql {
+                        let _ = txn
+                            .reader()
+                            .prepare(sql)
+                            .and_then(|mut s| s.query_map([], |_| Ok(())));
+                    }
+                    Ok(())
+                }),
+            );
+            let hook_sql = (!staging).then(|| sql.clone());
+            store
+                .catalog()
+                .set_test_derived_rows(Box::new(move |derived, _| {
+                    if let Some(sql) = &hook_sql {
+                        let _ = derived.execute(sql, []);
+                    }
+                    Ok(())
+                }));
+
+            // Act: a commit whose writer only prepares the statement
+            let out = store
+                .catalog()
+                .commit(&mut store.lock(), Durability::Normal, |txn| {
+                    txn.conn().prepare_cached(&sql).map(drop).unwrap();
+                    Ok(())
+                });
+
+            // Assert
+            let Err(refused) = out else {
+                panic!("{what}: the commit was not refused");
+            };
+            assert_refused(&refused, &what);
+            assert_rolled_back(&store, ra, extent, &what);
+        }
+    }
+}
+
 /// Commit `rows` sediment rows of the test class at generation 1, as a writer would.
 fn sediment_rows(store: &SqliteStore, rows: usize) {
     store

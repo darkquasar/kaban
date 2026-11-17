@@ -23,13 +23,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use kaban_core::{Durability, Result};
-use rusqlite::{Connection, Transaction, TransactionBehavior};
+use rusqlite::{Connection, Params, Transaction, TransactionBehavior};
 
 use super::Catalog;
 use super::capture::{self, BatchChanges};
 use super::class::{ExtentClass, ExtentLocation};
 use super::kbx::Unpublished;
-use super::phase::{Phase, Staged};
+use super::phase::{Phase, Phases, Reader, Staged};
 use super::tables::{ExtentId, Generation, SedimentSeq, sql_int, uint};
 use crate::sql_error::SqlResultExt;
 
@@ -110,9 +110,10 @@ fn next_generation(conn: &Connection) -> Result<Generation> {
 /// after the change set is frozen.
 pub(crate) struct Derived<'t> {
     conn: &'t Connection,
+    phases: &'t Phases,
 }
 
-impl Derived<'_> {
+impl<'t> Derived<'t> {
     /// The transaction's connection, for statements over the derived tables.
     #[cfg_attr(
         not(test),
@@ -121,15 +122,44 @@ impl Derived<'_> {
     pub(crate) fn conn(&self) -> &Connection {
         self.conn
     }
+    /// The hook's reads of this commit's rows.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "T13's rollup maintenance reads through it")
+    )]
+    pub(crate) fn reader(&self) -> Reader<'t> {
+        Reader::new(self.conn, self.phases)
+    }
+    /// Run the statement `sql` over the derived tables.
+    ///
+    /// # Errors
+    /// SQLite's.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "T13's rollup maintenance writes through it")
+    )]
+    pub(crate) fn execute(&self, sql: &str, params: impl Params) -> Result<usize> {
+        let _ = (sql, params);
+        Ok(0)
+    }
 }
 
 /// An index class's handle in the staging phase: it stages sediment and nothing else.
 pub(crate) struct Stage<'t> {
     conn: &'t Connection,
+    phases: &'t Phases,
     staged: &'t mut Staged,
 }
 
-impl Stage<'_> {
+impl<'t> Stage<'t> {
+    /// The class's reads of this commit's rows.
+    #[cfg_attr(
+        not(any(test, feature = "failpoints")),
+        expect(dead_code, reason = "T7's and T11's classes read through it")
+    )]
+    pub(crate) fn reader(&self) -> Reader<'t> {
+        Reader::new(self.conn, self.phases)
+    }
     /// Stage one sediment row of `class` in this transaction; the commit publishes the next
     /// generation with it.
     ///
@@ -216,7 +246,13 @@ impl Catalog {
         // phase closes with the queue still empty (nothing canonical changed after the freeze)
         let changes = capture::drain(&txn.tx)?;
         phase.set(Phase::Derived);
-        let derived = self.derived_rows(&Derived { conn: &txn.tx }, &changes);
+        let derived = self.derived_rows(
+            &Derived {
+                conn: &txn.tx,
+                phases: &self.phases,
+            },
+            &changes,
+        );
         phase.close(&txn.tx, derived)?;
         phase.set(Phase::Stage);
         // the writer phase's publication (if any) fixed the generation the staging names
@@ -227,6 +263,7 @@ impl Catalog {
         for class in self.classes() {
             let mut handle = Stage {
                 conn: &txn.tx,
+                phases: &self.phases,
                 staged: &mut staged,
             };
             let staging = class.stage(&mut handle, &changes);
