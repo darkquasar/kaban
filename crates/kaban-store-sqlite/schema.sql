@@ -200,6 +200,10 @@ CREATE TABLE cat_extent(
 
 CREATE INDEX cat_extent_class ON cat_extent(class, generation);
 
+-- A publication refuses a range that overlaps one a row names (END-MAJ-01): the rows whose
+-- range ends past the new range's start.
+CREATE INDEX cat_extent_kbx_end ON cat_extent(kbx_offset + kbx_len) WHERE kbx_offset IS NOT NULL;
+
 CREATE TABLE cat_sediment(
   seq INTEGER PRIMARY KEY AUTOINCREMENT,
   class TEXT NOT NULL,

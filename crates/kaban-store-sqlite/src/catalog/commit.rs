@@ -22,13 +22,13 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use kaban_core::{Durability, Result};
-use rusqlite::{Connection, Params, Transaction, TransactionBehavior};
+use kaban_core::{BackendSource, Durability, Result, StoreError};
+use rusqlite::{Connection, OptionalExtension, Params, Transaction, TransactionBehavior};
 
 use super::Catalog;
 use super::capture::{self, BatchChanges};
-use super::class::{ExtentClass, ExtentLocation};
-use super::kbx::Unpublished;
+use super::class::ExtentClass;
+use super::kbx::{ContainerId, Unpublished};
 use super::phase::{Phase, Phases, Reader, Staged};
 use super::tables::{ExtentId, Generation, SedimentSeq, sql_int, uint};
 use crate::sql_error::SqlResultExt;
@@ -37,6 +37,9 @@ use crate::sql_error::SqlResultExt;
 /// It holds no change set (the set is frozen only after the closure) and stages nothing.
 pub(crate) struct Txn<'c> {
     tx: Transaction<'c>,
+    /// The catalog's container: the one whose ranges this commit may publish (`None`: the
+    /// catalog has no container, so it publishes none).
+    container: Option<ContainerId>,
     /// The generation this commit publishes, once the writer phase allocated it.
     generation: Option<Generation>,
 }
@@ -49,29 +52,53 @@ impl Txn<'_> {
 
     /// Publish `extent` in this commit: its catalog row names the generation the commit
     /// publishes, so a pin sees it once the commit is visible and never before (INV-3).
+    /// Publishing consumes the token, so its range gains one owner at most (END-MAJ-01): a range
+    /// appended to another container, or one that overlaps a range a catalog row already names
+    /// (live, or dead and not yet reclaimed: reclaiming it would release the new extent's
+    /// bytes), is refused by name and the commit rolls back. A token whose commit rolls back is
+    /// gone with it: its range stays unnamed until T6's recovery reclaims it.
     ///
     /// # Errors
-    /// SQLite errors.
-    #[expect(
-        clippy::needless_pass_by_value,
-        reason = "publishing consumes the unpublished extent: it cannot be published twice"
-    )]
+    /// [`PublishRefused`] (behind `StoreError::Backend`); SQLite errors.
     pub(crate) fn publish(&mut self, extent: Unpublished) -> Result<ExtentId> {
+        let (class, offset, len, container) = extent.into_parts();
+        if self.container != Some(container) {
+            return Err(PublishRefused::ForeignContainer.into());
+        }
+        let end = offset.checked_add(len).ok_or(PublishRefused::Overlap {
+            offset,
+            len,
+            owner: None,
+        })?;
         let generation = sql_int(self.generation()?.0).sql()?;
-        let (offset, len, relpath) = match &extent.location {
-            ExtentLocation::Kbx { offset, len } => (
-                Some(sql_int(*offset).sql()?),
-                Some(sql_int(*len).sql()?),
-                None,
-            ),
-            ExtentLocation::File { relpath } => (None, None, Some(relpath.as_str())),
-        };
+        let (offset_sql, len_sql) = (sql_int(offset).sql()?, sql_int(len).sql()?);
+        // every row whose range reaches past `offset` and starts before `end`
+        // (`cat_extent_kbx_end` serves the first bound)
+        let owner = self
+            .tx
+            .query_row(
+                "SELECT id FROM cat_extent
+                 WHERE kbx_offset IS NOT NULL AND kbx_offset + kbx_len > ?1 AND kbx_offset < ?2
+                 LIMIT 1",
+                rusqlite::params![offset_sql, sql_int(end).sql()?],
+                |r| uint(r, 0),
+            )
+            .optional()
+            .sql()?;
+        if let Some(owner) = owner {
+            return Err(PublishRefused::Overlap {
+                offset,
+                len,
+                owner: Some(ExtentId(owner)),
+            }
+            .into());
+        }
         let id = self
             .tx
             .query_row(
-                "INSERT INTO cat_extent(class, generation, kbx_offset, kbx_len, relpath)
-                 VALUES (?1, ?2, ?3, ?4, ?5) RETURNING id",
-                rusqlite::params![extent.class.as_str(), generation, offset, len, relpath],
+                "INSERT INTO cat_extent(class, generation, kbx_offset, kbx_len)
+                 VALUES (?1, ?2, ?3, ?4) RETURNING id",
+                rusqlite::params![class.as_str(), generation, offset_sql, len_sql],
                 |r| uint(r, 0),
             )
             .sql()?;
@@ -90,6 +117,62 @@ impl Txn<'_> {
         let g = next_generation(&self.tx)?;
         self.generation = Some(g);
         Ok(g)
+    }
+}
+
+/// A publication refused because its range would gain a second owner (END-MAJ-01): the commit
+/// rolls back and nothing of it is published.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PublishRefused {
+    /// The range was appended to another container than the catalog's.
+    ForeignContainer,
+    /// The range overlaps the range the catalog row `owner` names (`None`: the range does not
+    /// fit the container's address space at all).
+    Overlap {
+        /// Start of the refused range.
+        offset: u64,
+        /// Length of the refused range.
+        len: u64,
+        /// The extent that already names an overlapping range.
+        owner: Option<ExtentId>,
+    },
+}
+
+impl std::fmt::Display for PublishRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ForeignContainer => f.write_str(
+                "catalog_publish_refused: the extent was appended to another container",
+            ),
+            Self::Overlap {
+                offset,
+                len,
+                owner: Some(owner),
+            } => write!(
+                f,
+                "catalog_publish_refused: the range of {len} bytes at offset {offset} overlaps extent {}",
+                owner.0
+            ),
+            Self::Overlap {
+                offset,
+                len,
+                owner: None,
+            } => write!(
+                f,
+                "catalog_publish_refused: the range of {len} bytes at offset {offset} overlaps \
+                 the end of the address space"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for PublishRefused {}
+
+impl From<PublishRefused> for StoreError {
+    fn from(e: PublishRefused) -> Self {
+        Self::Backend {
+            source: BackendSource::new(e),
+        }
     }
 }
 
@@ -240,6 +323,7 @@ impl Catalog {
             .sql()?;
         let mut txn = Txn {
             tx,
+            container: self.container,
             generation: None,
         };
         // declared after `txn`, so it drops first: an early exit's rollback runs unrestricted

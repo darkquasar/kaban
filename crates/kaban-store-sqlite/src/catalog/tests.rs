@@ -604,20 +604,26 @@ fn writes(rid: i64, extent: u64) -> [(&'static str, String); 3] {
     ]
 }
 
-/// Publish one cold-file extent of the test class; its id.
+/// Publish one cold-file extent of the test class (a row the writer writes: no producer
+/// appends cold files yet); its id.
 fn published_extent(store: &SqliteStore) -> u64 {
     store
         .catalog()
         .commit(&mut store.lock(), Durability::Normal, |txn| {
-            txn.publish(super::kbx::Unpublished {
-                class: ExtentClass::Test,
-                location: super::class::ExtentLocation::File {
-                    relpath: "cold/one".into(),
-                },
-            })
+            let generation = i64::try_from(txn.generation()?.0).unwrap();
+            txn.conn()
+                .query_row(
+                    "INSERT INTO cat_extent(class, generation, relpath)
+                     VALUES ('test', ?1, 'cold/one') RETURNING id",
+                    [generation],
+                    |r| r.get::<_, i64>(0),
+                )
+                .map_err(|e| StoreError::Backend {
+                    source: kaban_core::BackendSource::new(e),
+                })
         })
+        .map(|id| u64::try_from(id).unwrap())
         .unwrap()
-        .0
 }
 
 /// Nothing of a refused commit stayed: node `rid` active, extent `extent` published, no edge
@@ -1251,6 +1257,10 @@ fn pinned_extent(store: &SqliteStore, id: u64) -> Option<((u64, u64), Vec<u8>)> 
 
 #[test]
 fn an_unpublished_extent_cannot_be_copied_so_one_append_is_published_at_most_once() {
+    // Arrange: the probe tells a Clone type
+    let probe_sees_clone = (&CloneProbe::<String>(std::marker::PhantomData)).is_clone();
+    assert!(probe_sees_clone, "the probe does not tell a Clone type");
+
     // Act: whether a second token for the same range can be made from the first
     let cloneable = (&CloneProbe::<super::kbx::Unpublished>(std::marker::PhantomData)).is_clone();
 

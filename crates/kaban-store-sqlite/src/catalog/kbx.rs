@@ -11,7 +11,7 @@
 use std::fmt;
 use std::fs::File;
 use std::io;
-use std::os::unix::fs::FileExt;
+use std::os::unix::fs::{FileExt, MetadataExt};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
 
@@ -19,7 +19,7 @@ use kaban_core::{BackendSource, Result, StoreError};
 use rustix::fs::{FlockOperation, Mode, OFlags};
 use tantivy::directory::{Directory, MmapDirectory, OwnedBytes};
 
-use super::class::{ExtentClass, ExtentLocation};
+use super::class::ExtentClass;
 use super::io as catalog_io;
 
 /// The container's file name.
@@ -108,15 +108,83 @@ fn wrong_type(path: &Path, expected: &str) -> io::Error {
     )
 }
 
-/// Bytes written and synced to the container but not yet named by any generation: a later
-/// commit publishes them, or reclamation finds them unreferenced.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// The identity of one container file: its device and inode. An [`Unpublished`] range carries
+/// the identity of the container it was appended to, and a catalog publishes only ranges of its
+/// own container (END-MAJ-01).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ContainerId {
+    dev: u64,
+    ino: u64,
+}
+
+impl ContainerId {
+    /// The identity of the open container `file`.
+    fn of(file: &File) -> io::Result<Self> {
+        Ok(Self::from_metadata(&file.metadata()?))
+    }
+
+    /// The identity of the container at `kbx` (never through a symlink).
+    ///
+    /// # Errors
+    /// The I/O error of reading its metadata (an absent container among them).
+    pub(crate) fn at(kbx: &Path) -> io::Result<Self> {
+        Ok(Self::from_metadata(&std::fs::symlink_metadata(kbx)?))
+    }
+
+    fn from_metadata(meta: &std::fs::Metadata) -> Self {
+        Self {
+            dev: meta.dev(),
+            ino: meta.ino(),
+        }
+    }
+}
+
+/// Bytes written and synced to the container but not yet named by any generation: the one
+/// owner of their range until a commit publishes them ([`super::commit::Txn::publish`]
+/// consumes it). It is made only by an append, is not `Clone` and names the container it was
+/// appended to, so a range is published at most once and only by its container's catalog.
+/// A token whose publishing commit rolls back is gone with it: its range stays unnamed (a leak
+/// that T6's verify reports and its recovery reclaims, never published again).
+#[derive(Debug)]
 #[must_use = "an unpublished extent is garbage until a commit publishes it"]
 pub(crate) struct Unpublished {
-    /// The class the bytes belong to.
-    pub(crate) class: ExtentClass,
-    /// Where they were written.
-    pub(crate) location: ExtentLocation,
+    class: ExtentClass,
+    offset: u64,
+    len: u64,
+    container: ContainerId,
+}
+
+impl Unpublished {
+    /// The container's range, its class and the container, consuming the token: the
+    /// publication's view of it.
+    pub(crate) fn into_parts(self) -> (ExtentClass, u64, u64, ContainerId) {
+        (self.class, self.offset, self.len, self.container)
+    }
+
+    /// Divide this range into consecutive tokens of `lens` bytes each, consuming it: every
+    /// byte keeps one owner. `None` when `lens` does not sum to the range's length.
+    #[cfg(any(test, feature = "failpoints"))]
+    pub(crate) fn split(self, lens: &[u64]) -> Option<Vec<Self>> {
+        let total = lens.iter().try_fold(0_u64, |sum, &n| sum.checked_add(n))?;
+        if total != self.len {
+            return None;
+        }
+        let mut offset = self.offset;
+        Some(
+            lens.iter()
+                .map(|&len| {
+                    let part = Self {
+                        class: self.class,
+                        offset,
+                        len,
+                        container: self.container,
+                    };
+                    offset += len;
+                    part
+                })
+                .collect(),
+        )
+    }
 }
 
 /// A failed operation on a catalog artefact: what was done to which path, and why.
@@ -175,9 +243,12 @@ pub(crate) fn append(kbx: &Path, class: ExtentClass, bytes: &[u8]) -> Result<Unp
     file.write_all_at(bytes, offset)
         .map_err(|e| failed("write an extent to", kbx, e))?;
     catalog_io::sync_data(&file, kbx, catalog_io::APPEND)?;
+    let container = ContainerId::of(&file).map_err(|e| failed("identify", kbx, e))?;
     Ok(Unpublished {
         class,
-        location: ExtentLocation::Kbx { offset, len },
+        offset,
+        len,
+        container,
     })
 }
 

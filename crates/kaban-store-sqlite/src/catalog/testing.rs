@@ -15,7 +15,7 @@ use rusqlite::Connection;
 
 pub use super::failpoint::Window;
 use super::io;
-use super::kbx::{Unpublished, failed};
+use super::kbx::failed;
 use super::pins;
 use super::tables::{sql_int, uint};
 use crate::sql_error::SqlResultExt;
@@ -150,19 +150,10 @@ pub fn append_and_publish(store: &SqliteStore, bytes: &[u8]) -> Result<u64> {
 pub fn append_and_publish_all(store: &SqliteStore, extents: &[Vec<u8>]) -> Result<Vec<u64>> {
     let whole = extents.concat();
     let appended = store.catalog().append_extent(ExtentClass::Test, &whole)?;
-    let ExtentLocation::Kbx { offset: start, .. } = appended.location else {
-        unreachable!("an append names a container range")
+    let lens: Vec<u64> = extents.iter().map(|bytes| bytes.len() as u64).collect();
+    let Some(parts) = appended.split(&lens) else {
+        unreachable!("the parts sum to the appended range")
     };
-    let mut offset = start;
-    let mut parts = Vec::with_capacity(extents.len());
-    for bytes in extents {
-        let len = bytes.len() as u64;
-        parts.push(Unpublished {
-            class: ExtentClass::Test,
-            location: ExtentLocation::Kbx { offset, len },
-        });
-        offset += len;
-    }
     store
         .catalog()
         .commit(&mut store.lock(), Durability::Normal, |txn| {

@@ -59,6 +59,9 @@ pub(crate) struct Catalog {
     /// nothing was probed (an in-memory database, a reader, or an as-is open whose container
     /// is absent or cannot be probed): such a catalog reclaims nothing.
     reclamation: Option<io::Reclamation>,
+    /// The identity of the container, once it exists: a commit publishes only ranges appended
+    /// to it (`None`: an in-memory database, a reader, or an as-is open without a container).
+    container: Option<kbx::ContainerId>,
     classes: RwLock<Vec<Arc<dyn IndexClass>>>,
     /// Set only while [`Self::commit`] commits (and around an explicit maintenance statement,
     /// [`Self::outside_commit`]): the writer guard of test builds refuses any other commit on
@@ -125,6 +128,8 @@ impl Catalog {
     /// `StoreError::StorageFatal` for a failed sync; the probe's open or lock errors.
     pub(crate) fn create_artefacts(&mut self) -> Result<()> {
         kbx::create_artefacts(&self.kbx)?;
+        self.container =
+            Some(kbx::ContainerId::at(&self.kbx).map_err(|e| kbx::failed("identify", &self.kbx, e))?);
         if self.reclamation.is_none() {
             self.reclamation = Some(io::probe_hole_punch(&self.kbx)?);
         }
@@ -144,6 +149,7 @@ impl Catalog {
         reclaim_floor(conn)?;
         let mut catalog = Self::with_container(kbx::kbx_path(db_path));
         catalog.reclamation = io::probe_hole_punch(&catalog.kbx).ok();
+        catalog.container = kbx::ContainerId::at(&catalog.kbx).ok();
         catalog.attach_writer(conn)
     }
 
@@ -172,6 +178,7 @@ impl Catalog {
             #[cfg(any(test, feature = "failpoints"))]
             failpoints: failpoint::Failpoints::default(),
             reclamation: None,
+            container: None,
             classes: RwLock::new(Vec::new()),
             committing: Arc::new(AtomicBool::new(false)),
             phases: Arc::new(phase::Phases::default()),
