@@ -228,21 +228,44 @@ fn a_forced_no_punch_probe_degrades_reclamation_to_zero_fill_and_the_container_n
     );
 }
 
+/// Whether the file system of `dir` punches keep-size holes, asked of it directly (a scratch
+/// file, not the catalog's probe): the hole-punch test proves block release where it does.
+fn punches_holes(dir: &Path) -> bool {
+    let path = dir.join("punch-probe");
+    let file = std::fs::File::create(&path).unwrap();
+    std::io::Write::write_all(&mut &file, &pattern(1, EXTENT_LEN)).unwrap();
+    file.sync_all().unwrap();
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    let punched = rustix::fs::fallocate(
+        &file,
+        rustix::fs::FallocateFlags::PUNCH_HOLE | rustix::fs::FallocateFlags::KEEP_SIZE,
+        0,
+        EXTENT_LEN as u64,
+    )
+    .is_ok();
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    let punched = false;
+    drop(file);
+    std::fs::remove_file(&path).unwrap();
+    punched
+}
+
 #[test]
-fn with_hole_punching_a_reclaimed_range_reads_as_zeros_its_blocks_are_freed_and_the_size_stays() {
-    // Arrange: the scratch filesystem punches holes (ext4, xfs, btrfs and tmpfs all do)
+fn a_reclaimed_range_reads_as_zeros_the_size_stays_and_where_holes_punch_its_blocks_are_freed() {
+    // Arrange: whatever the scratch file system is (ext4, xfs, btrfs and tmpfs punch holes)
     let s = Scratch::new("kaban-t5-io", "punch");
+    let punches = punches_holes(&s.0);
     let store = SqliteStore::open(&s.db(), &s.keys()).unwrap();
 
     // Act
     let degraded = catalog_testing::degraded_reclamation(&store);
     let r = reclaim_one(&store, &s.0.join("kaban.kbx"));
 
-    // Assert: not degraded, the range reads as zeros, its blocks were freed (a punch, not a
-    // zero-fill) and the container's length is unchanged
-    assert!(
-        !degraded,
-        "the probe found no hole punching on the scratch filesystem"
+    // Assert, everywhere: the catalog's probe agrees with the file system, the range reads as
+    // zeros, the keeper is intact and the container's length is unchanged
+    assert_eq!(
+        degraded, !punches,
+        "the catalog's probe disagrees with the file system (punches holes: {punches})"
     );
     assert_eq!(r.doomed, vec![0; EXTENT_LEN]);
     assert_eq!(r.keeper, pattern(4, EXTENT_LEN));
@@ -250,6 +273,20 @@ fn with_hole_punching_a_reclaimed_range_reads_as_zeros_its_blocks_are_freed_and_
         r.len.0, r.len.1,
         "reclamation changed the container's length"
     );
+    if !punches {
+        assert_eq!(
+            (r.outcome.punched_bytes, r.outcome.zero_filled_bytes),
+            (0, EXTENT_LEN as u64),
+            "zero-filled bytes were reported as reclaimed space"
+        );
+        eprintln!(
+            "skipped the block-release assertion: the scratch file system at {} does not punch \
+             holes (a punching file system proves it)",
+            s.0.display()
+        );
+        return;
+    }
+    // where holes punch: its blocks were freed (a punch, not a zero-fill) and reported so
     assert!(
         r.blocks.1 < r.blocks.0,
         "the reclaimed range was not punched: blocks {:?}",
