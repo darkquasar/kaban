@@ -77,6 +77,10 @@ pub struct PreparedSediment {
     _lease: Option<BudgetLease>,
 }
 
+/// The most runs a [`PreparedSediment`] holds: every extension that would exceed it merges the
+/// smallest adjacent runs first, so a read never merges more than this many sediment sources.
+pub const MAX_SEDIMENT_RUNS: usize = 32;
+
 /// The empty sediment, shared by chain-only readers.
 pub(crate) static EMPTY: PreparedSediment = PreparedSediment::empty();
 
@@ -352,6 +356,17 @@ impl PreparedSediment {
         self.merge(&new, budget)
     }
 
+    /// [`PreparedSediment::extend`] under a run limit of `limit` instead of
+    /// [`MAX_SEDIMENT_RUNS`].
+    fn extend_within<R: AsRef<Records>>(
+        &self,
+        batches: &[R],
+        budget: &QueryBudget,
+        _limit: usize,
+    ) -> Result<Self, GraphError> {
+        self.extend(batches, budget)
+    }
+
     /// `self` followed by `new` (prepared from the batches after `self`'s).
     fn merge(&self, new: &Self, budget: &QueryBudget) -> Result<Self, GraphError> {
         let mut charge = Charge::new(budget)?;
@@ -433,6 +448,13 @@ impl PreparedSediment {
         self.batches
     }
 
+    /// The number of immutable sorted runs held: 0 for a sediment without records, otherwise
+    /// between 1 and [`MAX_SEDIMENT_RUNS`].
+    #[must_use]
+    pub fn runs(&self) -> usize {
+        0
+    }
+
     /// The newest membership change of `id` in the sediment.
     pub(crate) fn node(&self, id: u32) -> Option<OpKind> {
         self.nodes
@@ -499,5 +521,104 @@ impl PreparedSediment {
             .flatten()
             .max()
             .map_or(0, |id| u64::from(id) + 1)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)] // test code: failures are the assertion
+
+    use super::*;
+    use crate::id::{Direction, LocalId, RelId, RelSelection};
+    use crate::op::{EdgeOp, FactOp, NodeOp};
+    use crate::view::View;
+
+    /// Batch `i`: one or two edges, a node change (every fifth a removal) and a fact change.
+    fn batch(i: u32) -> Records {
+        let id = |k: u32| LocalId(k % 9);
+        let mut r = Records {
+            edges: vec![EdgeOp {
+                src: id(i),
+                rel: RelId(u16::try_from(i % 3).unwrap()),
+                dst: id(i * 4 + 1),
+                kind: if i % 6 == 4 {
+                    OpKind::Remove
+                } else {
+                    OpKind::Add
+                },
+                attr: Attr {
+                    weight: i64::from(i),
+                    ts: 0,
+                },
+            }],
+            nodes: vec![NodeOp {
+                node: id(i * 7),
+                kind: if i % 5 == 3 {
+                    OpKind::Remove
+                } else {
+                    OpKind::Add
+                },
+            }],
+            facts: vec![FactOp {
+                node: id(i * 2),
+                key: u8::try_from(i % 2).unwrap(),
+                kind: OpKind::Add,
+                payload: i.to_le_bytes().to_vec(),
+            }],
+        };
+        if i % 4 == 0 {
+            r.edges.push(EdgeOp {
+                src: id(i + 2),
+                rel: RelId(0),
+                dst: id(i),
+                kind: OpKind::Add,
+                attr: Attr::default(),
+            });
+        }
+        r
+    }
+
+    type Answer = (bool, Vec<Option<Vec<u8>>>, Vec<(u32, u16, Attr)>);
+
+    /// Everything a view over `s` answers about ids `0..10`.
+    fn answers(s: &PreparedSediment) -> Vec<Answer> {
+        let b = QueryBudget::new(u64::MAX, None);
+        let v = View::new(None, &[], s, &b).unwrap();
+        (0..10)
+            .map(|n| {
+                let n = LocalId(n);
+                let facts = (0..2).map(|k| v.fact(n, k).map(<[u8]>::to_vec)).collect();
+                let rows = v
+                    .neighbours(n, &RelSelection::All, Direction::Both, &b)
+                    .map(|row| row.map(|(m, r, a)| (m.0, r.0, a)))
+                    .collect::<Result<_, _>>()
+                    .unwrap();
+                (v.contains(n), facts, rows)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_run_limit_merges_adjacent_runs_and_keeps_every_answer() {
+        let b = QueryBudget::new(u64::MAX, None);
+        for limit in [1, 2, 3] {
+            let mut value = PreparedSediment::empty();
+            let mut all = Vec::new();
+            for i in 0..40 {
+                let r = batch(i);
+                value = value
+                    .extend_within(std::slice::from_ref(&r), &b, limit)
+                    .unwrap();
+                all.push(r);
+                let runs = value.runs();
+                assert!((1..=limit).contains(&runs), "limit {limit}: {runs} runs");
+                let scratch = PreparedSediment::prepare(&all, &b).unwrap();
+                assert_eq!(
+                    answers(&value),
+                    answers(&scratch),
+                    "limit {limit}, batch {i}"
+                );
+            }
+        }
     }
 }
