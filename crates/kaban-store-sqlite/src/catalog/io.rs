@@ -149,7 +149,7 @@ pub(crate) fn release(
 
 /// Overwrite the `len` bytes at `offset` of `file` with zeros.
 fn zero_fill(file: &File, offset: u64, len: u64) -> io::Result<()> {
-    let zeros = [0_u8; ZERO_CHUNK];
+    let zeros = vec![0_u8; usize::try_from(len).map_or(ZERO_CHUNK, |n| n.min(ZERO_CHUNK))];
     let end = offset + len;
     let mut at = offset;
     while at < end {

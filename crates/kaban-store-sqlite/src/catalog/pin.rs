@@ -88,7 +88,7 @@ pub(crate) struct Pin {
 
 #[expect(
     dead_code,
-    reason = "T5 Step 4 and the index readers (T7, T11, T16) read the pinned extents"
+    reason = "the index readers (T7, T11, T16) read the pinned extents"
 )]
 impl Pin {
     /// The pinned generation (the actual generation h of PC-8).

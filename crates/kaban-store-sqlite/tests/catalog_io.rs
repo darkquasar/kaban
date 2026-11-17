@@ -96,7 +96,7 @@ fn an_injected_sync_failure_during_a_publish_is_fatal_attempted_once_and_publish
 }
 
 /// Open a fresh project with the creation sync `op` failing: the open is refused as
-/// StorageFatal after one attempt; a later open syncs the artefacts again and serves the
+/// `StorageFatal` after one attempt; a later open syncs the artefacts again and serves the
 /// catalog.
 fn a_failed_creation_sync_refuses_the_open_and_a_later_open_completes_it(op: &'static str) {
     // Arrange
