@@ -330,6 +330,21 @@ fn sealing_a_prepared_value_answers_as_the_value_unsealed() {
 }
 
 #[test]
+fn both_sealing_entries_write_the_same_layer_for_one_batch() {
+    let b = budget();
+    for seed in 0..3 {
+        let c = chain(seed);
+        let parent = View::new(Some(&c.base), &c.layers, &EMPTY, &b).unwrap();
+        for (i, r) in history(seed).iter().enumerate() {
+            let prepared = PreparedSediment::prepare(std::slice::from_ref(r), &b).unwrap();
+            let sealed = prepared.seal(&parent, 1, &b).unwrap();
+            assert_eq!(sealed.through, 1, "seed {seed} batch {i}");
+            assert_eq!(sealed.layer, seal(&parent, r), "seed {seed} batch {i}");
+        }
+    }
+}
+
+#[test]
 fn sealing_a_prefix_leaves_a_remainder_that_extends_over_the_new_chain() {
     let b = budget();
     for seed in 0..3 {
