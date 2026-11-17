@@ -7,7 +7,7 @@
 
 use tantivy::directory::OwnedBytes;
 
-use crate::charge::Ticker;
+use crate::charge::{Phase, Ticker};
 use crate::error::GraphError;
 use crate::op::OpKind;
 use crate::op::{Reader, column, corrupt, kind_byte, kind_from, put_len};
@@ -80,7 +80,7 @@ impl IdIndex {
                 let ids = r.slice(file, len, "sorted index")?;
                 let mut prev: Option<u32> = None;
                 for &chunk in ids.as_chunks::<4>().0 {
-                    t.tick()?;
+                    t.tick(Phase::Validate)?;
                     let id = u32::from_le_bytes(chunk);
                     if u64::from(id) >= domain || prev.is_some_and(|p| p >= id) {
                         return Err(corrupt("sorted index order or domain"));
@@ -104,7 +104,7 @@ impl IdIndex {
                     .chunks(8 * WORDS_PER_SAMPLE)
                     .zip(samples.as_chunks::<8>().0)
                 {
-                    t.tick()?;
+                    t.tick(Phase::Validate)?;
                     let sample = u64::from_le_bytes(*sample);
                     if sample != total {
                         return Err(corrupt("rank sample"));
@@ -223,13 +223,13 @@ impl IdIter<'_> {
     /// The next id; every id of a sorted index and every bitvector word visited is one unit of
     /// `t`, so a long run of empty words is metered and checked word by word; `None` once `t`
     /// refused.
-    pub(crate) fn next(&mut self, t: &Ticker<'_>) -> Option<u32> {
+    pub(crate) fn next(&mut self, t: &Ticker<'_>, phase: Phase) -> Option<u32> {
         match self.index {
             IdIndex::Sorted { ids, count } => {
                 if self.pos >= *count {
                     return None;
                 }
-                if !t.step() {
+                if !t.step(phase) {
                     return None;
                 }
                 let id = u32::from_le_bytes(column::<4>(ids, self.pos)?);
@@ -246,7 +246,7 @@ impl IdIter<'_> {
                     self.rank += 1;
                     return u32::try_from(self.word + bit).ok();
                 }
-                if !t.step() {
+                if !t.step(phase) {
                     return None;
                 }
                 self.word_bits = u64::from_le_bytes(column::<8>(words, self.pos)?);
@@ -363,8 +363,8 @@ pub(crate) struct PresenceIter<'p> {
 
 impl PresenceIter<'_> {
     /// The next touched id and its change, metered on `t` as [`IdIter::next`].
-    pub(crate) fn next(&mut self, t: &Ticker<'_>) -> Option<(u32, OpKind)> {
-        let id = self.ids.next(t)?;
+    pub(crate) fn next(&mut self, t: &Ticker<'_>, phase: Phase) -> Option<(u32, OpKind)> {
+        let id = self.ids.next(t, phase)?;
         let kind = kind_from(*self.kinds.get(self.rank)?).ok()?;
         self.rank += 1;
         Some((id, kind))
@@ -378,7 +378,7 @@ const KINDS_PER_UNIT: usize = 256;
 /// of `t`.
 pub(crate) fn check_kinds(kinds: &[u8], what: &str, t: &Ticker<'_>) -> Result<(), GraphError> {
     for chunk in kinds.chunks(KINDS_PER_UNIT) {
-        t.tick()?;
+        t.tick(Phase::Validate)?;
         for &k in chunk {
             kind_from(k).map_err(|_| corrupt(what))?;
         }

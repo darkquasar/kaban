@@ -4,7 +4,7 @@ use std::cmp::Ordering;
 
 use kaban_core::query_budget::QueryBudget;
 
-use crate::charge::{Charged, Grow, Hold, Ticker};
+use crate::charge::{Charged, Grow, Hold, Phase, Ticker};
 use crate::error::GraphError;
 use crate::id::{Direction, LocalId, RelSelection};
 use crate::traverse::{Caps, Cut, Want, check_caps, depth_of, search};
@@ -82,7 +82,7 @@ pub fn shortest_path(
     let tick = Ticker::new(budget);
     let mut on: Grow<'_, bool> = Grow::with_capacity(budget, order.len())?;
     for _ in 0..order.len() {
-        tick.tick()?;
+        tick.tick(Phase::Init)?;
         on.push(false)?;
     }
     let Some(last) = find(len, dst) else {
@@ -93,7 +93,7 @@ pub fn shortest_path(
     }
     for d in (1..len).rev() {
         for i in level(d) {
-            tick.tick()?;
+            tick.tick(Phase::Paths)?;
             let Some(&(u, _)) = order.get(i) else {
                 continue;
             };
@@ -177,7 +177,7 @@ pub fn meet(
     let mut out: Grow<'_, LocalId> = Grow::new(budget)?;
     let (mut at_a, mut at_b) = (0, 0);
     while let (Some(&(na, da)), Some(&(nb, db))) = (sa.seen.get(at_a), sb.seen.get(at_b)) {
-        tick.tick()?;
+        tick.tick(Phase::Meet)?;
         match na.cmp(&nb) {
             Ordering::Less => at_a += 1,
             Ordering::Greater => at_b += 1,

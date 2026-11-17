@@ -5,7 +5,7 @@ use std::cmp::Ordering;
 
 use tantivy::directory::OwnedBytes;
 
-use crate::charge::Ticker;
+use crate::charge::{Phase, Ticker};
 use crate::error::GraphError;
 use crate::op::{OpKind, Reader, column, corrupt, kind_byte, kind_from, put_len};
 use crate::presence::check_kinds;
@@ -74,7 +74,7 @@ impl Facts {
         };
         let mut prev: Option<(u32, u8)> = None;
         for i in 0..count {
-            t.tick()?;
+            t.tick(Phase::Validate)?;
             let key = facts.key_at(i).ok_or_else(|| corrupt("fact keys"))?;
             if u64::from(key.0) >= domain || prev.is_some_and(|p| p >= key) {
                 return Err(corrupt("fact order or domain"));
@@ -83,7 +83,7 @@ impl Facts {
         }
         let mut last = 0u64;
         for (i, &o) in facts.offsets.as_chunks::<8>().0.iter().enumerate() {
-            t.tick()?;
+            t.tick(Phase::Validate)?;
             let o = u64::from_le_bytes(o);
             if (i == 0 && o != 0) || o < last {
                 return Err(corrupt("fact offsets"));

@@ -8,7 +8,7 @@
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 
-use crate::charge::{Charge, Ticker};
+use crate::charge::{Charge, Phase, Ticker};
 use crate::error::GraphError;
 
 /// A sorted keyed source with strictly ascending keys; every advance is metered on the ticker.
@@ -16,8 +16,8 @@ pub(crate) trait Source {
     type Key: Ord + Copy;
     type Value;
 
-    /// The next entry; `None` at the end or once `t` refused.
-    fn advance(&mut self, t: &Ticker<'_>) -> Option<(Self::Key, Self::Value)>;
+    /// The next entry, one unit of `t` in `phase`; `None` at the end or once `t` refused.
+    fn advance(&mut self, t: &Ticker<'_>, phase: Phase) -> Option<(Self::Key, Self::Value)>;
 }
 
 /// A k-way merge of sorted keyed sources, oldest first: per key the newest source wins.
@@ -69,9 +69,9 @@ impl<S: Source> NewestWins<S> {
     }
 
     /// Advance source `i` and put its next head on the heap; one unit of `t` for the push.
-    fn refill(&mut self, i: usize, t: &Ticker<'_>) {
-        if let Some((key, value)) = self.sources[i].advance(t)
-            && t.step()
+    fn refill(&mut self, i: usize, t: &Ticker<'_>, phase: Phase) {
+        if let Some((key, value)) = self.sources[i].advance(t, phase)
+            && t.step(phase)
         {
             self.heads[i] = Some(value);
             self.heap.push(Reverse((key, i)));
@@ -91,7 +91,7 @@ impl<S: Source> NewestWins<S> {
         if !self.primed {
             self.primed = true;
             for i in 0..self.sources.len() {
-                self.refill(i, t);
+                self.refill(i, t, Phase::MergePrime);
             }
         }
         let mut won: Option<(S::Key, S::Value, usize)> = None;
@@ -101,13 +101,13 @@ impl<S: Source> NewestWins<S> {
                 (None, _) => break,
                 _ => {}
             }
-            if !t.step() {
+            if !t.step(Phase::Merge) {
                 return None;
             }
             let Reverse((key, i)) = self.heap.pop()?;
             let value = self.heads[i].take()?;
             each(i, &value);
-            self.refill(i, t);
+            self.refill(i, t, Phase::Merge);
             won = Some((key, value, i));
         }
         won
@@ -138,8 +138,8 @@ impl<'a, T, K: Ord + Copy> Source for Slice<'a, T, K> {
     type Key = K;
     type Value = &'a T;
 
-    fn advance(&mut self, t: &Ticker<'_>) -> Option<(K, &'a T)> {
-        if !t.step() {
+    fn advance(&mut self, t: &Ticker<'_>, phase: Phase) -> Option<(K, &'a T)> {
+        if !t.step(phase) {
             return None;
         }
         self.items.next().map(|item| ((self.key)(item), item))

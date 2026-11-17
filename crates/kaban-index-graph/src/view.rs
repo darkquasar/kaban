@@ -18,7 +18,7 @@ use std::ops::Range;
 use kaban_core::query_budget::{BudgetLease, QueryBudget};
 
 use crate::base::Base;
-use crate::charge::{Charge, Ticker};
+use crate::charge::{Charge, Phase, Ticker};
 use crate::error::GraphError;
 use crate::id::{Direction, LocalId, RelId, RelSelection};
 use crate::layer::{Edges, Extent, Layer};
@@ -211,7 +211,7 @@ impl<'a> View<'a> {
                 .into_iter()
                 .chain(layer_extents.take(if skip_layers { 0 } else { self.layers.len() }));
             for e in extents {
-                t.tick()?;
+                t.tick(Phase::Cursor)?;
                 let edges = e.edges(out);
                 if let Some(range) = edges.list(n) {
                     sources.push(EdgeSource::Extent { edges, range });
@@ -219,7 +219,7 @@ impl<'a> View<'a> {
             }
         }
         for (i, run) in runs.iter().enumerate().skip(cut.unwrap_or(0)) {
-            t.tick()?;
+            t.tick(Phase::Cursor)?;
             let list = run.list(n, out);
             if !list.is_empty() {
                 sources.push(EdgeSource::Run {
@@ -299,11 +299,11 @@ impl<'a> View<'a> {
             let mut sources: Vec<PresenceSource<'v>> =
                 charged(charge.as_mut(), self.layers.len() + 1 + runs.len())?;
             for e in self.extents() {
-                t.tick()?;
+                t.tick(Phase::Cursor)?;
                 sources.push(PresenceSource::Extent(e.presence.cursor()));
             }
             for run in runs {
-                t.tick()?;
+                t.tick(Phase::Cursor)?;
                 sources.push(PresenceSource::Sediment(run.nodes().iter()));
             }
             let merge = NewestWins::new(sources, charge.as_mut())?;
@@ -384,7 +384,7 @@ fn verify_union(last: &Layer, layers: &[Layer], t: &Ticker<'_>) -> Result<(), Gr
     for layer in layers {
         for (union, edges) in [(out, &layer.extent.out), (inc, &layer.extent.inc)] {
             let mut ids = edges.touched_cursor();
-            while let Some(n) = ids.next(t) {
+            while let Some(n) = ids.next(t, Phase::UnionCoverage) {
                 if !union.contains(n) {
                     return Err(corrupt("layer union coverage"));
                 }
@@ -405,11 +405,11 @@ impl Source for PresenceSource<'_> {
     type Key = u32;
     type Value = OpKind;
 
-    fn advance(&mut self, t: &Ticker<'_>) -> Option<(u32, OpKind)> {
+    fn advance(&mut self, t: &Ticker<'_>, phase: Phase) -> Option<(u32, OpKind)> {
         match self {
-            Self::Extent(it) => it.next(t),
+            Self::Extent(it) => it.next(t, phase),
             Self::Sediment(it) => {
-                if !t.step() {
+                if !t.step(phase) {
                     return None;
                 }
                 it.next().map(|n| (n.id, n.kind))
@@ -475,8 +475,8 @@ impl Source for EdgeSource<'_> {
     type Key = (u32, u16);
     type Value = (OpKind, Attr, usize);
 
-    fn advance(&mut self, t: &Ticker<'_>) -> Option<(Self::Key, Self::Value)> {
-        if !t.step() {
+    fn advance(&mut self, t: &Ticker<'_>, phase: Phase) -> Option<(Self::Key, Self::Value)> {
+        if !t.step(phase) {
             return None;
         }
         match self {

@@ -34,7 +34,7 @@ use std::ops::Range;
 use kaban_core::query_budget::QueryBudget;
 use tantivy::directory::OwnedBytes;
 
-use crate::charge::Ticker;
+use crate::charge::{Phase, Ticker};
 use crate::error::GraphError;
 use crate::facts::{FactEntry, Facts};
 use crate::op::{Attr, OpKind, Reader, Records, column, corrupt, kind_byte, kind_from, put_len};
@@ -245,7 +245,7 @@ impl Edges {
         check_kinds(&self.kinds, "edge kinds", t)?;
         let mut start = 0usize;
         for (i, &o) in self.offsets.as_chunks::<8>().0.iter().enumerate() {
-            t.tick()?;
+            t.tick(Phase::Validate)?;
             let end =
                 usize::try_from(u64::from_le_bytes(o)).map_err(|_| corrupt("edge offsets"))?;
             if (i == 0 && end != 0) || end < start || end > self.entries {
@@ -253,7 +253,7 @@ impl Edges {
             }
             let mut prev: Option<(u32, u16)> = None;
             for e in start..end {
-                t.tick()?;
+                t.tick(Phase::Validate)?;
                 let key = column::<4>(&self.nbrs, e)
                     .map(u32::from_le_bytes)
                     .zip(column::<2>(&self.rels, e).map(u16::from_le_bytes))
@@ -302,7 +302,7 @@ impl Edges {
     pub(crate) fn touched(&self) -> impl Iterator<Item = u32> + '_ {
         let mut ids = self.index.cursor();
         let t = Ticker::unmetered();
-        std::iter::from_fn(move || ids.next(&t))
+        std::iter::from_fn(move || ids.next(&t, Phase::Writer))
     }
 }
 

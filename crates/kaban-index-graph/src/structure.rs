@@ -5,7 +5,7 @@ use std::collections::BinaryHeap;
 
 use kaban_core::query_budget::QueryBudget;
 
-use crate::charge::{Charge, Charged, Grow, Hold, Ticker};
+use crate::charge::{Charge, Charged, Grow, Hold, Phase, Ticker};
 use crate::error::GraphError;
 use crate::id::{Direction, LocalId, RelSelection};
 use crate::traverse::{Caps, RowCap, Want, check_caps, search};
@@ -103,7 +103,7 @@ pub fn common_neighbours(
     let tick = Ticker::new(budget);
     let mut at = 0;
     for &x in short.iter() {
-        tick.tick()?;
+        tick.tick(Phase::Common)?;
         at = gallop(long, at, x);
         if long.get(at) == Some(&x) {
             out.push(x)?;
@@ -160,12 +160,12 @@ pub fn topo_order(
     let tick = Ticker::new(budget);
     let mut indeg: Grow<'_, u32> = Grow::with_capacity(budget, set.len())?;
     for _ in set {
-        tick.tick()?;
+        tick.tick(Phase::Init)?;
         indeg.push(0)?;
     }
     let corrupt = || GraphError::Corrupt("in-degree out of range".to_owned());
     for &(node, _) in set {
-        tick.tick()?;
+        tick.tick(Phase::Topo)?;
         let mut last = None;
         for row in v.neighbours(LocalId(node), rels, Direction::Out, budget) {
             let (succ, _, _) = row?;
@@ -181,14 +181,14 @@ pub fn topo_order(
     let mut charge = Charge::new(budget)?;
     let mut heap = BinaryHeap::from(charge.vec::<Reverse<usize>>(set.len())?);
     for (at, &count) in indeg.iter().enumerate() {
-        tick.tick()?;
+        tick.tick(Phase::Topo)?;
         if count == 0 {
             heap.push(Reverse(at));
         }
     }
     let mut out = Grow::with_capacity(budget, set.len())?;
     while let Some(Reverse(at)) = heap.pop() {
-        tick.tick()?;
+        tick.tick(Phase::Topo)?;
         let Some(&(node, _)) = set.get(at) else {
             return Err(corrupt());
         };
@@ -240,7 +240,7 @@ fn cycle(
         let mut cur = LocalId(start.0);
         let tick = Ticker::new(budget);
         for _ in 0..set.len() {
-            tick.tick()?;
+            tick.tick(Phase::Cycle)?;
             let mut pred = None;
             for row in v.neighbours(cur, rels, Direction::In, budget) {
                 let (p, _, _) = row?;
@@ -264,7 +264,7 @@ fn cycle(
 /// is one unit of `t`, so a long walk is checked from inside.
 fn find(parent: &mut [u32], mut x: usize, t: &Ticker<'_>) -> Result<usize, GraphError> {
     loop {
-        t.tick()?;
+        t.tick(Phase::UnionFind)?;
         let Some(&p) = parent.get(x) else {
             return Ok(x);
         };
@@ -323,11 +323,11 @@ pub fn wcc(
     let tick = Ticker::new(budget);
     let mut parent: Grow<'_, u32> = Grow::with_capacity(budget, nodes.len())?;
     for i in 0..nodes.len() {
-        tick.tick()?;
+        tick.tick(Phase::Init)?;
         parent.push(u32::try_from(i).map_err(|_| too_many())?)?;
     }
     for (i, &n) in nodes.iter().enumerate() {
-        tick.tick()?;
+        tick.tick(Phase::Components)?;
         for row in v.neighbours(n, rels, Direction::Out, budget) {
             let (m, _, _) = row?;
             let Ok(j) = nodes.binary_search(&m) else {
@@ -347,7 +347,7 @@ pub fn wcc(
         .min(usize::try_from(cap.0).unwrap_or(usize::MAX));
     let mut out = Grow::with_capacity(budget, rows)?;
     for (i, &n) in nodes.iter().take(rows).enumerate() {
-        tick.tick()?;
+        tick.tick(Phase::Components)?;
         let root = find(&mut parent, i, &tick)?;
         let Some(&c) = nodes.get(root) else {
             return Err(too_many());

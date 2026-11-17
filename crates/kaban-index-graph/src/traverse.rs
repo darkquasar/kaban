@@ -10,7 +10,7 @@
 
 use kaban_core::query_budget::QueryBudget;
 
-use crate::charge::{Charged, Grow, Hold, Ticker, sort_checked};
+use crate::charge::{Charged, Grow, Hold, Phase, Ticker, sort_checked};
 use crate::error::GraphError;
 use crate::id::{Direction, LocalId, RelId, RelSelection};
 use crate::view::View;
@@ -168,7 +168,7 @@ pub(crate) fn search<'b>(
     let tick = Ticker::new(budget);
     let mut frontier: Grow<'b, u32> = Grow::with_capacity(budget, src.len())?;
     for &n in src {
-        tick.tick()?;
+        tick.tick(Phase::Search)?;
         if v.contains(n) {
             frontier.push(n.0)?;
         }
@@ -177,7 +177,7 @@ pub(crate) fn search<'b>(
     frontier.dedup(&tick)?;
     let mut seen: Grow<'b, (u32, u8)> = Grow::with_capacity(budget, frontier.len())?;
     for &n in frontier.iter() {
-        tick.tick()?;
+        tick.tick(Phase::Search)?;
         seen.push((n, 0))?;
     }
     let mut order = Grow::new(budget)?;
@@ -201,7 +201,7 @@ pub(crate) fn search<'b>(
         let mut cand: Grow<'b, u32> = Grow::new(budget)?;
         let mut met: Grow<'b, Met> = Grow::new(budget)?;
         for &n in frontier.iter() {
-            tick.tick()?;
+            tick.tick(Phase::Search)?;
             for &pass in passes {
                 let mut last = None;
                 let mut fresh = 0usize;
@@ -239,7 +239,7 @@ pub(crate) fn search<'b>(
         rows_left -= cand.len();
         if let Some(edges) = &mut edges {
             for &(n, rel, m, out) in met.iter() {
-                tick.tick()?;
+                tick.tick(Phase::Search)?;
                 if depth_of(&seen, m).is_some() || cand.binary_search(&m).is_ok() {
                     let rel = RelId(rel);
                     edges.push(if out {
@@ -253,7 +253,7 @@ pub(crate) fn search<'b>(
         drop(met);
         order.reserve(cand.len())?;
         for &m in cand.iter() {
-            tick.tick()?;
+            tick.tick(Phase::Search)?;
             order.push((LocalId(m), next))?;
         }
         seen = merge(&seen, &cand, next, budget, &tick)?;
@@ -291,7 +291,7 @@ fn beyond(
     tick: &Ticker<'_>,
 ) -> Result<bool, GraphError> {
     for &n in frontier {
-        tick.tick()?;
+        tick.tick(Phase::Search)?;
         for &pass in passes {
             for row in v.neighbours(LocalId(n), rels, pass, budget) {
                 let (m, _, _) = row?;
@@ -316,7 +316,7 @@ fn merge<'b>(
     let mut out = Grow::with_capacity(budget, seen.len() + level.len())?;
     let (mut i, mut j) = (0, 0);
     loop {
-        tick.tick()?;
+        tick.tick(Phase::Search)?;
         let item = match (seen.get(i), level.get(j)) {
             (Some(&s), Some(&l)) if s.0 < l => {
                 i += 1;

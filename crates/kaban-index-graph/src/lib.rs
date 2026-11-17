@@ -12,6 +12,8 @@ mod merge;
 mod op;
 mod paths;
 mod presence;
+#[cfg(test)]
+mod probe;
 mod sediment;
 mod structure;
 mod traverse;

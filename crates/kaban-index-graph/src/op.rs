@@ -3,7 +3,7 @@
 use kaban_core::query_budget::{BudgetLease, QueryBudget};
 use tantivy::directory::OwnedBytes;
 
-use crate::charge::{Charge, Ticker};
+use crate::charge::{Charge, Phase, Ticker};
 use crate::error::GraphError;
 use crate::id::{LocalId, RelId};
 
@@ -158,7 +158,7 @@ impl Records {
         let count = r.count(EDGE_BYTES, "edge records")?;
         let mut edges = charge.vec(count)?;
         for _ in 0..count {
-            t.tick()?;
+            t.tick(Phase::Decode)?;
             edges.push(EdgeOp {
                 src: LocalId(r.u32("edge src")?),
                 rel: RelId(r.u16("edge rel")?),
@@ -173,7 +173,7 @@ impl Records {
         let count = r.count(NODE_BYTES, "node records")?;
         let mut nodes = charge.vec(count)?;
         for _ in 0..count {
-            t.tick()?;
+            t.tick(Phase::Decode)?;
             nodes.push(NodeOp {
                 node: LocalId(r.u32("node id")?),
                 kind: kind_from(r.u8("node kind")?)?,
@@ -182,14 +182,14 @@ impl Records {
         let count = r.count(FACT_FIXED_BYTES, "fact records")?;
         let mut facts = charge.vec(count)?;
         for _ in 0..count {
-            t.tick()?;
+            t.tick(Phase::Decode)?;
             let node = LocalId(r.u32("fact node")?);
             let key = r.u8("fact key")?;
             let kind = kind_from(r.u8("fact kind")?)?;
             let len = r.count(1, "fact payload")?;
             let mut payload = charge.vec(len)?;
             for chunk in r.take(len, "fact payload")?.chunks(COPY_CHUNK) {
-                t.tick()?;
+                t.tick(Phase::Decode)?;
                 payload.extend_from_slice(chunk);
             }
             facts.push(FactOp {

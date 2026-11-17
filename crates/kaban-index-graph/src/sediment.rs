@@ -77,7 +77,7 @@ use std::sync::Arc;
 
 use kaban_core::query_budget::{BudgetLease, QueryBudget};
 
-use crate::charge::{Charge, Ticker, sort_checked};
+use crate::charge::{Charge, Phase, Ticker, sort_checked};
 use crate::error::GraphError;
 use crate::layer::{Sections, seal_over};
 use crate::merge::{NewestWins, Slice};
@@ -190,10 +190,10 @@ fn compact<T: Clone, K: PartialEq>(
     let mut kept = 0;
     let mut i = 0;
     while i < v.len() {
-        t.tick()?;
+        t.tick(Phase::Compact)?;
         let mut last = i;
         while last + 1 < v.len() && key(&v[last + 1]) == key(&v[i]) {
-            t.tick()?;
+            t.tick(Phase::Compact)?;
             last += 1;
         }
         if keep(&v[last]) {
@@ -243,7 +243,7 @@ fn copy_payload(
 ) -> Result<Range<usize>, GraphError> {
     let start = arena.len();
     for chunk in bytes.chunks(COPY_CHUNK) {
-        t.tick()?;
+        t.tick(Phase::Copy)?;
         arena.extend_from_slice(chunk);
     }
     Ok(start..arena.len())
@@ -258,7 +258,7 @@ fn removed_ids(
     let count = nodes.iter().filter(|n| n.barrier.is_some()).count();
     let mut removed: Vec<u32> = charge.vec(count)?;
     for n in nodes {
-        t.tick()?;
+        t.tick(Phase::Barriers)?;
         if n.barrier.is_some() {
             removed.push(n.id);
         }
@@ -280,7 +280,7 @@ impl Run {
         let mut nodes: Vec<SedNode> = charge.vec(total(batches, |r| r.nodes.len()))?;
         for (b, r) in batches.iter().enumerate() {
             for (i, op) in r.as_ref().nodes.iter().enumerate() {
-                t.tick()?;
+                t.tick(Phase::Copy)?;
                 nodes.push(SedNode {
                     id: op.node.0,
                     order: (first + b, i),
@@ -297,7 +297,7 @@ impl Run {
             let mut entry = nodes[i];
             let mut barrier = None;
             while i < nodes.len() && nodes[i].id == entry.id {
-                t.tick()?;
+                t.tick(Phase::Compact)?;
                 if nodes[i].kind == OpKind::Remove {
                     barrier = Some(nodes[i].order.0);
                 }
@@ -313,7 +313,7 @@ impl Run {
         let mut out: Vec<SedEdge> = charge.vec(total(batches, |r| r.edges.len()))?;
         for (b, r) in batches.iter().enumerate() {
             for (i, e) in r.as_ref().edges.iter().enumerate() {
-                t.tick()?;
+                t.tick(Phase::Copy)?;
                 out.push(SedEdge {
                     key: (e.src.0, e.dst.0, e.rel.0),
                     order: (first + b, i),
@@ -332,7 +332,7 @@ impl Run {
         out.truncate(kept);
         let mut inc: Vec<SedEdge> = charge.vec(out.len())?;
         for e in &out {
-            t.tick()?;
+            t.tick(Phase::Transpose)?;
             inc.push(SedEdge {
                 key: (e.key.1, e.key.0, e.key.2),
                 ..*e
@@ -350,7 +350,7 @@ impl Run {
         let mut facts: Vec<SedFact> = charge.vec(total(batches, |r| r.facts.len()))?;
         for (b, r) in batches.iter().enumerate() {
             for (i, f) in r.as_ref().facts.iter().enumerate() {
-                t.tick()?;
+                t.tick(Phase::Copy)?;
                 facts.push(SedFact {
                     key: (f.node.0, f.key),
                     order: (first + b, i),
@@ -424,7 +424,7 @@ impl Run {
                 let next = merge.next(&t);
                 t.stopped()?;
                 let Some((_, e, _)) = next else { break };
-                t.tick()?;
+                t.tick(Phase::Merge)?;
                 if survives(&nodes, &removed, e.order.0, &[e.key.0, e.key.1]) {
                     merged.push(*e);
                 }
@@ -446,7 +446,7 @@ impl Run {
             let next = merge.next(&t);
             t.stopped()?;
             let Some((_, f, from)) = next else { break };
-            t.tick()?;
+            t.tick(Phase::Merge)?;
             if survives(&nodes, &removed, f.order.0, &[f.key.0]) {
                 let payload = copy_payload(&mut arena, runs[from].payload(f), &t)?;
                 facts.push(SedFact {

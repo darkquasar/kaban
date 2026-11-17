@@ -219,7 +219,7 @@ impl<T: PartialEq + Copy> Grow<'_, T> {
     pub(crate) fn dedup(&mut self, t: &Ticker<'_>) -> Result<(), GraphError> {
         let mut kept = 0;
         for i in 0..self.items.len() {
-            t.tick()?;
+            t.tick(Phase::Dedup)?;
             let item = self.items[i];
             if kept == 0 || self.items[kept - 1] != item {
                 self.items[kept] = item;
@@ -244,17 +244,17 @@ pub(crate) fn sort_checked<T, K: Ord>(
     t: &Ticker<'_>,
 ) -> Result<(), GraphError> {
     if v.len() <= SMALL_SORT {
-        t.tick()?;
+        t.tick(Phase::Sort)?;
         v.sort_unstable_by_key(key);
         return Ok(());
     }
     let n = v.len();
     for root in (0..n / 2).rev() {
-        t.tick()?;
+        t.tick(Phase::Sort)?;
         sift_down(v, root, n, &key);
     }
     for end in (1..n).rev() {
-        t.tick()?;
+        t.tick(Phase::Sort)?;
         v.swap(0, end);
         sift_down(v, 0, end, &key);
     }
@@ -311,6 +311,71 @@ pub fn work_units() -> u64 {
     WORK_UNITS.load(Ordering::SeqCst)
 }
 
+/// The metered loop a unit of work belongs to. Every unit names its loop, so test
+/// instrumentation can request a cancellation inside one named loop and see which loop's check
+/// refused; production code ignores it.
+#[allow(
+    dead_code,
+    reason = "the loops not yet metered are named by the cancellation table"
+)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum Phase {
+    /// Decoding sediment records and copying their payloads.
+    Decode,
+    /// Validating an extent's sections at open.
+    Validate,
+    /// Counting a stream's records over the batches of a new run.
+    CountBatches,
+    /// Summing the fact payload bytes of the batches of a new run.
+    SizePayload,
+    /// Copying the batches' records and payloads into a new run.
+    Copy,
+    /// One sift of an interruptible sort.
+    Sort,
+    /// Compacting a sorted stream to its newest record per key.
+    Compact,
+    /// Counting the nodes of a run that carry a barrier.
+    CountBarriers,
+    /// Copying the ids of a run's barriers.
+    Barriers,
+    /// Writing a run's incoming edges from its outgoing ones.
+    Transpose,
+    /// Setting up a k-way merge's per-source heads.
+    MergeSetup,
+    /// Priming a k-way merge's heap with every source's first entry.
+    MergePrime,
+    /// One step of a k-way merge (a heap pop or push, or a source advanced by one entry).
+    Merge,
+    /// Preparing one cursor per extent or run.
+    Cursor,
+    /// Checking that the newest layer's union covers every layer of the chain.
+    UnionCoverage,
+    /// Moving a growing vector's elements into its new buffer.
+    Grow,
+    /// Removing consecutive duplicates.
+    Dedup,
+    /// The loops of a breadth-first search.
+    Search,
+    /// Initialising a structural function's per-node state.
+    Init,
+    /// The in-degree, seeding and release loops of a topological order.
+    Topo,
+    /// Finding and walking to a node on a cycle.
+    Cycle,
+    /// One step of a union-find walk.
+    UnionFind,
+    /// The node and output loops of the components.
+    Components,
+    /// Marking the nodes on a shortest path.
+    Paths,
+    /// Merging two seen sets for meeting points.
+    Meet,
+    /// Galloping through two neighbour lists.
+    Common,
+    /// Unmetered writer paths (a ticker without a budget never checks).
+    Writer,
+}
+
 /// Counts units of work and checks the budget once every [`BUDGET_CHECK_INTERVAL`] units,
 /// starting before the first unit. A ticker without a budget (writer paths) neither checks nor
 /// publishes.
@@ -346,10 +411,12 @@ impl<'b> Ticker<'b> {
         Ticker::maybe(None)
     }
 
-    /// One unit of work; at every interval boundary (and before the first unit) the budget is
-    /// checked.
-    pub(crate) fn tick(&self) -> Result<(), GraphError> {
+    /// One unit of work of the loop `phase`; at every interval boundary (and before the first
+    /// unit) the budget is checked.
+    pub(crate) fn tick(&self, phase: Phase) -> Result<(), GraphError> {
         if let Some(e) = self.failed.get() {
+            #[cfg(test)]
+            crate::probe::after_refusal(self.budget, phase);
             return Err(e.into());
         }
         let units = self.units.get();
@@ -359,16 +426,22 @@ impl<'b> Ticker<'b> {
                 && let Err(e) = budget.check()
             {
                 self.failed.set(Some(e));
+                #[cfg(test)]
+                crate::probe::refused(budget, phase);
                 return Err(e.into());
             }
         }
         self.units.set(units + 1);
+        #[cfg(test)]
+        crate::probe::unit(self.budget, phase);
+        #[cfg(not(test))]
+        let _ = phase;
         Ok(())
     }
 
     /// [`Ticker::tick`] for sources that cannot return an error: `false` once the budget refused.
-    pub(crate) fn step(&self) -> bool {
-        self.tick().is_ok()
+    pub(crate) fn step(&self, phase: Phase) -> bool {
+        self.tick(phase).is_ok()
     }
 
     /// The breach a failed step recorded, if any.
