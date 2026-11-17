@@ -1,28 +1,90 @@
-//! Prepared sediment: the net change of a run of sediment batches as sorted, barrier-applied
-//! vectors that own their fact payloads and hold their budget charge (PC-17). It is built once
-//! and borrowed by every [`crate::View`] over it, and extended in place of a rebuild when newer
-//! batches arrive.
+//! Prepared sediment: the pending sediment batches as a short sequence of immutable sorted
+//! runs (a log-structured merge), each owning its fact payloads and holding its budget charge
+//! (PC-17). It is built once, borrowed by every [`crate::View`] over the same batches, and
+//! extended by adding a run instead of rebuilding.
 //!
-//! Batches apply oldest first. Within a batch the node stream applies first, then the edge and
-//! fact streams, so a node removal is a deletion barrier (MED-02): every edge with the node as
-//! an endpoint and every fact of the node recorded before the removal is deleted, in this
-//! sediment and in every extent under it, even when a later record re-adds the node. Records of
-//! the removing batch itself come after the barrier and survive.
+//! # Chronology and barriers
 //!
-//! Building sorts in place (no hidden allocation) and compacts each stream to its newest record
-//! per key. Every copied record, payload chunk, sort sift, compaction and merge step is one unit
-//! of work, so a cancellation or deadline stops building or extending within
-//! [`crate::BUDGET_CHECK_INTERVAL`] units.
+//! Batches carry sequence numbers in the order they apply, oldest first, and every run covers
+//! a contiguous range of them; runs are ordered oldest first and never reordered. Within a
+//! batch the node stream applies first, then the edge and fact streams, so a node removal is a
+//! deletion barrier (MED-02): every edge with the node as an endpoint and every fact of the
+//! node recorded before the removal is deleted, in older runs and in every extent under the
+//! sediment, even when a later record re-adds the node. Records of the removing batch itself
+//! come after the barrier and survive. A run stores, per node, the sequence number of its last
+//! removal, so the barriers survive merging.
+//!
+//! # Runs and merging
+//!
+//! A run holds four streams (nodes by id, outgoing and incoming edges by (node, neighbour,
+//! relation), facts by (node, key)), each sorted and compacted to its newest surviving record
+//! per key, with the run's own barriers applied. [`PreparedSediment::extend`] prepares the new
+//! batches as one run, appends it and then merges by size tier, with this exact rule: let `s`
+//! be the size of the new run (records over its four streams); walking from the newest older
+//! run backwards, a run of size `o` joins the merge while `2 * s >= o`, and `s` grows by `o`
+//! each time. The joined runs are combined by one k-way merge into one run. Afterwards each run
+//! is more than twice the size of the merged run after it, so the runs shrink geometrically
+//! towards the newest and there are at most about log2(records) + 1 of them.
+//!
+//! A run of size `o` joins a merge only together with newer runs of total size at least `o / 2`,
+//! so each time a record already in a run is moved by a merge, the run it lands in is at least
+//! 1.5 times as large as the one it left. Each record is therefore moved at most
+//! 1 + log1.5(N) (about 1 + 1.71 log2 N) times over N appended records: O(log N) moves per
+//! appended record, amortised. Compaction only removes records (an overwritten or deleted key),
+//! which are never moved again.
+//!
+//! The run count is also capped by [`MAX_SEDIMENT_RUNS`]: while an extension would leave more,
+//! the two adjacent runs with the smallest combined size are merged, so a read never merges more
+//! than that many sediment sources. Only adjacent runs are ever merged, which keeps batch order.
+//!
+//! A merge is a k-way merge of already sorted streams through a heap of the run heads: per key
+//! the newest run wins, a node keeps the newest of its removals, and an edge or fact is kept
+//! only when it is not older than the last removal of its nodes. Merges never sort.
+//!
+//! # What sorts, and when (GRA-06)
+//!
+//! - Each batch is sorted exactly once, when it becomes (part of) a new run, by
+//!   [`PreparedSediment::prepare`] or [`PreparedSediment::extend`]: an interruptible in-place
+//!   heapsort of that batch's records only, never of what was prepared before.
+//! - Queries never sort: [`crate::View::new`] over a prepared value does no sediment work, and
+//!   every read merges sorted lists.
+//! - Merging runs never sorts.
+//! - A fresh process that rebuilds the value from stored batches prepares them (one run) or
+//!   extends batch by batch; either way each stored batch is sorted once.
+//!
+//! # Reads
+//!
+//! A read looks a key up in each run, newest first, by binary search, skipping a run without a
+//! search when the key lies outside the run's first and last key of that stream (each stream is
+//! sorted, so these bounds cost nothing to keep) or, for barriers, outside the run's own list of
+//! removed ids, which is empty for most runs. A node's edges come from the runs from its newest
+//! removal on (older runs and the extents are behind its barrier), merged with the extents'
+//! lists by the same heap merge; an older entry whose neighbour is removed in a newer run is
+//! deleted.
+//!
+//! # Work
+//!
+//! Every copied record, payload chunk, sort sift, compaction step, merge step and heap push or
+//! pop is one unit of work, so a cancellation or deadline stops building, extending or merging
+//! within [`crate::BUDGET_CHECK_INTERVAL`] units. Every run, merge output and run list
+//! is reserved on the budget before it is built; a refused or cancelled extension returns the
+//! error and leaves the value it extends unchanged.
 
 use std::ops::Range;
+use std::sync::Arc;
 
 use kaban_core::query_budget::{BudgetLease, QueryBudget};
 
 use crate::charge::{Charge, Ticker, sort_checked};
 use crate::error::GraphError;
+use crate::merge::{NewestWins, Slice};
 use crate::op::{Attr, COPY_CHUNK, OpKind, Records};
 
-/// A record's position: (batch, index in its stream).
+/// The most runs a [`PreparedSediment`] holds: an extension that would leave more merges the
+/// smallest adjacent runs first, so a read never merges more than this many sediment sources.
+pub const MAX_SEDIMENT_RUNS: usize = 32;
+
+/// A record's position: (batch sequence number, index in its stream).
 type Order = (usize, usize);
 
 /// One node's newest membership change, and the batch of its last removal.
@@ -44,42 +106,51 @@ pub(crate) struct SedEdge {
     pub(crate) attr: Attr,
 }
 
-/// One fact's newest surviving change; its payload is a range of the owning arena.
+/// One fact's newest surviving change; its payload is a range of the owning run's arena.
 #[derive(Debug, Clone)]
-struct SedFact {
-    key: (u32, u8),
+pub(crate) struct SedFact {
+    pub(crate) key: (u32, u8),
     order: Order,
-    kind: OpKind,
+    pub(crate) kind: OpKind,
     payload: Range<usize>,
 }
 
-/// The prepared, sorted and barrier-applied sediment of a run of batches, owning its payloads
-/// and holding the budget charge of its vectors while it lives.
-///
-/// Build it once with [`PreparedSediment::prepare`], borrow it from every [`crate::View`] that
-/// reads the same batches (a view does no sediment work at construction), and when newer
-/// batches arrive call [`PreparedSediment::extend`], which returns a new value by a linear merge
-/// of the prepared state with the newly prepared batches; the old value is unchanged, so views
-/// over it stay correct while they live.
+/// One immutable sorted run: the net change of a contiguous range of batches, barriers
+/// applied, holding the charge of its vectors while it lives.
 #[derive(Debug)]
-pub struct PreparedSediment {
+pub(crate) struct Run {
+    /// The batch sequence numbers this run covers.
+    span: Range<usize>,
     nodes: Vec<SedNode>,
+    /// The ids removed in this run (a barrier), ascending.
+    removed: Vec<u32>,
     out: Vec<SedEdge>,
     inc: Vec<SedEdge>,
     facts: Vec<SedFact>,
     /// Fact payload bytes; each fact holds a range of it.
     arena: Vec<u8>,
-    /// Batches applied so far: the batch index of the next extension's first batch.
-    batches: usize,
-    /// Whether any node is removed in the sediment.
-    barriers: bool,
-    /// The charge of the vectors; `None` for the empty sediment.
-    _lease: Option<BudgetLease>,
+    _lease: BudgetLease,
 }
 
-/// The most runs a [`PreparedSediment`] holds: every extension that would exceed it merges the
-/// smallest adjacent runs first, so a read never merges more than this many sediment sources.
-pub const MAX_SEDIMENT_RUNS: usize = 32;
+/// The prepared sediment of a sequence of batches: immutable sorted runs, oldest first, each
+/// shared by every value that contains it.
+///
+/// Build it once with [`PreparedSediment::prepare`], borrow it from every [`crate::View`] that
+/// reads the same batches (a view does no sediment work at construction), and when newer
+/// batches arrive call [`PreparedSediment::extend`], which returns a new value sharing the old
+/// runs and adding one (merging runs by size tier, see the module documentation). The old value
+/// is unchanged, so views over it stay correct while they live.
+///
+/// What sorts and when: each batch is sorted once, when it becomes a run; queries and run
+/// merges never sort the runs (see the module documentation, "What sorts, and when").
+#[derive(Debug)]
+pub struct PreparedSediment {
+    runs: Vec<Arc<Run>>,
+    /// Batches applied so far: the sequence number of the next extension's first batch.
+    batches: usize,
+    /// The charge of the run list; `None` for the empty sediment.
+    _lease: Option<BudgetLease>,
+}
 
 /// The empty sediment, shared by chain-only readers.
 pub(crate) static EMPTY: PreparedSediment = PreparedSediment::empty();
@@ -118,53 +189,21 @@ fn compact<T: Clone, K: PartialEq>(
     Ok(kept)
 }
 
-/// Merge two sorted, key-unique runs: per key the `new` element wins; every emitted element
-/// that `keep` accepts goes to `emit` with whether it came from `new`. One unit per element.
-fn merge_newest<T, K: Ord>(
-    old: &[T],
-    new: &[T],
-    key: impl Fn(&T) -> K,
-    keep: impl Fn(&T) -> bool,
-    mut emit: impl FnMut(&T, bool) -> Result<(), GraphError>,
-    t: &Ticker<'_>,
-) -> Result<(), GraphError> {
-    let (mut at_old, mut at_new) = (0, 0);
-    loop {
-        t.tick()?;
-        let (item, fresh) = match (old.get(at_old), new.get(at_new)) {
-            (Some(older), Some(newer)) => match key(older).cmp(&key(newer)) {
-                std::cmp::Ordering::Less => {
-                    at_old += 1;
-                    (older, false)
-                }
-                std::cmp::Ordering::Equal => {
-                    at_old += 1;
-                    at_new += 1;
-                    (newer, true)
-                }
-                std::cmp::Ordering::Greater => {
-                    at_new += 1;
-                    (newer, true)
-                }
-            },
-            (Some(older), None) => {
-                at_old += 1;
-                (older, false)
-            }
-            (None, Some(newer)) => {
-                at_new += 1;
-                (newer, true)
-            }
-            (None, None) => return Ok(()),
-        };
-        if keep(item) {
-            emit(item, fresh)?;
-        }
+/// Whether `id` lies within the first and last key of a sorted stream: the skip check that
+/// spares a binary search in a run that cannot hold `id`.
+fn spans<T>(v: &[T], id: u32, key: impl Fn(&T) -> u32) -> bool {
+    match (v.first(), v.last()) {
+        (Some(first), Some(last)) => key(first) <= id && id <= key(last),
+        _ => false,
     }
 }
 
-/// The barrier batch of `id` in `nodes` (sorted by id).
-fn barrier_of(nodes: &[SedNode], id: u32) -> Option<usize> {
+/// The barrier batch of `id` in `nodes` (sorted by id) when `removed` (its removed ids) holds
+/// it.
+fn barrier_of(nodes: &[SedNode], removed: &[u32], id: u32) -> Option<usize> {
+    if !spans(removed, id, |&r| r) || removed.binary_search(&id).is_err() {
+        return None;
+    }
     nodes
         .binary_search_by_key(&id, |n| n.id)
         .ok()
@@ -173,9 +212,11 @@ fn barrier_of(nodes: &[SedNode], id: u32) -> Option<usize> {
 
 /// Whether a record of `batch` naming `ids` survives the barriers of `nodes`: it is not older
 /// than the last removal of any of its nodes.
-fn survives(nodes: &[SedNode], batch: usize, ids: &[u32]) -> bool {
-    ids.iter()
-        .all(|&id| barrier_of(nodes, id).is_none_or(|b| batch >= b))
+fn survives(nodes: &[SedNode], removed: &[u32], batch: usize, ids: &[u32]) -> bool {
+    removed.is_empty()
+        || ids
+            .iter()
+            .all(|&id| barrier_of(nodes, removed, id).is_none_or(|b| batch >= b))
 }
 
 /// Copy `bytes` into `arena` (reserved), one unit per [`COPY_CHUNK`]; returns its range.
@@ -192,43 +233,31 @@ fn copy_payload(
     Ok(start..arena.len())
 }
 
-impl PreparedSediment {
-    /// No sediment: nothing is allocated or charged.
-    #[must_use]
-    pub const fn empty() -> Self {
-        Self {
-            nodes: Vec::new(),
-            out: Vec::new(),
-            inc: Vec::new(),
-            facts: Vec::new(),
-            arena: Vec::new(),
-            batches: 0,
-            barriers: false,
-            _lease: None,
+/// The ids of `nodes` that carry a barrier, ascending, reserved on `charge`.
+fn removed_ids(
+    nodes: &[SedNode],
+    charge: &mut Charge,
+    t: &Ticker<'_>,
+) -> Result<Vec<u32>, GraphError> {
+    let count = nodes.iter().filter(|n| n.barrier.is_some()).count();
+    let mut removed: Vec<u32> = charge.vec(count)?;
+    for n in nodes {
+        t.tick()?;
+        if n.barrier.is_some() {
+            removed.push(n.id);
         }
     }
+    Ok(removed)
+}
 
-    /// Prepare `batches` (oldest first): copy, sort and compact their streams and apply the
-    /// deletion barriers. Every vector is reserved on `budget` before it is allocated and stays
-    /// charged while the result lives; the fact payloads are copied, so the result does not
-    /// borrow `batches`.
-    ///
-    /// # Errors
-    /// [`GraphError::BudgetExceeded`] when `budget` refuses a reservation, already refuses at
-    /// entry or is cancelled or past its deadline while preparing; nothing stays charged.
-    pub fn prepare<R: AsRef<Records>>(
-        batches: &[R],
-        budget: &QueryBudget,
-    ) -> Result<Self, GraphError> {
-        Self::prepare_from(batches, 0, budget)
-    }
-
-    /// Prepare `batches` numbered from batch index `first`.
-    fn prepare_from<R: AsRef<Records>>(
+impl Run {
+    /// Prepare `batches` numbered from sequence number `first` as one run: copy, sort and
+    /// compact their streams and apply their barriers. `None` when they hold no record.
+    fn build<R: AsRef<Records>>(
         batches: &[R],
         first: usize,
         budget: &QueryBudget,
-    ) -> Result<Self, GraphError> {
+    ) -> Result<Option<Self>, GraphError> {
         let mut charge = Charge::new(budget)?;
         let t = Ticker::new(budget);
 
@@ -248,7 +277,6 @@ impl PreparedSediment {
         // The newest change wins; the barrier is the last removal of the run.
         let mut kept = 0;
         let mut i = 0;
-        let mut barriers = false;
         while i < nodes.len() {
             let mut entry = nodes[i];
             let mut barrier = None;
@@ -260,11 +288,11 @@ impl PreparedSediment {
                 entry = nodes[i];
                 i += 1;
             }
-            barriers |= barrier.is_some();
             nodes[kept] = SedNode { barrier, ..entry };
             kept += 1;
         }
         nodes.truncate(kept);
+        let removed = removed_ids(&nodes, &mut charge, &t)?;
 
         let mut out: Vec<SedEdge> = charge.vec(total(batches, |r| r.edges.len()))?;
         for (b, r) in batches.iter().enumerate() {
@@ -282,7 +310,7 @@ impl PreparedSediment {
         let kept = compact(
             &mut out,
             |e| e.key,
-            |e| survives(&nodes, e.order.0, &[e.key.0, e.key.1]),
+            |e| survives(&nodes, &removed, e.order.0, &[e.key.0, e.key.1]),
             &t,
         )?;
         out.truncate(kept);
@@ -319,125 +347,297 @@ impl PreparedSediment {
         let kept = compact(
             &mut facts,
             |f| f.key,
-            |f| survives(&nodes, f.order.0, &[f.key.0]),
+            |f| survives(&nodes, &removed, f.order.0, &[f.key.0]),
             &t,
         )?;
         facts.truncate(kept);
 
-        Ok(Self {
+        if nodes.is_empty() && out.is_empty() && facts.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(Self {
+            span: first..first + batches.len(),
             nodes,
+            removed,
             out,
             inc,
             facts,
             arena,
-            batches: first + batches.len(),
-            barriers,
-            _lease: Some(charge.into_lease()),
+            _lease: charge.into_lease(),
+        }))
+    }
+
+    /// Merge adjacent `runs` (oldest first, at least one) into one run by a k-way merge of their
+    /// sorted streams: per key the newest run wins, a node keeps its newest removal, and an
+    /// edge or fact older than the last removal of one of its nodes is dropped. No sorting.
+    pub(crate) fn merge(runs: &[Arc<Run>], budget: &QueryBudget) -> Result<Self, GraphError> {
+        let mut charge = Charge::new(budget)?;
+        let t = Ticker::new(budget);
+        let sum = |len: fn(&Run) -> usize| runs.iter().map(|r| len(r)).sum::<usize>();
+        let span = match (runs.first(), runs.last()) {
+            (Some(first), Some(last)) => first.span.start..last.span.end,
+            _ => 0..0,
+        };
+
+        let mut nodes: Vec<SedNode> = charge.vec(sum(|r| r.nodes.len()))?;
+        let mut sources = charge.vec(runs.len())?;
+        sources.extend(
+            runs.iter()
+                .map(|r| Slice::new(&r.nodes, |n: &SedNode| n.id)),
+        );
+        let mut merge = NewestWins::new(sources, Some(&mut charge))?;
+        loop {
+            let mut barrier = None;
+            let next = merge.next_with(&t, |_, n| barrier = n.barrier.or(barrier));
+            t.stopped()?;
+            let Some((_, n, _)) = next else { break };
+            nodes.push(SedNode { barrier, ..*n });
+        }
+        drop(merge);
+        let removed = removed_ids(&nodes, &mut charge, &t)?;
+
+        let mut edges = |side: fn(&Run) -> &[SedEdge]| {
+            let mut merged: Vec<SedEdge> = charge.vec(runs.iter().map(|r| side(r).len()).sum())?;
+            let mut sources = charge.vec(runs.len())?;
+            sources.extend(
+                runs.iter()
+                    .map(|r| Slice::new(side(r), |e: &SedEdge| e.key)),
+            );
+            let mut merge = NewestWins::new(sources, Some(&mut charge))?;
+            loop {
+                let next = merge.next(&t);
+                t.stopped()?;
+                let Some((_, e, _)) = next else { break };
+                t.tick()?;
+                if survives(&nodes, &removed, e.order.0, &[e.key.0, e.key.1]) {
+                    merged.push(*e);
+                }
+            }
+            Ok::<_, GraphError>(merged)
+        };
+        let out = edges(|r| &r.out)?;
+        let inc = edges(|r| &r.inc)?;
+
+        let mut arena: Vec<u8> = charge.vec(sum(|r| r.arena.len()))?;
+        let mut facts: Vec<SedFact> = charge.vec(sum(|r| r.facts.len()))?;
+        let mut sources = charge.vec(runs.len())?;
+        sources.extend(
+            runs.iter()
+                .map(|r| Slice::new(&r.facts, |f: &SedFact| f.key)),
+        );
+        let mut merge = NewestWins::new(sources, Some(&mut charge))?;
+        loop {
+            let next = merge.next(&t);
+            t.stopped()?;
+            let Some((_, f, from)) = next else { break };
+            t.tick()?;
+            if survives(&nodes, &removed, f.order.0, &[f.key.0]) {
+                let payload = copy_payload(&mut arena, runs[from].payload(f), &t)?;
+                facts.push(SedFact {
+                    payload,
+                    ..f.clone()
+                });
+            }
+        }
+        drop(merge);
+
+        Ok(Self {
+            span,
+            nodes,
+            removed,
+            out,
+            inc,
+            facts,
+            arena,
+            _lease: charge.into_lease(),
         })
     }
 
-    /// This sediment followed by `batches` (oldest first), as a new value equal to preparing
-    /// every batch from scratch (barriers and newest-wins included); `self` is unchanged, so
-    /// views over it stay valid.
-    ///
-    /// Work: `batches` are prepared alone (sorting only them), then merged with the prepared
-    /// state by one linear pass per stream, O(prepared + new) units with no re-sort of what was
-    /// already prepared. The new value's vectors are reserved on `budget` and stay charged
-    /// while it lives; the working copy of `batches` is released before returning.
+    /// Records over the four streams: the size the merge rule compares.
+    fn size(&self) -> usize {
+        self.nodes.len() + self.out.len() + self.inc.len() + self.facts.len()
+    }
+
+    /// The newest change of `id` in this run.
+    pub(crate) fn node(&self, id: u32) -> Option<&SedNode> {
+        if !spans(&self.nodes, id, |n| n.id) {
+            return None;
+        }
+        let at = self.nodes.binary_search_by_key(&id, |n| n.id).ok()?;
+        self.nodes.get(at)
+    }
+
+    /// Whether `id` is removed in this run: older records of it are deleted.
+    pub(crate) fn removes(&self, id: u32) -> bool {
+        spans(&self.removed, id, |&r| r) && self.removed.binary_search(&id).is_ok()
+    }
+
+    /// The ids removed in this run, ascending.
+    pub(crate) fn removed(&self) -> &[u32] {
+        &self.removed
+    }
+
+    /// Node changes ascending by id.
+    pub(crate) fn nodes(&self) -> &[SedNode] {
+        &self.nodes
+    }
+
+    /// Edge changes of one direction, ascending by (node, neighbour, relation).
+    pub(crate) fn edges(&self, out: bool) -> &[SedEdge] {
+        if out { &self.out } else { &self.inc }
+    }
+
+    /// The edge changes of `n` in one direction, ascending by (neighbour, relation).
+    pub(crate) fn list(&self, n: u32, out: bool) -> &[SedEdge] {
+        let all = self.edges(out);
+        if !spans(all, n, |e| e.key.0) {
+            return &[];
+        }
+        let lo = all.partition_point(|e| e.key.0 < n);
+        let hi = all.partition_point(|e| e.key.0 <= n);
+        &all[lo..hi]
+    }
+
+    /// Fact changes ascending by (node, key).
+    pub(crate) fn facts(&self) -> &[SedFact] {
+        &self.facts
+    }
+
+    /// The fact changes of `n`, ascending by key.
+    pub(crate) fn facts_of(&self, n: u32) -> &[SedFact] {
+        if !spans(&self.facts, n, |f| f.key.0) {
+            return &[];
+        }
+        let lo = self.facts.partition_point(|f| f.key.0 < n);
+        let hi = self.facts.partition_point(|f| f.key.0 <= n);
+        &self.facts[lo..hi]
+    }
+
+    /// The change of fact `key` of `n` in this run.
+    pub(crate) fn fact(&self, n: u32, key: u8) -> Option<&SedFact> {
+        if !spans(&self.facts, n, |f| f.key.0) {
+            return None;
+        }
+        let at = self.facts.binary_search_by_key(&(n, key), |f| f.key).ok()?;
+        self.facts.get(at)
+    }
+
+    /// The payload of `f`, a fact of this run.
+    pub(crate) fn payload(&self, f: &SedFact) -> &[u8] {
+        self.arena.get(f.payload.clone()).unwrap_or_default()
+    }
+
+    /// The smallest domain covering every id named here.
+    fn domain(&self) -> u64 {
+        let top = [
+            self.nodes.last().map(|n| n.id),
+            self.out.last().map(|e| e.key.0),
+            self.inc.last().map(|e| e.key.0),
+            self.facts.last().map(|f| f.key.0),
+        ];
+        top.into_iter()
+            .flatten()
+            .max()
+            .map_or(0, |id| u64::from(id) + 1)
+    }
+}
+
+/// Where the size-tier rule starts merging `sizes` (oldest first, the newest last): the first
+/// index of the suffix that merges, or the last index when nothing merges.
+fn tier_start(sizes: &[usize]) -> usize {
+    let Some(&newest) = sizes.last() else {
+        return 0;
+    };
+    let mut start = sizes.len() - 1;
+    let mut merged = newest;
+    while start > 0 && merged.saturating_mul(2) >= sizes[start - 1] {
+        start -= 1;
+        merged = merged.saturating_add(sizes[start]);
+    }
+    start
+}
+
+impl PreparedSediment {
+    /// No sediment: nothing is allocated or charged.
+    #[must_use]
+    pub const fn empty() -> Self {
+        Self {
+            runs: Vec::new(),
+            batches: 0,
+            _lease: None,
+        }
+    }
+
+    /// Prepare `batches` (oldest first) as one run: copy, sort and compact their streams and
+    /// apply the deletion barriers. Every vector is reserved on `budget` before it is
+    /// allocated and stays charged while the result lives; the fact payloads are copied, so the
+    /// result does not borrow `batches`.
     ///
     /// # Errors
-    /// As [`PreparedSediment::prepare`]; nothing new stays charged.
+    /// [`GraphError::BudgetExceeded`] when `budget` refuses a reservation, already refuses at
+    /// entry or is cancelled or past its deadline while preparing; nothing stays charged.
+    pub fn prepare<R: AsRef<Records>>(
+        batches: &[R],
+        budget: &QueryBudget,
+    ) -> Result<Self, GraphError> {
+        Self::empty().extend(batches, budget)
+    }
+
+    /// This sediment followed by `batches` (oldest first), as a new value that answers as
+    /// preparing every batch from scratch (barriers and newest-wins included); `self` is
+    /// unchanged, so views over it stay valid.
+    ///
+    /// Work: `batches` are prepared as one new run (sorting only them), which shares `self`'s
+    /// runs and then merges with the newest of them by the size-tier rule and the run limit
+    /// (see the module documentation): O(log N) record moves per appended record, amortised,
+    /// over N records. The new run, every merge output and the run list are reserved on
+    /// `budget` before they are built and stay charged while the new value lives; runs shared
+    /// with `self` keep their own charge.
+    ///
+    /// # Errors
+    /// As [`PreparedSediment::prepare`]; nothing new stays charged and `self` is unchanged.
     pub fn extend<R: AsRef<Records>>(
         &self,
         batches: &[R],
         budget: &QueryBudget,
     ) -> Result<Self, GraphError> {
-        let new = Self::prepare_from(batches, self.batches, budget)?;
-        self.merge(&new, budget)
+        self.extend_within(batches, budget, MAX_SEDIMENT_RUNS)
     }
 
-    /// [`PreparedSediment::extend`] under a run limit of `limit` instead of
-    /// [`MAX_SEDIMENT_RUNS`].
+    /// [`PreparedSediment::extend`] under a run limit of `limit` (at least one).
     fn extend_within<R: AsRef<Records>>(
         &self,
         batches: &[R],
         budget: &QueryBudget,
-        _limit: usize,
+        limit: usize,
     ) -> Result<Self, GraphError> {
-        self.extend(batches, budget)
-    }
-
-    /// `self` followed by `new` (prepared from the batches after `self`'s).
-    fn merge(&self, new: &Self, budget: &QueryBudget) -> Result<Self, GraphError> {
+        budget.check()?;
+        let fresh = Run::build(batches, self.batches, budget)?;
         let mut charge = Charge::new(budget)?;
-        let t = Ticker::new(budget);
-
-        let mut nodes: Vec<SedNode> = charge.vec(self.nodes.len() + new.nodes.len())?;
-        let mut barriers = false;
-        merge_newest(
-            &self.nodes,
-            &new.nodes,
-            |n| n.id,
-            |_| true,
-            |n, fresh| {
-                let barrier = if fresh {
-                    n.barrier.or_else(|| barrier_of(&self.nodes, n.id))
-                } else {
-                    n.barrier
-                };
-                barriers |= barrier.is_some();
-                nodes.push(SedNode { barrier, ..*n });
-                Ok(())
-            },
-            &t,
-        )?;
-
-        let edges = |old: &[SedEdge], fresh: &[SedEdge], charge: &mut Charge| {
-            let mut merged: Vec<SedEdge> = charge.vec(old.len() + fresh.len())?;
-            merge_newest(
-                old,
-                fresh,
-                |e| e.key,
-                |e| survives(&nodes, e.order.0, &[e.key.0, e.key.1]),
-                |e, _| {
-                    merged.push(*e);
-                    Ok(())
-                },
-                &t,
-            )?;
-            Ok::<_, GraphError>(merged)
-        };
-        let out = edges(&self.out, &new.out, &mut charge)?;
-        let inc = edges(&self.inc, &new.inc, &mut charge)?;
-
-        let mut arena: Vec<u8> = charge.vec(self.arena.len() + new.arena.len())?;
-        let mut facts: Vec<SedFact> = charge.vec(self.facts.len() + new.facts.len())?;
-        merge_newest(
-            &self.facts,
-            &new.facts,
-            |f| f.key,
-            |f| survives(&nodes, f.order.0, &[f.key.0]),
-            |f, fresh| {
-                let from = if fresh { new } else { self };
-                let bytes = from.arena.get(f.payload.clone()).unwrap_or_default();
-                let payload = copy_payload(&mut arena, bytes, &t)?;
-                facts.push(SedFact {
-                    payload,
-                    ..f.clone()
-                });
-                Ok(())
-            },
-            &t,
-        )?;
-
+        let mut runs: Vec<Arc<Run>> = charge.vec(self.runs.len() + usize::from(fresh.is_some()))?;
+        runs.extend(self.runs.iter().cloned());
+        if let Some(fresh) = fresh {
+            runs.push(Arc::new(fresh));
+            let mut sizes: Vec<usize> = charge.vec(runs.len())?;
+            sizes.extend(runs.iter().map(|r| r.size()));
+            let start = tier_start(&sizes);
+            if start + 1 < runs.len() {
+                let merged = Run::merge(&runs[start..], budget)?;
+                runs.truncate(start);
+                runs.push(Arc::new(merged));
+            }
+        }
+        while runs.len() > limit.max(1) {
+            let at = (0..runs.len() - 1)
+                .min_by_key(|&i| runs[i].size() + runs[i + 1].size())
+                .unwrap_or(0);
+            let merged = Run::merge(&runs[at..at + 2], budget)?;
+            runs[at] = Arc::new(merged);
+            runs.remove(at + 1);
+        }
         Ok(Self {
-            nodes,
-            out,
-            inc,
-            facts,
-            arena,
-            batches: new.batches,
-            barriers,
+            runs,
+            batches: self.batches + batches.len(),
             _lease: Some(charge.into_lease()),
         })
     }
@@ -452,78 +652,56 @@ impl PreparedSediment {
     /// between 1 and [`MAX_SEDIMENT_RUNS`].
     #[must_use]
     pub fn runs(&self) -> usize {
-        0
+        self.runs.len()
+    }
+
+    /// The runs, oldest first.
+    pub(crate) fn sorted_runs(&self) -> &[Arc<Run>] {
+        &self.runs
     }
 
     /// The newest membership change of `id` in the sediment.
     pub(crate) fn node(&self, id: u32) -> Option<OpKind> {
-        self.nodes
-            .binary_search_by_key(&id, |n| n.id)
-            .ok()
-            .map(|at| self.nodes[at].kind)
+        self.runs
+            .iter()
+            .rev()
+            .find_map(|r| r.node(id))
+            .map(|n| n.kind)
     }
 
-    /// Whether `id` is removed somewhere in the sediment: every extent record of it is deleted.
-    pub(crate) fn barrier(&self, id: u32) -> bool {
-        self.barriers && barrier_of(&self.nodes, id).is_some()
+    /// The index of the newest run that removes `id`: older runs and every extent hold no
+    /// surviving record of it.
+    pub(crate) fn cut(&self, id: u32) -> Option<usize> {
+        self.runs.iter().rposition(|r| r.removes(id))
     }
 
-    /// Node changes ascending by id.
-    pub(crate) fn nodes(&self) -> &[SedNode] {
-        &self.nodes
+    /// Whether `id` is removed in run `from` or a newer one: records of it older than run
+    /// `from` (from extents when `from` is 0) are deleted.
+    pub(crate) fn removed_since(&self, id: u32, from: usize) -> bool {
+        self.runs
+            .get(from..)
+            .is_some_and(|newer| newer.iter().any(|r| r.removes(id)))
     }
 
-    /// The surviving edge changes of `n` in one direction, ascending by (neighbour, relation).
-    pub(crate) fn list(&self, n: u32, out: bool) -> &[SedEdge] {
-        let all = if out { &self.out } else { &self.inc };
-        let lo = all.partition_point(|e| e.key.0 < n);
-        let hi = all.partition_point(|e| e.key.0 <= n);
-        &all[lo..hi]
-    }
-
-    /// Nodes with a surviving edge change in one direction, ascending.
-    pub(crate) fn listed(&self, out: bool) -> impl Iterator<Item = u32> + '_ {
-        let all = if out { &self.out } else { &self.inc };
-        let mut prev = None;
-        all.iter().filter_map(move |e| {
-            let fresh = prev != Some(e.key.0);
-            prev = Some(e.key.0);
-            fresh.then_some(e.key.0)
-        })
-    }
-
-    /// The surviving change of fact `key` of `n`.
+    /// The sediment's change of fact `key` of `n`, newest run first; a removal of `n` reads as
+    /// a removed fact (it deletes every older value).
     pub(crate) fn fact(&self, n: u32, key: u8) -> Option<(OpKind, &[u8])> {
-        let f = &self.facts[self.facts.binary_search_by_key(&(n, key), |f| f.key).ok()?];
-        Some((f.kind, self.arena.get(f.payload.clone())?))
-    }
-
-    /// Every surviving fact change in (node, key) order.
-    pub(crate) fn facts(&self) -> impl Iterator<Item = ((u32, u8), OpKind, &[u8])> + '_ {
-        self.facts.iter().map(|f| {
-            (
-                f.key,
-                f.kind,
-                self.arena.get(f.payload.clone()).unwrap_or_default(),
-            )
-        })
+        for r in self.runs.iter().rev() {
+            if let Some(f) = r.fact(n, key) {
+                return Some((f.kind, r.payload(f)));
+            }
+            if r.removes(n) {
+                return Some((OpKind::Remove, &[]));
+            }
+        }
+        None
     }
 
     /// The smallest domain covering every id named here.
     pub(crate) fn domain(&self) -> u64 {
-        let top = [
-            self.nodes.last().map(|n| n.id),
-            self.out.last().map(|e| e.key.0),
-            self.inc.last().map(|e| e.key.0),
-            self.facts.last().map(|f| f.key.0),
-        ];
-        top.into_iter()
-            .flatten()
-            .max()
-            .map_or(0, |id| u64::from(id) + 1)
+        self.runs.iter().map(|r| r.domain()).max().unwrap_or(0)
     }
 }
-
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)] // test code: failures are the assertion
@@ -566,7 +744,7 @@ mod tests {
                 payload: i.to_le_bytes().to_vec(),
             }],
         };
-        if i % 4 == 0 {
+        if i.is_multiple_of(4) {
             r.edges.push(EdgeOp {
                 src: id(i + 2),
                 rel: RelId(0),

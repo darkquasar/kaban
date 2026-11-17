@@ -8,6 +8,7 @@ mod error;
 mod facts;
 mod id;
 mod layer;
+mod merge;
 mod op;
 mod paths;
 mod presence;

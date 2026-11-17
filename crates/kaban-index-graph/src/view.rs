@@ -22,6 +22,7 @@ use crate::charge::{Charge, Ticker};
 use crate::error::GraphError;
 use crate::id::{Direction, LocalId, RelId, RelSelection};
 use crate::layer::{Edges, Extent, Layer};
+use crate::merge::{NewestWins, Source, charged};
 use crate::op::{Attr, OpKind, corrupt};
 use crate::presence::PresenceIter;
 use crate::sediment::{EMPTY, PreparedSediment, SedEdge, SedNode};
@@ -49,14 +50,6 @@ pub struct View<'a> {
     /// Whether the newest layer's union is trusted: its depth is the layer count and it was
     /// verified to cover every node touched by every layer of this chain.
     union: bool,
-}
-
-/// A cursor vector of `capacity`, charged when a charge is given (query paths).
-fn cursors<T>(charge: Option<&mut Charge>, capacity: usize) -> Result<Vec<T>, GraphError> {
-    match charge {
-        Some(charge) => charge.vec(capacity),
-        None => Ok(Vec::with_capacity(capacity)),
-    }
 }
 
 impl<'a> View<'a> {
@@ -189,17 +182,21 @@ impl<'a> View<'a> {
     }
 
     /// One direction's merged list of `n`; `rels` filters by relation and presence. Preparing
-    /// each extent's cursor is one unit of `t`.
+    /// each extent's and run's cursor is one unit of `t`. The extents and the runs older than
+    /// the newest run that removes `n` are behind its barrier and are not read.
     fn list<'v>(
         &'v self,
         n: u32,
         out: bool,
         rels: Option<&'v RelSelection>,
-        charge: Option<&mut Charge>,
+        mut charge: Option<&mut Charge>,
         t: &Ticker<'_>,
     ) -> Result<List<'v>, GraphError> {
-        let mut sources: Vec<Cursor<EdgeSource<'v>>> = cursors(charge, self.layers.len() + 2)?;
-        if !self.sediment.barrier(n) {
+        let runs = self.sediment.sorted_runs();
+        let cut = self.sediment.cut(n);
+        let mut sources: Vec<EdgeSource<'v>> =
+            charged(charge.as_deref_mut(), self.layers.len() + 1 + runs.len())?;
+        if cut.is_none() {
             let skip_layers = self.union
                 && self.layers.last().is_some_and(|l| {
                     l.extent
@@ -217,18 +214,24 @@ impl<'a> View<'a> {
                 t.tick()?;
                 let edges = e.edges(out);
                 if let Some(range) = edges.list(n) {
-                    sources.push(Cursor::new(EdgeSource::Extent { edges, range }));
+                    sources.push(EdgeSource::Extent { edges, range });
                 }
             }
         }
-        t.tick()?;
-        sources.push(Cursor::new(EdgeSource::Sediment(
-            self.sediment.list(n, out).iter(),
-        )));
+        for (i, run) in runs.iter().enumerate().skip(cut.unwrap_or(0)) {
+            t.tick()?;
+            let list = run.list(n, out);
+            if !list.is_empty() {
+                sources.push(EdgeSource::Run {
+                    entries: list.iter(),
+                    from: i + 1,
+                });
+            }
+        }
         Ok(List {
             view: self,
             rels,
-            merge: NewestWins { sources },
+            merge: NewestWins::new(sources, charge)?,
         })
     }
 
@@ -251,7 +254,9 @@ impl<'a> View<'a> {
             .extents()
             .flat_map(|e| e.edges(out).touched())
             .collect();
-        set.extend(self.sediment.listed(out));
+        for run in self.sediment.sorted_runs() {
+            set.extend(run.edges(out).iter().map(|e| e.key.0));
+        }
         set
     }
 
@@ -282,31 +287,31 @@ impl<'a> View<'a> {
     /// Present nodes; unbudgeted when `budget` is `None` (writer paths).
     pub(crate) fn present<'v>(&'v self, budget: Option<&'v QueryBudget>) -> Nodes<'v> {
         let mut it = Nodes {
-            merge: NewestWins {
-                sources: Vec::new(),
-            },
+            merge: NewestWins::empty(),
             ticker: Ticker::maybe(budget),
             pending: None,
             done: false,
             lease: None,
         };
         let t = &it.ticker;
+        let runs = self.sediment.sorted_runs();
         let prepared = budget.map(Charge::new).transpose().and_then(|mut charge| {
-            let mut sources: Vec<Cursor<PresenceSource<'v>>> =
-                cursors(charge.as_mut(), self.layers.len() + 2)?;
+            let mut sources: Vec<PresenceSource<'v>> =
+                charged(charge.as_mut(), self.layers.len() + 1 + runs.len())?;
             for e in self.extents() {
                 t.tick()?;
-                sources.push(Cursor::new(PresenceSource::Extent(e.presence.cursor())));
+                sources.push(PresenceSource::Extent(e.presence.cursor()));
             }
-            t.tick()?;
-            sources.push(Cursor::new(PresenceSource::Sediment(
-                self.sediment.nodes().iter(),
-            )));
-            Ok((sources, charge.map(Charge::into_lease)))
+            for run in runs {
+                t.tick()?;
+                sources.push(PresenceSource::Sediment(run.nodes().iter()));
+            }
+            let merge = NewestWins::new(sources, charge.as_mut())?;
+            Ok((merge, charge.map(Charge::into_lease)))
         });
         match prepared {
-            Ok((sources, lease)) => {
-                it.merge.sources = sources;
+            Ok((merge, lease)) => {
+                it.merge = merge;
                 it.lease = lease;
             }
             Err(e) => it.pending = Some(e),
@@ -323,28 +328,28 @@ impl<'a> View<'a> {
         }
         let (kind, payload) = match self.sediment.fact(n.0, key) {
             Some(found) => found,
-            None if self.sediment.barrier(n.0) => return None,
             None => self.extents().rev().find_map(|e| e.facts.get(n.0, key))?,
         };
         (kind == OpKind::Add).then_some(payload)
     }
 
-    /// Every surviving fact, presence not applied (writer paths).
+    /// Every surviving fact, presence not applied (writer paths). Runs apply oldest first: a
+    /// run's removals delete the older facts of their nodes before its own facts apply.
     pub(crate) fn alive_facts(&self) -> BTreeMap<(u32, u8), &'a [u8]> {
         let mut map = BTreeMap::new();
         for e in self.extents() {
+            map.extend(e.facts.iter().map(|(k, kind, p)| (k, (kind, p))));
+        }
+        for run in self.sediment.sorted_runs() {
+            if !run.removed().is_empty() {
+                map.retain(|&(n, _), _| !run.removes(n));
+            }
             map.extend(
-                e.facts
+                run.facts()
                     .iter()
-                    .filter(|((n, _), _, _)| !self.sediment.barrier(*n))
-                    .map(|(k, kind, p)| (k, (kind, p))),
+                    .map(|f| (f.key, (f.kind, run.payload(f)))),
             );
         }
-        map.extend(
-            self.sediment
-                .facts()
-                .map(|(key, kind, payload)| (key, (kind, payload))),
-        );
         map.into_iter()
             .filter(|(_, (kind, _))| *kind == OpKind::Add)
             .map(|(k, (_, p))| (k, p))
@@ -354,17 +359,15 @@ impl<'a> View<'a> {
     /// The keys of the surviving facts of `n` (writer paths).
     pub(crate) fn alive_fact_keys(&self, n: u32) -> Vec<u8> {
         let mut map: BTreeMap<u8, OpKind> = BTreeMap::new();
-        if !self.sediment.barrier(n) {
+        let cut = self.sediment.cut(n);
+        if cut.is_none() {
             for e in self.extents() {
                 map.extend(e.facts.of_node(n).map(|((_, k), kind, _)| (k, kind)));
             }
         }
-        map.extend(
-            self.sediment
-                .facts()
-                .filter(|&((m, _), _, _)| m == n)
-                .map(|((_, key), kind, _)| (key, kind)),
-        );
+        for run in self.sediment.sorted_runs().iter().skip(cut.unwrap_or(0)) {
+            map.extend(run.facts_of(n).iter().map(|f| (f.key.1, f.kind)));
+        }
         map.into_iter()
             .filter(|&(_, kind)| kind == OpKind::Add)
             .map(|(k, _)| k)
@@ -392,80 +395,7 @@ fn verify_union(last: &Layer, layers: &[Layer], t: &Ticker<'_>) -> Result<(), Gr
     Ok(())
 }
 
-/// A sorted keyed source read by [`NewestWins`]; every advance is metered on the ticker.
-trait Source {
-    type Key: Ord + Copy;
-    type Value;
-
-    /// The next entry; `None` at the end or once `t` refused.
-    fn advance(&mut self, t: &Ticker<'_>) -> Option<(Self::Key, Self::Value)>;
-}
-
-/// A source with its peeked head.
-struct Cursor<S: Source> {
-    src: S,
-    head: Option<(S::Key, S::Value)>,
-    primed: bool,
-}
-
-impl<S: Source> Cursor<S> {
-    fn new(src: S) -> Self {
-        Self {
-            src,
-            head: None,
-            primed: false,
-        }
-    }
-
-    fn peek(&mut self, t: &Ticker<'_>) -> Option<S::Key> {
-        if !self.primed {
-            self.head = self.src.advance(t);
-            self.primed = true;
-        }
-        self.head.as_ref().map(|(k, _)| *k)
-    }
-
-    fn take(&mut self) -> Option<(S::Key, S::Value)> {
-        self.primed = false;
-        self.head.take()
-    }
-}
-
-/// A k-way merge of sorted keyed sources, oldest first: per key the newest source wins.
-struct NewestWins<S: Source> {
-    sources: Vec<Cursor<S>>,
-}
-
-impl<S: Source> NewestWins<S> {
-    /// The next merged entry. Comparing one source is one unit of `t` (its advance is another);
-    /// after `t` refused the result is meaningless and the caller reports the refusal.
-    fn next(&mut self, t: &Ticker<'_>) -> Option<(S::Key, S::Value)> {
-        let mut best: Option<(S::Key, usize)> = None;
-        for (i, c) in self.sources.iter_mut().enumerate() {
-            if !t.step() {
-                return None;
-            }
-            if let Some(k) = c.peek(t)
-                && best.is_none_or(|(b, _)| k <= b)
-            {
-                best = Some((k, i));
-            }
-        }
-        let (key, winner) = best?;
-        let mut value = None;
-        for (i, c) in self.sources.iter_mut().enumerate() {
-            if c.peek(t) == Some(key) {
-                let item = c.take();
-                if i == winner {
-                    value = item.map(|(_, v)| v);
-                }
-            }
-        }
-        value.map(|v| (key, v))
-    }
-}
-
-/// One presence source: an extent section or the prepared sediment.
+/// One presence source: an extent section or a sediment run.
 enum PresenceSource<'v> {
     Extent(PresenceIter<'v>),
     Sediment(std::slice::Iter<'v, SedNode>),
@@ -516,7 +446,7 @@ impl Iterator for Nodes<'_> {
                 self.done = true;
                 return Some(Err(e));
             }
-            let Some((n, kind)) = item else {
+            let Some((n, kind, _)) = item else {
                 self.done = true;
                 return None;
             };
@@ -527,19 +457,23 @@ impl Iterator for Nodes<'_> {
     }
 }
 
-/// One source of a node's list: an extent section range or the prepared sediment. The value
-/// says whether the entry comes from the sediment.
+/// One source of a node's list: an extent section range or a sediment run. The value carries
+/// the first run newer than the entry (0 for an extent entry): a removal of the neighbour in
+/// that run or a later one deletes the entry.
 enum EdgeSource<'v> {
     Extent {
         edges: &'v Edges,
         range: Range<usize>,
     },
-    Sediment(std::slice::Iter<'v, SedEdge>),
+    Run {
+        entries: std::slice::Iter<'v, SedEdge>,
+        from: usize,
+    },
 }
 
 impl Source for EdgeSource<'_> {
     type Key = (u32, u16);
-    type Value = (OpKind, Attr, bool);
+    type Value = (OpKind, Attr, usize);
 
     fn advance(&mut self, t: &Ticker<'_>) -> Option<(Self::Key, Self::Value)> {
         if !t.step() {
@@ -548,11 +482,11 @@ impl Source for EdgeSource<'_> {
         match self {
             Self::Extent { edges, range } => {
                 let (nbr, rel, kind, attr) = edges.entry(range.next()?)?;
-                Some(((nbr, rel), (kind, attr, false)))
+                Some(((nbr, rel), (kind, attr, 0)))
             }
-            Self::Sediment(it) => it
+            Self::Run { entries, from } => entries
                 .next()
-                .map(|e| ((e.key.1, e.key.2), (e.kind, e.attr, true))),
+                .map(|e| ((e.key.1, e.key.2), (e.kind, e.attr, *from))),
         }
     }
 }
@@ -571,11 +505,11 @@ impl List<'_> {
         loop {
             let item = self.merge.next(t);
             t.stopped()?;
-            let Some(((nbr, rel), (kind, attr, fresh))) = item else {
+            let Some(((nbr, rel), (kind, attr, from), _)) = item else {
                 return Ok(None);
             };
-            // An extent entry whose neighbour is removed in the sediment is deleted.
-            if kind != OpKind::Add || (!fresh && self.view.sediment.barrier(nbr)) {
+            // An entry whose neighbour is removed in a newer run is deleted.
+            if kind != OpKind::Add || self.view.sediment.removed_since(nbr, from) {
                 continue;
             }
             if let Some(rels) = self.rels
