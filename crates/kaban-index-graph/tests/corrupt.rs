@@ -471,12 +471,47 @@ fn the_largest_id_round_trips_through_a_base() {
 
 const UNION_IN: u32 = 6;
 
-/// Clear bit `id` of the union bitvector section `tag` of layer `bytes` (lengths unchanged).
-fn clear_union_bit(bytes: &mut [u8], tag: u32, id: u32) {
-    let words = section(bytes, tag).start + 8; // after the bit count
-    let at = words + 8 * (id / 64) as usize;
-    let word = get_u64(bytes, at) & !(1u64 << (id % 64));
-    put_u64(bytes, at, word);
+/// Remove `id` from the union section `tag` of layer `bytes`, keeping the section well formed
+/// with lengths unchanged, so that only the coverage check can notice: a sorted list (form 0:
+/// count `u64`, ids `u32`) gets a free id between `id`'s neighbours in its place; a bitmap
+/// (form 1: count `u64`, bit count `u64`, words, one rank sample per 8 words) loses the bit and
+/// its count and later rank samples drop by one.
+fn drop_union_id(bytes: &mut [u8], tag: u32, id: u32) {
+    let s = section(bytes, tag);
+    let domain = get_u64(bytes, 12);
+    match bytes[s.start] {
+        0 => {
+            let count = get_u64(bytes, s.start + 1) as usize;
+            let at = |i: usize| s.start + 9 + 4 * i;
+            let ids: Vec<u32> = (0..count)
+                .map(|i| u32::from_le_bytes(bytes[at(i)..at(i) + 4].try_into().unwrap()))
+                .collect();
+            let i = ids.binary_search(&id).expect("the id is in the union");
+            let lo = if i == 0 { 0 } else { u64::from(ids[i - 1]) + 1 };
+            let hi = ids.get(i + 1).map_or(domain, |&n| u64::from(n));
+            let free = (lo..hi)
+                .find(|&c| c != u64::from(id))
+                .expect("a free id next to the dropped one");
+            put_u32(bytes, at(i), free as u32);
+        }
+        1 => {
+            let count = s.start + 1;
+            let words = s.start + 17;
+            let nwords = get_u64(bytes, s.start + 9).div_ceil(64) as usize;
+            let samples = words + 8 * nwords;
+            let w = (id / 64) as usize;
+            let bit = 1u64 << (id % 64);
+            let word = get_u64(bytes, words + 8 * w);
+            assert_ne!(word & bit, 0, "the id is in the union");
+            put_u64(bytes, words + 8 * w, word & !bit);
+            put_u64(bytes, count, get_u64(bytes, count) - 1);
+            for block in w / 8 + 1..nwords.div_ceil(8) {
+                let at = samples + 8 * block;
+                put_u64(bytes, at, get_u64(bytes, at) - 1);
+            }
+        }
+        f => panic!("unknown union form {f}"),
+    }
 }
 
 /// The view over `base` and `layers`, or the answer it gives: a view that prepares must read
@@ -498,10 +533,17 @@ fn assert_safe(base: &Base, layers: &[Layer], n: u32, dir: Direction, what: &str
     }
 }
 
-/// END-MED-01: a union bitvector that misses a touched node of its own layer or of an ancestor
-/// layer is never trusted.
+/// END-MED-01: a union that misses a touched node of its own layer or of an ancestor layer is
+/// never trusted, in its bitmap form (the fixtures' own domain) and its sorted-list form (a
+/// domain of 10,000 ids).
 #[test]
 fn a_union_missing_a_touched_node_is_never_trusted() {
+    for domain in [0, 10_000] {
+        union_missing_a_touched_node(domain);
+    }
+}
+
+fn union_missing_a_touched_node(domain: u32) {
     let base = open_base(&build_base(
         &Records {
             nodes: vec![
@@ -512,7 +554,7 @@ fn a_union_missing_a_touched_node_is_never_trusted() {
             edges: vec![edge(1, 0, 2)],
             ..Records::default()
         },
-        0,
+        domain,
     ))
     .unwrap();
     // Layer 1 removes 1 > 2; layer 2 adds an unrelated edge 3 > 3.
@@ -550,24 +592,30 @@ fn a_union_missing_a_touched_node_is_never_trusted() {
     for (tag, n, dir) in [(UNION_OUT, 1, Direction::Out), (UNION_IN, 2, Direction::In)] {
         // The current layer's own change.
         let mut bad = l1.clone();
-        clear_union_bit(&mut bad, tag, n);
+        drop_union_id(&mut bad, tag, n);
         match open_layer(&bad) {
             Err(GraphError::Corrupt(_)) => {}
-            Err(e) => panic!("own change {tag}: expected Corrupt, got {e:?}"),
-            Ok(layer) => assert_safe(&base, &[layer], n, dir, &format!("own change {tag}")),
+            Err(e) => panic!("own change {tag} {domain}: expected Corrupt, got {e:?}"),
+            Ok(layer) => assert_safe(
+                &base,
+                &[layer],
+                n,
+                dir,
+                &format!("own change {tag} {domain}"),
+            ),
         }
         // An ancestor layer's change, missing from the newest union.
         let mut bad = l2.clone();
-        clear_union_bit(&mut bad, tag, n);
+        drop_union_id(&mut bad, tag, n);
         match open_layer(&bad) {
             Err(GraphError::Corrupt(_)) => {}
-            Err(e) => panic!("ancestor change {tag}: expected Corrupt, got {e:?}"),
+            Err(e) => panic!("ancestor change {tag} {domain}: expected Corrupt, got {e:?}"),
             Ok(layer) => assert_safe(
                 &base,
                 &[open_layer(&l1).unwrap(), layer],
                 n,
                 dir,
-                &format!("ancestor change {tag}"),
+                &format!("ancestor change {tag} {domain}"),
             ),
         }
     }
