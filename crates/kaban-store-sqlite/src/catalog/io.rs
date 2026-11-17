@@ -11,7 +11,7 @@
 //!   probe (open):    flock(EX) kaban.kbx.alloc => punch(keep size) [len, len + 4 KiB)
 //!                    => Punch | ZeroFill (degraded_reclamation)
 //!   reclaim_ranges:  release(range) per range (punch, or zero-fill) => sync_data(kaban.kbx)
-//!                                                                         [reclaim_ranges]
+//!                    => Released { punched, zero_filled }                 [reclaim_ranges]
 //! ```
 //!
 //! Test builds (`cfg(test)`, `failpoints`) consult [`faults`] at every sync and at the probe:
@@ -65,6 +65,17 @@ pub(crate) struct Released {
     pub(crate) punched: u64,
     /// Bytes released by zero-filling: no space is reclaimed.
     pub(crate) zero_filled: u64,
+}
+
+impl Released {
+    /// This outcome and `other`'s together.
+    #[must_use]
+    pub(crate) fn and(self, other: Self) -> Self {
+        Self {
+            punched: self.punched.saturating_add(other.punched),
+            zero_filled: self.zero_filled.saturating_add(other.zero_filled),
+        }
+    }
 }
 
 /// Sync `file`'s data (`fdatasync`) for the operation `op`, once.
@@ -133,8 +144,8 @@ pub(crate) fn probe_hole_punch(kbx: &Path) -> Result<Reclamation> {
 
 /// Release the `len` bytes at `offset` of the container `file` (at `kbx`) by `mode`, clamped
 /// to the container's length: the container neither shrinks nor grows, and the range reads as
-/// zeros afterwards. A punch the file system refuses falls back to a zero-fill. Not synced:
-/// the caller syncs once after its ranges ([`RECLAIM`]).
+/// zeros afterwards. A punch the file system refuses falls back to a zero-fill, and the outcome
+/// says which happened. Not synced: the caller syncs once after its ranges ([`RECLAIM`]).
 ///
 /// # Errors
 /// `kbx::ContainerError` for a failed measure, punch or write.
@@ -144,14 +155,14 @@ pub(crate) fn release(
     offset: u64,
     len: u64,
     mode: Reclamation,
-) -> Result<()> {
+) -> Result<Released> {
     let size = file
         .metadata()
         .map_err(|e| failed("measure", kbx, e))?
         .len();
     let end = offset.saturating_add(len).min(size);
     let Some(len) = end.checked_sub(offset).filter(|&n| n > 0) else {
-        return Ok(());
+        return Ok(Released::default());
     };
     if mode == Reclamation::Punch {
         let punched = if faults::release_punch_refused(kbx) {
@@ -160,12 +171,21 @@ pub(crate) fn release(
             punch(file, offset, len)
         };
         match punched {
-            Ok(()) => return Ok(()),
+            Ok(()) => {
+                return Ok(Released {
+                    punched: len,
+                    zero_filled: 0,
+                });
+            }
             Err(e) if refused(e) => {}
             Err(e) => return Err(failed("punch a reclaimed range of", kbx, e)),
         }
     }
-    zero_fill(file, offset, len).map_err(|e| failed("zero a reclaimed range of", kbx, e))
+    zero_fill(file, offset, len).map_err(|e| failed("zero a reclaimed range of", kbx, e))?;
+    Ok(Released {
+        punched: 0,
+        zero_filled: len,
+    })
 }
 
 /// Overwrite the `len` bytes at `offset` of `file` with zeros.

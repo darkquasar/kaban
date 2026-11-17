@@ -36,7 +36,7 @@ pub mod testing;
 mod tests;
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, PoisonError, RwLock};
 
 use kaban_core::Result;
@@ -59,6 +59,9 @@ pub(crate) struct Catalog {
     /// nothing was probed (an in-memory database, a reader, or an as-is open whose container
     /// is absent or cannot be probed): such a catalog reclaims nothing.
     reclamation: Option<io::Reclamation>,
+    /// Set once a release found its punch refused after the probe found punching (END-MED-03):
+    /// from then on the catalog zero-fills and reports degraded reclamation.
+    punch_refused: AtomicBool,
     /// The identity of the container, once it exists: a commit publishes only ranges appended
     /// to it (`None`: an in-memory database, a reader, or an as-is open without a container).
     container: Option<kbx::ContainerId>,
@@ -178,6 +181,7 @@ impl Catalog {
             #[cfg(any(test, feature = "failpoints"))]
             failpoints: failpoint::Failpoints::default(),
             reclamation: None,
+            punch_refused: AtomicBool::new(false),
             container: None,
             classes: RwLock::new(Vec::new()),
             committing: Arc::new(AtomicBool::new(false)),
@@ -263,22 +267,28 @@ impl Catalog {
             .clone()
     }
 
-    /// Whether reclamation zero-fills because the open's probe found no keep-size hole
-    /// punching (KER-11: doctor and maintenance report `space_reclaim_unsupported`, and a
-    /// zero-filled block never counts as reclaimed space).
+    /// Whether reclamation zero-fills (KER-11: doctor and maintenance report
+    /// `space_reclaim_unsupported`, and a zero-filled block never counts as reclaimed space):
+    /// the open's probe found no keep-size hole punching, or a release found its punch refused
+    /// since ([`Self::reclaim_ranges`]). `false` means only that neither is known to have
+    /// happened. Safe to read from any thread.
     #[cfg_attr(
         not(feature = "failpoints"),
         expect(dead_code, reason = "T6's doctor and maintenance read the flag")
     )]
     pub(crate) fn degraded_reclamation(&self) -> bool {
         self.reclamation == Some(io::Reclamation::ZeroFill)
+            || self.punch_refused.load(Ordering::Acquire)
     }
 
     /// Release the container ranges `ranges` (`(offset, len)`) of extents no pin can reach any
     /// more (the caller follows PC-8's two-phase rule): punched keeping the size, or
     /// zero-filled in degraded mode ([`Self::degraded_reclamation`]), then synced once (no
-    /// range, no sync). Every
-    /// range reads as zeros afterwards and the container neither shrinks nor grows.
+    /// range, no sync). Every range reads as zeros afterwards and the container neither shrinks
+    /// nor grows. The outcome counts the bytes punched and the bytes only zero-filled (a punch
+    /// the file system refuses falls back to a zero-fill and makes the catalog degraded from
+    /// then on); only punched bytes are reclaimed space. A mixed outcome is a call whose
+    /// punches began to be refused part way.
     ///
     /// # Errors
     /// `kbx::ContainerError` for a failed open, punch or write, or a catalog that probed no
@@ -293,7 +303,7 @@ impl Catalog {
             // nothing released, nothing to sync
             return Ok(io::Released::default());
         }
-        let Some(mode) = self.reclamation else {
+        let Some(probed) = self.reclamation else {
             return Err(kbx::failed(
                 "reclaim ranges of",
                 &self.kbx,
@@ -304,11 +314,21 @@ impl Catalog {
             ));
         };
         let file = kbx::open_existing(&self.kbx).map_err(|e| kbx::failed("open", &self.kbx, e))?;
+        let mut released = io::Released::default();
         for &(offset, len) in ranges {
-            io::release(&file, &self.kbx, offset, len, mode)?;
+            let mode = if self.punch_refused.load(Ordering::Acquire) {
+                io::Reclamation::ZeroFill
+            } else {
+                probed
+            };
+            let range = io::release(&file, &self.kbx, offset, len, mode)?;
+            if mode == io::Reclamation::Punch && range.zero_filled > 0 {
+                self.punch_refused.store(true, Ordering::Release);
+            }
+            released = released.and(range);
         }
         io::sync_data(&file, &self.kbx, io::RECLAIM)?;
-        Ok(io::Released::default())
+        Ok(released)
     }
 
     /// Append `bytes` to the container outside the writer lock: reserve a range under a short
