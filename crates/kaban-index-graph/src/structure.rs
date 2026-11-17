@@ -232,13 +232,19 @@ fn cycle(
 ) -> GraphError {
     let walk = || -> Result<LocalId, GraphError> {
         let unreleased = |m: LocalId| index(set, m).is_some_and(|j| indeg.get(j) > Some(&0));
-        let start = indeg
-            .iter()
-            .position(|&d| d > 0)
+        let tick = Ticker::new(budget);
+        let mut first = None;
+        for item in tick.each(Phase::Cycle, indeg.iter().enumerate()) {
+            let (i, &d) = item?;
+            if d > 0 {
+                first = Some(i);
+                break;
+            }
+        }
+        let start = first
             .and_then(|i| set.get(i))
             .ok_or_else(|| GraphError::Corrupt("no unreleased node".to_owned()))?;
         let mut cur = LocalId(start.0);
-        let tick = Ticker::new(budget);
         for _ in 0..set.len() {
             tick.tick(Phase::Cycle)?;
             let mut pred = None;

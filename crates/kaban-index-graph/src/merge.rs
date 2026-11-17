@@ -42,13 +42,17 @@ pub(crate) fn charged<T>(
 
 impl<S: Source> NewestWins<S> {
     /// A merge of `sources` (oldest first); its head and heap vectors are charged to `charge`
-    /// when given.
+    /// when given. Setting up each source's head is one unit of `t`.
     pub(crate) fn new(
         sources: Vec<S>,
         mut charge: Option<&mut Charge>,
+        t: &Ticker<'_>,
     ) -> Result<Self, GraphError> {
         let mut heads = charged(charge.as_deref_mut(), sources.len())?;
-        heads.resize_with(sources.len(), || None);
+        for slot in t.each(Phase::MergeSetup, 0..sources.len()) {
+            slot?;
+            heads.push(None);
+        }
         let heap = BinaryHeap::from(charged(charge, sources.len())?);
         Ok(Self {
             sources,
@@ -80,8 +84,9 @@ impl<S: Source> NewestWins<S> {
 
     /// The next merged entry and the index of the source it came from. Every source holding
     /// the same key is passed to `each` oldest first and advanced; the newest one's value is
-    /// returned. Each heap pop and push is one unit of `t` (a sift of at most log2(k)
-    /// comparisons), each source advance another; after `t` refused the result is meaningless
+    /// returned. Priming visits each source once (one unit of `t` each, stopping at the first
+    /// refusal); each heap pop and push is one unit of `t` (a sift of at most log2(k)
+    /// comparisons), each source advance another. After `t` refused the result is meaningless
     /// and the caller reports the refusal.
     pub(crate) fn next_with(
         &mut self,
@@ -91,7 +96,13 @@ impl<S: Source> NewestWins<S> {
         if !self.primed {
             self.primed = true;
             for i in 0..self.sources.len() {
+                if !t.step(Phase::MergePrime) {
+                    return None;
+                }
                 self.refill(i, t, Phase::MergePrime);
+                if t.refused() {
+                    return None;
+                }
             }
         }
         let mut won: Option<(S::Key, S::Value, usize)> = None;

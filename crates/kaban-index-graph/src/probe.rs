@@ -167,7 +167,6 @@ mod tests {
 /// the same invocation refuses from that loop's own check, attempts no further unit and leaves
 /// nothing charged. Removing the loop's metering makes its row fail: either the loop is never
 /// seen (no unit of it is counted) or a later loop's check refuses instead.
-
 mod cancellation {
     #![allow(clippy::unwrap_used)] // test code: failures are the assertion
 

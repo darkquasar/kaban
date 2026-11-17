@@ -171,12 +171,23 @@ pub struct Sealed {
 /// The empty sediment, shared by chain-only readers.
 pub(crate) static EMPTY: PreparedSediment = PreparedSediment::empty();
 
-/// Total length of one stream over every batch.
-fn total<R: AsRef<Records>>(batches: &[R], len: impl Fn(&Records) -> usize) -> usize {
-    batches
-        .iter()
-        .map(|r| len(r.as_ref()))
-        .fold(0usize, usize::saturating_add)
+/// Total length of one stream over every batch, one unit of `t` per batch.
+fn total<R: AsRef<Records>>(
+    batches: &[R],
+    len: impl Fn(&Records) -> usize,
+    t: &Ticker<'_>,
+) -> Result<usize, GraphError> {
+    t.sum(Phase::CountBatches, batches, |r| len(r.as_ref()))
+}
+
+/// Total fact payload bytes over every batch, one unit of `t` per batch and per fact.
+fn payload_bytes<R: AsRef<Records>>(batches: &[R], t: &Ticker<'_>) -> Result<usize, GraphError> {
+    let mut bytes = 0usize;
+    for r in t.each(Phase::SizePayload, batches) {
+        let facts = &r?.as_ref().facts;
+        bytes = bytes.saturating_add(t.sum(Phase::SizePayload, facts, |f| f.payload.len())?);
+    }
+    Ok(bytes)
 }
 
 /// Keep the newest element of every run of equal keys (the slice is sorted by key, then order)
@@ -255,10 +266,12 @@ fn removed_ids(
     charge: &mut Charge,
     t: &Ticker<'_>,
 ) -> Result<Vec<u32>, GraphError> {
-    let count = nodes.iter().filter(|n| n.barrier.is_some()).count();
+    let count = t.sum(Phase::CountBarriers, nodes, |n| {
+        usize::from(n.barrier.is_some())
+    })?;
     let mut removed: Vec<u32> = charge.vec(count)?;
-    for n in nodes {
-        t.tick(Phase::Barriers)?;
+    for n in t.each(Phase::Barriers, nodes) {
+        let n = n?;
         if n.barrier.is_some() {
             removed.push(n.id);
         }
@@ -277,8 +290,9 @@ impl Run {
         let mut charge = Charge::new(budget)?;
         let t = Ticker::new(budget);
 
-        let mut nodes: Vec<SedNode> = charge.vec(total(batches, |r| r.nodes.len()))?;
-        for (b, r) in batches.iter().enumerate() {
+        let mut nodes: Vec<SedNode> = charge.vec(total(batches, |r| r.nodes.len(), &t)?)?;
+        for batch in t.each(Phase::Copy, batches.iter().enumerate()) {
+            let (b, r) = batch?;
             for (i, op) in r.as_ref().nodes.iter().enumerate() {
                 t.tick(Phase::Copy)?;
                 nodes.push(SedNode {
@@ -310,8 +324,9 @@ impl Run {
         nodes.truncate(kept);
         let removed = removed_ids(&nodes, &mut charge, &t)?;
 
-        let mut out: Vec<SedEdge> = charge.vec(total(batches, |r| r.edges.len()))?;
-        for (b, r) in batches.iter().enumerate() {
+        let mut out: Vec<SedEdge> = charge.vec(total(batches, |r| r.edges.len(), &t)?)?;
+        for batch in t.each(Phase::Copy, batches.iter().enumerate()) {
+            let (b, r) = batch?;
             for (i, e) in r.as_ref().edges.iter().enumerate() {
                 t.tick(Phase::Copy)?;
                 out.push(SedEdge {
@@ -340,15 +355,10 @@ impl Run {
         }
         sort_checked(&mut inc, |e| e.key, &t)?;
 
-        let payload = total(batches, |r| {
-            r.facts
-                .iter()
-                .map(|f| f.payload.len())
-                .fold(0usize, usize::saturating_add)
-        });
-        let mut arena: Vec<u8> = charge.vec(payload)?;
-        let mut facts: Vec<SedFact> = charge.vec(total(batches, |r| r.facts.len()))?;
-        for (b, r) in batches.iter().enumerate() {
+        let mut arena: Vec<u8> = charge.vec(payload_bytes(batches, &t)?)?;
+        let mut facts: Vec<SedFact> = charge.vec(total(batches, |r| r.facts.len(), &t)?)?;
+        for batch in t.each(Phase::Copy, batches.iter().enumerate()) {
+            let (b, r) = batch?;
             for (i, f) in r.as_ref().facts.iter().enumerate() {
                 t.tick(Phase::Copy)?;
                 facts.push(SedFact {
@@ -401,7 +411,7 @@ impl Run {
             runs.iter()
                 .map(|r| Slice::new(&r.nodes, |n: &SedNode| n.id)),
         );
-        let mut merge = NewestWins::new(sources, Some(&mut charge))?;
+        let mut merge = NewestWins::new(sources, Some(&mut charge), &t)?;
         loop {
             let mut barrier = None;
             let next = merge.next_with(&t, |_, n| barrier = n.barrier.or(barrier));
@@ -419,7 +429,7 @@ impl Run {
                 runs.iter()
                     .map(|r| Slice::new(side(r), |e: &SedEdge| e.key)),
             );
-            let mut merge = NewestWins::new(sources, Some(&mut charge))?;
+            let mut merge = NewestWins::new(sources, Some(&mut charge), &t)?;
             loop {
                 let next = merge.next(&t);
                 t.stopped()?;
@@ -441,7 +451,7 @@ impl Run {
             runs.iter()
                 .map(|r| Slice::new(&r.facts, |f: &SedFact| f.key)),
         );
-        let mut merge = NewestWins::new(sources, Some(&mut charge))?;
+        let mut merge = NewestWins::new(sources, Some(&mut charge), &t)?;
         loop {
             let next = merge.next(&t);
             t.stopped()?;

@@ -231,7 +231,7 @@ impl<'a> View<'a> {
         Ok(List {
             view: self,
             rels,
-            merge: NewestWins::new(sources, charge)?,
+            merge: NewestWins::new(sources, charge, t)?,
         })
     }
 
@@ -306,7 +306,7 @@ impl<'a> View<'a> {
                 t.tick(Phase::Cursor)?;
                 sources.push(PresenceSource::Sediment(run.nodes().iter()));
             }
-            let merge = NewestWins::new(sources, charge.as_mut())?;
+            let merge = NewestWins::new(sources, charge.as_mut(), t)?;
             Ok((merge, charge.map(Charge::into_lease)))
         });
         match prepared {
@@ -376,13 +376,16 @@ impl<'a> View<'a> {
 }
 
 /// Refuse a newest-layer union that misses a node touched (in either direction) by any layer of
-/// `layers`, one unit of `t` per touched id or index word visited.
+/// `layers`, one unit of `t` per layer, per direction, and per touched id or index word visited
+/// (so a chain of empty edge indexes is metered too).
 fn verify_union(last: &Layer, layers: &[Layer], t: &Ticker<'_>) -> Result<(), GraphError> {
     let Some((out, inc)) = last.extent.union.as_ref() else {
         return Err(corrupt("layer union"));
     };
-    for layer in layers {
+    for layer in t.each(Phase::UnionCoverage, layers) {
+        let layer = layer?;
         for (union, edges) in [(out, &layer.extent.out), (inc, &layer.extent.inc)] {
+            t.tick(Phase::UnionCoverage)?;
             let mut ids = edges.touched_cursor();
             while let Some(n) = ids.next(t, Phase::UnionCoverage) {
                 if !union.contains(n) {

@@ -128,13 +128,18 @@ impl<T> std::ops::Deref for Charged<T> {
 
 /// A growing query-owned vector (PC-17): every growth reserves the new buffer on the budget
 /// before allocating it, and the old buffer's charge is released once that buffer is freed.
-/// The charge always covers the live capacity.
+/// The charge always covers the live capacity. A growth moves the elements in chunks of
+/// [`MOVE_CHUNK`] bytes, one unit of work each, so a long move is checked from inside.
 #[derive(Debug)]
 pub(crate) struct Grow<'b, T> {
     budget: &'b QueryBudget,
     items: Vec<T>,
     lease: BudgetLease,
+    ticker: Ticker<'b>,
 }
+
+/// Bytes of a growing vector moved per unit of work.
+const MOVE_CHUNK: usize = 4096;
 
 /// The charge of a buffer of `capacity` elements of `T`: its bytes rounded to the alignment plus
 /// the allocation metadata.
@@ -160,6 +165,7 @@ impl<'b, T> Grow<'b, T> {
             budget,
             items: Vec::new(),
             lease: budget.reserve(0)?,
+            ticker: Ticker::new(budget),
         })
     }
 
@@ -173,7 +179,8 @@ impl<'b, T> Grow<'b, T> {
         Ok(grow)
     }
 
-    /// Room for `extra` more elements; grows by doubling, reserving before allocating.
+    /// Room for `extra` more elements; grows by doubling, reserving before allocating. After an
+    /// error the vector may be emptied: callers propagate the error and drop it.
     pub(crate) fn reserve(&mut self, extra: usize) -> Result<(), GraphError> {
         let need = self
             .items
@@ -189,8 +196,14 @@ impl<'b, T> Grow<'b, T> {
         let capacity = need.max(self.items.capacity().saturating_mul(2)).max(4);
         let lease = self.budget.reserve(buffer_charge::<T>(capacity)?)?;
         let mut items = Vec::with_capacity(capacity);
-        items.append(&mut self.items);
+        let chunk = (MOVE_CHUNK / size_of::<T>().max(1)).max(1);
+        let mut old = std::mem::take(&mut self.items).into_iter();
+        while old.len() > 0 {
+            self.ticker.tick(Phase::Grow)?;
+            items.extend(old.by_ref().take(chunk));
+        }
         // The old buffer is freed here, then its charge is released with the old lease.
+        drop(old);
         self.items = items;
         self.lease = lease;
         Ok(())
@@ -314,10 +327,6 @@ pub fn work_units() -> u64 {
 /// The metered loop a unit of work belongs to. Every unit names its loop, so test
 /// instrumentation can request a cancellation inside one named loop and see which loop's check
 /// refused; production code ignores it.
-#[allow(
-    dead_code,
-    reason = "the loops not yet metered are named by the cancellation table"
-)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Phase {
     /// Decoding sediment records and copying their payloads.
@@ -444,6 +453,42 @@ impl<'b> Ticker<'b> {
         self.tick(phase).is_ok()
     }
 
+    /// Whether a check of this ticker has refused: the loop must stop at once.
+    pub(crate) fn refused(&self) -> bool {
+        self.failed.get().is_some()
+    }
+
+    /// `items`, one unit of `phase` each: the one way a query path walks input-sized data.
+    /// The budget is checked before the first item and at every interval; once a check refuses
+    /// the error is yielded and the walk ends. A loop that does not walk this way either ticks
+    /// `phase` itself at the top of every iteration or is bounded by a constant.
+    pub(crate) fn each<I: IntoIterator>(
+        &self,
+        phase: Phase,
+        items: I,
+    ) -> Each<'_, 'b, I::IntoIter> {
+        Each {
+            ticker: self,
+            phase,
+            items: items.into_iter(),
+            done: false,
+        }
+    }
+
+    /// The saturating sum of `len` over `items`, one unit of `phase` per item.
+    pub(crate) fn sum<I: IntoIterator>(
+        &self,
+        phase: Phase,
+        items: I,
+        len: impl Fn(I::Item) -> usize,
+    ) -> Result<usize, GraphError> {
+        let mut total = 0usize;
+        for item in self.each(phase, items) {
+            total = total.saturating_add(len(item?));
+        }
+        Ok(total)
+    }
+
     /// The breach a failed step recorded, if any.
     pub(crate) fn stopped(&self) -> Result<(), GraphError> {
         match self.failed.get() {
@@ -458,6 +503,31 @@ impl<'b> Ticker<'b> {
             WORK_UNITS.fetch_add(units - self.published.get(), Ordering::SeqCst);
             self.published.set(units);
         }
+    }
+}
+
+/// The iterator of [`Ticker::each`].
+#[derive(Debug)]
+pub(crate) struct Each<'t, 'b, I> {
+    ticker: &'t Ticker<'b>,
+    phase: Phase,
+    items: I,
+    done: bool,
+}
+
+impl<I: Iterator> Iterator for Each<'_, '_, I> {
+    type Item = Result<I::Item, GraphError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.done {
+            return None;
+        }
+        let item = self.items.next()?;
+        if let Err(e) = self.ticker.tick(self.phase) {
+            self.done = true;
+            return Some(Err(e));
+        }
+        Some(Ok(item))
     }
 }
 
