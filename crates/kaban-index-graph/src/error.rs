@@ -13,14 +13,14 @@ pub enum GraphError {
         /// The cap that was missing.
         limit: &'static str,
     },
-    /// A cap exceeded its configured maximum (GRA-04), or a cap cut a search before it could
-    /// settle a global answer, which is refused rather than returned as if complete; `max` is
-    /// then the cap's own value.
-    #[error("cap exceeded: {limit} above {max}")]
+    /// A cap does not cover the request (GRA-04): the answer needs more than the cap admits (a
+    /// result larger than `rows`, a degree past `u32`), or the cap cut a search before it could
+    /// settle a global answer, which is refused rather than returned as if complete.
+    #[error("the {limit} cap of {max} does not cover the request")]
     CapExceeded {
-        /// The cap that was too large.
+        /// The cap that does not cover the request.
         limit: &'static str,
-        /// The configured maximum.
+        /// That cap's value: the one the caller passed, or the fixed limit it stands for.
         max: u64,
     },
     /// The function is not planned and is refused (GRA-01).
