@@ -133,12 +133,14 @@ impl<'a> View<'a> {
     /// nothing.
     ///
     /// The iterator charges its cursors to `budget` while it lives and checks `budget` before
-    /// its first unit of work and after every [`BUDGET_CHECK_INTERVAL`] units (see the module
-    /// documentation). After it yields an error it ends.
+    /// anything is read (an absent `n` and an empty selection included) and after every
+    /// [`BUDGET_CHECK_INTERVAL`] units (see the module documentation). After it yields an error
+    /// it ends.
     ///
     /// # Errors
-    /// Yields [`GraphError::BudgetExceeded`] when the budget refuses the cursors, the deadline
-    /// passes or the query is cancelled.
+    /// Yields [`GraphError::BudgetExceeded`] as its first item when the budget already refuses
+    /// (a recorded memory breach, the deadline or a cancellation), and when it refuses the
+    /// cursors, the deadline passes or the query is cancelled while reading.
     pub fn neighbours<'v>(
         &'v self,
         n: LocalId,
@@ -156,6 +158,12 @@ impl<'a> View<'a> {
             done: false,
             lease: None,
         };
+        // The budget is checked before anything is read, so a query that reads nothing still
+        // reports a cancelled, expired or memory-breached budget.
+        if let Err(e) = budget.check() {
+            it.pending = Some(e.into());
+            return it;
+        }
         let nothing = matches!(rels, RelSelection::Only(ids) if ids.is_empty());
         if nothing || !self.contains(n) {
             return it;
