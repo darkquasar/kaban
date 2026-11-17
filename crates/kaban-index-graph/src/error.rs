@@ -13,7 +13,9 @@ pub enum GraphError {
         /// The cap that was missing.
         limit: &'static str,
     },
-    /// A cap exceeded its configured maximum (GRA-04).
+    /// A cap exceeded its configured maximum (GRA-04), or a cap cut a search before it could
+    /// settle a global answer, which is refused rather than returned as if complete; `max` is
+    /// then the cap's own value.
     #[error("cap exceeded: {limit} above {max}")]
     CapExceeded {
         /// The cap that was too large.

@@ -183,14 +183,15 @@ impl Graph {
         if reached {
             return Ok(true);
         }
-        match self.cut(src, depth, rows) {
-            Some((cap, _)) => Err(cap),
-            None => {
-                let far = self.distances(src, Direction::Out);
-                assert!(!far.contains_key(&dst), "an uncut search saw every reachable node");
-                Ok(false)
-            }
+        if let Some((cap, _)) = self.cut(src, depth, rows) {
+            return Err(cap);
         }
+        let far = self.distances(src, Direction::Out);
+        assert!(
+            !far.contains_key(&dst),
+            "an uncut search saw every reachable node"
+        );
+        Ok(false)
     }
 
     /// The lexicographically smallest shortest path from `src` to `dst` (at every step the
@@ -239,8 +240,16 @@ impl Graph {
     ///
     /// A missed node has a summed depth of at least the smallest cut floor, so a minimum below
     /// it is the exact one; that is checked here against the unbounded distances.
-    pub(crate) fn meet(&self, a: u32, b: u32, depth: u8, rows: u32) -> Result<Vec<LocalId>, &'static str> {
-        let minima = |da: &BTreeMap<u32, usize>, db: &BTreeMap<u32, usize>| -> (Option<usize>, Vec<LocalId>) {
+    pub(crate) fn meet(
+        &self,
+        a: u32,
+        b: u32,
+        depth: u8,
+        rows: u32,
+    ) -> Result<Vec<LocalId>, &'static str> {
+        let minima = |da: &BTreeMap<u32, usize>,
+                      db: &BTreeMap<u32, usize>|
+         -> (Option<usize>, Vec<LocalId>) {
             let sums: BTreeMap<u32, usize> = da
                 .iter()
                 .filter_map(|(n, &x)| db.get(n).map(|&y| (*n, x + y)))
@@ -253,8 +262,12 @@ impl Graph {
                 .collect();
             (best, out)
         };
-        let widen = |m: BTreeMap<u32, u8>| m.into_iter().map(|(n, d)| (n, usize::from(d))).collect();
-        let (best, found) = minima(&widen(self.reached(a, depth, rows)), &widen(self.reached(b, depth, rows)));
+        let widen =
+            |m: BTreeMap<u32, u8>| m.into_iter().map(|(n, d)| (n, usize::from(d))).collect();
+        let (best, found) = minima(
+            &widen(self.reached(a, depth, rows)),
+            &widen(self.reached(b, depth, rows)),
+        );
         let low = [self.cut(a, depth, rows), self.cut(b, depth, rows)]
             .into_iter()
             .flatten()

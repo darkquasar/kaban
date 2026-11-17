@@ -16,6 +16,10 @@ use crate::id::{Direction, LocalId, RelId, RelSelection};
 use crate::view::View;
 
 /// Caps of a traversal; zero means missing and is refused (GRA-04).
+///
+/// `rows` bounds the reached nodes a search keeps, not the edges a result lists (each kept
+/// node's met edges are listed) nor every temporary candidate (a level gathers at most
+/// rows + 1 new entries per list before it is cut).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Caps {
     /// Maximum depth in hops.
@@ -36,8 +40,47 @@ pub struct Reached {
     pub nodes: Vec<(LocalId, u8)>,
     /// Every edge met within the bound, as (source, relation, destination), each once.
     pub edges: Vec<(LocalId, RelId, LocalId)>,
-    /// Whether `caps.rows` cut the result.
+    /// Whether `caps.rows` cut the result. A truncated result is a prefix on both sides: its
+    /// nodes stop at the cut and its edges are only those between kept nodes, so neither set
+    /// is complete.
     pub truncated: bool,
+}
+
+/// Where a search stopped short of everything its sources reach.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Cut {
+    /// The rows cap dropped nodes first met at `level` and nothing deeper was searched, so a
+    /// node the search did not keep lies at depth `level` or deeper.
+    Rows {
+        /// The cut level.
+        level: u8,
+    },
+    /// A node lies one hop past the depth bound (looked for only under [`Want::settle`]).
+    Depth,
+}
+
+impl Cut {
+    /// The smallest depth a node the search did not keep can have.
+    pub(crate) fn floor(self, caps: Caps) -> u16 {
+        match self {
+            Self::Rows { level } => u16::from(level),
+            Self::Depth => u16::from(caps.depth) + 1,
+        }
+    }
+
+    /// The refusal naming the cap that cut, with that cap's value.
+    pub(crate) fn refusal(self, caps: Caps) -> GraphError {
+        match self {
+            Self::Rows { .. } => GraphError::CapExceeded {
+                limit: "rows",
+                max: u64::from(caps.rows),
+            },
+            Self::Depth => GraphError::CapExceeded {
+                limit: "depth",
+                max: u64::from(caps.depth),
+            },
+        }
+    }
 }
 
 /// Refuse a zero cap; runs before any neighbour access.
@@ -67,8 +110,15 @@ pub(crate) struct Search<'b> {
     pub(crate) order: Grow<'b, (LocalId, u8)>,
     /// The edges met, when asked for.
     pub(crate) edges: Option<Grow<'b, (LocalId, RelId, LocalId)>>,
+    /// Where the search stopped short of everything the sources reach, if it did.
+    pub(crate) cut: Option<Cut>,
+}
+
+impl Search<'_> {
     /// Whether the rows cap cut a level.
-    pub(crate) truncated: bool,
+    pub(crate) fn truncated(&self) -> bool {
+        matches!(self.cut, Some(Cut::Rows { .. }))
+    }
 }
 
 /// What a search collects and when it stops early.
@@ -78,6 +128,9 @@ pub(crate) struct Want {
     pub(crate) edges: bool,
     /// Stop after the level that reaches this node.
     pub(crate) stop: Option<LocalId>,
+    /// When the search ends at the depth bound without a rows cut or reaching `stop`, look one
+    /// hop further and record [`Cut::Depth`] if an unseen node is there (global questions).
+    pub(crate) settle: bool,
 }
 
 /// One edge met while expanding `parent`: (parent, relation, neighbour, outgoing).
@@ -93,10 +146,15 @@ type Met = (u32, u16, u32, bool);
 /// separately and an edge is reported only from the endpoint expanded first (a self-loop from
 /// its outgoing side), so every directed edge appears once and reciprocal edges both appear.
 ///
+/// [`Search::cut`] records a rows cut with its level; under [`Want::settle`] a search that ends
+/// at the depth bound reads the lists of its last level until the first unseen neighbour and
+/// records [`Cut::Depth`] when there is one; a settled search without a cut saw every node
+/// its sources reach.
+///
 /// Work: each kept node at depth below `caps.depth` reads its lists once (bounded as above);
 /// each level sorts its candidates (an interruptible heapsort) and merges them into the seen
-/// set, O(seen) per level. Every loop is metered and checked every
-/// [`crate::BUDGET_CHECK_INTERVAL`] units.
+/// set, O(seen) per level; settling reads the last level's lists at most once more. Every loop
+/// is metered and checked every [`crate::BUDGET_CHECK_INTERVAL`] units.
 pub(crate) fn search<'b>(
     v: &View<'_>,
     src: &[LocalId],
@@ -129,7 +187,8 @@ pub(crate) fn search<'b>(
         None
     };
     let mut rows_left = usize::try_from(caps.rows).unwrap_or(usize::MAX);
-    let mut truncated = false;
+    let mut cut = None;
+    let mut found = false;
     let passes: &[Direction] = match dir {
         Direction::Out => &[Direction::Out],
         Direction::In => &[Direction::In],
@@ -172,12 +231,12 @@ pub(crate) fn search<'b>(
         }
         sort_checked(&mut cand, |&m| m, &tick)?;
         cand.dedup(&tick)?;
+        let next = depth + 1;
         if cand.len() > rows_left {
-            truncated = true;
+            cut = Some(Cut::Rows { level: next });
             cand.truncate(rows_left);
         }
         rows_left -= cand.len();
-        let next = depth + 1;
         if let Some(edges) = &mut edges {
             for &(n, rel, m, out) in met.iter() {
                 tick.tick()?;
@@ -198,18 +257,51 @@ pub(crate) fn search<'b>(
             order.push((LocalId(m), next))?;
         }
         seen = merge(&seen, &cand, next, budget, &tick)?;
-        let found = want.stop.is_some_and(|s| cand.binary_search(&s.0).is_ok());
+        found = want.stop.is_some_and(|s| cand.binary_search(&s.0).is_ok());
         frontier = cand;
-        if truncated || found {
+        if cut.is_some() || found {
             break;
         }
+    }
+    // A non-empty frontier here without a cut or a find is the level at the depth bound.
+    if want.settle
+        && cut.is_none()
+        && !found
+        && beyond(v, &frontier, &seen, rels, passes, budget, &tick)?
+    {
+        cut = Some(Cut::Depth);
     }
     Ok(Search {
         seen,
         order,
         edges,
-        truncated,
+        cut,
     })
+}
+
+/// Whether a node of `frontier` has a neighbour along `rels` in one of `passes` that is not in
+/// `seen`; each list is read until the first such neighbour.
+fn beyond(
+    v: &View<'_>,
+    frontier: &[u32],
+    seen: &[(u32, u8)],
+    rels: &RelSelection,
+    passes: &[Direction],
+    budget: &QueryBudget,
+    tick: &Ticker<'_>,
+) -> Result<bool, GraphError> {
+    for &n in frontier {
+        tick.tick()?;
+        for &pass in passes {
+            for row in v.neighbours(LocalId(n), rels, pass, budget) {
+                let (m, _, _) = row?;
+                if depth_of(seen, m.0).is_none() {
+                    return Ok(true);
+                }
+            }
+        }
+    }
+    Ok(false)
 }
 
 /// `seen` (sorted by id) merged with the new `level` ids (sorted, none seen) at `depth`, by a
@@ -250,7 +342,9 @@ fn merge<'b>(
 /// bound once, including edges back to nodes already reached; the edges are listed in the
 /// order of the node expanded (depth, id), then neighbour-list order, outgoing before incoming.
 /// When `caps.rows` cuts, the lowest ids of the cut depth are kept, `truncated` is set and only
-/// edges between kept nodes (and sources) are listed, those met before the cut.
+/// edges between kept nodes (and sources) are listed, those met before the cut: a truncated
+/// [`Reached`] has an incomplete node set and an incomplete edge set. The depth bound is part
+/// of the question here (nodes past it are not asked for), so it never sets `truncated`.
 ///
 /// Absent sources are ignored. The result holds the charge of its two vectors.
 ///
@@ -269,8 +363,10 @@ pub fn expand(
     let want = Want {
         edges: true,
         stop: None,
+        settle: false,
     };
     let s = search(v, src, rels, dir, caps, want, budget)?;
+    let truncated = s.truncated();
     let (nodes, nodes_lease) = s.order.into_parts();
     let (edges, edges_lease) = match s.edges {
         Some(edges) => edges.into_parts(),
@@ -279,7 +375,7 @@ pub fn expand(
     let reached = Reached {
         nodes,
         edges,
-        truncated: s.truncated,
+        truncated,
     };
     Ok(Charged::new(
         reached,
@@ -315,12 +411,22 @@ pub fn reverse_closure(
     expand(v, src, rels, Direction::In, caps, budget)
 }
 
-/// Whether `dst` is reachable from `src` along outgoing `rels` within `caps`: `dst` is among
-/// the nodes [`closure`] returns, or `dst` is `src` and present (zero hops). The search stops
-/// at the depth that reaches `dst`.
+/// Whether `dst` is reachable from `src` along outgoing `rels`, at any depth: `true` when the
+/// search within `caps` reaches `dst` (or `dst` is `src` and present: zero hops), `false` only
+/// when the search saw every node `src` reaches. The search stops at the depth that reaches
+/// `dst`.
+///
+/// The caps bound the work, not the question, and a cut never reads as `false`:
+/// - `rows`: when more nodes lie within the depth bound than `caps.rows` and `dst` is not
+///   among those kept, the call refuses (the dropped nodes may lead to `dst`);
+/// - `depth`: when the search ends at the depth bound and a node lies one hop past it, the call
+///   refuses. A `false` there would read as "unreachable" while meaning only "not within
+///   `caps.depth` hops"; the bounded question is asked through [`closure`], whose depth bound is
+///   part of its answer.
 ///
 /// # Errors
-/// As [`expand`].
+/// [`GraphError::CapExceeded`] naming `rows` or `depth` (with that cap's value) when a cut
+/// kept the search from settling the answer; plus the [`expand`] errors.
 pub fn reachable(
     v: &View<'_>,
     src: LocalId,
@@ -337,7 +443,14 @@ pub fn reachable(
     let want = Want {
         edges: false,
         stop: Some(dst),
+        settle: true,
     };
     let s = search(v, &[src], rels, Direction::Out, caps, want, budget)?;
-    Ok(depth_of(&s.seen, dst.0).is_some())
+    if depth_of(&s.seen, dst.0).is_some() {
+        return Ok(true);
+    }
+    match s.cut {
+        None => Ok(false),
+        Some(cut) => Err(cut.refusal(caps)),
+    }
 }

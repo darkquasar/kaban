@@ -146,9 +146,11 @@ pub fn topo_order(
     let want = Want {
         edges: false,
         stop: None,
+        settle: false,
     };
     let reached = search(v, nodes, rels, Direction::Out, caps, want, budget)?;
-    if reached.truncated || reached.seen.len() > usize::try_from(caps.rows).unwrap_or(usize::MAX) {
+    if reached.truncated() || reached.seen.len() > usize::try_from(caps.rows).unwrap_or(usize::MAX)
+    {
         return Err(GraphError::CapExceeded {
             limit: "rows",
             max: u64::from(caps.rows),
@@ -354,8 +356,8 @@ pub fn wcc(
     }
     let (rows, lease) = out.into_parts();
     let components = Components {
+        truncated: nodes.len() > rows.len(),
         rows,
-        truncated: false,
     };
     Ok(Charged::new(components, Hold::new(lease, None)))
 }

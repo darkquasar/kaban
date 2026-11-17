@@ -317,8 +317,8 @@ fn fan() -> [Records; 1] {
     }]
 }
 
-fn refused(limit: &'static str, max: u64) -> Option<GraphError> {
-    Some(GraphError::CapExceeded { limit, max })
+fn refused(limit: &'static str, max: u64) -> GraphError {
+    GraphError::CapExceeded { limit, max }
 }
 
 #[test]
@@ -329,13 +329,21 @@ fn a_rows_cut_never_reads_as_unreachable() {
     let r = |dst: u32, c: Caps| reachable(&v, LocalId(1), LocalId(dst), &all, c, &b);
     // Rows 2 keeps {2, 3} of level one: 4 is dropped and 9 lies behind it.
     for dst in [4, 9, 7] {
-        assert_eq!(r(dst, caps(3, 2)).err(), refused("rows", 2), "dst {dst}");
+        assert_eq!(
+            r(dst, caps(3, 2)).err(),
+            Some(refused("rows", 2)),
+            "dst {dst}"
+        );
     }
     assert_eq!(r(2, caps(3, 2)), Ok(true), "a kept node is reached");
     assert_eq!(r(3, caps(3, 2)), Ok(true), "a kept node is reached");
     // Uncut: everything 1 reaches lies within depth 3 and 6 rows.
     assert_eq!(r(9, caps(3, 6)), Ok(true));
-    assert_eq!(r(7, caps(3, 6)), Ok(false), "a settled search says unreachable");
+    assert_eq!(
+        r(7, caps(3, 6)),
+        Ok(false),
+        "a settled search says unreachable"
+    );
 }
 
 #[test]
@@ -345,8 +353,8 @@ fn a_depth_bound_with_nodes_beyond_it_is_refused_not_false() {
     let (b, all) = (budget(), RelSelection::All);
     let r = |dst: u32, c: Caps| reachable(&v, LocalId(1), LocalId(dst), &all, c, &b);
     // Depth 2 reaches 5 but not 6, which lies one hop past the bound.
-    assert_eq!(r(6, caps(2, 100)).err(), refused("depth", 2));
-    assert_eq!(r(7, caps(2, 100)).err(), refused("depth", 2));
+    assert_eq!(r(6, caps(2, 100)).err(), Some(refused("depth", 2)));
+    assert_eq!(r(7, caps(2, 100)).err(), Some(refused("depth", 2)));
     assert_eq!(r(5, caps(2, 100)), Ok(true));
     // Depth 3 sees everything: 7 is settled as unreachable.
     assert_eq!(r(7, caps(3, 100)), Ok(false));
@@ -369,13 +377,14 @@ fn shortest_path_refuses_when_a_cut_hides_the_path() {
     let v = view(None, &[], &rs);
     let (b, all) = (budget(), RelSelection::All);
     let p = |dst: u32, c: Caps| {
-        shortest_path(&v, LocalId(1), LocalId(dst), &all, c, &b).map(|p| p.map(|p| p.value().clone()))
+        shortest_path(&v, LocalId(1), LocalId(dst), &all, c, &b)
+            .map(|p| p.map(|p| p.value().clone()))
     };
     // The path 1 > 4 > 9 runs through 4, which rows 2 drops.
-    assert_eq!(p(9, caps(4, 2)).err(), refused("rows", 2));
-    assert_eq!(p(7, caps(4, 2)).err(), refused("rows", 2));
+    assert_eq!(p(9, caps(4, 2)).err(), Some(refused("rows", 2)));
+    assert_eq!(p(7, caps(4, 2)).err(), Some(refused("rows", 2)));
     // 1 > 3 > 5 > 6 is three hops: depth 2 cannot settle it.
-    assert_eq!(p(6, caps(2, 100)).err(), refused("depth", 2));
+    assert_eq!(p(6, caps(2, 100)).err(), Some(refused("depth", 2)));
     // A cut at the level where dst is kept hides nothing: every shallower level is complete.
     assert_eq!(p(3, caps(4, 2)), Ok(Some(vec![LocalId(1), LocalId(3)])));
     assert_eq!(
@@ -396,7 +405,7 @@ fn meet_refuses_when_a_cut_could_hide_a_minimum() {
     }];
     let v = view(None, &[], &twin);
     let m = |c: Caps| meet(&v, LocalId(1), LocalId(2), &all, c, &b).map(|r| r.value().clone());
-    assert_eq!(m(caps(1, 1)).err(), refused("rows", 1));
+    assert_eq!(m(caps(1, 1)).err(), Some(refused("rows", 1)));
     assert_eq!(m(caps(1, 2)), Ok(vec![LocalId(3), LocalId(4)]));
     // 1 > 3 > 5 and 2 > 4 > 5: depth 1 finds no common node, but one lies past the bound.
     let far = [Records {
@@ -406,7 +415,7 @@ fn meet_refuses_when_a_cut_could_hide_a_minimum() {
     }];
     let v = view(None, &[], &far);
     let m = |c: Caps| meet(&v, LocalId(1), LocalId(2), &all, c, &b).map(|r| r.value().clone());
-    assert_eq!(m(caps(1, 10)).err(), refused("depth", 1));
+    assert_eq!(m(caps(1, 10)).err(), Some(refused("depth", 1)));
     assert_eq!(m(caps(2, 10)), Ok(vec![LocalId(5)]));
     // 1 > 2 > 7 > 8: the minimum 2 (summed depth 1) is below anything past depth 1, so it is
     // the exact answer although both searches stop short of the whole graph.
@@ -430,7 +439,10 @@ fn wcc_flags_rows_left_out() {
     let v = view(None, &[], &three);
     let (b, all) = (budget(), RelSelection::All);
     let got = wcc(&v, &all, RowCap(2), &b).unwrap();
-    assert_eq!(got.rows, vec![(LocalId(1), LocalId(1)), (LocalId(2), LocalId(2))]);
+    assert_eq!(
+        got.rows,
+        vec![(LocalId(1), LocalId(1)), (LocalId(2), LocalId(2))]
+    );
     assert!(got.truncated, "a third member exists");
     let got = wcc(&v, &all, RowCap(3), &b).unwrap();
     assert_eq!(got.rows.len(), 3);

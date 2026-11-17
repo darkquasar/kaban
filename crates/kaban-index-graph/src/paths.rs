@@ -7,14 +7,23 @@ use kaban_core::query_budget::QueryBudget;
 use crate::charge::{Charged, Grow, Hold, Ticker};
 use crate::error::GraphError;
 use crate::id::{Direction, LocalId, RelSelection};
-use crate::traverse::{Caps, Want, check_caps, depth_of, search};
+use crate::traverse::{Caps, Cut, Want, check_caps, depth_of, search};
 use crate::view::View;
 
 /// A shortest outgoing path from `src` to `dst` within `caps`, `src` and `dst` included.
 ///
-/// `dst` must be reachable as [`crate::reachable`] defines it (`src` itself gives a one-node
-/// path). Among the shortest paths the lexicographically smallest wins: from `src`, each step
-/// takes the lowest-id successor that is still on a shortest path to `dst`.
+/// `Some` when the search within `caps` reaches `dst` (`src` itself gives a one-node path);
+/// `None` only when the search saw every node `src` reaches, so no path exists at any depth.
+/// Among the shortest paths the lexicographically smallest wins: from `src`, each step takes
+/// the lowest-id successor that is still on a shortest path to `dst`.
+///
+/// Caps and completeness, as [`crate::reachable`]: a rows or depth cut that keeps the search
+/// from settling the answer refuses rather than reading as `None`. A path found is exact even
+/// when the rows cap cut the level where `dst` was found: a cut ends the search at its level,
+/// so every shallower level is complete (no shorter path is hidden) and the cut level
+/// contributes only `dst` itself (no smaller path through a dropped node of that level
+/// exists). The depth bound only limits how far the search looks; a found path is never
+/// longer than `caps.depth`.
 ///
 /// Work: one breadth-first search to the depth of `dst`, then one backward pass over the
 /// outgoing lists of the levels in between to mark the nodes on a shortest path, and one
@@ -22,7 +31,8 @@ use crate::view::View;
 /// charge.
 ///
 /// # Errors
-/// As [`crate::expand`].
+/// [`GraphError::CapExceeded`] naming `rows` or `depth` (with that cap's value) when a cut
+/// kept the search from settling the answer; plus the [`crate::expand`] errors.
 pub fn shortest_path(
     v: &View<'_>,
     src: LocalId,
@@ -45,10 +55,14 @@ pub fn shortest_path(
     let want = Want {
         edges: false,
         stop: Some(dst),
+        settle: true,
     };
     let s = search(v, &[src], rels, Direction::Out, caps, want, budget)?;
     let Some(len) = depth_of(&s.seen, dst.0) else {
-        return Ok(None);
+        return match s.cut {
+            None => Ok(None),
+            Some(cut) => Err(cut.refusal(caps)),
+        };
     };
     let order = &s.order[..];
     // The slice of `order` holding depth `d` (sorted by id).
@@ -121,16 +135,27 @@ pub fn shortest_path(
     Ok(Some(Charged::new(path, Hold::new(lease, None))))
 }
 
-/// The nodes reached along outgoing `rels` from both `a` and `b` within `caps` (each node
-/// counting itself at depth 0 when present) whose summed depth is smallest, ascending.
+/// The nodes reachable along outgoing `rels` from both `a` and `b` (each node counting itself
+/// at depth 0 when present) whose summed depth is smallest, ascending; empty only when no node
+/// is reachable from both at any depth.
 ///
-/// Work: two breadth-first searches as [`crate::closure`] does, then one linear merge of their
-/// seen sets (both sorted by id) to find the minimum and collect it. The result holds its
-/// charge.
+/// The caps bound the two searches, and an answer is returned only when it is the exact one:
+/// a node a cut search did not keep lies at depth `l` or deeper on that side, where `l` is the
+/// rows cut level or `caps.depth + 1` when a node lies past the depth bound; its summed depth
+/// is therefore at least the smallest such `l` over both sides. When the found minimum is below
+/// that floor no hidden node can equal or beat it and the minima are returned; otherwise (or
+/// when nothing common was found and a side was cut) the call refuses naming the cap that set
+/// the floor.
+///
+/// Work: two breadth-first searches as [`crate::closure`] does (each settled at the depth bound
+/// as [`crate::reachable`] does), then one linear merge of their seen sets (both sorted by id)
+/// to find the minimum and collect it. The result holds its charge.
 ///
 /// # Errors
-/// [`GraphError::CapExceeded`] when more than `caps.rows` nodes share the smallest summed depth
-/// (`rows` bounds the result; the minima are not truncated); plus the [`crate::expand`] errors.
+/// [`GraphError::CapExceeded`] naming `rows` or `depth` (with that cap's value) when a cut
+/// could hide a node at or below the found minimum, and naming `rows` when more than
+/// `caps.rows` nodes share the exact minimum (`rows` bounds the result; the minima are not
+/// truncated); plus the [`crate::expand`] errors.
 pub fn meet(
     v: &View<'_>,
     a: LocalId,
@@ -143,6 +168,7 @@ pub fn meet(
     let want = Want {
         edges: false,
         stop: None,
+        settle: true,
     };
     let sa = search(v, &[a], rels, Direction::Out, caps, want, budget)?;
     let sb = search(v, &[b], rels, Direction::Out, caps, want, budget)?;
@@ -168,6 +194,15 @@ pub fn meet(
                 at_b += 1;
             }
         }
+    }
+    let floor = [sa.cut, sb.cut]
+        .into_iter()
+        .flatten()
+        .min_by_key(|cut: &Cut| cut.floor(caps));
+    if let Some(cut) = floor
+        && best.is_none_or(|low| low >= cut.floor(caps))
+    {
+        return Err(cut.refusal(caps));
     }
     if out.len() > usize::try_from(caps.rows).unwrap_or(usize::MAX) {
         return Err(GraphError::CapExceeded {
