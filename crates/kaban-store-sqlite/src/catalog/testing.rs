@@ -415,6 +415,12 @@ impl IoFaults {
     pub fn fail_sync(&self, op: &'static str) {
         io::faults::fail_sync(&self.0, op);
     }
+    /// Count every later sync without performing it: for a test whose subject is not
+    /// durability (the pin races), so it does not pay a device sync per reclamation. Faults
+    /// set by [`Self::fail_sync`] still fail.
+    pub fn skip_syncs(&self) {
+        io::faults::skip_syncs(&self.0);
+    }
     /// Let every later sync reach the file system again.
     pub fn heal(&self) {
         io::faults::heal(&self.0);

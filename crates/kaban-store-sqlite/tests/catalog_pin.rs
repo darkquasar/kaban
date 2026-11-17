@@ -13,7 +13,7 @@ mod common;
 use common::Scratch;
 use kaban_core::query_budget::QueryBudget;
 use kaban_store_sqlite::SqliteStore;
-use kaban_store_sqlite::catalog_testing::{self, PinView, Window};
+use kaban_store_sqlite::catalog_testing::{self, IoFaults, PinView, Window};
 use std::io::{BufRead, Write};
 use std::process::{Child, ChildStdin, Command as Process, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -134,7 +134,11 @@ fn concurrent_appends_reserve_disjoint_ranges_and_the_container_never_shrinks() 
 // reclamation (T6's two-phase rule, zero-filling) retires and reclaims the extent the reader
 // may hold. Each window runs `ITERATIONS` times with the reclamation on a thread of this
 // process and again in a child process. Every wait is bounded (`STEP`), every loop by
-// `RACE_DEADLINE`, and the child is killed and reaped however the test ends.
+// `RACE_DEADLINE`, and the child is killed and reaped however the test ends. Both sides count
+// their syncs without performing them (`IoFaults::skip_syncs`): what a pin reads is served by
+// the page cache whether or not a reclamation's release reached the device, so the race needs
+// the release, not a device sync per iteration; that a release is synced, and that a failed
+// sync is fatal, is `catalog_io.rs`'s subject.
 //
 //   window                 reader (this process)            reclamation (thread or child)
 //   ReaderCandidate        candidate g read, no lock  ~>    retire, reclaim (to completion)
@@ -276,6 +280,8 @@ fn pin_race_reclaimer_role() {
         return;
     };
     let db = std::path::PathBuf::from(db);
+    let faults = IoFaults::install(db.parent().unwrap());
+    faults.skip_syncs();
     let store = SqliteStore::open(&db, &db.with_file_name("keys")).unwrap();
     let next: Next = Arc::new(|| {
         let mut line = String::new();
@@ -470,6 +476,8 @@ fn read_intact(view: PinView<'_>, keeper: u64, doomed: u64, at: usize) -> bool {
 /// Race the reader against the reclamation `ITERATIONS` times in `window`.
 fn race(window: Window, mode: Mode) -> Tally {
     let s = Scratch::new("kaban-t5-pin", &format!("race-{window:?}-{mode:?}"));
+    let faults = IoFaults::install(&s.0);
+    faults.skip_syncs();
     let reader = SqliteStore::open(&s.db(), &s.keys()).unwrap();
     // the keeper (never retired), then one extent per iteration, published up front (one sync)
     let mut extents = vec![pattern(255, EXTENT_LEN)];
@@ -681,6 +689,8 @@ fn killed_pin_holder_role() {
         return;
     };
     let db = std::path::PathBuf::from(db);
+    let faults = IoFaults::install(db.parent().unwrap());
+    faults.skip_syncs();
     let store = SqliteStore::open(&db, &db.with_file_name("keys")).unwrap();
     let pin = catalog_testing::pin(&store, &budget()).unwrap();
     let mut out = std::io::stdout().lock();

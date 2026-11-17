@@ -81,11 +81,14 @@ pub(crate) fn sync_dir(dir: &Path, op: &'static str) -> Result<()> {
     attempt(dir, op, || rustix::fs::fsync(&fd).map_err(io::Error::from))
 }
 
-/// Run one sync of `op` on `path` (or its injected failure); its failure is fatal.
+/// Run one sync of `op` on `path` (or its injected outcome); its failure is fatal.
 fn attempt(path: &Path, op: &'static str, sync: impl FnOnce() -> io::Result<()>) -> Result<()> {
-    faults::injected(path, op)
-        .map_or_else(sync, Err)
-        .map_err(|source| StoreError::StorageFatal { op, source })
+    match faults::injected(path, op) {
+        None => sync(),
+        Some(faults::Injected::Fail(e)) => Err(e),
+        Some(faults::Injected::Skip) => Ok(()),
+    }
+    .map_err(|source| StoreError::StorageFatal { op, source })
 }
 
 /// Probe whether the file system of the container `kbx` punches keep-size holes: punch the
@@ -187,7 +190,8 @@ fn punch(file: &File, offset: u64, len: u64) -> rustix::io::Result<()> {
 }
 
 /// The I/O faults a test injects for the catalogs under a directory (test builds only): failed
-/// syncs by operation, a probe that finds no hole punching, and a count of the syncs attempted.
+/// syncs by operation, syncs counted but not performed, a probe that finds no hole punching,
+/// and a count of the syncs attempted.
 #[cfg(any(test, feature = "failpoints"))]
 pub(crate) mod faults {
     use std::collections::HashMap;
@@ -195,10 +199,19 @@ pub(crate) mod faults {
     use std::path::{Path, PathBuf};
     use std::sync::{Mutex, PoisonError};
 
+    /// What a test injected in place of one sync.
+    pub(crate) enum Injected {
+        /// The sync fails with this error.
+        Fail(io::Error),
+        /// The sync is counted and not performed.
+        Skip,
+    }
+
     /// The faults of one directory.
     struct Faults {
         dir: PathBuf,
         failing: Vec<&'static str>,
+        skipping: bool,
         no_punch: bool,
         calls: HashMap<&'static str, u64>,
     }
@@ -216,14 +229,15 @@ pub(crate) mod faults {
             .map(f)
     }
 
-    /// Count a sync of `op` on `path`; its injected failure, if any.
-    pub(super) fn injected(path: &Path, op: &'static str) -> Option<io::Error> {
+    /// Count a sync of `op` on `path`; what replaces it, if anything (a failure wins).
+    pub(super) fn injected(path: &Path, op: &'static str) -> Option<Injected> {
         with(path, |faults| {
             *faults.calls.entry(op).or_default() += 1;
-            faults
-                .failing
-                .contains(&op)
-                .then(|| io::Error::from(rustix::io::Errno::IO))
+            if faults.failing.contains(&op) {
+                Some(Injected::Fail(io::Error::from(rustix::io::Errno::IO)))
+            } else {
+                faults.skipping.then_some(Injected::Skip)
+            }
         })
         .flatten()
     }
@@ -240,6 +254,7 @@ pub(crate) mod faults {
         registry.push(Faults {
             dir: dir.to_path_buf(),
             failing: Vec::new(),
+            skipping: false,
             no_punch: false,
             calls: HashMap::new(),
         });
@@ -259,6 +274,10 @@ pub(crate) mod faults {
     pub(crate) fn heal(dir: &Path) {
         with(dir, |faults| faults.failing.clear());
     }
+    /// Count every later sync under `dir` without performing it.
+    pub(crate) fn skip_syncs(dir: &Path) {
+        with(dir, |faults| faults.skipping = true);
+    }
     /// Make the hole-punch probe under `dir` find no hole punching.
     pub(crate) fn no_punch(dir: &Path) {
         with(dir, |faults| faults.no_punch = true);
@@ -275,8 +294,14 @@ mod faults {
     use std::io;
     use std::path::Path;
 
+    /// What a test injects in place of one sync (never constructed in this build).
+    pub(super) enum Injected {
+        Fail(io::Error),
+        Skip,
+    }
+
     #[inline]
-    pub(super) fn injected(path: &Path, op: &'static str) -> Option<io::Error> {
+    pub(super) fn injected(path: &Path, op: &'static str) -> Option<Injected> {
         let _ = (path, op);
         None
     }
