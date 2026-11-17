@@ -392,3 +392,46 @@ fn a_recorded_memory_breach_stops_decoding_opening_and_view_preparation() {
     );
     assert_eq!(budget.live_bytes(), 0);
 }
+
+/// POST-MED-01: a neighbour query that reads nothing (an absent node, or an empty relation
+/// selection on a present node) still reports an already failed budget as its first item, then
+/// ends, for each way a budget fails.
+#[test]
+fn an_empty_neighbour_query_reports_a_failed_budget_first() {
+    let (base, layers) = chain();
+    let v = view::<Records>(Some(&base), &layers, &[]);
+    let cancelled = QueryBudget::new(u64::MAX, None);
+    cancelled.cancel();
+    let expired = QueryBudget::new(u64::MAX, Some(Duration::ZERO));
+    std::thread::sleep(Duration::from_millis(2));
+    let breached = QueryBudget::new(1024, None);
+    assert!(breached.reserve(4096).is_err(), "records a memory breach");
+    let empty = RelSelection::only(Vec::new());
+    let absent = LocalId(99);
+    assert!(!v.contains(absent));
+    assert!(v.contains(LocalId(0)));
+    for (budget, limit) in [
+        (&cancelled, "cancelled"),
+        (&expired, "time"),
+        (&breached, "memory"),
+    ] {
+        for (what, n, rels) in [
+            ("absent node", absent, &RelSelection::All),
+            ("empty selection", LocalId(0), &empty),
+        ] {
+            for dir in [Direction::Out, Direction::In, Direction::Both] {
+                let mut it = v.neighbours(n, rels, dir, budget);
+                let first = it.next();
+                assert!(
+                    matches!(
+                        first,
+                        Some(Err(GraphError::BudgetExceeded { limit: l, .. })) if l == limit
+                    ),
+                    "{limit}, {what}, {dir:?}: first item {first:?}"
+                );
+                assert!(it.next().is_none(), "{limit}, {what}, {dir:?}: then ends");
+            }
+        }
+    }
+    assert_eq!(breached.live_bytes(), 0);
+}
