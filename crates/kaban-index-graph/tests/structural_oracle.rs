@@ -888,3 +888,29 @@ fn common_neighbours_follow_the_asked_direction() {
         "direction ignored"
     );
 }
+
+/// POST-LOW-03: a cap that cuts a search before it settles, and a cap an answer does not fit,
+/// read neutrally and name the cap and its value (the cap was not "above" anything).
+#[test]
+fn cap_refusals_name_the_cap_without_reading_as_above() {
+    let rs = vec![Records {
+        nodes: (0..=4).map(node).collect(),
+        edges: (0..4).map(|n| edge(n, 0, n + 1)).collect(),
+        ..Records::default()
+    }];
+    let v = view(None, &[], &rs);
+    let b = budget();
+    let all = RelSelection::All;
+    // A search cut at depth 2 cannot settle whether 4 is reachable.
+    let cut = reachable(&v, LocalId(0), LocalId(4), &all, caps(2, 100), &b).unwrap_err();
+    assert_eq!(
+        cut.to_string(),
+        "the depth cap of 2 does not cover the request"
+    );
+    // The complete order has 5 nodes, more than a rows cap of 3 admits.
+    let admit = topo_order(&v, &[LocalId(0)], &all, caps(8, 3), &b).unwrap_err();
+    assert_eq!(
+        admit.to_string(),
+        "the rows cap of 3 does not cover the request"
+    );
+}
