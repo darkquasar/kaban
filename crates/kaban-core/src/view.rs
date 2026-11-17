@@ -1,5 +1,8 @@
 //! View names (spec 11): the one memory view `main` and a code view per commit, `code@<sha>`.
 //! A [`CommitSha`] is the 40-hex commit id every code view, index writer and snapshot names.
+//! [`ViewName`] is open to new kinds (a view that is not a commit, such as an agent's
+//! unfinished work over a base): match it with a fallback arm; a form this build does not
+//! know is refused by name ([`InvalidViewName`]).
 
 use std::fmt;
 use std::str::FromStr;
@@ -41,8 +44,11 @@ impl fmt::Display for CommitSha {
     }
 }
 
-/// The view a read or a write names: the memory view, or the code view of one commit.
+/// The view a read or a write names: the memory view, or the code view of one commit. Later
+/// kinds are added as variants, so a match outside this crate needs a fallback arm; its text
+/// form round-trips through `Display` and `FromStr`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum ViewName {
     /// `main`: the memory graph.
     Main,
@@ -53,10 +59,21 @@ pub enum ViewName {
 /// The text before a code view's commit.
 const CODE_PREFIX: &str = "code@";
 
-/// A string that names no view: neither `main` nor `code@<40 lowercase hex>`.
+/// A string that names no view this build knows: neither `main` nor `code@<40 lowercase
+/// hex>`. The error names the refused text.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("a view is `main` or `code@<40 lowercase hex commit>`")]
-pub struct InvalidViewName;
+#[error("unknown view `{name}`: a view is `main` or `code@<40 lowercase hex commit>`")]
+pub struct InvalidViewName {
+    name: String,
+}
+
+impl InvalidViewName {
+    /// The refused text.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+}
 
 impl FromStr for ViewName {
     type Err = InvalidViewName;
@@ -67,7 +84,7 @@ impl FromStr for ViewName {
         s.strip_prefix(CODE_PREFIX)
             .and_then(CommitSha::parse)
             .map(Self::Code)
-            .ok_or(InvalidViewName)
+            .ok_or_else(|| InvalidViewName { name: s.to_owned() })
     }
 }
 
@@ -150,7 +167,8 @@ mod tests {
             format!("code@{SHA}/"),
         ]);
         for bad in bad {
-            assert_eq!(bad.parse::<ViewName>(), Err(InvalidViewName), "{bad}");
+            let err = bad.parse::<ViewName>().expect_err(&bad);
+            assert_eq!(err.name(), bad);
         }
     }
 }
