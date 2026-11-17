@@ -119,6 +119,26 @@ mod tests {
     }
 
     #[test]
+    fn an_unknown_view_form_is_refused_by_name_without_a_panic() {
+        let long = "x".repeat(4096);
+        for bad in [
+            "work@agent-1",
+            "agent@0123456789abcdef0123456789abcdef01234567/draft",
+            "code@é0123456789abcdef0123456789abcdef012345",
+            "\u{0}main",
+            long.as_str(),
+        ] {
+            let err = bad
+                .parse::<ViewName>()
+                .expect_err(&format!("{bad:?} was accepted as a view"));
+            assert!(
+                err.to_string().contains(bad),
+                "the refusal does not name {bad:?}: {err}"
+            );
+        }
+    }
+
+    #[test]
     fn a_view_name_refuses_anything_else() {
         let mut bad = ["", "Main", "main ", "code", "code@", "code@main"]
             .map(str::to_owned)
