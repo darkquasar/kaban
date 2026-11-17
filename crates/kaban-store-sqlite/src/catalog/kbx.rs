@@ -20,6 +20,7 @@ use rustix::fs::{FlockOperation, Mode, OFlags};
 use tantivy::directory::{Directory, MmapDirectory, OwnedBytes};
 
 use super::class::{ExtentClass, ExtentLocation};
+use super::io as catalog_io;
 
 /// The container's file name.
 pub(crate) const KBX_FILE: &str = "kaban.kbx";
@@ -49,18 +50,35 @@ fn beside(db_path: &Path, name: &str) -> PathBuf {
 
 /// Create the container, the allocation lock and the pins directory in the directory of
 /// `beside` (the database or the container) where they are missing, owner-only (core-spec
-/// S5), and open none of them for longer: an existing one is kept as it is. A symlink or an
-/// entry of the wrong type is refused.
+/// S5), and make them durable: each file is synced, then the directory holding their entries
+/// (spec 11 KER-11). An existing one is kept as it is and synced like a created one, so a
+/// later open completes the durability of an open whose sync failed. A symlink or an entry of
+/// the wrong type is refused.
+///
+/// ```text
+///   kaban.kbx => fsync [create_container] => kaban.kbx.alloc => fsync [create_alloc_lock]
+///   => kaban.kbx.pins/ => fsync(parent directory) [create_dir_entries]
+/// ```
 ///
 /// # Errors
-/// `StoreError::FileMode` with the I/O error.
+/// `StoreError::FileMode` with the I/O error of a creation; `StoreError::StorageFatal` for a
+/// failed sync (the open is refused, nothing is half admitted: a later open syncs again).
 pub(crate) fn create_artefacts(beside: &Path) -> Result<()> {
-    create_file(&kbx_path(beside)).map_err(StoreError::FileMode)?;
-    create_file(&alloc_path(beside)).map_err(StoreError::FileMode)?;
-    create_dir(&pins_dir(beside)).map_err(StoreError::FileMode)
+    let kbx = kbx_path(beside);
+    let container = create_file(&kbx).map_err(StoreError::FileMode)?;
+    catalog_io::sync_file(&container, &kbx, catalog_io::CREATE_CONTAINER)?;
+    let alloc = alloc_path(beside);
+    let lock = create_file(&alloc).map_err(StoreError::FileMode)?;
+    catalog_io::sync_file(&lock, &alloc, catalog_io::CREATE_ALLOC_LOCK)?;
+    create_dir(&pins_dir(beside)).map_err(StoreError::FileMode)?;
+    let dir = match kbx.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir,
+        _ => Path::new("."),
+    };
+    catalog_io::sync_dir(dir, catalog_io::CREATE_DIR_ENTRIES)
 }
 
-fn create_file(path: &Path) -> io::Result<()> {
+fn create_file(path: &Path) -> io::Result<File> {
     let flags = OFlags::CREATE | OFlags::RDWR | OFlags::NOFOLLOW | OFlags::CLOEXEC;
     let fd = rustix::fs::open(path, flags, Mode::RUSR | Mode::WUSR)?;
     let stat = rustix::fs::fstat(&fd)?;
@@ -69,7 +87,7 @@ fn create_file(path: &Path) -> io::Result<()> {
     }
     // exact owner-only mode whatever the umask
     rustix::fs::fchmod(&fd, Mode::RUSR | Mode::WUSR)?;
-    Ok(())
+    Ok(File::from(fd))
 }
 
 fn create_dir(path: &Path) -> io::Result<()> {
@@ -147,8 +165,8 @@ pub(crate) fn open_existing(path: &Path) -> io::Result<File> {
 /// outside that lock. The container only grows.
 ///
 /// # Errors
-/// [`ContainerError`] for a failed open, lock, growth or write; the sync's error
-/// ([`super::io::sync_data`]).
+/// [`ContainerError`] for a failed open, lock, growth or write; `StoreError::StorageFatal`
+/// for a failed sync ([`super::io::sync_data`]: attempted once, and the range stays unnamed).
 pub(crate) fn append(kbx: &Path, class: ExtentClass, bytes: &[u8]) -> Result<Unpublished> {
     let len = u64::try_from(bytes.len())
         .map_err(|e| failed("size an extent for", kbx, io::Error::other(e)))?;
@@ -156,7 +174,7 @@ pub(crate) fn append(kbx: &Path, class: ExtentClass, bytes: &[u8]) -> Result<Unp
     let offset = reserve(kbx, &file, len)?;
     file.write_all_at(bytes, offset)
         .map_err(|e| failed("write an extent to", kbx, e))?;
-    super::io::sync_data(&file, "append_extent")?;
+    catalog_io::sync_data(&file, kbx, catalog_io::APPEND)?;
     Ok(Unpublished {
         class,
         location: ExtentLocation::Kbx { offset, len },

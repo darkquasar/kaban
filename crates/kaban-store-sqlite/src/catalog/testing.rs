@@ -2,10 +2,10 @@
 //! supported interface): a test index class whose `stage` writes one sediment row per edge
 //! change and records the change set it was handed, a pin of that class's sediment, and the
 //! container's extents of the test class: appended and published, pinned and read, retired and
-//! reclaimed by a test reclamation that follows T6's two-phase rule (PC-8) and zero-fills
-//! instead of punching, with hooks in the pin protocol's windows ([`Window`]).
+//! reclaimed by a test reclamation that follows T6's two-phase rule (PC-8) and releases ranges
+//! through the catalog's primitive, with hooks in the pin protocol's windows ([`Window`]), and
+//! the I/O faults of the catalog's I/O seam ([`IoFaults`]).
 
-use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -15,7 +15,7 @@ use rusqlite::Connection;
 
 pub use super::failpoint::Window;
 use super::io;
-use super::kbx::{Unpublished, failed, open_existing};
+use super::kbx::{Unpublished, failed};
 use super::pins;
 use super::tables::{sql_int, uint};
 use crate::sql_error::SqlResultExt;
@@ -303,19 +303,21 @@ pub fn retire(store: &SqliteStore, ids: &[u64]) -> Result<u64> {
 pub struct Reclaimed {
     /// The `reclaim_floor` it committed.
     pub floor: u64,
-    /// The extents whose container ranges it zeroed and whose rows it dropped, in id order.
+    /// The extents whose container ranges it released and whose rows it dropped, in id order.
     pub punched: Vec<u64>,
     /// Whether its re-scan found a live pin below the floor (`pin_race_retry`): then it
-    /// zeroed nothing.
+    /// released nothing.
     pub pin_race_retry: bool,
 }
 
-/// Reclaim `store`'s container by T6's two-phase rule (PC-8), zero-filling where T6 punches:
+/// Reclaim `store`'s container by T6's two-phase rule (PC-8), releasing ranges through the
+/// catalog's own primitive ([`Catalog::reclaim_ranges`]: punched, or zero-filled when
+/// reclamation is degraded):
 /// scan the live pin locks for the lowest generation P (the latest generation when none is
 /// live), commit `reclaim_floor = max(floor, P)`, [`Window::ReclaimFloorCommitted`], re-scan;
-/// a live pin below the floor makes it a `pin_race_retry` that zeroes nothing, else it zeroes
-/// every container range of an extent dead since a generation at or below the floor and drops
-/// those rows.
+/// a live pin below the floor makes it a `pin_race_retry` that releases nothing, else it
+/// releases every container range of an extent dead since a generation at or below the floor
+/// and, once that release is synced, drops those rows (a failed sync keeps them).
 ///
 /// # Errors
 /// The scans', commits' and container writes' errors; a catalog without a container.
@@ -370,12 +372,11 @@ pub fn reclaim(store: &SqliteStore) -> Result<Reclaimed> {
             .sql()?;
         rows.collect::<rusqlite::Result<Vec<_>>>().sql()
     })?;
-    let kbx = open_existing(&catalog.kbx).map_err(|e| failed("open", &catalog.kbx, e))?;
-    for (_, offset, len) in &doomed {
-        let zeros = vec![0_u8; usize::try_from(*len).unwrap_or(usize::MAX)];
-        kbx.write_all_at(&zeros, *offset)
-            .map_err(|e| failed("zero a reclaimed range of", &catalog.kbx, e))?;
-    }
+    let ranges: Vec<(u64, u64)> = doomed
+        .iter()
+        .map(|&(_, offset, len)| (offset, len))
+        .collect();
+    catalog.reclaim_ranges(&ranges)?;
     let punched: Vec<u64> = doomed.into_iter().map(|(id, _, _)| id).collect();
     catalog.commit(&mut store.lock(), Durability::Normal, |txn| {
         for id in &punched {

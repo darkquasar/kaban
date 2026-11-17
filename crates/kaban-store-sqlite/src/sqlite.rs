@@ -436,7 +436,7 @@ impl SqliteStore {
         let (mut conn, db_id, report, live) = Self::open_file(path, actor, Self::CAPABILITIES)?;
         // the catalog attaches first (the key record commits through it), but its artefacts
         // are created only once the key is admitted: a refused project gains none
-        let catalog = Catalog::open_as_is(path, &mut conn)?;
+        let mut catalog = Catalog::open_as_is(path, &mut conn)?;
         let signer = Self::project_key(&catalog, &mut conn, keys_dir, &db_id)?;
         catalog.create_artefacts()?;
         Self::assemble(

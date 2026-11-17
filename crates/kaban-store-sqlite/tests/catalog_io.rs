@@ -33,7 +33,10 @@ fn budget() -> QueryBudget {
 
 /// `len` bytes of the nonzero `fill`.
 fn pattern(fill: u8, len: usize) -> Vec<u8> {
-    assert_ne!(fill, 0, "a pattern is never zero: zero is what reclamation leaves");
+    assert_ne!(
+        fill, 0,
+        "a pattern is never zero: zero is what reclamation leaves"
+    );
     vec![fill; len]
 }
 
@@ -80,7 +83,10 @@ fn an_injected_sync_failure_during_a_publish_is_fatal_attempted_once_and_publish
     let err = catalog_testing::append_and_publish(&store, &[1]);
     assert!(err.is_err(), "the fault is still installed");
     let shown = err.unwrap_err().to_string();
-    assert!(shown.contains("append_extent"), "Display hides the op: {shown}");
+    assert!(
+        shown.contains("append_extent"),
+        "Display hides the op: {shown}"
+    );
     faults.heal();
     let id = catalog_testing::append_and_publish(&store, &pattern(9, 100)).unwrap();
     let (generation, extents) = pinned(&store);
@@ -104,7 +110,11 @@ fn a_failed_creation_sync_refuses_the_open_and_a_later_open_completes_it(op: &'s
     // Assert: refused, once
     let (failed_op, _) = storage_fatal(refused);
     assert_eq!(failed_op, op);
-    assert_eq!(faults.sync_calls(op), 1, "a failed creation sync was retried");
+    assert_eq!(
+        faults.sync_calls(op),
+        1,
+        "a failed creation sync was retried"
+    );
 
     // Act: a later open with the storage healthy again
     faults.heal();
@@ -114,7 +124,10 @@ fn a_failed_creation_sync_refuses_the_open_and_a_later_open_completes_it(op: &'s
     // and the catalog it serves publishes and reads
     assert_eq!(faults.sync_calls(op), 2, "the later open did not sync {op}");
     for name in ["kaban.kbx", "kaban.kbx.alloc", "kaban.kbx.pins"] {
-        assert!(s.0.join(name).exists(), "{name} is missing after the later open");
+        assert!(
+            s.0.join(name).exists(),
+            "{name} is missing after the later open"
+        );
     }
     let id = catalog_testing::append_and_publish(&store, &pattern(5, 512)).unwrap();
     let pin = catalog_testing::pin(&store, &budget()).unwrap();
@@ -132,8 +145,7 @@ fn a_failed_sync_of_the_new_allocation_lock_refuses_the_open_and_a_later_open_co
 }
 
 #[test]
-fn a_failed_sync_of_the_catalog_directory_entries_refuses_the_open_and_a_later_open_completes_it()
-{
+fn a_failed_sync_of_the_catalog_directory_entries_refuses_the_open_and_a_later_open_completes_it() {
     a_failed_creation_sync_refuses_the_open_and_a_later_open_completes_it("create_dir_entries");
 }
 
@@ -197,8 +209,15 @@ fn a_forced_no_punch_probe_degrades_reclamation_to_zero_fill_and_the_container_n
     assert!(degraded, "a no-punch probe did not degrade reclamation");
     assert_eq!(r.doomed, vec![0; EXTENT_LEN], "{:?}", r.len);
     assert_eq!(r.keeper, pattern(4, EXTENT_LEN));
-    assert_eq!(r.len.0, r.len.1, "reclamation changed the container's length");
-    assert!(r.blocks.1 >= r.blocks.0, "zero-fill freed blocks: {:?}", r.blocks);
+    assert_eq!(
+        r.len.0, r.len.1,
+        "reclamation changed the container's length"
+    );
+    assert!(
+        r.blocks.1 >= r.blocks.0,
+        "zero-fill freed blocks: {:?}",
+        r.blocks
+    );
 }
 
 #[test]
@@ -213,10 +232,16 @@ fn with_hole_punching_a_reclaimed_range_reads_as_zeros_its_blocks_are_freed_and_
 
     // Assert: not degraded, the range reads as zeros, its blocks were freed (a punch, not a
     // zero-fill) and the container's length is unchanged
-    assert!(!degraded, "the probe found no hole punching on the scratch filesystem");
+    assert!(
+        !degraded,
+        "the probe found no hole punching on the scratch filesystem"
+    );
     assert_eq!(r.doomed, vec![0; EXTENT_LEN]);
     assert_eq!(r.keeper, pattern(4, EXTENT_LEN));
-    assert_eq!(r.len.0, r.len.1, "reclamation changed the container's length");
+    assert_eq!(
+        r.len.0, r.len.1,
+        "reclamation changed the container's length"
+    );
     assert!(
         r.blocks.1 < r.blocks.0,
         "the reclaimed range was not punched: blocks {:?}",
