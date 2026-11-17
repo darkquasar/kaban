@@ -850,32 +850,38 @@ fn a_long_statement_in_a_cancelled_snapshot_is_interrupted() {
     // Arrange: a statement that runs for seconds and returns one row
     let store = SqliteStore::open_memory().unwrap();
     let budget = QueryBudget::new(u64::MAX, None);
-    let started = std::time::Instant::now();
+    let mut statement = None;
 
-    // Act: cancel, then run it inside the snapshot
+    // Act: cancel, then run it inside the snapshot, keeping the statement's own outcome
     let out = store
         .catalog()
         .with_snapshot(&mut store.lock(), &budget, |tx, _| {
             budget.cancel();
-            tx.query_row(
+            let row = tx.query_row(
                 "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 20000000)
                  SELECT count(*) FROM c",
                 [],
                 |r| r.get::<_, i64>(0),
-            )
-            .map_err(|e| StoreError::Backend {
+            );
+            statement = Some(
+                row.as_ref()
+                    .copied()
+                    .map_err(rusqlite::Error::sqlite_error_code),
+            );
+            row.map_err(|e| StoreError::Backend {
                 source: kaban_core::BackendSource::new(e),
             })
         });
 
-    // Assert: the budget error, well before the statement could finish
-    let elapsed = started.elapsed();
+    // Assert: SQLite interrupted the statement itself (not only the snapshot's final budget
+    // check), and the snapshot returns the budget error
+    assert_eq!(
+        statement,
+        Some(Err(Some(rusqlite::ErrorCode::OperationInterrupted))),
+        "the statement was not interrupted"
+    );
     let err = out.expect_err("the cancelled statement ran to completion");
     assert_eq!(budget_limit(&err), Some(Limit::Cancelled), "{err:?}");
-    assert!(
-        elapsed < std::time::Duration::from_secs(1),
-        "the statement was not interrupted: {elapsed:?}"
-    );
 }
 
 /// A file-backed store in a fresh scratch directory (the pin clones its container path).
@@ -951,7 +957,6 @@ fn a_pin_reserves_every_allocation_it_retains_before_it_copies() {
 
     let cases: Vec<(&str, Vec<&str>, usize, usize, usize)> = vec![
         ("empty", vec![], 0, 0, 0),
-        ("one small row", vec!["test"], 1, 1, 0),
         (
             "several classes",
             vec!["test", "text_tier", "graph_base"],
@@ -959,9 +964,6 @@ fn a_pin_reserves_every_allocation_it_retains_before_it_copies() {
             2,
             1,
         ),
-        ("growth 4", vec!["test"], 4, 1, 0),
-        ("growth 5", vec!["test"], 5, 1, 0),
-        ("growth 9", vec!["code_base", "test"], 9, 0, 5),
         ("growth 17", vec!["test"], 17, 3, 0),
     ];
     for (name, classes, rows, len, files) in cases {

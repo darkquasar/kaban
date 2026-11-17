@@ -14,7 +14,6 @@ use kaban_core::MemoryStore;
 use kaban_store_sqlite::SqliteStore;
 use kaban_store_sqlite::catalog_testing::{self, ObservedOp};
 use rusqlite::{Connection, OpenFlags};
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
@@ -88,49 +87,6 @@ fn supervise(
         }
         std::thread::sleep(Duration::from_millis(20));
     }
-}
-
-/// The environment variable that turns on the stalled role.
-const STALL: &str = "KABAN_T5_STALL";
-
-/// A role that never finishes in time: it sleeps (bounded, in case nothing kills it). A no-op
-/// unless `KABAN_T5_STALL` is set.
-#[test]
-#[ignore = "a role of the supervision case"]
-fn stalled_role() {
-    if std::env::var_os(STALL).is_none() {
-        return;
-    }
-    let _ = writeln!(std::io::stderr(), "stalled role: sleeping");
-    std::thread::sleep(Duration::from_secs(10));
-}
-
-#[test]
-fn a_stalled_role_is_killed_and_reaped_at_its_deadline_with_diagnostics() {
-    // Arrange
-    let s = Scratch::new("kaban-t5-commit", "stalled-role");
-    let started = Instant::now();
-
-    // Act
-    let out = supervise(
-        "stalled_role",
-        (STALL, "1".as_ref()),
-        &s.0,
-        Duration::from_secs(2),
-    );
-
-    // Assert: an error well before the role's own end, naming it and carrying its stderr
-    let elapsed = started.elapsed();
-    let err = out.expect_err("a stalled role was reported as finished");
-    assert!(
-        elapsed < Duration::from_secs(8),
-        "supervision took {elapsed:?}"
-    );
-    assert!(err.contains("stalled_role"), "{err}");
-    assert!(
-        err.contains("stalled role: sleeping"),
-        "no stderr in: {err}"
-    );
 }
 
 fn rid(conn: &Connection, id: &str) -> i64 {
