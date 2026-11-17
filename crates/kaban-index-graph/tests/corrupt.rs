@@ -248,15 +248,74 @@ fn a_newer_tombstone_with_a_bad_kind_byte_is_corrupt_not_skipped() {
         .expect("a fact tombstone");
     bad[at] = 2;
     assert_corrupt(open_layer(&bad), "layer fact tombstone kind");
-
-    let u = section(&good, UNION_OUT);
-    let mut bad = good.clone();
-    // Domain 1000: bits 1000..1024 of the last word are padding.
-    let last = u.end - 8;
-    let word = get_u64(&bad, last) | 1 << 50;
-    put_u64(&mut bad, last, word);
-    assert_corrupt(open_layer(&bad), "union padding bit");
     assert_corrupt(open_base(&good), "a layer is not a base");
+}
+
+/// POST-LOW-02: a version-2 layer whose outgoing union is a bitmap (5 touched ids over domain
+/// 100: 5 * 30 > 100) with one padding bit set past the domain is corrupt.
+#[test]
+fn a_set_padding_bit_in_a_bitmap_union_is_corrupt() {
+    let base = open_base(&build_base(
+        &Records {
+            nodes: (0..10).map(|n| node(n, OpKind::Add)).collect(),
+            ..Records::default()
+        },
+        100,
+    ))
+    .unwrap();
+    let r = Records {
+        edges: (0..5).map(|n| edge(n, 0, n + 1)).collect(),
+        ..Records::default()
+    };
+    let good = seal(&view::<Records>(Some(&base), &[], &[]), &r);
+    assert_eq!(good[4], 2, "version 2");
+    open_layer(&good).unwrap();
+    let u = section(&good, UNION_OUT);
+    // Form byte 1 (bitmap), count u64, bit count u64, words, then one rank sample per 8 words.
+    assert_eq!(good[u.start], 1, "the union is a bitmap");
+    let nbits = get_u64(&good, u.start + 9);
+    assert_eq!(nbits, 100);
+    let words = u.start + 17;
+    let last = words + 8 * (nbits.div_ceil(64) as usize - 1);
+    // Bits 100..128 are padding: bit 50 of the last word is id 114.
+    let word = get_u64(&good, last);
+    assert_eq!(word >> 36, 0, "the padding is clear in a well-formed union");
+    let mut bad = good.clone();
+    put_u64(&mut bad, last, word | 1 << 50);
+    assert_corrupt(open_layer(&bad), "union padding bit");
+    // The same bit with the count raised to match the population: only the padding rule can
+    // refuse it (the single rank sample, of block 0, is unchanged).
+    let count = get_u64(&bad, u.start + 1);
+    put_u64(&mut bad, u.start + 1, count + 1);
+    assert_corrupt(open_layer(&bad), "union padding bit, population matched");
+}
+
+/// Extents of any version but 2 (version 1 wrote every union as a bitmap) are refused as
+/// corrupt, for a base and for a layer: they must be rebuilt, not read.
+#[test]
+fn an_extent_of_another_version_is_refused() {
+    let base_bytes = build_base(&sparse(), 1000);
+    let base = open_base(&base_bytes).unwrap();
+    let layer_bytes = seal(&view::<Records>(Some(&base), &[], &[]), &sparse());
+    open_layer(&layer_bytes).unwrap();
+    for version in [1u8, 0, 3] {
+        let mut bad = base_bytes.clone();
+        bad[4] = version;
+        let got = open_base(&bad);
+        assert!(
+            matches!(&got, Err(GraphError::Corrupt(m)) if m.contains("extent version")),
+            "base version {version}: {:?}",
+            got.map(|_| ())
+        );
+        let mut bad = layer_bytes.clone();
+        bad[4] = version;
+        let got = open_layer(&bad);
+        assert!(
+            matches!(&got, Err(GraphError::Corrupt(m)) if m.contains("extent version")),
+            "layer version {version}: {:?}",
+            got.map(|_| ())
+        );
+    }
 }
 
 /// A dense base (bitvector presence): nodes 0 and 1 over domain 40, plus a dense layer that
