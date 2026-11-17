@@ -124,7 +124,11 @@ fn assert_chain(chain: &Chain, want: u8, ctx: &str) {
     for depth in 1..=chain.bytes.len() {
         let bytes = &chain.bytes[depth - 1];
         for tag in [UNION_OUT, UNION_IN] {
-            assert_eq!(form(bytes, tag), want, "{ctx}: depth {depth} union {tag} form");
+            assert_eq!(
+                form(bytes, tag),
+                want,
+                "{ctx}: depth {depth} union {tag} form"
+            );
         }
         let layers = chain.layers(depth);
         let v = view::<Records>(Some(&chain.base), &layers, &[]);
@@ -138,11 +142,15 @@ fn sparse_and_dense_layers_answer_as_the_oracle_at_depths_one_to_three() {
         let mut rng = Rng::new(seed + 7000);
         let base = random_records(&mut rng, IDS, 300, 5);
         // A few touched ids per layer in a million-id domain: sorted lists.
-        let small: Vec<Records> = (0..3).map(|_| random_records(&mut rng, IDS, 3, 30)).collect();
+        let small: Vec<Records> = (0..3)
+            .map(|_| random_records(&mut rng, IDS, 3, 30))
+            .collect();
         let sparse = Chain::new(&base, 1_000_000, &small);
         assert_chain(&sparse, LIST, &format!("sparse seed {seed}"));
         // Dozens of touched ids per layer over the fixtures' own domain: bitmaps.
-        let wide: Vec<Records> = (0..3).map(|_| random_records(&mut rng, IDS, 60, 30)).collect();
+        let wide: Vec<Records> = (0..3)
+            .map(|_| random_records(&mut rng, IDS, 60, 30))
+            .collect();
         let dense = Chain::new(&base, 0, &wide);
         assert_chain(&dense, BITMAP, &format!("dense seed {seed}"));
     }
@@ -186,6 +194,9 @@ fn sparse_layer() -> Vec<u8> {
     Chain::new(&base, 1_000, &[r]).bytes.remove(0)
 }
 
+/// One way to break a layer's bytes in place.
+type Breakage = Box<dyn Fn(&mut Vec<u8>)>;
+
 fn put_u32(bytes: &mut [u8], at: usize, v: u32) {
     bytes[at..at + 4].copy_from_slice(&v.to_le_bytes());
 }
@@ -199,7 +210,7 @@ fn malformed_union_lists_are_refused() {
         assert_eq!(good[s.start], LIST, "fixture union {tag} is a list");
         // Layout: form byte, count u64, ids u32 each.
         let ids = s.start + 9;
-        let cases: [(&str, Box<dyn Fn(&mut Vec<u8>)>); 6] = [
+        let cases: [(&str, Breakage); 6] = [
             (
                 "unsorted",
                 Box::new(move |b| {
@@ -208,10 +219,19 @@ fn malformed_union_lists_are_refused() {
                 }),
             ),
             ("duplicate", Box::new(move |b| put_u32(b, ids + 4, 1))),
-            ("id at the domain", Box::new(move |b| put_u32(b, ids + 8, 1_000))),
-            ("id past the domain", Box::new(move |b| put_u32(b, ids + 8, u32::MAX))),
+            (
+                "id at the domain",
+                Box::new(move |b| put_u32(b, ids + 8, 1_000)),
+            ),
+            (
+                "id past the domain",
+                Box::new(move |b| put_u32(b, ids + 8, u32::MAX)),
+            ),
             ("unknown form byte", Box::new(move |b| b[ids - 9] = 2)),
-            ("bitmap form byte on a list", Box::new(move |b| b[ids - 9] = BITMAP)),
+            (
+                "bitmap form byte on a list",
+                Box::new(move |b| b[ids - 9] = BITMAP),
+            ),
         ];
         for (what, break_it) in &cases {
             let mut bad = good.clone();

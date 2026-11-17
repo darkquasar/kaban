@@ -2,7 +2,7 @@
 //!
 //! An extent is a header, a section table and the sections it lists, all little-endian:
 //!
-//! - header (24 bytes): magic `KBXG`, version `u8`, kind `u8` (0 base, 1 layer), reserved
+//! - header (24 bytes): magic `KBXG`, version `u8` (2), kind `u8` (0 base, 1 layer), reserved
 //!   `u16`, depth `u32` (0 for a base, the chain position for a layer), id domain `u64`,
 //!   section count `u32`;
 //! - section table: per section a tag `u32` and a byte length `u64`; sections follow in table
@@ -13,8 +13,20 @@
 //!   `u16`, kind `u8`, weight `i64`, ts `i64`; each list is sorted by (neighbour, relation);
 //! - facts (tag 4, mandatory): count `u64`, columns node `u32`, key `u8`, kind `u8`, payload
 //!   offsets `u64` (count + 1), payload bytes; sorted by (node, key);
-//! - union of touched nodes over the chain, outgoing and incoming (tags 5, 6, layers only):
-//!   bitvectors over the domain.
+//! - union of touched nodes over the chain, outgoing and incoming (tags 5, 6, layers only): the
+//!   cumulative set of nodes whose list some layer of the chain touched, each written as an id
+//!   index in the form its density picks when the layer is sealed, by the presence rule: form
+//!   byte 0, a sorted list (count `u64`, ascending `u32` ids), when touched * 30 <= domain;
+//!   form byte 1, the bitvector over the domain with its rank samples, otherwise. Any other
+//!   form byte is corrupt. A list costs 9 + 4t bytes for t ids, a bitvector over d ids
+//!   17 + 8 ceil(d / 64) + 8 ceil(d / 512), about 9d / 64; they break even at t = 9d / 256
+//!   (about d / 28.4). The rule switches at t = d / 30, where the list (about 0.133d) is still
+//!   the smaller, so the bitvector chosen between d / 30 and d / 28.4 is at most about 5.5%
+//!   larger than the list, and everywhere else the chosen form is the smaller one. Membership
+//!   is a binary search in a list and one bit probe in a bitvector.
+//!
+//! Version 2 replaced version 1's always-bitvector unions with these density-chosen indexes;
+//! any other version is refused as corrupt.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
@@ -26,11 +38,11 @@ use crate::charge::Ticker;
 use crate::error::GraphError;
 use crate::facts::{FactEntry, Facts};
 use crate::op::{Attr, OpKind, Reader, Records, column, corrupt, kind_byte, kind_from, put_len};
-use crate::presence::{IdIndex, IdIter, Presence, check_kinds, parse_bits, test_bit, write_bits};
+use crate::presence::{IdIndex, IdIter, Presence, check_kinds};
 use crate::view::View;
 
 const MAGIC: &[u8; 4] = b"KBXG";
-const VERSION: u8 = 1;
+const VERSION: u8 = 2;
 pub(crate) const KIND_BASE: u8 = 0;
 pub(crate) const KIND_LAYER: u8 = 1;
 const TAG_PRESENCE: u32 = 1;
@@ -253,16 +265,14 @@ impl Edges {
     }
 }
 
-/// A union bitvector of touched nodes.
+/// The union of touched nodes over a chain, in one direction: a density-chosen id index.
 #[derive(Debug, Clone)]
-pub(crate) struct Union {
-    words: OwnedBytes,
-    nbits: u64,
-}
+pub(crate) struct Union(IdIndex);
 
 impl Union {
+    /// Whether some layer of the chain touched `id`'s list.
     pub(crate) fn contains(&self, id: u32) -> bool {
-        test_bit(&self.words, self.nbits, id)
+        self.0.contains(id)
     }
 }
 
@@ -306,9 +316,9 @@ impl Extent {
         Facts::write(&mut buf, &facts);
         sections.push((TAG_FACTS, std::mem::take(&mut buf)));
         if let Some((out, inc)) = union {
-            write_bits(&mut buf, out, domain);
+            IdIndex::write(&mut buf, out, domain);
             sections.push((TAG_UNION_OUT, std::mem::take(&mut buf)));
-            write_bits(&mut buf, inc, domain);
+            IdIndex::write(&mut buf, inc, domain);
             sections.push((TAG_UNION_IN, std::mem::take(&mut buf)));
         }
         let body: usize = sections.iter().map(|(_, s)| s.len()).sum();
@@ -396,10 +406,10 @@ impl Extent {
         s.finish("section length")?;
         let union = if kind == KIND_LAYER {
             let mut s = section(4)?;
-            let o = parse_union(&mut s, file, domain)?;
+            let o = parse_union(&mut s, file, domain, ticker)?;
             s.finish("section length")?;
             let mut s = section(5)?;
-            let i = parse_union(&mut s, file, domain)?;
+            let i = parse_union(&mut s, file, domain, ticker)?;
             s.finish("section length")?;
             Some((o, i))
         } else {
@@ -418,9 +428,14 @@ impl Extent {
     }
 }
 
-fn parse_union(r: &mut Reader<'_>, file: &OwnedBytes, domain: u64) -> Result<Union, GraphError> {
-    let (words, nbits) = parse_bits(r, file, domain)?;
-    Ok(Union { words, nbits })
+/// Parse and validate a union section, either form, as every other id index.
+fn parse_union(
+    r: &mut Reader<'_>,
+    file: &OwnedBytes,
+    domain: u64,
+    t: &Ticker<'_>,
+) -> Result<Union, GraphError> {
+    IdIndex::parse(r, file, domain, t).map(Union)
 }
 
 /// An immutable sealed layer over its parent view.
@@ -439,8 +454,13 @@ impl Layer {
     /// unknown kind byte; sorted ids, neighbour lists or fact keys that do not strictly ascend;
     /// list or payload offsets that do not start at zero or decrease; ids at or past the
     /// domain; bitvector bits set past the domain; a bit-index count or rank sample that does
-    /// not match the bits. After a successful open every lookup is exact, so corruption is never
-    /// read as absence.
+    /// not match the bits; a union form byte other than list or bitvector. After a successful
+    /// open every lookup is exact, so corruption is never read as absence.
+    ///
+    /// Validation is per section: it does not check that the outgoing and incoming sections
+    /// are transposes of each other, and nothing in a layer names the parent it was sealed
+    /// over, so ancestry is the caller's to record; [`View::new`] checks only that the newest
+    /// union covers every layer it is given.
     ///
     /// Validation runs under `budget` (the loading query's deadline and cancellation): every
     /// validated id, entry, offset, rank-sample block and 256 kind bytes is one unit of work,
@@ -461,7 +481,8 @@ impl Layer {
 /// `parent` is not part of that chain and is ignored, so a caller may seal a batch from a loaded
 /// view that still holds the same batch (or any other) as sediment. The layer stores the net
 /// change per edge, node and fact, every list sorted, plus the cumulative union of touched nodes
-/// over the chain.
+/// over the chain in each direction, each written as a sorted list or a bitvector by density
+/// (see the format above).
 ///
 /// A node removal in `r` is a deletion barrier ([`crate::NodeOp`]): the layer materialises a
 /// tombstone for every edge of the node (both directions, presence not applied) and every fact

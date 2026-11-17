@@ -2,7 +2,8 @@
 //!
 //! An index maps the touched ids of a section to their rank (their position in the section's
 //! aligned columns). It is a sorted `u32` id array when touched/n is at most 1/30, otherwise a
-//! bitvector over the id domain with one cumulative rank sample per 512 bits (S7).
+//! bitvector over the id domain with one cumulative rank sample per 512 bits (S7). The same
+//! index stores a layer's union sections, where only membership is asked.
 
 use tantivy::directory::OwnedBytes;
 
@@ -132,6 +133,15 @@ impl IdIndex {
         }
     }
 
+    /// Whether `id` is touched: a binary search over a sorted index, one bit probe over a
+    /// bitvector.
+    pub(crate) fn contains(&self, id: u32) -> bool {
+        match self {
+            Self::Sorted { .. } => self.rank(id).is_some(),
+            Self::Bits { words, nbits, .. } => test_bit(words, *nbits, id),
+        }
+    }
+
     /// Touched ids.
     pub(crate) fn len(&self) -> usize {
         match self {
@@ -248,7 +258,7 @@ impl IdIter<'_> {
 }
 
 /// Write a bitvector of `nbits` bits with `ids` set; returns the words written.
-pub(crate) fn write_bits(out: &mut Vec<u8>, ids: &[u32], nbits: u64) -> Vec<u64> {
+fn write_bits(out: &mut Vec<u8>, ids: &[u32], nbits: u64) -> Vec<u64> {
     let mut words = vec![0u64; usize::try_from(nbits.div_ceil(64)).unwrap_or(0)];
     for &id in ids {
         if let Some(w) = words.get_mut((id / 64) as usize) {
@@ -264,7 +274,7 @@ pub(crate) fn write_bits(out: &mut Vec<u8>, ids: &[u32], nbits: u64) -> Vec<u64>
 
 /// Parse a bitvector written by [`write_bits`]; its size must equal `domain` and the bits past
 /// it in the last word must be clear.
-pub(crate) fn parse_bits(
+fn parse_bits(
     r: &mut Reader<'_>,
     file: &OwnedBytes,
     domain: u64,
@@ -292,7 +302,7 @@ pub(crate) fn parse_bits(
 }
 
 /// Whether bit `id` is set in a bitvector of `nbits` bits.
-pub(crate) fn test_bit(words: &[u8], nbits: u64, id: u32) -> bool {
+fn test_bit(words: &[u8], nbits: u64, id: u32) -> bool {
     u64::from(id) < nbits
         && usize::try_from(id / 64)
             .ok()
