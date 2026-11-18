@@ -298,8 +298,16 @@ fn cheapest(
 ) -> Result<Option<(i64, Vec<LocalId>)>, GraphError> {
     let order = Order::reversed(IDS);
     let v = f.view();
-    weighted_shortest_path(&v, LocalId(src), LocalId(dst), &RelSelection::All, caps, &order, &budget())
-        .map(|p| p.map(|c| c.into_parts().0))
+    weighted_shortest_path(
+        &v,
+        LocalId(src),
+        LocalId(dst),
+        &RelSelection::All,
+        caps,
+        &order,
+        &budget(),
+    )
+    .map(|p| p.map(|c| c.into_parts().0))
 }
 
 const WIDE: Caps = Caps {
@@ -333,7 +341,15 @@ fn rows_and_depth_caps_refuse_a_weighted_search_they_cut() {
     );
     // Settling 0..=3 is all four rows allow: node 5 lies past them and is not read as absent.
     assert_eq!(
-        cheapest(&f, 0, 5, Caps { depth: 255, rows: 4 }),
+        cheapest(
+            &f,
+            0,
+            5,
+            Caps {
+                depth: 255,
+                rows: 4
+            }
+        ),
         Err(GraphError::CapExceeded {
             limit: "rows",
             max: 4
@@ -341,7 +357,15 @@ fn rows_and_depth_caps_refuse_a_weighted_search_they_cut() {
     );
     // The cheapest path has five hops: a depth cap of four refuses rather than cut it.
     assert_eq!(
-        cheapest(&f, 0, 5, Caps { depth: 4, rows: 1_500 }),
+        cheapest(
+            &f,
+            0,
+            5,
+            Caps {
+                depth: 4,
+                rows: 1_500
+            }
+        ),
         Err(GraphError::CapExceeded {
             limit: "depth",
             max: 4
@@ -401,8 +425,15 @@ fn ranking_an_empty_view_still_sees_the_deadline() {
             tolerance: 0.0,
         };
         let budget = QueryBudget::new(u64::MAX, Some(Duration::from_millis(20)));
-        let got = pagerank(&v, &RelSelection::All, p, &Order::reversed(IDS), RowCap(5), &budget)
-            .map(|r| r.rows.len());
+        let got = pagerank(
+            &v,
+            &RelSelection::All,
+            p,
+            &Order::reversed(IDS),
+            RowCap(5),
+            &budget,
+        )
+        .map(|r| r.rows.len());
         let _ = tx.send(got);
     });
     let got = rx

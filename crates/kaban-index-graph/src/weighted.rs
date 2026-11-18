@@ -62,15 +62,24 @@ fn heap_pop(h: &mut Grow<'_, Entry>) -> Option<Entry> {
 ///
 /// The path is the cheapest by (total weight, hops), and among those each node's predecessor is
 /// the one with the lowest `order` rank (equal-cost choices follow the stable public order, not
-/// local ids). Weights must be non-negative.
+/// local ids).
 ///
-/// Caps bound the work and a cut never reads as `None`: the search settles at most
-/// `caps.rows` nodes (`src` included) and refuses when it would settle more before reaching
-/// `dst`; a cheapest path of more than `caps.depth` hops is refused, not shortened.
+/// Weights must be non-negative, and a cheapest path is only exact when every edge it could
+/// depend on is: a negative edge anywhere `src` reaches can undercut any cost found. So the
+/// search does not stop at `dst`; it settles everything `src` reaches within the caps, checks
+/// every edge it reads, and answers only after that.
 ///
-/// Work: a Dijkstra search; each settled node's outgoing list is read once and every edge read
-/// pushes one heap entry. The heap, the settled set and the path are reserved on `budget`; the
-/// path holds its charge.
+/// Caps bound the search itself and a cut never reads as an answer:
+/// - `rows`: the search settles at most `caps.rows` nodes (`src` included) and refuses when
+///   there are more to settle;
+/// - `depth`: a node settled `caps.depth` hops from `src` is not expanded further. Its edges
+///   are still checked, and the call refuses unless each leads to a settled node at no greater
+///   cost (so no path past the bound can be cheaper or reach a node the search missed).
+///
+/// Work: a Dijkstra search over the nodes `src` reaches within the caps; each settled node's
+/// outgoing list is read once and every edge read pushes at most one heap entry. The heap, the
+/// settled set, the edges past the depth bound and the path are reserved on `budget`; the path
+/// holds its charge.
 ///
 /// # Errors
 /// [`GraphError::CapMissing`] for a zero cap; [`GraphError::CapExceeded`] naming `rows` or
@@ -93,16 +102,26 @@ pub fn weighted_shortest_path(
     }
     let tick = Ticker::new(budget);
     let mut heap: Grow<'_, Entry> = Grow::new(budget)?;
-    // Settled nodes as (node, parent, hops), sorted by node.
-    let mut settled: Grow<'_, (u32, u32, u32)> = Grow::new(budget)?;
+    // Settled nodes as (node, parent, hops, cost), sorted by node.
+    let mut settled: Grow<'_, (u32, u32, u32, i64)> = Grow::new(budget)?;
+    // Edges not followed past the depth bound, as (destination, cost through the edge).
+    let mut past: Grow<'_, (u32, i64)> = Grow::new(budget)?;
+    let find = |settled: &[(u32, u32, u32, i64)], m: u32| {
+        settled
+            .binary_search_by_key(&m, |&(n, ..)| n)
+            .ok()
+            .and_then(|i| settled.get(i).copied())
+    };
     let rows = usize::try_from(caps.rows).unwrap_or(usize::MAX);
+    let depth = u32::from(caps.depth);
+    let mut found = None;
     heap_push(&mut heap, (0, 0, order.rank(src)?.0, 0, src.0, src.0))?;
-    let found = loop {
+    loop {
         tick.tick(Phase::Weighted)?;
         let Some((cost, hops, rank, _, node, parent)) = heap_pop(&mut heap) else {
-            return Ok(None);
+            break;
         };
-        let Err(at) = settled.binary_search_by_key(&node, |&(n, _, _)| n) else {
+        let Err(at) = settled.binary_search_by_key(&node, |&(n, ..)| n) else {
             continue;
         };
         if settled.len() == rows {
@@ -111,9 +130,9 @@ pub fn weighted_shortest_path(
                 max: u64::from(caps.rows),
             });
         }
-        settled.insert(at, (node, parent, hops))?;
+        settled.insert(at, (node, parent, hops, cost))?;
         if node == dst.0 {
-            break (cost, hops);
+            found = Some((cost, hops));
         }
         for row in v.neighbours(LocalId(node), rels, Direction::Out, budget) {
             let (m, rel, attr) = row?;
@@ -125,7 +144,7 @@ pub fn weighted_shortest_path(
                     dst: m,
                 });
             }
-            if settled.binary_search_by_key(&m.0, |&(n, _, _)| n).is_ok() {
+            if find(&settled, m.0).is_some() {
                 continue;
             }
             let cost = cost
@@ -134,36 +153,38 @@ pub fn weighted_shortest_path(
                     limit: "cost",
                     max: i64::MAX.unsigned_abs(),
                 })?;
+            if hops >= depth {
+                past.push((m.0, cost))?;
+                continue;
+            }
             heap_push(
                 &mut heap,
-                (
-                    cost,
-                    hops.saturating_add(1),
-                    order.rank(m)?.0,
-                    rank,
-                    m.0,
-                    node,
-                ),
+                (cost, hops + 1, order.rank(m)?.0, rank, m.0, node),
             )?;
         }
-    };
-    let (cost, hops) = found;
-    if hops > u32::from(caps.depth) {
-        return Err(GraphError::CapExceeded {
-            limit: "depth",
-            max: u64::from(caps.depth),
-        });
     }
-    drop(heap);
+    for &(m, cost) in past.iter() {
+        tick.tick(Phase::Weighted)?;
+        if find(&settled, m).is_none_or(|(.., settled_cost)| settled_cost > cost) {
+            return Err(GraphError::CapExceeded {
+                limit: "depth",
+                max: u64::from(caps.depth),
+            });
+        }
+    }
+    let Some((cost, hops)) = found else {
+        return Ok(None);
+    };
+    drop((heap, past));
     let mut path = Grow::with_capacity(budget, hops as usize + 1)?;
     let mut at = dst.0;
     path.push(dst)?;
     while at != src.0 {
         tick.tick(Phase::Weighted)?;
-        let Ok(i) = settled.binary_search_by_key(&at, |&(n, _, _)| n) else {
+        let Some((_, parent, ..)) = find(&settled, at) else {
             return Err(GraphError::Corrupt("unsettled node on a path".to_owned()));
         };
-        at = settled[i].1;
+        at = parent;
         path.push(LocalId(at))?;
     }
     path.reverse();
