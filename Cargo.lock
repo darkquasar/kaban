@@ -1462,6 +1462,7 @@ dependencies = [
  "kaban-codegraph",
  "kaban-core",
  "kaban-index",
+ "kaban-index-graph",
  "kaban-index-tantivy",
  "kaban-ingest",
  "kaban-policy",
