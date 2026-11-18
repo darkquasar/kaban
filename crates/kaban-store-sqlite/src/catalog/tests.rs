@@ -1353,10 +1353,9 @@ fn a_view_does_not_load_through_another_database_at_the_same_generation() {
     let out = ours
         .catalog()
         .with_snapshot(&ours.lock(), &budget, |_, pin| {
-            let tx = other.unchecked_transaction().unwrap();
-            let loaded = pin.load_view(&tx, &ViewName::Main).map(|_| ());
-            tx.finish().unwrap();
-            Ok(loaded)
+            theirs.catalog().read(&other, |tx| {
+                Ok(pin.load_view(tx, &ViewName::Main).map(|_| ()))
+            })
         })
         .unwrap();
 

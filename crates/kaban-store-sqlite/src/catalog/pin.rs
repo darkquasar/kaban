@@ -20,7 +20,7 @@ use kaban_core::query_budget::{
     ALLOCATION_METADATA_BYTES, BudgetExceeded, BudgetLease, QueryBudget,
 };
 use kaban_core::{BackendSource, Result, StoreError, ViewName};
-use rusqlite::{Connection, Row, Transaction};
+use rusqlite::{Connection, Row, Transaction, TransactionState};
 use tantivy::directory::OwnedBytes;
 
 use super::Catalog;
@@ -58,6 +58,9 @@ pub(crate) struct Pin {
     generation: Generation,
     /// The candidate generation whose lock the pin holds (PC-8), at or below `generation`.
     candidate: u64,
+    /// The identity of the connection the pin was acquired on ([`connection_id`]): a view
+    /// loads only through it.
+    owner: usize,
     kbx: PathBuf,
     /// The container's mapping, shared with the catalog's other pins (excluded from the
     /// charge: a shared immutable mapping, PC-17). It holds no pin lock; only the bytes
@@ -221,10 +224,12 @@ impl Pin {
         &self.kbx
     }
 
-    /// Refuse `conn` unless it is inside a read transaction at this pin's generation that the
-    /// pin's lock still guards (the floor has not passed its candidate): the pin's own.
+    /// Refuse `conn` unless it is the connection the pin was acquired on, inside a read
+    /// transaction at this pin's generation that the pin's lock still guards (the floor has not
+    /// passed its candidate): the pin's own. Generation equality alone would admit another
+    /// database at the same generation.
     fn inside(&self, conn: &Connection) -> Result<()> {
-        if conn.is_autocommit() {
+        if connection_id(conn) != self.owner || conn.is_autocommit() {
             return Err(outside());
         }
         let (floor, actual) = floor_and_latest(conn)?;
@@ -378,7 +383,7 @@ impl Catalog {
     /// leaves it in place and installs none.
     ///
     /// # Errors
-    /// [`OuterTransaction`] when `conn` already has a transaction open; the closure's, the
+    /// [`OuterTransaction`] when `conn` already has a transaction open or a live statement; the closure's, the
     /// budget's, the pin lock's or SQLite's error.
     pub(crate) fn with_snapshot<T>(
         &self,
@@ -401,7 +406,7 @@ impl Catalog {
     /// no statement that reads live rows, and loads no other view.
     ///
     /// # Errors
-    /// [`OuterTransaction`] when `conn` already has a transaction open; the budget's, the pin
+    /// [`OuterTransaction`] when `conn` already has a transaction open or a live statement; the budget's, the pin
     /// lock's or SQLite's error.
     pub(crate) fn pin(
         &self,
@@ -437,11 +442,15 @@ impl Catalog {
     where
         F: FnOnce(&Transaction<'_>, Pin) -> Result<T>,
     {
-        if !conn.is_autocommit() {
+        // autocommit alone is not enough: a live SELECT keeps an older read transaction open
+        if !conn.is_autocommit()
+            || conn.transaction_state(None::<&str>).sql()? != TransactionState::None
+        {
             return Err(StoreError::Backend {
                 source: BackendSource::new(OuterTransaction),
             });
         }
+        let owner = connection_id(conn);
         // held until every transaction of the acquisition (and `f`) has ended: dropped last
         let _admitted = self
             .pins
@@ -468,7 +477,7 @@ impl Catalog {
                     });
                 }
                 self.failpoint(Window::ReaderInTransaction);
-                let pin = self.new_pin(budget, Generation(actual), candidate, lock)?;
+                let pin = self.new_pin(budget, Generation(actual), candidate, owner, lock)?;
                 f(tx, pin).map(Attempt::Pinned)
             })?;
             match attempt {
@@ -485,13 +494,14 @@ impl Catalog {
         }
     }
 
-    /// A pin at `generation` holding `lock` at `candidate`, with no view loaded: its container
-    /// path and shared lock charged to `budget` (PC-17).
+    /// A pin at `generation` holding `lock` at `candidate`, acquired on the connection `owner`,
+    /// with no view loaded: its container path and shared lock charged to `budget` (PC-17).
     fn new_pin(
         &self,
         budget: &QueryBudget,
         generation: Generation,
         candidate: u64,
+        owner: usize,
         lock: Option<PinLock>,
     ) -> Result<Pin> {
         budget.check().map_err(budget_exceeded)?;
@@ -506,6 +516,7 @@ impl Catalog {
         Ok(Pin {
             generation,
             candidate,
+            owner,
             kbx: self.kbx.clone(),
             mapping: Arc::clone(&self.mapping),
             budget: budget.clone(),
@@ -633,6 +644,12 @@ enum Attempt<T, F> {
     Retry { candidate: u64, f: F },
 }
 
+/// The identity of `conn` while it lives: its address. A transaction derefs to its connection,
+/// so the pin's own transaction has the pin's identity.
+fn connection_id(conn: &Connection) -> usize {
+    std::ptr::from_ref(conn).addr()
+}
+
 /// The latest generation `tx` sees.
 pub(super) fn latest_generation(tx: &Transaction<'_>) -> Result<u64> {
     tx.query_row(
@@ -654,15 +671,17 @@ fn floor_and_latest(conn: &Connection) -> Result<(u64, u64)> {
     .sql()
 }
 
-/// A snapshot or pin asked of a connection that already has a transaction open: PC-8 pins
-/// only from a fresh read transaction begun after its lock, never inside a competing outer
-/// one.
+/// A snapshot or pin asked of a connection that already has a transaction open, or a live
+/// statement holding one (a stepped, unfinished SELECT): PC-8 pins only from a fresh read
+/// transaction begun after its lock, never inside a competing outer one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct OuterTransaction;
 
 impl std::fmt::Display for OuterTransaction {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("catalog: a pin needs a connection without an open transaction")
+        f.write_str(
+            "catalog: a pin needs a connection without an open transaction or a live statement",
+        )
     }
 }
 
