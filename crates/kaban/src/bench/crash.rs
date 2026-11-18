@@ -202,7 +202,8 @@ mod campaign {
     }
 
     /// One kill at `point` over a fresh store in `dir`: its JSONL line and whether the child
-    /// died at the point and the recovered catalog verifies clean.
+    /// died at the point and the recovered catalog verifies clean. A recovery or verification
+    /// that fails is a line too (its error and the store kept), never an early return.
     fn kill(dir: &Path, n: u32, point: &str) -> Result<(serde_json::Value, bool)> {
         let started = Instant::now();
         let store = open(dir)?;
@@ -220,11 +221,29 @@ mod campaign {
         )?;
         std::fs::write(dir.join("child.stderr"), &child.stderr)?;
         let status = child.status;
-        let recovered = store.recover_catalog()?;
-        let verified = store.verify_catalog()?;
         let signal = status.and_then(|s| s.signal());
         // killed by its own crash point, not by the runner's deadline
         let killed = signal == Some(9) && child.killed.is_none();
+        let checked = store
+            .recover_catalog()
+            .and_then(|recovered| Ok((recovered, store.verify_catalog()?)));
+        let (recovered, verified) = match checked {
+            Ok(checked) => checked,
+            // the record is written before the error is: its text and the kept store
+            Err(e) => {
+                let line = json!({
+                    "kill": n,
+                    "point": point,
+                    "killed": killed,
+                    "exit": status.and_then(|s| s.code()),
+                    "signal": signal,
+                    "error": e.to_string(),
+                    "store": dir.display().to_string(),
+                    "elapsed_ms": started.elapsed().as_secs_f64() * 1e3,
+                });
+                return Ok((line, false));
+            }
+        };
         let inconsistencies = verified.inconsistencies();
         let line = json!({
             "kill": n,
