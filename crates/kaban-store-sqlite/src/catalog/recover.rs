@@ -4,7 +4,8 @@
 //!   recover: maintenance lock EX (bounded wait)?
 //!              no  => maintenance_live: clear nothing
 //!              yes => delete every claim => [recover.mid] => punch every unpublished range
-//!   verify:  one read transaction: classes, chains, claims, named ranges
+//!   verify:  pin => maintenance lock EX probe (held through the read)
+//!            => one read transaction: classes, chains, claims, named ranges
 //!            => unnamed ranges that hold data => missing cold files => hashes of live extents
 //! ```
 //!
@@ -23,6 +24,7 @@ use std::os::unix::fs::FileExt;
 use std::path::Path;
 use std::time::Duration;
 
+use kaban_core::query_budget::QueryBudget;
 use kaban_core::{Durability, Result};
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
@@ -30,6 +32,7 @@ use sha2::{Digest, Sha256};
 use super::Catalog;
 use super::class::ExtentLocation;
 use super::fail;
+use super::failpoint::Window;
 use super::kbx::{self, failed};
 use super::pins;
 use super::reclaim::coalesce;
@@ -148,16 +151,23 @@ impl Catalog {
     /// Verify the catalog (read only): every extent class, unreferenced ranges, missing cold
     /// files, views in `needs_reimport`, chain inconsistencies, content hash mismatches of live
     /// extents (a row without a hash is reported apart, not failed) and stale claims, all from
-    /// one read transaction. Retired extents are not hashed: a reclamation may already have
-    /// punched them.
+    /// one read transaction. A pin taken before that transaction keeps every extent it reads
+    /// from reclamation while it is hashed, and the maintenance probe is held through it, so
+    /// claims and unnamed ranges count only while no maintenance can run. Retired extents are
+    /// not hashed: a reclamation may already have punched them.
     ///
     /// # Errors
     /// SQLite, lock and container errors.
     pub(crate) fn verify(&self, conn: &Connection) -> Result<VerifyReport> {
-        let maintenance_live = match (self.pins.as_deref(), self.container) {
-            (Some(pins), Some(_)) => pins::exclusive_maintenance(pins, Duration::ZERO)?.is_none(),
-            _ => false,
+        // taken before the read: every extent live in it stays unreclaimed while it is hashed
+        let budget = QueryBudget::new(u64::MAX, Some(self.maintenance_budget().deadline));
+        let _pin = self.pin_untouched(conn, &budget, &[])?;
+        // held through the read: no maintenance starts while claims and ranges are read
+        let probe = match (self.pins.as_deref(), self.container) {
+            (Some(pins), Some(_)) => Some(pins::exclusive_maintenance(pins, Duration::ZERO)?),
+            _ => None,
         };
+        let maintenance_live = matches!(probe, Some(None));
         let (mut report, extents) = self.read(conn, |tx| {
             let mut report = VerifyReport {
                 classes: query(
@@ -217,6 +227,8 @@ impl Catalog {
             report.unreferenced_ranges = self.unreferenced(&named)?;
             Ok((report, extents))
         })?;
+        drop(probe);
+        self.failpoint(Window::VerifyHashing);
         let container = self.open_container()?;
         for (id, location, sha256) in extents {
             match location {

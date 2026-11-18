@@ -23,6 +23,8 @@ pub enum Window {
     ReclaimFloorCommitted,
     /// A compaction unit's claim is committed and its merge work has not begun.
     CompactClaimed,
+    /// A verification has read its rows and not hashed the live extents yet.
+    VerifyHashing,
 }
 
 #[cfg(any(test, feature = "failpoints"))]
@@ -41,7 +43,7 @@ mod hooks {
     /// The installed hooks of one catalog, and how often its readers retried (PC-8 step 4).
     #[derive(Default)]
     pub(crate) struct Failpoints {
-        hooks: Mutex<[Option<Hook>; 5]>,
+        hooks: Mutex<[Option<Hook>; 6]>,
         retries: AtomicU64,
     }
 
@@ -60,6 +62,7 @@ mod hooks {
             Window::ReaderInTransaction => 2,
             Window::ReclaimFloorCommitted => 3,
             Window::CompactClaimed => 4,
+            Window::VerifyHashing => 5,
         }
     }
 

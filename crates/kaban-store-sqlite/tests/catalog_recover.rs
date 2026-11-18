@@ -18,7 +18,7 @@ use kaban_core::MemoryStore;
 use kaban_core::config::{CatalogCfg, SealOps};
 use kaban_core::query_budget::QueryBudget;
 use kaban_store_sqlite::SqliteStore;
-use kaban_store_sqlite::catalog_testing;
+use kaban_store_sqlite::catalog_testing::{self, Window};
 use std::os::unix::fs::FileExt;
 use std::os::unix::process::ExitStatusExt;
 use std::process::{Command, Stdio};
@@ -402,4 +402,28 @@ fn a_crash_between_the_punch_and_the_rows_of_a_reclamation_recovers_clean() {
 #[test]
 fn a_crash_in_the_middle_of_a_recovery_recovers_clean() {
     crash_at("recover.mid");
+}
+
+#[test]
+fn a_reclamation_while_verify_hashes_leaves_no_mismatch() {
+    // Arrange: one live extent; a second store of the database retires and reclaims it between
+    // verify's read and its hashing
+    let s = Scratch::new("kaban-t6-recover", "verify-race");
+    let store = open_at(&s.db());
+    let id = catalog_testing::append_and_publish(&store, &pattern(9, 8192)).unwrap();
+    let other = open_at(&s.db());
+    catalog_testing::set_failpoint(
+        &store,
+        Window::VerifyHashing,
+        Some(std::sync::Arc::new(move || {
+            catalog_testing::retire(&other, &[id]).unwrap();
+            catalog_testing::reclaim(&other).unwrap();
+        })),
+    );
+
+    // Act
+    let report = store.verify_catalog().unwrap();
+
+    // Assert: what verify read stayed whole while it hashed
+    assert_eq!(report.hash_mismatches, Vec::<u64>::new(), "{report:?}");
 }
