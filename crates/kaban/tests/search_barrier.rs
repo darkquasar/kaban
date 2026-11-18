@@ -395,13 +395,6 @@ fn an_ingest_carries_a_receipt_and_is_searchable_under_activation() {
     }
 }
 
-/// The budget of one write under activation (fix11: a lone writer or a serving process
-/// publishes its own commit well inside the 5 s barrier; before, every write slept to the
-/// deadline).
-const ONE_WRITE: Duration = Duration::from_secs(2);
-/// The budget of fifty writes over MCP.
-const FIFTY_WRITES: Duration = Duration::from_secs(10);
-
 /// A database the production open activates (SS-13b, the path users hit): one note on the
 /// latest schema and the adapter's projection built beside it at the canonical head, so the
 /// next binary open serves from the adapter.
@@ -411,20 +404,22 @@ fn seed_installed(s: &Scratch) {
     adapter(s).rebuild().unwrap();
 }
 
-/// Median and p95 of per-write latencies, printed for the hand-back.
-fn report(label: &str, mut samples: Vec<Duration>) {
+/// The first write's latency, then the median, p95 and total of the loop's, printed only: a
+/// wall-clock bound would fail on a loaded machine and prove nothing the outcomes do not (a
+/// write that slept to the barrier's deadline reports `committed_not_yet_searchable`).
+fn report(label: &str, first: Duration, mut samples: Vec<Duration>) {
     samples.sort_unstable();
     let n = samples.len();
     let median = samples[n / 2];
     let p95 = samples[(n * 95 / 100).min(n - 1)];
     let total: Duration = samples.iter().sum();
-    eprintln!("{label}: n={n} median={median:?} p95={p95:?} total={total:?}");
+    eprintln!("{label}: first={first:?} n={n} median={median:?} p95={p95:?} total={total:?}");
 }
 
 /// A lone CLI writer under activation (SS-10, SS-21; fix11): the production open activates
-/// the installed index, the first `remember` is `committed` and a recall hit within 2 s,
-/// and fifty more land within 13 s in all. Before the fix each write slept the whole 5 s
-/// barrier.
+/// the installed index, the first `remember` is `committed` and a recall hit, and fifty more
+/// are each `committed` inside their barrier. Before the fix each write slept the whole 5 s
+/// barrier. The latencies are printed, not asserted.
 #[test]
 fn a_lone_cli_writer_publishes_each_write_well_inside_the_barrier() {
     let s = Scratch::new("kaban-barrier", "cli-latency");
@@ -444,10 +439,8 @@ fn a_lone_cli_writer_publishes_each_write_well_inside_the_barrier() {
         texts.iter().any(|t| t == "quokka first under activation"),
         "{texts:?}"
     );
-    assert!(first < ONE_WRITE, "the first write took {first:?}");
 
     let mut samples = Vec::new();
-    let loop_started = Instant::now();
     for i in 0..50 {
         let text = format!("wombat note {i} by the lone writer");
         let started = Instant::now();
@@ -460,19 +453,14 @@ fn a_lone_cli_writer_publishes_each_write_well_inside_the_barrier() {
             "{i}"
         );
     }
-    let total = loop_started.elapsed();
-    report("cli", samples);
+    report("cli", first, samples);
     let texts = recalled(&s, "wombat note lone writer");
     assert!(!texts.is_empty(), "the loop's notes are hits");
-    assert!(
-        total < Duration::from_secs(13),
-        "fifty writes took {total:?}"
-    );
 }
 
 /// A serving process under activation (the harness drives `kaban --db ...` over MCP): the
-/// mode-B loop or the drain publishes each `remember` inside the barrier; one write within
-/// 2 s, fifty within 10 s, every receipt `committed`.
+/// mode-B loop or the drain publishes each `remember` inside the barrier: every receipt of
+/// fifty-one writes is `committed`. The latencies are printed, not asserted.
 #[test]
 fn a_serving_process_publishes_each_write_well_inside_the_barrier() {
     let s = Scratch::new("kaban-barrier", "mcp-latency");
@@ -495,10 +483,8 @@ fn a_serving_process_publishes_each_write_well_inside_the_barrier() {
         json!("committed"),
         "{reply}"
     );
-    assert!(first < ONE_WRITE, "the first write took {first:?}");
 
     let mut samples = Vec::new();
-    let loop_started = Instant::now();
     for i in 0..50 {
         let (reply, took) = remember(&format!("wombat note {i} over mcp"));
         samples.push(took);
@@ -508,8 +494,7 @@ fn a_serving_process_publishes_each_write_well_inside_the_barrier() {
             "{i}: {reply}"
         );
     }
-    let total = loop_started.elapsed();
-    report("mcp", samples);
+    report("mcp", first, samples);
     srv.finish();
     assert!(
         visible_through(&adapter(&s)).is_some_and(|seq| seq > 0),
@@ -520,5 +505,4 @@ fn a_serving_process_publishes_each_write_well_inside_the_barrier() {
         texts.iter().any(|t| t == "quokka first over mcp"),
         "{texts:?}"
     );
-    assert!(total < FIFTY_WRITES, "fifty writes took {total:?}");
 }

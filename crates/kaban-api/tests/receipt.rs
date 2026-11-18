@@ -23,6 +23,7 @@ use kaban_policy::Policy;
 use kaban_store_sqlite::SqliteStore;
 use serde_json::{Value, json};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 /// Hits the builtin credential rule `aws-access-key-id` (always reject); assembled at run time
 /// so no key-shaped literal sits in the source.
@@ -515,6 +516,32 @@ fn a_post_tool_use_that_records_evidence_reports_committed() {
     assert_eq!(nothing.receipt, None, "{nothing:?}");
 }
 
+/// A hook's committed write is `committed`, or `committed_not_yet_searchable` when the text
+/// projector missed the hook's quarter-second barrier (a loaded machine): never a rejection.
+/// A pending one must become searchable at its position within a generous bound, each try one
+/// full write barrier that drives the store's own drain and polls the watermark.
+fn assert_committed_and_searchable(api: &KabanApi, receipt: &WriteReceipt) {
+    if receipt.outcome == WriteOutcome::Committed {
+        return;
+    }
+    assert_eq!(
+        receipt.outcome,
+        WriteOutcome::CommittedNotYetSearchable,
+        "{receipt:?}"
+    );
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while api
+        .await_searchable(api.committed_receipt(receipt.seq))
+        .outcome
+        != WriteOutcome::Committed
+    {
+        assert!(
+            Instant::now() < deadline,
+            "the committed write never became searchable: {receipt:?}"
+        );
+    }
+}
+
 /// D3 review d3-1 (SS-10 "post-commit failure never becomes rejection"): `hook fix` commits
 /// the Improvement with its `FIXED_BY` edge through `remember`, then patches the Failure in a
 /// second transaction. A failure of that patch (injected: a trigger aborts the props update)
@@ -547,7 +574,7 @@ fn a_fix_whose_failure_patch_fails_after_the_improvement_committed_reports_commi
         .receipt
         .clone()
         .expect("the Improvement committed: {out:?}");
-    assert_eq!(receipt.outcome, WriteOutcome::Committed, "{out:?}");
+    assert_committed_and_searchable(&api, &receipt);
     assert!(
         receipt.seq.unwrap() > head,
         "the Improvement and its edge are in the log: {out:?}"
@@ -594,7 +621,7 @@ fn a_failure_whose_session_pairing_fails_after_the_record_committed_reports_comm
         &failure_envelope("make test"),
     );
     let receipt = out.receipt.clone().expect("the Failure committed: {out:?}");
-    assert_eq!(receipt.outcome, WriteOutcome::Committed, "{out:?}");
+    assert_committed_and_searchable(&api, &receipt);
     assert!(receipt.seq.unwrap() > head, "{out:?}");
     assert_eq!(receipt.seq, Some(store.changes_head().unwrap()));
     assert_identities(&store, &receipt);

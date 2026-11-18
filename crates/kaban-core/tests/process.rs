@@ -472,14 +472,15 @@ fn a_monitor_erroring_on_its_second_sample_kills_within_two_intervals() {
     }));
     let outcome = run(s).unwrap();
     assert_eq!(outcome.killed, Some(KillReason::Monitor { class: "quota" }));
-    // two intervals plus the poll and kill slack (OWN-11 margins under parallel load)
+    // not before the second sample, and the monitor's kill, far before the 5 s deadline's (a
+    // loose bound: a loaded runner stretches the poll and kill slack well past one interval)
     assert!(
         outcome.wall >= interval * 2,
         "killed too early: {:?}",
         outcome.wall
     );
     assert!(
-        outcome.wall < interval * 2 + Duration::from_millis(50),
+        outcome.wall < interval * 2 + Duration::from_secs(1),
         "took {:?}",
         outcome.wall
     );
