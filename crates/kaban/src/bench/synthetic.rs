@@ -43,8 +43,8 @@ pub(crate) fn generate(seed: u64, edges: u64) -> Records {
                 dst: LocalId((rng.next() % nodes) as u32),
                 kind: OpKind::Add,
                 attr: Attr {
-                    weight: (rng.next() % 1_000_000) as i64,
-                    ts: (rng.next() % 1_000_000_000) as i64,
+                    weight: (rng.next() % 1_000_000).cast_signed(),
+                    ts: (rng.next() % 1_000_000_000).cast_signed(),
                 },
             }
         })
