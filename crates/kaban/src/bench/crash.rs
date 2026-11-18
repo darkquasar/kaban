@@ -73,7 +73,7 @@ mod campaign {
     use std::io::Write;
     use std::os::unix::process::ExitStatusExt;
     use std::path::Path;
-    use std::process::{Child, Command, ExitCode, ExitStatus, Stdio};
+    use std::process::ExitCode;
     use std::time::{Duration, Instant};
 
     use anyhow::{Context, Result, bail};
@@ -201,39 +201,30 @@ mod campaign {
         Ok(ExitCode::from(3))
     }
 
-    /// Wait at most [`CHILD_WAIT`] for `child`; kill it past that (`None`).
-    fn wait(child: &mut Child) -> Result<Option<ExitStatus>> {
-        let started = Instant::now();
-        while started.elapsed() < CHILD_WAIT {
-            if let Some(status) = child.try_wait()? {
-                return Ok(Some(status));
-            }
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        let _ = child.kill();
-        let _ = child.wait();
-        Ok(None)
-    }
-
     /// One kill at `point` over a fresh store in `dir`: its JSONL line and whether the child
     /// died at the point and the recovered catalog verifies clean.
     fn kill(dir: &Path, n: u32, point: &str) -> Result<(serde_json::Value, bool)> {
         let started = Instant::now();
         let store = open(dir)?;
         arrange(&store, point)?;
-        let mut child = Command::new(std::env::current_exe()?)
-            .args(["bench", "crash", "--child"])
-            .arg(dir)
-            .env(catalog_testing::FAILPOINT_ARM, point)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(std::fs::File::create(dir.join("child.stderr"))?)
-            .spawn()?;
-        let status = wait(&mut child)?;
+        let args = [
+            "bench".as_ref(),
+            "crash".as_ref(),
+            "--child".as_ref(),
+            dir.as_os_str(),
+        ];
+        let child = crate::bench::run_self(
+            &args,
+            &[(catalog_testing::FAILPOINT_ARM, point)],
+            CHILD_WAIT,
+        )?;
+        std::fs::write(dir.join("child.stderr"), &child.stderr)?;
+        let status = child.status;
         let recovered = store.recover_catalog()?;
         let verified = store.verify_catalog()?;
         let signal = status.and_then(|s| s.signal());
-        let killed = signal == Some(9);
+        // killed by its own crash point, not by the runner's deadline
+        let killed = signal == Some(9) && child.killed.is_none();
         let inconsistencies = verified.inconsistencies();
         let line = json!({
             "kill": n,

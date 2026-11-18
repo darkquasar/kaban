@@ -69,7 +69,7 @@ mod tests {
     fn the_same_seed_generates_the_same_records_of_the_asked_size() {
         let a = generate(7, 1_000);
         assert_eq!(a.edges.len(), 1_000);
-        assert!(!a.nodes.is_empty());
+        assert_eq!(a.nodes.len(), 100);
         assert_eq!(a, generate(7, 1_000));
         assert_ne!(a, generate(8, 1_000));
     }

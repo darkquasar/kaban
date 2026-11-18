@@ -267,8 +267,9 @@ mod writers {
 
 #[cfg(feature = "bench")]
 mod memory {
-    use std::process::{Command, ExitCode};
-    use std::time::Instant;
+    use std::io::Write;
+    use std::process::ExitCode;
+    use std::time::{Duration, Instant};
 
     use anyhow::{Context, Result};
     use kaban_core::query_budget::QueryBudget;
@@ -281,6 +282,8 @@ mod memory {
 
     /// The generator seed of every measurement.
     const SEED: u64 = 0x7_6;
+    /// The bound of one measured child (a 5M-edge fold ran 10 s in a debug build).
+    const CHILD_DEADLINE: Duration = Duration::from_mins(15);
 
     /// `key` of `/proc/self/status`, in KiB.
     fn status_kib(key: &str) -> Result<u64> {
@@ -380,18 +383,22 @@ mod memory {
 
     /// Run `op` over `edges` edges in a child process; its line goes to stdout.
     pub(super) fn run(op: Op, edges: u64) -> Result<ExitCode> {
-        let status = Command::new(std::env::current_exe()?)
-            .args([
-                "bench",
-                "catalog",
-                "--memory",
-                op.name(),
-                "--memory-child",
-                "--edges",
-            ])
-            .arg(edges.to_string())
-            .status()?;
-        Ok(if status.success() {
+        let edges = edges.to_string();
+        let args = [
+            "bench",
+            "catalog",
+            "--memory",
+            op.name(),
+            "--memory-child",
+            "--edges",
+            &edges,
+        ];
+        let args: Vec<&std::ffi::OsStr> = args.iter().map(std::ffi::OsStr::new).collect();
+        let child = crate::bench::run_self(&args, &[], CHILD_DEADLINE)?;
+        std::io::stdout().write_all(&child.stdout)?;
+        std::io::stderr().write_all(&child.stderr)?;
+        let ok = child.killed.is_none() && child.status.is_some_and(|s| s.success());
+        Ok(if ok {
             ExitCode::SUCCESS
         } else {
             ExitCode::FAILURE

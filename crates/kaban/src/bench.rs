@@ -66,3 +66,35 @@ fn not_delivered(name: &str) -> std::process::ExitCode {
     crate::cli::output::print_error(&format!("error: bench {name} not delivered"));
     std::process::ExitCode::from(crate::cli::output::EXIT_INVALID)
 }
+
+/// Run this binary as a child through the one process runner (`bench crash`, `bench catalog
+/// --memory`): `args`, the caller's `HOME`, `KABAN_HOME`, `TMPDIR` and `PATH` plus `env`, killed
+/// past `deadline`.
+#[cfg(feature = "bench")]
+fn run_self(
+    args: &[&std::ffi::OsStr],
+    env: &[(&str, &str)],
+    deadline: std::time::Duration,
+) -> anyhow::Result<kaban_core::process::Outcome> {
+    use kaban_core::process::{EnvAllowlist, Exec, InheritedFds, Spec};
+    let mut allowed = EnvAllowlist::new();
+    for name in ["HOME", "KABAN_HOME", "TMPDIR", "PATH"] {
+        allowed.carry(name)?;
+    }
+    for (name, value) in env {
+        allowed.insert(name, value)?;
+    }
+    Ok(kaban_core::process::run(Spec {
+        exec: Exec::Path(std::env::current_exe()?),
+        args: args.iter().map(|a| a.to_os_string()).collect(),
+        cwd: std::path::Path::new("."),
+        env: allowed,
+        deadline,
+        stdout_cap: 64 * 1024,
+        stderr_cap: 64 * 1024,
+        monitors: Vec::new(),
+        join_bound: std::time::Duration::from_secs(1),
+        // the benches run under a flock launcher, as the identity commands do
+        inherited_fds: InheritedFds::Tolerate,
+    })?)
+}
