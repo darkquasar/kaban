@@ -335,6 +335,7 @@ fn workspace_id_is_not_null_on_exactly_the_tenant_scoped_tables() {
             "cat_meta",
             "cat_sediment",
             "cat_view",
+            "cat_view_extent",
             "index_meta",
             "leases",
             "projections",

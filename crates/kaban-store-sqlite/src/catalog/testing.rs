@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use kaban_core::query_budget::QueryBudget;
-use kaban_core::{Durability, Result};
+use kaban_core::{Durability, Result, ViewName};
 use rusqlite::Connection;
 use tantivy::directory::OwnedBytes;
 
@@ -128,8 +128,8 @@ pub fn pin_sediment(store: &SqliteStore) -> Result<Vec<String>> {
         .collect())
 }
 
-/// Append `bytes` to `store`'s container as an extent of the test class and publish it in one
-/// commit; returns its extent id.
+/// Append `bytes` to `store`'s container as an extent of the test class and publish it into
+/// `main` in one commit; returns its extent id.
 ///
 /// # Errors
 /// The append's or the commit's errors.
@@ -138,21 +138,21 @@ pub fn append_and_publish(store: &SqliteStore, bytes: &[u8]) -> Result<u64> {
     let id = store
         .catalog()
         .commit(&mut store.lock(), Durability::Normal, |txn| {
-            txn.publish(extent)
+            txn.publish(extent, &[ViewName::Main])
         })?;
     Ok(id.0)
 }
 
 /// Append every one of `extents` to `store`'s container with one write and one sync, and
-/// publish each as its own extent of the test class in one commit; returns their ids in order.
+/// publish each as its own extent of the test class into `main` in one commit; returns their
+/// ids in order.
 ///
 /// # Errors
 /// The append's or the commit's errors.
 pub fn append_and_publish_all(store: &SqliteStore, extents: &[Vec<u8>]) -> Result<Vec<u64>> {
     let whole = extents.concat();
     let appended = store.catalog().append_extent(ExtentClass::Test, &whole)?;
-    let lens: Vec<u64> = extents.iter().map(|bytes| bytes.len() as u64).collect();
-    let Some(parts) = appended.split(&lens) else {
+    let Some(parts) = appended.split(extents) else {
         unreachable!("the parts sum to the appended range")
     };
     store
@@ -160,7 +160,7 @@ pub fn append_and_publish_all(store: &SqliteStore, extents: &[Vec<u8>]) -> Resul
         .commit(&mut store.lock(), Durability::Normal, |txn| {
             parts
                 .into_iter()
-                .map(|part| txn.publish(part).map(|id| id.0))
+                .map(|part| txn.publish(part, &[ViewName::Main]).map(|id| id.0))
                 .collect()
         })
 }

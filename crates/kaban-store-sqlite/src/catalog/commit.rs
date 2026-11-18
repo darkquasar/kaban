@@ -22,13 +22,13 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use kaban_core::{BackendSource, Durability, Result, StoreError};
+use kaban_core::{BackendSource, Durability, Result, StoreError, ViewName};
 use rusqlite::{Connection, OptionalExtension, Params, Transaction, TransactionBehavior};
 
 use super::Catalog;
 use super::capture::{self, BatchChanges};
 use super::class::ExtentClass;
-use super::kbx::{ContainerId, Unpublished};
+use super::kbx::{ContainerId, Parts, Unpublished};
 use super::phase::{Phase, Phases, Reader, Staged};
 use super::tables::{ExtentId, Generation, SedimentSeq, sql_int, uint};
 use crate::sql_error::SqlResultExt;
@@ -59,12 +59,20 @@ impl Txn<'_> {
     /// appended to another container, or one that overlaps a range a catalog row already names
     /// (live, or dead and not yet reclaimed: reclaiming it would release the new extent's
     /// bytes), is refused by name and the commit rolls back. A token whose commit rolls back is
-    /// gone with it: its range stays unnamed until T6's recovery reclaims it.
+    /// gone with it: its range stays unnamed until T6's recovery reclaims it. The row records
+    /// the bytes' SHA-256, and the extent is appended to the chain of each of `views` in the
+    /// same commit (spec 11 7.4): views share an extent, such as a base, by each naming it.
     ///
     /// # Errors
     /// [`PublishRefused`] (behind `StoreError::Backend`); SQLite errors.
-    pub(crate) fn publish(&mut self, extent: Unpublished) -> Result<ExtentId> {
-        let (class, offset, len, container) = extent.into_parts();
+    pub(crate) fn publish(&mut self, extent: Unpublished, views: &[ViewName]) -> Result<ExtentId> {
+        let Parts {
+            class,
+            offset,
+            len,
+            container,
+            sha256,
+        } = extent.into_parts();
         if self.container != Some(container) {
             return Err(PublishRefused::ForeignContainer.into());
         }
@@ -99,12 +107,22 @@ impl Txn<'_> {
         let id = self
             .tx
             .query_row(
-                "INSERT INTO cat_extent(class, generation, kbx_offset, kbx_len)
-                 VALUES (?1, ?2, ?3, ?4) RETURNING id",
-                rusqlite::params![class.as_str(), generation, offset_sql, len_sql],
+                "INSERT INTO cat_extent(class, generation, kbx_offset, kbx_len, content_sha256)
+                 VALUES (?1, ?2, ?3, ?4, ?5) RETURNING id",
+                rusqlite::params![class.as_str(), generation, offset_sql, len_sql, sha256],
                 |r| uint(r, 0),
             )
             .sql()?;
+        for view in views {
+            self.tx
+                .execute(
+                    "INSERT INTO cat_view_extent(view, position, extent_id)
+                     SELECT ?1, COALESCE(max(position) + 1, 0), ?2
+                     FROM cat_view_extent WHERE view = ?1",
+                    rusqlite::params![view.to_string(), sql_int(id).sql()?],
+                )
+                .sql()?;
+        }
         Ok(ExtentId(id))
     }
 

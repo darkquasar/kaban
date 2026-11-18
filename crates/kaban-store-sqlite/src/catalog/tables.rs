@@ -1,7 +1,7 @@
 //! The catalog's row vocabulary (spec 11 KER-01, INV-3): generations, extent references and
-//! sediment rows. The `cat_generation`, `cat_extent`, `cat_sediment`, `cat_claim`, `cat_view`
-//! and `cat_meta` tables (`reclaim_floor` among the latter) of `schema.sql` hold them; the
-//! commit entry writes them and a pin reads them.
+//! sediment rows. The `cat_generation`, `cat_extent`, `cat_sediment`, `cat_claim`, `cat_view`,
+//! `cat_view_extent` (each view's ordered chain) and `cat_meta` tables (`reclaim_floor` among
+//! the latter) of `schema.sql` hold them; the commit entry writes them and a pin reads them.
 
 use super::class::{ExtentClass, ExtentLocation};
 

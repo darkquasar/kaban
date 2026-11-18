@@ -188,12 +188,15 @@ CREATE TABLE cat_generation(
 -- `id` is the extent's stable identity (T6's `ExtentId`), never reused (AUTOINCREMENT);
 -- `dead_since` is the generation that retired the extent (NULL while it is live): reclaim
 -- punches only extents dead since a generation at or below `reclaim_floor` (PC-8).
+-- `content_sha256` is the SHA-256 of the extent's bytes, written by the publication of an
+-- appended extent (spec 11 7.4: verify may check it; the bytes themselves name no view).
 CREATE TABLE cat_extent(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   class TEXT NOT NULL,
   generation INTEGER NOT NULL,
   dead_since INTEGER,
   kbx_offset INTEGER, kbx_len INTEGER, relpath TEXT,
+  content_sha256 BLOB CHECK(content_sha256 IS NULL OR length(content_sha256) = 32),
   CHECK((kbx_offset IS NOT NULL AND kbx_len IS NOT NULL AND relpath IS NULL)
      OR (kbx_offset IS NULL AND kbx_len IS NULL AND relpath IS NOT NULL))
 );
@@ -224,6 +227,19 @@ CREATE TABLE cat_view(
   parent TEXT,
   state TEXT NOT NULL DEFAULT 'live' CHECK(state IN ('live','needs_reimport'))
 );
+
+-- Each view's ordered extent chain (spec 11 7.4), for every view kind (`main`, `code@<sha>`):
+-- position 0 is the oldest extent. A publication appends to the chains of the views it names;
+-- views share an extent by naming it each, so a base appears in every chain over it.
+CREATE TABLE cat_view_extent(
+  view TEXT NOT NULL,
+  position INTEGER NOT NULL,
+  extent_id INTEGER NOT NULL REFERENCES cat_extent(id) ON DELETE CASCADE,
+  PRIMARY KEY(view, position),
+  UNIQUE(view, extent_id)
+);
+
+CREATE INDEX cat_view_extent_extent ON cat_view_extent(extent_id);
 
 CREATE TABLE cat_meta(
   key TEXT PRIMARY KEY,

@@ -17,6 +17,7 @@ use std::sync::{Mutex, PoisonError};
 
 use kaban_core::{BackendSource, Result, StoreError};
 use rustix::fs::{FlockOperation, Mode, OFlags};
+use sha2::{Digest, Sha256};
 use tantivy::directory::{Directory, MmapDirectory, OwnedBytes};
 
 use super::class::ExtentClass;
@@ -144,7 +145,8 @@ impl ContainerId {
 /// consumes it). It is made only by an append, is not `Clone` and names the container it was
 /// appended to, so a range is published at most once and only by its container's catalog.
 /// A token whose publishing commit rolls back is gone with it: its range stays unnamed (a leak
-/// that T6's verify reports and its recovery reclaims, never published again).
+/// that T6's verify reports and its recovery reclaims, never published again). It carries the
+/// SHA-256 of the bytes, computed by the append that had them.
 #[derive(Debug)]
 #[must_use = "an unpublished extent is garbage until a commit publishes it"]
 pub(crate) struct Unpublished {
@@ -152,35 +154,58 @@ pub(crate) struct Unpublished {
     offset: u64,
     len: u64,
     container: ContainerId,
+    sha256: [u8; 32],
+}
+
+/// What a publication takes from an [`Unpublished`] token.
+#[derive(Debug)]
+pub(crate) struct Parts {
+    pub(crate) class: ExtentClass,
+    pub(crate) offset: u64,
+    pub(crate) len: u64,
+    pub(crate) container: ContainerId,
+    pub(crate) sha256: [u8; 32],
 }
 
 impl Unpublished {
-    /// The container's range, its class and the container, consuming the token: the
-    /// publication's view of it.
-    pub(crate) fn into_parts(self) -> (ExtentClass, u64, u64, ContainerId) {
-        (self.class, self.offset, self.len, self.container)
+    /// The container's range, its class, the container and the bytes' hash, consuming the
+    /// token: the publication's view of it.
+    pub(crate) fn into_parts(self) -> Parts {
+        Parts {
+            class: self.class,
+            offset: self.offset,
+            len: self.len,
+            container: self.container,
+            sha256: self.sha256,
+        }
     }
 
-    /// Divide this range into consecutive tokens of `lens` bytes each, consuming it: every
-    /// byte keeps one owner. `None` when `lens` does not sum to the range's length.
+    /// Divide this range into consecutive tokens, one per part of `bytes` (what was appended,
+    /// in order), consuming it: every byte keeps one owner and each token the hash of its
+    /// part. `None` when the parts do not sum to the range's length.
     #[cfg(any(test, feature = "failpoints"))]
-    pub(crate) fn split(self, lens: &[u64]) -> Option<Vec<Self>> {
-        let total = lens.iter().try_fold(0_u64, |sum, &n| sum.checked_add(n))?;
+    pub(crate) fn split(self, bytes: &[Vec<u8>]) -> Option<Vec<Self>> {
+        let total = bytes
+            .iter()
+            .try_fold(0_u64, |sum, part| sum.checked_add(part.len() as u64))?;
         if total != self.len {
             return None;
         }
         let mut offset = self.offset;
         Some(
-            lens.iter()
-                .map(|&len| {
-                    let part = Self {
+            bytes
+                .iter()
+                .map(|part| {
+                    let len = part.len() as u64;
+                    let token = Self {
                         class: self.class,
                         offset,
                         len,
                         container: self.container,
+                        sha256: Sha256::digest(part).into(),
                     };
                     offset += len;
-                    part
+                    token
                 })
                 .collect(),
         )
@@ -249,6 +274,7 @@ pub(crate) fn append(kbx: &Path, class: ExtentClass, bytes: &[u8]) -> Result<Unp
         offset,
         len,
         container,
+        sha256: Sha256::digest(bytes).into(),
     })
 }
 

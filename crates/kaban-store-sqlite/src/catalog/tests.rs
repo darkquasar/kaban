@@ -10,7 +10,7 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use kaban_core::{
-    Actor, Durability, MemoryStore, NewNode, NodeId, RememberOutcome, Result, StoreError,
+    Actor, Durability, MemoryStore, NewNode, NodeId, RememberOutcome, Result, StoreError, ViewName,
     WorkspaceId, WriteCtx,
 };
 use rusqlite::Connection;
@@ -1186,7 +1186,7 @@ fn a_span_beyond_the_container_is_refused_and_a_span_inside_it_reads() {
     store
         .catalog()
         .commit(&mut store.lock(), Durability::Normal, |txn| {
-            txn.publish(inside)?;
+            txn.publish(inside, &[ViewName::Main])?;
             txn.conn()
                 .execute_batch(
                     "INSERT INTO cat_extent(class, generation, kbx_offset, kbx_len)
@@ -1355,7 +1355,7 @@ fn a_token_appended_to_another_container_is_refused_by_name() {
         .store
         .catalog()
         .commit(&mut second.store.lock(), Durability::Normal, |txn| {
-            txn.publish(token)
+            txn.publish(token, &[ViewName::Main])
         });
 
     // Assert: refused by name, and the second catalog names no range
@@ -1398,7 +1398,7 @@ fn a_range_that_overlaps_a_range_a_catalog_row_names_is_refused() {
     let out = store
         .catalog()
         .commit(&mut store.lock(), Durability::Normal, |txn| {
-            txn.publish(token)
+            txn.publish(token, &[ViewName::Main])
         });
 
     // Assert: refused by name; only the first row names a range
@@ -1426,7 +1426,7 @@ fn retiring_one_published_extent_never_releases_the_bytes_of_another() {
         store
             .catalog()
             .commit(&mut store.lock(), Durability::Normal, |txn| {
-                txn.publish(token)
+                txn.publish(token, &[ViewName::Main])
             })
             .unwrap()
             .0
@@ -1460,7 +1460,7 @@ fn a_range_whose_publication_rolled_back_stays_unowned_and_is_never_released() {
     let out = store
         .catalog()
         .commit(&mut store.lock(), Durability::Normal, |txn| {
-            txn.publish(leaked)?;
+            txn.publish(leaked, &[ViewName::Main])?;
             Err::<(), _>(StoreError::NotFound(
                 "a writer that fails after publishing".into(),
             ))
@@ -1479,7 +1479,7 @@ fn a_range_whose_publication_rolled_back_stays_unowned_and_is_never_released() {
         store
             .catalog()
             .commit(&mut store.lock(), Durability::Normal, |txn| {
-                txn.publish(token)
+                txn.publish(token, &[ViewName::Main])
             })
             .unwrap()
             .0
@@ -1497,4 +1497,69 @@ fn a_range_whose_publication_rolled_back_stays_unowned_and_is_never_released() {
     let (keeper_at, bytes) = pinned_extent(store, keeper).unwrap();
     assert!(keeper_at.0 >= 8192, "{keeper_at:?}");
     assert_eq!(bytes, vec![4_u8; 8192]);
+}
+
+/// The extent ids of `view`'s chain, in chain order.
+fn chain(store: &SqliteStore, view: &ViewName) -> Vec<u64> {
+    let conn = store.lock();
+    let mut stmt = conn
+        .prepare("SELECT extent_id FROM cat_view_extent WHERE view = ?1 ORDER BY position")
+        .unwrap();
+    stmt.query_map([view.to_string()], |r| r.get::<_, i64>(0))
+        .unwrap()
+        .map(|id| u64::try_from(id.unwrap()).unwrap())
+        .collect()
+}
+
+#[test]
+fn views_sharing_a_base_resolve_to_their_own_ordered_chains_and_rows_carry_content_hashes() {
+    use sha2::{Digest, Sha256};
+
+    // Arrange: two code views over one base, one layer each
+    let fs = FileStore::new("ancestry");
+    let store = &fs.store;
+    let view = |c: char| -> ViewName {
+        format!("code@{}", c.to_string().repeat(40))
+            .parse()
+            .unwrap()
+    };
+    let (a, b) = (view('a'), view('b'));
+    let publish = |class: ExtentClass, bytes: &[u8], views: &[ViewName]| -> u64 {
+        let token = store.catalog().append_extent(class, bytes).unwrap();
+        store
+            .catalog()
+            .commit(&mut store.lock(), Durability::Normal, |txn| {
+                txn.publish(token, views)
+            })
+            .unwrap()
+            .0
+    };
+    let written: [&[u8]; 3] = [b"the shared base", b"layer over a", b"layer over b"];
+    let base = publish(ExtentClass::CodeBase, written[0], &[a.clone(), b.clone()]);
+    let layer_a = publish(ExtentClass::CodeLayer, written[1], &[a.clone()]);
+    let layer_b = publish(ExtentClass::CodeLayer, written[2], &[b.clone()]);
+
+    // Act
+    let (chain_a, chain_b) = (chain(store, &a), chain(store, &b));
+    let hashes: Vec<Option<Vec<u8>>> = [base, layer_a, layer_b]
+        .iter()
+        .map(|id| {
+            store
+                .lock()
+                .query_row(
+                    "SELECT content_sha256 FROM cat_extent WHERE id = ?1",
+                    [i64::try_from(*id).unwrap()],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        })
+        .collect();
+
+    // Assert: each view resolves to the base, then its own layer; each row's hash is the
+    // SHA-256 of its bytes
+    assert_eq!(chain_a, [base, layer_a], "code@a's chain");
+    assert_eq!(chain_b, [base, layer_b], "code@b's chain");
+    for (hash, bytes) in hashes.iter().zip(written) {
+        assert_eq!(hash.as_deref(), Some(Sha256::digest(bytes).as_slice()));
+    }
 }

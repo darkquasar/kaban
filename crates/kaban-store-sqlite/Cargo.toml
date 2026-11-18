@@ -28,6 +28,7 @@ serde_json.workspace = true
 rustix.workspace = true
 zstd.workspace = true   # the body codec (spec 05 SS-17, OWN-I): per-record zstd with the shipped dictionary
 crc32fast.workspace = true # the length and checksum framing of a body stored plain behind the tag (T8c review t8c-3)
+sha2.workspace = true # the content hash of every published extent (spec 11 7.4)
 
 [dev-dependencies]
 kaban-core = { workspace = true, features = ["test-fake"] } # `FakeIndex` for the `recall_with` seam test (spec 05 SS-07)
