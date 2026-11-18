@@ -5,10 +5,10 @@
 //! The copy is charged to the reader's budget before it is made (PC-17): the rows are counted
 //! first, every allocation the pin keeps (one vector per class, each payload and cold path,
 //! the container path, the shared pin lock) is reserved at its exact capacity, and only then
-//! copied into that capacity, never past it. Loading and the snapshot's statements obey the
-//! budget's deadline: the copy loops check it at bounded intervals, a progress handler
-//! interrupts a long statement, and a cancelled or expired budget turns any outcome into its
-//! error.
+//! copied into that capacity, never past it. Loading obeys the budget's deadline: the copy
+//! loops check it at bounded intervals, and a cancelled or expired budget turns any outcome
+//! into its error. A long statement is interrupted by the connection's own progress handler
+//! (a query connection's), which a pin leaves in place.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -31,9 +31,6 @@ use crate::sql_error::SqlResultExt;
 
 /// How many rows a copy loop copies between two budget checks.
 const CHECK_EVERY: usize = 256;
-
-/// How many SQLite virtual-machine steps pass between two budget checks of a statement.
-const PROGRESS_STEPS: i32 = 1000;
 
 /// The one allocation of a pin's shared lock (`Arc`: its two counts and the lock), as
 /// `(bytes, alignment)`: charged with the copy.
@@ -194,28 +191,6 @@ impl Pin {
     }
 }
 
-/// The writer connection with a progress handler that interrupts any statement once the
-/// budget is cancelled or past its deadline; removed again however the pin ends.
-struct Interruptible<'c>(&'c mut Connection);
-
-impl<'c> Interruptible<'c> {
-    fn new(conn: &'c mut Connection, budget: &QueryBudget) -> Result<Self> {
-        let budget = budget.clone();
-        conn.progress_handler(PROGRESS_STEPS, Some(move || budget.check().is_err()))
-            .sql()?;
-        Ok(Self(conn))
-    }
-    fn conn(&self) -> &Connection {
-        self.0
-    }
-}
-
-impl Drop for Interruptible<'_> {
-    fn drop(&mut self) {
-        let _ = self.0.progress_handler(0, None::<fn() -> bool>);
-    }
-}
-
 /// `out`, unless the budget is cancelled, expired or exceeded: then the budget's error,
 /// whatever the outcome was (an interrupted statement's error included).
 fn settle<T>(budget: &QueryBudget, out: Result<T>) -> Result<T> {
@@ -227,22 +202,23 @@ impl Catalog {
     /// Pin by PC-8 and run `f` with the pin's own read transaction, held open while `f`
     /// evaluates rows and indexes; the transaction ends on every exit, and the pin lock with
     /// it unless bytes taken from the pin ([`Pin::bytes`]) still live: those keep the lock,
-    /// and so their extents' protection from reclamation, but not the snapshot. Acquisition
-    /// and execution share `budget`: a statement of `f` is interrupted once it is cancelled or
-    /// past its deadline, and then the budget's error is the outcome even when `f` returned
-    /// `Ok`.
+    /// and so their extents' protection from reclamation, but not the snapshot. `conn` is
+    /// borrowed shared, as [`Catalog::read`] borrows it. Acquisition and execution share
+    /// `budget`: once it is cancelled or past its deadline the budget's error is the outcome,
+    /// even when `f` returned `Ok`. Interrupting a running statement is the connection's own
+    /// progress handler's (a query connection installs one, `kaban_vtab`): the snapshot
+    /// leaves it in place and installs none.
     ///
     /// # Errors
     /// [`OuterTransaction`] when `conn` already has a transaction open; the closure's, the
     /// budget's, the pin lock's or SQLite's error.
     pub(crate) fn with_snapshot<T>(
         &self,
-        conn: &mut Connection,
+        conn: &Connection,
         budget: &QueryBudget,
         f: impl FnOnce(&Transaction<'_>, &Pin) -> Result<T>,
     ) -> Result<T> {
-        let conn = Interruptible::new(conn, budget)?;
-        let out = self.acquire(conn.conn(), budget, |tx, pin| {
+        let out = self.acquire(conn, budget, |tx, pin| {
             let out = f(tx, &pin);
             drop(pin);
             settle(budget, out)
@@ -259,9 +235,8 @@ impl Catalog {
     /// # Errors
     /// [`OuterTransaction`] when `conn` already has a transaction open; the budget's, the pin
     /// lock's or SQLite's error.
-    pub(crate) fn pin(&self, conn: &mut Connection, budget: &QueryBudget) -> Result<Pin> {
-        let conn = Interruptible::new(conn, budget)?;
-        let out = self.acquire(conn.conn(), budget, |_, pin| Ok(pin));
+    pub(crate) fn pin(&self, conn: &Connection, budget: &QueryBudget) -> Result<Pin> {
+        let out = self.acquire(conn, budget, |_, pin| Ok(pin));
         settle(budget, out)
     }
 

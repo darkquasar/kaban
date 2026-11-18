@@ -120,7 +120,7 @@ pub fn install_edge_sediment_class(store: &SqliteStore) -> Observed {
 /// The pin's errors.
 pub fn pin_sediment(store: &SqliteStore) -> Result<Vec<String>> {
     let budget = QueryBudget::new(u64::MAX, None);
-    let pin = store.catalog().pin(&mut store.lock(), &budget)?;
+    let pin = store.catalog().pin(&store.lock(), &budget)?;
     Ok(pin
         .sediment(ExtentClass::Test)
         .iter()
@@ -248,7 +248,7 @@ impl PinView<'_> {
 /// # Errors
 /// The pin's errors.
 pub fn pin(store: &SqliteStore, budget: &QueryBudget) -> Result<TestPin> {
-    Ok(TestPin(store.catalog().pin(&mut store.lock(), budget)?))
+    Ok(TestPin(store.catalog().pin(&store.lock(), budget)?))
 }
 
 /// Run `f` inside a snapshot of `store`'s catalog under `budget` ([`Catalog::with_snapshot`]).
@@ -262,7 +262,7 @@ pub fn with_snapshot<T>(
 ) -> Result<T> {
     store
         .catalog()
-        .with_snapshot(&mut store.lock(), budget, |_, pin| f(PinView(pin)))
+        .with_snapshot(&store.lock(), budget, |_, pin| f(PinView(pin)))
 }
 
 /// Install `hook` in `window` of `store`'s catalog (`None` removes it). A reader's windows run

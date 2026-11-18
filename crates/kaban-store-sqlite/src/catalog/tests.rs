@@ -813,7 +813,7 @@ fn a_pin_cancelled_while_copying_returns_the_budget_error_and_releases_everythin
     }));
 
     // Act
-    let out = store.catalog().pin(&mut store.lock(), &budget);
+    let out = store.catalog().pin(&store.lock(), &budget);
 
     // Assert
     let err = out.expect_err("a cancelled copy produced a pin");
@@ -837,7 +837,7 @@ fn a_snapshot_whose_callback_cancels_the_budget_returns_the_budget_error() {
     // Act: the callback cancels and still returns Ok
     let out = store
         .catalog()
-        .with_snapshot(&mut store.lock(), &budget, |_, _| {
+        .with_snapshot(&store.lock(), &budget, |_, _| {
             budget.cancel();
             Ok(7)
         });
@@ -849,27 +849,32 @@ fn a_snapshot_whose_callback_cancels_the_budget_returns_the_budget_error() {
     assert!(store.lock().is_autocommit());
 }
 
+/// A statement that runs for seconds unless interrupted, and returns one row.
+const LONG_STATEMENT: &str = "WITH d(x) AS (VALUES (1), (2), (3), (4), (5), (6), (7), (8),
+                                     (9), (10), (11), (12), (13), (14), (15), (16))
+                 SELECT count(*) FROM d AS a, d AS b, d AS c, d AS e, d AS f, d AS g";
+
 #[test]
 fn a_long_statement_in_a_cancelled_snapshot_is_interrupted() {
     use kaban_core::query_budget::{Limit, QueryBudget};
 
-    // Arrange: a statement that runs for seconds and returns one row
+    // Arrange: a statement that runs for seconds and returns one row, on a connection whose
+    // own progress handler watches the budget (as a query connection's does)
     let store = SqliteStore::open_memory().unwrap();
     let budget = QueryBudget::new(u64::MAX, None);
+    let watched = budget.clone();
+    store
+        .lock()
+        .progress_handler(1000, Some(move || watched.check().is_err()))
+        .unwrap();
     let mut statement = None;
 
     // Act: cancel, then run it inside the snapshot, keeping the statement's own outcome
     let out = store
         .catalog()
-        .with_snapshot(&mut store.lock(), &budget, |tx, _| {
+        .with_snapshot(&store.lock(), &budget, |tx, _| {
             budget.cancel();
-            let row = tx.query_row(
-                "WITH d(x) AS (VALUES (1), (2), (3), (4), (5), (6), (7), (8),
-                                     (9), (10), (11), (12), (13), (14), (15), (16))
-                 SELECT count(*) FROM d AS a, d AS b, d AS c, d AS e, d AS f, d AS g",
-                [],
-                |r| r.get::<_, i64>(0),
-            );
+            let row = tx.query_row(LONG_STATEMENT, [], |r| r.get::<_, i64>(0));
             statement = Some(
                 row.as_ref()
                     .copied()
@@ -889,6 +894,64 @@ fn a_long_statement_in_a_cancelled_snapshot_is_interrupted() {
     );
     let err = out.expect_err("the cancelled statement ran to completion");
     assert_eq!(budget_limit(&err), Some(Limit::Cancelled), "{err:?}");
+}
+
+#[test]
+fn a_snapshot_leaves_the_connection_s_own_progress_handler_in_place() {
+    use kaban_core::query_budget::QueryBudget;
+
+    // Arrange: the connection's own handler (as a query connection installs one) interrupts
+    // every statement once `own` is cancelled
+    let store = SqliteStore::open_memory().unwrap();
+    let own = QueryBudget::new(u64::MAX, None);
+    let watched = own.clone();
+    store
+        .lock()
+        .progress_handler(1000, Some(move || watched.check().is_err()))
+        .unwrap();
+    let budget = QueryBudget::new(u64::MAX, None);
+
+    // Act: a snapshot, then the connection's own budget is cancelled
+    store
+        .catalog()
+        .with_snapshot(&store.lock(), &budget, |_, _| Ok(()))
+        .unwrap();
+    own.cancel();
+    let out = store
+        .lock()
+        .query_row(LONG_STATEMENT, [], |r| r.get::<_, i64>(0));
+
+    // Assert: the connection's handler still interrupts its statements
+    assert_eq!(
+        out.map_err(|e| e.sqlite_error_code()),
+        Err(Some(rusqlite::ErrorCode::OperationInterrupted)),
+        "the snapshot removed the connection's own progress handler"
+    );
+}
+
+#[test]
+fn a_snapshot_opens_through_a_shared_borrow_while_another_one_is_alive() {
+    use kaban_core::query_budget::QueryBudget;
+
+    // Arrange: one committed generation; a second shared borrow of the connection, alive
+    // across the snapshot (what a table function's execution context holds)
+    let store = SqliteStore::open_memory().unwrap();
+    sediment_rows(&store, 1);
+    let conn = store.lock();
+    let other: &Connection = &conn;
+    let budget = QueryBudget::new(u64::MAX, None);
+
+    // Act
+    let seen = store
+        .catalog()
+        .with_snapshot(&conn, &budget, |_, pin| {
+            Ok((pin.generation().0, other.is_autocommit()))
+        })
+        .unwrap();
+
+    // Assert: the other borrow saw the snapshot's transaction open, and it ended with it
+    assert_eq!(seen, (1, false));
+    assert!(other.is_autocommit());
 }
 
 /// A file-backed store in a fresh scratch directory (the pin clones its container path).
@@ -986,7 +1049,7 @@ fn a_pin_reserves_every_allocation_it_retains_before_it_copies() {
 
         // Act: an unbounded pin tells the charge, held while it is measured
         let open = QueryBudget::new(u64::MAX, None);
-        let pin = store.catalog().pin(&mut store.lock(), &open).unwrap();
+        let pin = store.catalog().pin(&store.lock(), &open).unwrap();
         let charge = open.live_bytes();
 
         // Assert: every retained allocation is paid for, and the charge returns on drop
@@ -1000,14 +1063,14 @@ fn a_pin_reserves_every_allocation_it_retains_before_it_copies() {
 
         // Act: exactly the charge admits, one byte less refuses before any row is copied
         let at = QueryBudget::new(charge, None);
-        let pinned = store.catalog().pin(&mut store.lock(), &at);
+        let pinned = store.catalog().pin(&store.lock(), &at);
         assert!(pinned.is_ok(), "{name}: refused at its own charge {charge}");
         drop(pinned);
         assert_eq!(at.live_bytes(), 0);
         if charge > 0 {
             copied.store(0, Ordering::SeqCst);
             let below = QueryBudget::new(charge - 1, None);
-            let err = store.catalog().pin(&mut store.lock(), &below).unwrap_err();
+            let err = store.catalog().pin(&store.lock(), &below).unwrap_err();
             assert_eq!(budget_limit(&err), Some(Limit::Memory), "{name}: {err:?}");
             assert_eq!(
                 copied.load(Ordering::SeqCst),
@@ -1061,7 +1124,7 @@ fn an_extent_keeps_a_stable_id_that_is_never_reused() {
     // Assert: the third extent does not take the deleted one's id, and a pin carries the ids
     assert_eq!(ids(&store), [1, 3], "a deleted extent's id was reused");
     let budget = kaban_core::query_budget::QueryBudget::new(u64::MAX, None);
-    let pin = store.catalog().pin(&mut store.lock(), &budget).unwrap();
+    let pin = store.catalog().pin(&store.lock(), &budget).unwrap();
     let pinned: Vec<u64> = pin
         .extents(ExtentClass::Test)
         .iter()
@@ -1092,7 +1155,7 @@ fn a_dead_extent_is_not_pinned() {
 
     // Act
     let budget = kaban_core::query_budget::QueryBudget::new(u64::MAX, None);
-    let pin = store.catalog().pin(&mut store.lock(), &budget).unwrap();
+    let pin = store.catalog().pin(&store.lock(), &budget).unwrap();
 
     // Assert
     let paths: Vec<_> = pin
@@ -1137,7 +1200,7 @@ fn a_span_beyond_the_container_is_refused_and_a_span_inside_it_reads() {
 
     // Act
     let budget = kaban_core::query_budget::QueryBudget::new(u64::MAX, None);
-    let pin = store.catalog().pin(&mut store.lock(), &budget).unwrap();
+    let pin = store.catalog().pin(&store.lock(), &budget).unwrap();
     let extents = pin.extents(ExtentClass::Test);
 
     // Assert: the range inside reads; one byte past the end and an offset past it refuse
@@ -1170,14 +1233,12 @@ fn a_pin_on_a_connection_with_an_open_transaction_is_refused_by_name() {
     // Arrange: the connection is inside a transaction the catalog did not open
     let store = SqliteStore::open_memory().unwrap();
     let budget = QueryBudget::new(u64::MAX, None);
-    let mut conn = store.lock();
+    let conn = store.lock();
     conn.execute_batch("SAVEPOINT outer").unwrap();
 
     // Act
-    let pinned = store.catalog().pin(&mut conn, &budget).map(|_| ());
-    let snapshot = store
-        .catalog()
-        .with_snapshot(&mut conn, &budget, |_, _| Ok(()));
+    let pinned = store.catalog().pin(&conn, &budget).map(|_| ());
+    let snapshot = store.catalog().with_snapshot(&conn, &budget, |_, _| Ok(()));
 
     // Assert: both refuse with the named error, and the outer transaction is left as it was
     for out in [pinned, snapshot] {
@@ -1249,7 +1310,7 @@ fn raw_range(fs: &FileStore, (offset, len): (u64, u64)) -> Vec<u8> {
 /// The container range of the pinned test-class extent `id` and its bytes through the pin.
 fn pinned_extent(store: &SqliteStore, id: u64) -> Option<((u64, u64), Vec<u8>)> {
     let budget = kaban_core::query_budget::QueryBudget::new(u64::MAX, None);
-    let pin = store.catalog().pin(&mut store.lock(), &budget).unwrap();
+    let pin = store.catalog().pin(&store.lock(), &budget).unwrap();
     let extents = pin.extents(ExtentClass::Test);
     let e = extents.iter().find(|e| e.id.0 == id)?;
     let super::class::ExtentLocation::Kbx { offset, len } = e.location else {
