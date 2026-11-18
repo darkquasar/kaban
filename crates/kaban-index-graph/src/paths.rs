@@ -56,6 +56,7 @@ pub fn shortest_path(
         edges: false,
         stop: Some(dst),
         settle: true,
+        window: None,
     };
     let s = search(v, &[src], rels, Direction::Out, caps, want, budget)?;
     let Some(len) = depth_of(&s.seen, dst.0) else {
@@ -169,6 +170,7 @@ pub fn meet(
         edges: false,
         stop: None,
         settle: true,
+        window: None,
     };
     let sa = search(v, &[a], rels, Direction::Out, caps, want, budget)?;
     let sb = search(v, &[b], rels, Direction::Out, caps, want, budget)?;

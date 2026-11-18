@@ -40,7 +40,7 @@ pub fn degree(
 
 /// The distinct neighbours of `n` in `dir`, ascending: every accessor stream is non-decreasing
 /// by neighbour, so equal-neighbour runs collapse without a sort.
-fn distinct<'b>(
+pub(crate) fn distinct<'b>(
     v: &View<'_>,
     n: LocalId,
     rels: &RelSelection,
@@ -94,15 +94,27 @@ pub fn common_neighbours(
     budget.check()?;
     let na = distinct(v, a, rels, dir, budget)?;
     let nb = distinct(v, b, rels, dir, budget)?;
+    let (out, lease) = intersection(&na, &nb, budget)?.into_parts();
+    Ok(Charged::new(out, Hold::new(lease, None)))
+}
+
+/// The elements of two ascending lists of distinct ids that are in both, ascending: each element
+/// of the shorter list gallops through the longer one, O(s log(l / s)) comparisons for lengths
+/// s <= l. The result is reserved on `budget`.
+pub(crate) fn intersection<'b>(
+    na: &[LocalId],
+    nb: &[LocalId],
+    budget: &'b QueryBudget,
+) -> Result<Grow<'b, LocalId>, GraphError> {
     let (short, long) = if na.len() <= nb.len() {
-        (&na, &nb)
+        (na, nb)
     } else {
-        (&nb, &na)
+        (nb, na)
     };
     let mut out = Grow::with_capacity(budget, short.len())?;
     let tick = Ticker::new(budget);
     let mut at = 0;
-    for &x in short.iter() {
+    for &x in short {
         tick.tick(Phase::Common)?;
         at = gallop(long, at, x);
         if long.get(at) == Some(&x) {
@@ -110,8 +122,7 @@ pub fn common_neighbours(
             at += 1;
         }
     }
-    let (out, lease) = out.into_parts();
-    Ok(Charged::new(out, Hold::new(lease, None)))
+    Ok(out)
 }
 
 /// The position of `m` in the sorted `set`.
@@ -147,6 +158,7 @@ pub fn topo_order(
         edges: false,
         stop: None,
         settle: false,
+        window: None,
     };
     let reached = search(v, nodes, rels, Direction::Out, caps, want, budget)?;
     if reached.truncated() || reached.seen.len() > usize::try_from(caps.rows).unwrap_or(usize::MAX)

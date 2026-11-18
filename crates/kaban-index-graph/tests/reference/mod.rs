@@ -4,7 +4,12 @@
 
 #![allow(dead_code)] // each test binary uses a different part of the reference
 #![allow(clippy::unwrap_used)] // test code: failures are the assertion
-#![allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)] // small test sizes
+#![allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::type_complexity
+)] // small test sizes and plain reference types
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -31,7 +36,8 @@ impl Graph {
         let nodes: Vec<u32> = oracle.nodes().iter().map(|n| n.0).collect();
         let mut edges = Vec::new();
         for &n in &nodes {
-            for (m, r, attr) in oracle.neighbours(LocalId(n), rels, kaban_index_graph::Direction::Out)
+            for (m, r, attr) in
+                oracle.neighbours(LocalId(n), rels, kaban_index_graph::Direction::Out)
             {
                 edges.push((n, r.0, m.0, attr));
             }
@@ -62,8 +68,11 @@ impl Graph {
         if seeds.is_empty() {
             teleport.fill(1.0 / n as f64);
         } else {
-            let present: BTreeSet<u32> =
-                seeds.iter().copied().filter(|s| self.nodes.contains(s)).collect();
+            let present: BTreeSet<u32> = seeds
+                .iter()
+                .copied()
+                .filter(|s| self.nodes.contains(s))
+                .collect();
             if present.is_empty() {
                 return vec![0.0; n];
             }
@@ -95,7 +104,12 @@ impl Graph {
 
     /// The first `cap` (node, score) pairs by descending score, then ascending rank.
     pub(crate) fn top(&self, scores: &[f64], order: &Order, cap: usize) -> Vec<(u32, f64)> {
-        let mut rows: Vec<(u32, f64)> = self.nodes.iter().copied().zip(scores.iter().copied()).collect();
+        let mut rows: Vec<(u32, f64)> = self
+            .nodes
+            .iter()
+            .copied()
+            .zip(scores.iter().copied())
+            .collect();
         rows.sort_by(|a, b| {
             b.1.partial_cmp(&a.1)
                 .unwrap()
@@ -191,7 +205,9 @@ impl Graph {
         loop {
             let mut changed = false;
             for &(s, _, d, attr) in &self.edges {
-                let Some(&(c, h)) = best.get(&s) else { continue };
+                let Some(&(c, h)) = best.get(&s) else {
+                    continue;
+                };
                 let cand = (c + attr.weight, h + 1);
                 if best.get(&d).is_none_or(|&old| cand < old) {
                     best.insert(d, cand);
@@ -240,7 +256,11 @@ impl Graph {
             .collect();
         let mut edges = BTreeSet::new();
         for d in 0..depth {
-            let level: Vec<u32> = seen.iter().filter(|&(_, &x)| x == d).map(|(&n, _)| n).collect();
+            let level: Vec<u32> = seen
+                .iter()
+                .filter(|&(_, &x)| x == d)
+                .map(|(&n, _)| n)
+                .collect();
             for n in level {
                 for &(s, r, m, attr) in &self.edges {
                     if s == n && lo <= attr.ts && attr.ts <= hi {
@@ -302,11 +322,15 @@ impl Fixture {
         let mut layers: Vec<Layer> = Vec::new();
         for r in &batches[1..3] {
             let empty = PreparedSediment::prepare::<Records>(&[], &budget()).unwrap();
-            let bytes = seal(&View::new(Some(&base), &layers, &empty, &budget()).unwrap(), r);
+            let bytes = seal(
+                &View::new(Some(&base), &layers, &empty, &budget()).unwrap(),
+                r,
+            );
             layers.push(Layer::open(OwnedBytes::new(bytes), &budget()).unwrap());
         }
-        let sediment: &'static PreparedSediment =
-            Box::leak(Box::new(PreparedSediment::prepare(&batches[3..], &budget()).unwrap()));
+        let sediment: &'static PreparedSediment = Box::leak(Box::new(
+            PreparedSediment::prepare(&batches[3..], &budget()).unwrap(),
+        ));
         let mut oracle = Oracle::default();
         for r in &batches {
             oracle.apply(r);
@@ -383,8 +407,10 @@ fn edges(rng: &mut Rng, r: &mut Records, count: usize, remove_percent: u64) {
 }
 
 fn nodes(r: &mut Records, ids: impl IntoIterator<Item = u32>, kind: OpKind) {
-    r.nodes
-        .extend(ids.into_iter().map(|n| NodeOp { node: LocalId(n), kind }));
+    r.nodes.extend(ids.into_iter().map(|n| NodeOp {
+        node: LocalId(n),
+        kind,
+    }));
 }
 
 /// The 200-node seeded fixture: nodes 0..190 in the base, 190..200 only in the sediment;

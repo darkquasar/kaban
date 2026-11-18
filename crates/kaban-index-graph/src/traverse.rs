@@ -131,6 +131,8 @@ pub(crate) struct Want {
     /// When the search ends at the depth bound without a rows cut or reaching `stop`, look one
     /// hop further and record [`Cut::Depth`] if an unseen node is there (global questions).
     pub(crate) settle: bool,
+    /// Follow only edges whose [`crate::Attr::ts`] lies in this inclusive range.
+    pub(crate) window: Option<(i64, i64)>,
 }
 
 /// One edge met while expanding `parent`: (parent, relation, neighbour, outgoing).
@@ -206,7 +208,13 @@ pub(crate) fn search<'b>(
                 let mut last = None;
                 let mut fresh = 0usize;
                 for row in v.neighbours(LocalId(n), rels, pass, budget) {
-                    let (m, rel, _) = row?;
+                    let (m, rel, attr) = row?;
+                    if want
+                        .window
+                        .is_some_and(|(lo, hi)| attr.ts < lo || attr.ts > hi)
+                    {
+                        continue;
+                    }
                     let m = m.0;
                     let old = depth_of(&seen, m);
                     if want.edges {
@@ -359,11 +367,25 @@ pub fn expand(
     caps: Caps,
     budget: &QueryBudget,
 ) -> Result<Charged<Reached>, GraphError> {
+    expand_window(v, src, rels, dir, caps, None, budget)
+}
+
+/// [`expand`] following only edges whose timestamp lies in the inclusive `window`.
+pub(crate) fn expand_window(
+    v: &View<'_>,
+    src: &[LocalId],
+    rels: &RelSelection,
+    dir: Direction,
+    caps: Caps,
+    window: Option<(i64, i64)>,
+    budget: &QueryBudget,
+) -> Result<Charged<Reached>, GraphError> {
     check_caps(caps)?;
     let want = Want {
         edges: true,
         stop: None,
         settle: false,
+        window,
     };
     let s = search(v, src, rels, dir, caps, want, budget)?;
     let truncated = s.truncated();
@@ -444,6 +466,7 @@ pub fn reachable(
         edges: false,
         stop: Some(dst),
         settle: true,
+        window: None,
     };
     let s = search(v, &[src], rels, Direction::Out, caps, want, budget)?;
     if depth_of(&s.seen, dst.0).is_some() {

@@ -4,7 +4,11 @@
 //! functions take a cap and refuse or flag a cut result (GRA-04).
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // test code: failures are the assertion
-#![allow(clippy::cast_possible_truncation)] // small test sizes
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::many_single_char_names
+)] // small test sizes, short names in oracle loops
 
 mod oracle;
 mod reference;
@@ -30,7 +34,13 @@ fn assert_ranked(what: &str, got: &[(LocalId, f64)], want: &[(u32, f64)]) {
     let want_ids: Vec<u32> = want.iter().map(|r| r.0).collect();
     assert_eq!(ids, want_ids, "{what}: top-k order");
     for (g, w) in got.iter().zip(want) {
-        assert!(close(g.1, w.1), "{what}: node {} score {} vs {}", w.0, g.1, w.1);
+        assert!(
+            close(g.1, w.1),
+            "{what}: node {} score {} vs {}",
+            w.0,
+            g.1,
+            w.1
+        );
     }
 }
 
@@ -63,7 +73,8 @@ fn pagerank_and_ppr_equal_the_reference_in_top_k_order() {
                     assert_ranked(&format!("pagerank {what}"), &got.rows, &want);
                     assert_eq!(got.truncated, g.nodes.len() > cap as usize, "{what}");
 
-                    let seeds: Vec<u32> = (0..3).map(|_| rng.below(u64::from(IDS)) as u32).collect();
+                    let seeds: Vec<u32> =
+                        (0..3).map(|_| rng.below(u64::from(IDS)) as u32).collect();
                     let scores = g.rank(&seeds, p.damping, p.iterations, p.tolerance);
                     let want = g.top(&scores, &order, cap as usize);
                     let ids: Vec<LocalId> = seeds.iter().map(|&s| LocalId(s)).collect();
@@ -176,10 +187,7 @@ fn time_window_expand_equals_the_reference() {
                 let depth = 1 + rng.below(4) as u8;
                 let (want_nodes, want_edges) = g.window(&src, window, depth);
                 let ids: Vec<LocalId> = src.iter().map(|&s| LocalId(s)).collect();
-                let caps = Caps {
-                    depth,
-                    rows: 1_500,
-                };
+                let caps = Caps { depth, rows: 1_500 };
                 let got = time_window_expand(&v, &ids, &rels, window, caps, &budget()).unwrap();
                 let nodes: BTreeMap<u32, u8> = got.nodes.iter().map(|&(n, d)| (n.0, d)).collect();
                 let edges: BTreeSet<(u32, u16, u32)> =
@@ -213,12 +221,27 @@ fn caps_and_parameters_out_of_range_are_refused() {
         ppr(&v, &[LocalId(1)], &all, p, &order, RowCap(0), &b).map(|r| r.rows.len()),
         missing
     );
-    assert_eq!(triangle_count(&v, &all, RowCap(0), &b), missing.map(|_: usize| 0));
+    assert_eq!(
+        triangle_count(&v, &all, RowCap(0), &b),
+        missing.map(|_: usize| 0)
+    );
     for (bad, name) in [
         (RankParams { damping: 1.5, ..p }, "damping"),
-        (RankParams { damping: f64::NAN, ..p }, "damping"),
+        (
+            RankParams {
+                damping: f64::NAN,
+                ..p
+            },
+            "damping",
+        ),
         (RankParams { iterations: 0, ..p }, "iterations"),
-        (RankParams { tolerance: -1.0, ..p }, "tolerance"),
+        (
+            RankParams {
+                tolerance: -1.0,
+                ..p
+            },
+            "tolerance",
+        ),
     ] {
         assert_eq!(
             pagerank(&v, &all, bad, &order, RowCap(5), &b).map(|r| r.rows.len()),
@@ -285,7 +308,13 @@ fn a_negative_weight_and_a_cut_weighted_search_are_refused() {
     );
     // Settling 0..=3 is all four rows allow: node 5 lies past them and is not read as absent.
     assert_eq!(
-        path(5, Caps { depth: 255, rows: 4 }),
+        path(
+            5,
+            Caps {
+                depth: 255,
+                rows: 4
+            }
+        ),
         Err(GraphError::CapExceeded {
             limit: "rows",
             max: 4
@@ -293,7 +322,13 @@ fn a_negative_weight_and_a_cut_weighted_search_are_refused() {
     );
     // The cheapest path has five hops: a depth cap of four refuses rather than cut it.
     assert_eq!(
-        path(5, Caps { depth: 4, rows: 1_500 }),
+        path(
+            5,
+            Caps {
+                depth: 4,
+                rows: 1_500
+            }
+        ),
         Err(GraphError::CapExceeded {
             limit: "depth",
             max: 4

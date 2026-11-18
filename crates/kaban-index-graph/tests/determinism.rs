@@ -7,6 +7,7 @@
 //! copied into a project with different rids, sediment nodes included.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // test code: failures are the assertion
+#![allow(clippy::many_single_char_names)] // short names in the output loop
 
 mod oracle;
 mod reference;
@@ -40,19 +41,41 @@ fn outputs(v: &View<'_>, order: &Order) -> Vec<u64> {
             out.push(s.to_bits());
         }
     };
-    ranked(&pagerank(v, &rels, p, order, RowCap(1_500), &b).unwrap().rows);
-    ranked(&ppr(v, &[LocalId(1), LocalId(2)], &rels, p, order, RowCap(1_500), &b).unwrap().rows);
+    ranked(
+        &pagerank(v, &rels, p, order, RowCap(1_500), &b)
+            .unwrap()
+            .rows,
+    );
+    ranked(
+        &ppr(
+            v,
+            &[LocalId(1), LocalId(2)],
+            &rels,
+            p,
+            order,
+            RowCap(1_500),
+            &b,
+        )
+        .unwrap()
+        .rows,
+    );
     for a in (0..IDS).step_by(7) {
         let (x, y) = (LocalId(a), LocalId((a * 13 + 5) % IDS));
         out.push(jaccard(v, x, y, &rels, &b).unwrap().to_bits());
         out.push(adamic_adar(v, x, y, &rels, &b).unwrap().to_bits());
         out.push(clustering(v, x, &rels, &b).unwrap().to_bits());
-        if let Some(path) = weighted_shortest_path(v, x, y, &rels, caps, order, &b).unwrap() {
+        let wide = Caps { depth: 255, ..caps };
+        if let Some(path) = weighted_shortest_path(v, x, y, &rels, wide, order, &b).unwrap() {
             out.push(path.0.cast_unsigned());
             out.extend(path.1.iter().map(|n| u64::from(n.0)));
         }
         let reached = time_window_expand(v, &[x], &rels, (0, 600_000), caps, &b).unwrap();
-        out.extend(reached.nodes.iter().map(|&(n, d)| u64::from(n.0) << 8 | u64::from(d)));
+        out.extend(
+            reached
+                .nodes
+                .iter()
+                .map(|&(n, d)| u64::from(n.0) << 8 | u64::from(d)),
+        );
         out.push(u64::MAX);
     }
     out.push(triangle_count(v, &rels, RowCap(1_500), &b).unwrap());
@@ -149,7 +172,14 @@ fn selection(f: &Fixture, order: &Order, name: &dyn Fn(u32) -> u32) -> Vec<u32> 
     let top = pagerank(&v, &rels, p, order, RowCap(3), &b).unwrap();
     assert!(top.truncated);
     out.extend(top.rows.iter().map(|r| name(r.0.0)));
-    let local = |id: u32| f.oracle.nodes().iter().map(|n| n.0).find(|&n| name(n) == id).unwrap();
+    let local = |id: u32| {
+        f.oracle
+            .nodes()
+            .iter()
+            .map(|n| n.0)
+            .find(|&n| name(n) == id)
+            .unwrap()
+    };
     let top = ppr(&v, &[LocalId(local(0))], &rels, p, order, RowCap(3), &b).unwrap();
     out.extend(top.rows.iter().map(|r| name(r.0.0)));
     let (src, dst) = (local(10), local(14));

@@ -38,4 +38,4 @@ pub use structure::{Components, common_neighbours, degree, refuse_not_planned, t
 pub use traverse::{Caps, Reached, RowCap, closure, expand, reachable, reverse_closure};
 pub use triangles::{clustering, triangle_count};
 pub use view::{BUDGET_CHECK_INTERVAL, View};
-pub use weighted::{time_window_expand, weighted_shortest_path};
+pub use weighted::{WeightedPath, time_window_expand, weighted_shortest_path};

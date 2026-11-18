@@ -246,6 +246,22 @@ impl<'b, T> Grow<'b, T> {
         Ok(())
     }
 
+    /// Insert `item` at `at` (at most the length), growing first when full; moving the tail is
+    /// one unit of work per [`MOVE_CHUNK`] bytes.
+    pub(crate) fn insert(&mut self, at: usize, item: T) -> Result<(), GraphError> {
+        self.reserve(1)?;
+        let tail = self
+            .items
+            .len()
+            .saturating_sub(at)
+            .saturating_mul(size_of::<T>());
+        for _ in 0..tail.div_ceil(MOVE_CHUNK).max(1) {
+            self.ticker.tick(Phase::Grow)?;
+        }
+        self.items.insert(at, item);
+        Ok(())
+    }
+
     /// Keep the first `len` elements (the capacity and its charge stay).
     pub(crate) fn truncate(&mut self, len: usize) {
         self.items.truncate(len);
@@ -393,6 +409,14 @@ pub(crate) enum Phase {
     Meet,
     /// Galloping through two neighbour lists.
     Common,
+    /// The node, link and iteration loops of `PageRank` and personalised `PageRank`.
+    Rank,
+    /// The neighbourhood loops of the similarity and clustering functions.
+    Similarity,
+    /// The node and merge loops of the triangle count.
+    Triangles,
+    /// One step of a weighted search (a heap pop or one edge relaxed).
+    Weighted,
     /// Unmetered writer paths (a ticker without a budget never checks).
     Writer,
 }
