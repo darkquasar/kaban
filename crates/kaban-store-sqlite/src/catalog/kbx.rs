@@ -13,7 +13,7 @@ use std::fs::File;
 use std::io;
 use std::os::unix::fs::{FileExt, MetadataExt};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use kaban_core::{BackendSource, Result, StoreError};
 use rustix::fs::{FlockOperation, Mode, OFlags};
@@ -22,6 +22,7 @@ use tantivy::directory::{Directory, MmapDirectory, OwnedBytes};
 
 use super::class::ExtentClass;
 use super::io as catalog_io;
+use super::pins::MaintenanceHold;
 
 /// The container's file name.
 pub(crate) const KBX_FILE: &str = "kaban.kbx";
@@ -146,7 +147,9 @@ impl ContainerId {
 /// appended to, so a range is published at most once and only by its container's catalog.
 /// A token whose publishing commit rolls back is gone with it: its range stays unnamed (a leak
 /// that T6's verify reports and its recovery reclaims, never published again). It carries the
-/// SHA-256 of the bytes, computed by the append that had them.
+/// SHA-256 of the bytes, computed by the append that had them, and a maintenance hold
+/// (`super::pins::MAINTENANCE`) until the commit that publishes it ends, so recovery never
+/// takes its range for a leak.
 #[derive(Debug)]
 #[must_use = "an unpublished extent is garbage until a commit publishes it"]
 pub(crate) struct Unpublished {
@@ -155,6 +158,7 @@ pub(crate) struct Unpublished {
     len: u64,
     container: ContainerId,
     sha256: [u8; 32],
+    hold: Option<Arc<MaintenanceHold>>,
 }
 
 /// What a publication takes from an [`Unpublished`] token.
@@ -165,6 +169,8 @@ pub(crate) struct Parts {
     pub(crate) len: u64,
     pub(crate) container: ContainerId,
     pub(crate) sha256: [u8; 32],
+    /// The maintenance hold, kept by the publishing commit until it ends.
+    pub(crate) hold: Option<Arc<MaintenanceHold>>,
 }
 
 impl Unpublished {
@@ -177,6 +183,7 @@ impl Unpublished {
             len: self.len,
             container: self.container,
             sha256: self.sha256,
+            hold: self.hold,
         }
     }
 
@@ -203,6 +210,7 @@ impl Unpublished {
                         len,
                         container: self.container,
                         sha256: Sha256::digest(part).into(),
+                        hold: self.hold.clone(),
                     };
                     offset += len;
                     token
@@ -260,7 +268,12 @@ pub(crate) fn open_existing(path: &Path) -> io::Result<File> {
 /// # Errors
 /// [`ContainerError`] for a failed open, lock, growth or write; `StoreError::StorageFatal`
 /// for a failed sync ([`super::io::sync_data`]: attempted once, and the range stays unnamed).
-pub(crate) fn append(kbx: &Path, class: ExtentClass, bytes: &[u8]) -> Result<Unpublished> {
+pub(crate) fn append(
+    kbx: &Path,
+    class: ExtentClass,
+    bytes: &[u8],
+    hold: Option<Arc<MaintenanceHold>>,
+) -> Result<Unpublished> {
     let len = u64::try_from(bytes.len())
         .map_err(|e| failed("size an extent for", kbx, io::Error::other(e)))?;
     let file = open_existing(kbx).map_err(|e| failed("open", kbx, e))?;
@@ -275,6 +288,7 @@ pub(crate) fn append(kbx: &Path, class: ExtentClass, bytes: &[u8]) -> Result<Unp
         len,
         container,
         sha256: Sha256::digest(bytes).into(),
+        hold,
     })
 }
 

@@ -9,6 +9,7 @@ use std::panic::AssertUnwindSafe;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, PoisonError};
 
+use kaban_core::query_budget::QueryBudget;
 use kaban_core::{
     Actor, Durability, MemoryStore, NewNode, NodeId, RememberOutcome, Result, StoreError, ViewName,
     WorkspaceId, WriteCtx,
@@ -17,7 +18,7 @@ use rusqlite::Connection;
 
 use super::Catalog;
 use super::capture::{BatchChanges, CaptureOp};
-use super::class::{ExtentClass, IndexClass, SealOutput};
+use super::class::{ExtentClass, IndexClass};
 use super::commit::Stage;
 use super::pin::{Pin, PinnedView};
 use crate::SqliteStore;
@@ -113,13 +114,29 @@ impl IndexClass for Scripted {
             .push(changes.clone());
         (self.script)(txn, changes)
     }
-    fn seal(&self, _pin: &Pin) -> Result<Option<SealOutput>> {
+    fn seal(
+        &self,
+        _pin: &Pin,
+        _rows: &[&super::tables::SedimentRow],
+        _budget: &QueryBudget,
+    ) -> Result<Option<Vec<u8>>> {
         Ok(None)
     }
-    fn fold(&self, _pin: &Pin) -> Result<Option<SealOutput>> {
+    fn fold(
+        &self,
+        _pin: &Pin,
+        _extents: &[super::tables::ExtentRef],
+        _budget: &QueryBudget,
+    ) -> Result<Option<Vec<u8>>> {
         Ok(None)
     }
-    fn purge(&self, _pin: &Pin, _rids: &[i64]) -> Result<Option<SealOutput>> {
+    fn purge(
+        &self,
+        _pin: &Pin,
+        _extent: &super::tables::ExtentRef,
+        _rids: &[i64],
+        _budget: &QueryBudget,
+    ) -> Result<Option<Vec<u8>>> {
         Ok(None)
     }
     fn rebuild(&self, _catalog: &Catalog, _rows: &Connection) -> Result<()> {
@@ -1779,4 +1796,26 @@ fn a_pin_charges_a_view_only_once_it_is_loaded_and_only_for_that_view() {
     );
     assert_eq!(chains, [3, 40]);
     assert!(reused, "a loaded view was loaded again");
+}
+
+#[test]
+fn a_writer_catalog_registers_the_text_graph_and_code_classes() {
+    // Arrange, Act
+    let store = SqliteStore::open_memory().unwrap();
+
+    // Assert: the three production classes, in that order, before any test class
+    let classes: Vec<ExtentClass> = store
+        .catalog()
+        .classes()
+        .iter()
+        .map(|c| c.class())
+        .collect();
+    assert_eq!(
+        classes,
+        vec![
+            ExtentClass::TextTier,
+            ExtentClass::GraphLayer,
+            ExtentClass::CodeLayer
+        ]
+    );
 }

@@ -17,14 +17,6 @@
 //! still checkpoints what it can and reports it. A detached pin holds admission only while its
 //! transaction is open.
 
-#![cfg_attr(
-    not(feature = "failpoints"),
-    expect(
-        dead_code,
-        reason = "T6's compact, one-shot writes and serve run the tick"
-    )
-)]
-
 use std::fs::File;
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -48,19 +40,19 @@ const CHECKPOINT: &str = "catalog_checkpoint";
 
 /// What one checkpoint tick did.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct CheckpointReport {
+pub struct CheckpointReport {
     /// The tick held both admission locks while it checkpointed (always for a catalog
     /// without a container, which admits no reader).
-    pub(crate) drained: bool,
+    pub drained: bool,
     /// The checkpoint's result row says every WAL frame is in the main file (KER-10).
-    pub(crate) backfilled: bool,
+    pub backfilled: bool,
     /// Frames in the WAL when it checkpointed.
-    pub(crate) wal_frames: u64,
+    pub wal_frames: u64,
     /// Frames it checkpointed.
-    pub(crate) checkpointed_frames: u64,
+    pub checkpointed_frames: u64,
     /// The platform's full sync is refused (the open's `F_FULLFSYNC` probe on macOS, or the
     /// pragmas did not take): the checkpoint is no KER-10 barrier.
-    pub(crate) degraded_durability: bool,
+    pub degraded_durability: bool,
 }
 
 /// The tick's hold of both admission locks and its waiting marker, released (admission

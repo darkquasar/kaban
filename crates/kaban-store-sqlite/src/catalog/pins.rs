@@ -24,7 +24,7 @@ use std::fs::File;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use kaban_core::Result;
 use kaban_core::query_budget::QueryBudget;
@@ -252,6 +252,57 @@ pub(crate) fn lock_while(
         }
         std::thread::sleep(LOCK_RETRY);
     }
+}
+
+/// The maintenance lock (`super::recover`): held shared by every compaction pass and by every
+/// unpublished extent while it lives ([`MaintenanceHold`]), exclusive by recovery, which then
+/// knows that every claim, and every container range no row names, was left by a process that
+/// is gone (a holder's lock dies with its process). Its name is no generation, so the pin scans
+/// skip it; it is never unlinked.
+pub(crate) const MAINTENANCE: &str = "maintenance";
+
+/// How long a maintenance hold waits for a recovery that holds the lock exclusive.
+const MAINTENANCE_WAIT: Duration = Duration::from_secs(10);
+
+/// A shared hold of [`MAINTENANCE`], released on drop.
+#[derive(Debug)]
+pub(crate) struct MaintenanceHold {
+    _lock: File,
+}
+
+/// Hold the maintenance lock of `pins` shared, waiting at most [`MAINTENANCE_WAIT`] for a
+/// recovery to end.
+///
+/// # Errors
+/// `ContainerError` for a lock file that cannot be opened or locked, or a recovery that holds
+/// it past the wait.
+pub(crate) fn hold_maintenance(pins: &Path) -> Result<MaintenanceHold> {
+    let deadline = Instant::now() + MAINTENANCE_WAIT;
+    let path = pins.join(MAINTENANCE);
+    let shared = FlockOperation::NonBlockingLockShared;
+    lock_while(&path, shared, || Ok(Instant::now() < deadline))?
+        .map(|lock| MaintenanceHold { _lock: lock })
+        .ok_or_else(|| {
+            failed(
+                "hold the maintenance lock",
+                &path,
+                io::Error::from(io::ErrorKind::TimedOut),
+            )
+        })
+}
+
+/// The maintenance lock of `pins` held exclusive, taken within `wait`; `None` while a hold is
+/// live past it.
+///
+/// # Errors
+/// `ContainerError` for a lock file that cannot be opened or locked.
+pub(crate) fn exclusive_maintenance(pins: &Path, wait: Duration) -> Result<Option<File>> {
+    let deadline = Instant::now() + wait;
+    lock_while(
+        &pins.join(MAINTENANCE),
+        FlockOperation::NonBlockingLockExclusive,
+        || Ok(Instant::now() < deadline),
+    )
 }
 
 /// The lock file of `generation` in `pins`.

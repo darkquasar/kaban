@@ -3,6 +3,10 @@
 //! retires its inputs and hides the sediment it consumed from every later pin, while an
 //! earlier pin keeps what it saw.
 //!
+//! Compaction by policy (Step 4 of the T6 brief, 7.6, 7.8): due sediment seals, a deep chain
+//! folds, a unit refused by its maintenance budget is retried smaller and reported, and a
+//! purge rewrites the extents that hold a purged record.
+//!
 //! Runs with the `failpoints` feature (the test class lives behind it).
 
 #![cfg(feature = "failpoints")]
@@ -11,11 +15,12 @@
 mod common;
 
 use common::{Scratch, created, ctx, nid};
-use kaban_core::query_budget::QueryBudget;
+use kaban_core::config::{CatalogCfg, SealOps};
+use kaban_core::query_budget::{Limit, QueryBudget};
 use kaban_core::{MemoryStore, StoreError};
-use kaban_store_sqlite::SqliteStore;
-use kaban_store_sqlite::catalog_testing;
-use std::sync::{Arc, Barrier};
+use kaban_store_sqlite::catalog_testing::{self, Window};
+use kaban_store_sqlite::{CompactBudget, SkipReason, Skipped, SqliteStore, WorkKind};
+use std::sync::{Arc, Barrier, Mutex};
 use std::time::Duration;
 
 /// The bound of every wait on another thread.
@@ -294,4 +299,278 @@ fn a_refused_publication_keeps_its_claim_for_release_and_its_inputs_can_be_claim
     // Assert: the refusal rolled the switch back, and the released inputs are free again
     assert_eq!(catalog_testing::chain(&store, "main").unwrap(), ids);
     assert_eq!(again.map(|c| c.inputs()), Some(vec![ids[0]]));
+}
+
+/// The test policy: the test class seals at 2 pending rows and folds past 2 layers; a scheduled
+/// checkpoint at most once a minute.
+fn policy() -> CatalogCfg {
+    CatalogCfg {
+        seal_ops: SealOps {
+            graph: 2,
+            ..SealOps::default()
+        },
+        fold_depth: 2,
+        checkpoint_interval_ms: 60_000,
+        ..CatalogCfg::default()
+    }
+}
+
+/// A store of `s`'s database under [`policy`], with the test class installed.
+fn open(s: &Scratch) -> SqliteStore {
+    let store = SqliteStore::open(&s.db(), &s.keys())
+        .unwrap()
+        .with_catalog_config(policy())
+        .unwrap();
+    let _observed = catalog_testing::install_edge_sediment_class(&store);
+    store
+}
+
+/// A unit budget of `memory_bytes` and [`STEP`].
+fn unit(memory_bytes: u64) -> CompactBudget {
+    CompactBudget {
+        memory_bytes,
+        deadline: STEP,
+    }
+}
+
+/// The bytes of the test-class extents in `main`'s chain, in chain order.
+fn chain_bytes(store: &SqliteStore) -> Vec<Vec<u8>> {
+    let pin = catalog_testing::pin(store, &budget()).unwrap();
+    let view = pin.view();
+    view.extents()
+        .into_iter()
+        .map(|id| view.read(id).unwrap().unwrap())
+        .collect()
+}
+
+/// Link `from` to `to` on `store`.
+fn link(store: &SqliteStore, from: &kaban_core::Node, to: &kaban_core::Node) {
+    store
+        .link(
+            &nid(&from.id),
+            &nid(&to.id),
+            "RELATES_TO",
+            None,
+            None,
+            &ctx(),
+        )
+        .unwrap();
+}
+
+#[test]
+fn compaction_seals_due_sediment_into_one_extent_of_main() {
+    // Arrange: two pending sediment rows, the test class's seal trigger
+    let s = Scratch::new("kaban-t6-compact", "seal");
+    let store = open(&s);
+    let a = created(&store, "Fact", "the net is mended at dawn");
+    let b = created(&store, "Fact", "the boat sails at noon");
+    link(&store, &a, &b);
+    link(&store, &b, &a);
+    let rows = catalog_testing::pin_sediment_rows(&store).unwrap();
+    assert_eq!(rows.len(), 2, "{rows:?}");
+
+    // Act
+    let report = catalog_testing::compact(&store, unit(u64::MAX)).unwrap();
+
+    // Assert: one seal of both rows; main now holds their payloads and no pending row
+    assert_eq!(report.skipped, Vec::new(), "{report:?}");
+    assert_eq!(report.published.len(), 1, "{report:?}");
+    let sealed = &report.published[0];
+    assert_eq!(
+        (sealed.class, sealed.kind, sealed.sediment_rows),
+        ("test", WorkKind::Seal, 2)
+    );
+    let expected: Vec<u8> = rows
+        .iter()
+        .flat_map(|(_, p)| format!("{p}\n").into_bytes())
+        .collect();
+    assert_eq!(chain_bytes(&store), vec![expected]);
+    assert_eq!(
+        catalog_testing::pin_sediment_rows(&store).unwrap(),
+        Vec::new()
+    );
+}
+
+#[test]
+fn compaction_folds_a_chain_deeper_than_the_fold_depth() {
+    // Arrange: a base and two layers, past the fold depth of 2
+    let s = Scratch::new("kaban-t6-compact", "fold");
+    let store = open(&s);
+    let parts = [pattern(1, 100), pattern(2, 100), pattern(3, 100)];
+    let ids = catalog_testing::append_and_publish_all(&store, &parts).unwrap();
+
+    // Act
+    let report = catalog_testing::compact(&store, unit(u64::MAX)).unwrap();
+
+    // Assert: one fold of all three into one extent with their bytes in chain order
+    assert_eq!(report.skipped, Vec::new(), "{report:?}");
+    assert_eq!(report.published.len(), 1, "{report:?}");
+    assert_eq!(report.published[0].kind, WorkKind::Fold);
+    assert_eq!(report.published[0].extents, ids);
+    assert_eq!(chain_bytes(&store), vec![parts.concat()]);
+    assert!(catalog_testing::claim(&store, &ids[..1]).unwrap().is_none());
+}
+
+#[test]
+fn two_compactions_over_the_same_inputs_fold_once_and_the_other_reports_them_skipped() {
+    // Arrange: a foldable chain, and two stores of the database; the first stops right after
+    // its claim until the second has run
+    let s = Scratch::new("kaban-t6-compact", "compact-race");
+    let first = open(&s);
+    let second = open(&s);
+    let ids = catalog_testing::append_and_publish_all(
+        &first,
+        &[pattern(1, 64), pattern(2, 64), pattern(3, 64)],
+    )
+    .unwrap();
+    let (claimed, on_claim) = std::sync::mpsc::channel();
+    let (go, wait) = std::sync::mpsc::channel::<()>();
+    let wait = Mutex::new(wait);
+    catalog_testing::set_failpoint(
+        &first,
+        Window::CompactClaimed,
+        Some(Arc::new(move || {
+            let _ = claimed.send(());
+            let _ = wait.lock().unwrap().recv_timeout(STEP);
+        })),
+    );
+    let (done, finished) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = done.send(catalog_testing::compact(&first, unit(u64::MAX)));
+    });
+    on_claim
+        .recv_timeout(STEP)
+        .expect("the first compaction never claimed");
+
+    // Act
+    let skipped = catalog_testing::compact(&second, unit(u64::MAX)).unwrap();
+    go.send(()).unwrap();
+    let folded = finished
+        .recv_timeout(STEP)
+        .expect("the first compaction did not finish")
+        .unwrap();
+
+    // Assert: the first folded the inputs; the second published nothing and listed them
+    assert_eq!(folded.published.len(), 1, "{folded:?}");
+    assert_eq!(folded.published[0].extents, ids);
+    assert_eq!(skipped.published, Vec::new(), "{skipped:?}");
+    assert_eq!(
+        skipped.skipped,
+        vec![Skipped {
+            class: "test",
+            kind: WorkKind::Fold,
+            extents: ids,
+            sediment_rows: 0,
+            reason: SkipReason::Claimed,
+        }]
+    );
+}
+
+/// Whether `reason` is a refusal of the memory ceiling.
+fn memory_refused(reason: &SkipReason) -> bool {
+    matches!(reason, SkipReason::Budget(e) if e.limit == Limit::Memory)
+}
+
+#[test]
+fn a_fold_refused_by_its_budget_is_retried_with_fewer_layers() {
+    // Arrange: four extents of 1000 bytes; the budget holds two of them, not four
+    let s = Scratch::new("kaban-t6-compact", "fold-retry");
+    let store = open(&s);
+    let parts: Vec<Vec<u8>> = (1..=4).map(|i| pattern(i, 1000)).collect();
+    let ids = catalog_testing::append_and_publish_all(&store, &parts).unwrap();
+
+    // Act
+    let report = catalog_testing::compact(&store, unit(2500)).unwrap();
+
+    // Assert: the fold of four was refused and listed; the fold of the newest two published
+    assert_eq!(report.skipped.len(), 1, "{report:?}");
+    assert_eq!(report.skipped[0].extents, ids);
+    assert!(memory_refused(&report.skipped[0].reason), "{report:?}");
+    assert_eq!(report.published.len(), 1, "{report:?}");
+    assert_eq!(report.published[0].extents, ids[2..]);
+    let chain = chain_bytes(&store);
+    assert_eq!(
+        chain,
+        vec![parts[0].clone(), parts[1].clone(), parts[2..].concat()]
+    );
+}
+
+#[test]
+fn a_smallest_unit_refused_is_reported_and_its_inputs_stay_claimable() {
+    // Arrange: four extents of 1000 bytes; the budget holds less than two
+    let s = Scratch::new("kaban-t6-compact", "fold-refused");
+    let store = open(&s);
+    let parts: Vec<Vec<u8>> = (1..=4).map(|i| pattern(i, 1000)).collect();
+    let ids = catalog_testing::append_and_publish_all(&store, &parts).unwrap();
+
+    // Act: no error, whatever the budget refuses
+    let report = catalog_testing::compact(&store, unit(1500)).unwrap();
+
+    // Assert: four, then two refused and listed; nothing published, every claim released
+    let refused: Vec<Vec<u64>> = report.skipped.iter().map(|k| k.extents.clone()).collect();
+    assert_eq!(refused, vec![ids.clone(), ids[2..].to_vec()], "{report:?}");
+    assert!(report.skipped.iter().all(|k| memory_refused(&k.reason)));
+    assert_eq!(report.published, Vec::new());
+    assert_eq!(chain_bytes(&store), parts);
+    assert!(catalog_testing::claim(&store, &ids).unwrap().is_some());
+}
+
+/// The `rid`s of a sealed edge payload line (`<op> <src> <dst> <rel>`).
+fn rids_of(payload: &str) -> (i64, i64) {
+    let mut fields = payload.split_whitespace().skip(1);
+    let mut next = || fields.next().unwrap().parse().unwrap();
+    (next(), next())
+}
+
+#[test]
+fn a_purge_rewrites_the_extents_that_hold_a_rid_and_retires_them() {
+    // Arrange: three nodes, a -> b and b -> c sealed into one extent
+    let s = Scratch::new("kaban-t6-compact", "purge");
+    let store = open(&s);
+    let a = created(&store, "Fact", "the anchor is raised");
+    let b = created(&store, "Fact", "the sail is set");
+    let c = created(&store, "Fact", "the harbour falls behind");
+    link(&store, &a, &b);
+    link(&store, &b, &c);
+    let rows = catalog_testing::pin_sediment_rows(&store).unwrap();
+    let (rid_a, _) = rids_of(&rows[0].1);
+    catalog_testing::compact(&store, unit(u64::MAX)).unwrap();
+    let sealed = catalog_testing::pin(&store, &budget())
+        .unwrap()
+        .view()
+        .extents();
+    assert_eq!(sealed.len(), 1, "{sealed:?}");
+
+    // Act: a rid no extent holds, then a's
+    let untouched = catalog_testing::purge(&store, &[i64::MAX]).unwrap();
+    let purged = catalog_testing::purge(&store, &[rid_a]).unwrap();
+
+    // Assert: nothing rewritten for the unknown rid; a's line is gone, b -> c is kept, and the
+    // old extent is retired
+    assert_eq!(untouched.published, Vec::new(), "{untouched:?}");
+    assert_eq!(untouched.skipped, Vec::new(), "{untouched:?}");
+    assert_eq!(purged.published.len(), 1, "{purged:?}");
+    assert_eq!(purged.published[0].kind, WorkKind::Purge);
+    assert_eq!(purged.published[0].extents, sealed);
+    assert_eq!(
+        chain_bytes(&store),
+        vec![format!("{}\n", rows[1].1).into_bytes()]
+    );
+    assert!(catalog_testing::claim(&store, &sealed).unwrap().is_none());
+}
+
+#[test]
+fn compaction_ticks_the_checkpoint_only_once_its_interval_elapsed() {
+    // Arrange: an interval of a minute
+    let s = Scratch::new("kaban-t6-compact", "tick");
+    let store = open(&s);
+    catalog_testing::append_and_publish(&store, &pattern(1, 64)).unwrap();
+
+    // Act
+    let first = catalog_testing::compact(&store, unit(u64::MAX)).unwrap();
+    let second = catalog_testing::compact(&store, unit(u64::MAX)).unwrap();
+
+    // Assert: the first compaction ticked, the second, within the interval, did not
+    assert!(first.checkpoint.is_some(), "{first:?}");
+    assert_eq!(second.checkpoint, None, "{second:?}");
 }

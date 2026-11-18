@@ -22,12 +22,16 @@ use crate::sql_error::SqlResultExt;
 
 use super::Catalog;
 use super::capture::{BatchChanges, CaptureOp};
-use super::class::{ExtentClass, ExtentLocation, IndexClass, SealOutput};
+use super::class::{ExtentClass, ExtentLocation, IndexClass};
 use super::commit::Stage;
-use super::compact::{Claim, Publication, ViewSwitch};
-use super::pin::{Pin, PinnedView};
-use super::tables::{ExtentId, ExtentRef, SedimentSeq};
+use super::compact::{Claim, CompactBudget, CompactReport, Publication, PurgeReport, ViewSwitch};
+use super::pin::{Pin, PinnedView, budget_exceeded};
+use super::tables::{ExtentId, ExtentRef, SedimentRow, SedimentSeq};
 use crate::SqliteStore;
+
+/// The environment variable that arms one named crash point in a child process
+/// (`catalog::fail`): the child kills itself with `SIGKILL` there.
+pub const FAILPOINT_ARM: &str = super::fail::ARM;
 
 /// What happened to an observed row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -363,7 +367,7 @@ pub fn reclaim(store: &SqliteStore) -> Result<Reclaimed> {
     let r = catalog.reclaim_through(&mut store.lock(), u64::MAX)?;
     Ok(Reclaimed {
         floor: r.floor,
-        punched: r.reclaimed.into_iter().map(|id| id.0).collect(),
+        punched: r.reclaimed,
         pin_race_retry: r.pin_race_retry,
         punched_bytes: r.punched_range_bytes,
         zero_filled_bytes: r.zero_filled_bytes,
@@ -569,11 +573,10 @@ pub struct ReclaimOutcome {
 /// The reclamation's errors.
 pub fn reclaim_retired(store: &SqliteStore) -> Result<ReclaimOutcome> {
     let r = store.catalog().reclaim(&mut store.lock())?;
-    let ids = |v: Vec<ExtentId>| v.into_iter().map(|id| id.0).collect();
     Ok(ReclaimOutcome {
         floor: r.floor,
-        reclaimed: ids(r.reclaimed),
-        pending: ids(r.pending),
+        reclaimed: r.reclaimed,
+        pending: r.pending,
         released_bytes: r.released_bytes,
         punched_range_bytes: r.punched_range_bytes,
         zero_filled_bytes: r.zero_filled_bytes,
@@ -708,16 +711,117 @@ impl IndexClass for EdgeSediment {
             .push(nodes.chain(edges).collect());
         Ok(())
     }
-    fn seal(&self, _pin: &Pin) -> Result<Option<SealOutput>> {
-        Ok(None)
+    /// The payloads, one per line, in sequence order.
+    fn seal(
+        &self,
+        _pin: &Pin,
+        rows: &[&SedimentRow],
+        budget: &QueryBudget,
+    ) -> Result<Option<Vec<u8>>> {
+        let len: usize = rows.iter().map(|r| r.payload.len() + 1).sum();
+        let _held = budget.reserve(len as u64).map_err(budget_exceeded)?;
+        let mut out = Vec::with_capacity(len);
+        for row in rows {
+            out.extend_from_slice(&row.payload);
+            out.push(b'\n');
+        }
+        Ok(Some(out))
     }
-    fn fold(&self, _pin: &Pin) -> Result<Option<SealOutput>> {
-        Ok(None)
+    /// The extents' bytes, concatenated in chain order.
+    fn fold(
+        &self,
+        pin: &Pin,
+        extents: &[ExtentRef],
+        budget: &QueryBudget,
+    ) -> Result<Option<Vec<u8>>> {
+        let spans = extents
+            .iter()
+            .map(|e| pin.bytes(e))
+            .collect::<Result<Vec<_>>>()?;
+        let len: usize = spans.iter().map(OwnedBytes::len).sum();
+        let _held = budget.reserve(len as u64).map_err(budget_exceeded)?;
+        Ok(Some(
+            spans
+                .iter()
+                .flat_map(OwnedBytes::as_slice)
+                .copied()
+                .collect(),
+        ))
     }
-    fn purge(&self, _pin: &Pin, _rids: &[i64]) -> Result<Option<SealOutput>> {
-        Ok(None)
+    /// The extent without the lines (sealed edge payloads) whose source or target is one of
+    /// `rids`; `None` when no line names one.
+    fn purge(
+        &self,
+        pin: &Pin,
+        extent: &ExtentRef,
+        rids: &[i64],
+        budget: &QueryBudget,
+    ) -> Result<Option<Vec<u8>>> {
+        let bytes = pin.bytes(extent)?;
+        let _held = budget
+            .reserve(bytes.len() as u64)
+            .map_err(budget_exceeded)?;
+        let names = |line: &[u8]| {
+            std::str::from_utf8(line).is_ok_and(|l| {
+                l.split_whitespace()
+                    .skip(1)
+                    .take(2)
+                    .any(|rid| rid.parse().is_ok_and(|rid: i64| rids.contains(&rid)))
+            })
+        };
+        let lines: Vec<&[u8]> = bytes.as_slice().split_inclusive(|b| *b == b'\n').collect();
+        if !lines.iter().any(|l| names(l)) {
+            return Ok(None);
+        }
+        Ok(Some(
+            lines
+                .into_iter()
+                .filter(|l| !names(l))
+                .flatten()
+                .copied()
+                .collect(),
+        ))
     }
     fn rebuild(&self, _catalog: &Catalog, _rows: &Connection) -> Result<()> {
         Ok(())
     }
+}
+
+/// Compact `store`'s catalog under `budget` ([`Catalog::compact`]).
+///
+/// # Errors
+/// The compaction's errors.
+pub fn compact(store: &SqliteStore, budget: CompactBudget) -> Result<CompactReport> {
+    store.catalog().compact(&mut store.lock(), budget)
+}
+
+/// Purge `rids` from every class's extents of `store`'s catalog ([`Catalog::purge`]).
+///
+/// # Errors
+/// The purge's errors.
+pub fn purge(store: &SqliteStore, rids: &[i64]) -> Result<PurgeReport> {
+    store.catalog().purge(&mut store.lock(), rids)
+}
+
+/// Append `bytes` to `store`'s container as a test-class extent and never publish it: a leaked
+/// range, as a compaction that died between its append and its switch leaves one.
+///
+/// # Errors
+/// The append's errors.
+pub fn append_unpublished(store: &SqliteStore, bytes: &[u8]) -> Result<()> {
+    let leaked = store.catalog().append_extent(ExtentClass::Test, bytes)?;
+    drop(leaked);
+    Ok(())
+}
+
+/// Run `sql` in one catalog commit of `store`: a test's corruption of the catalog rows.
+///
+/// # Errors
+/// The commit's errors.
+pub fn corrupt(store: &SqliteStore, sql: &str) -> Result<()> {
+    store
+        .catalog()
+        .commit(&mut store.lock(), Durability::Normal, |txn| {
+            txn.conn().execute_batch(sql).sql()
+        })
 }

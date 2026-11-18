@@ -24,6 +24,10 @@
 //! rule; reclamation deletes them later, in chunks (`Catalog::reclaim`), so the switch
 //! transaction stays short (PC-9 item 1). A refused switch rolls back and hands its claim back
 //! ([`PublishFailed`]): the caller retries or releases it ([`Catalog::release`]).
+//!
+//! [`Catalog::compact`] schedules the units by the `[catalog]` policy and [`Catalog::purge`]
+//! rewrites what holds a purged record; both run every unit through the same claim, merge,
+//! append and publish, under a maintenance budget per unit (spec 11 7.6).
 
 #![cfg_attr(
     not(feature = "failpoints"),
@@ -34,14 +38,24 @@
 )]
 
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, PoisonError};
+use std::time::{Duration, Instant};
 
+use kaban_core::config::SealOps;
+use kaban_core::query_budget::{BudgetExceeded, QueryBudget};
 use kaban_core::{BackendSource, Durability, Result, StoreError, ViewName};
 use rusqlite::{Connection, OptionalExtension};
 
 use super::Catalog;
+use super::checkpoint::CheckpointReport;
+use super::class::{ExtentClass, ExtentLocation, IndexClass};
 use super::commit::Txn;
+use super::fail;
+use super::failpoint::Window;
 use super::kbx::Unpublished;
-use super::tables::{ExtentId, Generation, SedimentSeq, sql_int, uint};
+use super::pin::{Pin, PinnedView};
+use super::reclaim::ReclaimReport;
+use super::tables::{ExtentId, ExtentRef, Generation, SedimentRow, SedimentSeq, sql_int, uint};
 use crate::sql_error::SqlResultExt;
 
 /// A compaction's claim on its input extents, recorded in `cat_claim` under its own token.
@@ -319,6 +333,7 @@ impl Catalog {
             txn.conn()
                 .execute("DELETE FROM cat_claim WHERE claim = ?1", [&claim.token])
                 .sql()?;
+            fail::point("publish.before_commit");
             Ok(generation)
         });
         switched.map_err(|error| Box::new(PublishFailed { error, claim }))
@@ -386,4 +401,596 @@ fn switch_view(txn: &Txn<'_>, switch: &ViewSwitch, ids: &[ExtentId]) -> Result<(
             .sql()?;
     }
     Ok(())
+}
+
+/// The maintenance budget of one unit of work (one seal, one fold, one class's purge; spec 11
+/// 7.6): the memory it may hold and how long it may run. The configured one is
+/// [`Catalog::maintenance_budget`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CompactBudget {
+    /// The memory ceiling, in bytes.
+    pub memory_bytes: u64,
+    /// The deadline of one unit.
+    pub deadline: Duration,
+}
+
+impl CompactBudget {
+    /// A fresh query budget for one unit of work.
+    fn unit(self) -> QueryBudget {
+        QueryBudget::new(self.memory_bytes, Some(self.deadline))
+    }
+}
+
+/// What a unit of maintenance work does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkKind {
+    /// Seal sediment rows into an extent.
+    Seal,
+    /// Fold consecutive extents of one view into one.
+    Fold,
+    /// Rewrite extents without purged records.
+    Purge,
+}
+
+/// One unit of work that published.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Compacted {
+    /// The index class (its catalog name).
+    pub class: &'static str,
+    /// What it did.
+    pub kind: WorkKind,
+    /// The generation its switch published.
+    pub generation: u64,
+    /// The extents it replaced, in chain order.
+    pub extents: Vec<u64>,
+    /// How many sediment rows it sealed.
+    pub sediment_rows: usize,
+}
+
+/// Why a unit of work was skipped (it published nothing and holds no claim).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SkipReason {
+    /// Another compaction holds a claim on one of its inputs, or an input is retired.
+    Claimed,
+    /// `maintenance_budget_refused`: its work ran out of its maintenance budget (7.6).
+    Budget(BudgetExceeded),
+    /// Its switch was refused (the refusal's text): a consumed sediment row, a changed chain.
+    Refused(String),
+}
+
+/// One unit of work that was skipped, with its inputs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Skipped {
+    /// The index class (its catalog name).
+    pub class: &'static str,
+    /// What it would have done.
+    pub kind: WorkKind,
+    /// The extents it would have replaced.
+    pub extents: Vec<u64>,
+    /// How many sediment rows it would have sealed.
+    pub sediment_rows: usize,
+    /// Why it was skipped.
+    pub reason: SkipReason,
+}
+
+/// What one compaction did ([`Catalog::compact`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CompactReport {
+    /// The units that published, in the order they ran.
+    pub published: Vec<Compacted>,
+    /// The units skipped, in the order they ran (a refused unit before its smaller retry).
+    pub skipped: Vec<Skipped>,
+    /// The reclamation that followed.
+    pub reclaim: ReclaimReport,
+    /// SQLite free pages the bounded incremental vacuum released.
+    pub vacuumed_pages: u64,
+    /// The checkpoint tick, when the configured interval had elapsed since the last one.
+    pub checkpoint: Option<CheckpointReport>,
+}
+
+/// What one purge did ([`Catalog::purge`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PurgeReport {
+    /// One entry per class whose extents were rewritten.
+    pub published: Vec<Compacted>,
+    /// The classes whose rewrite was skipped: the caller purges again.
+    pub skipped: Vec<Skipped>,
+    /// The reclamation that followed.
+    pub reclaim: ReclaimReport,
+}
+
+impl Catalog {
+    /// The configured maintenance budget (`[catalog]` `maintenance_memory_mib`,
+    /// `maintenance_deadline_ms`).
+    pub(crate) fn maintenance_budget(&self) -> CompactBudget {
+        CompactBudget {
+            memory_bytes: self.config().maintenance_memory_mib.saturating_mul(1 << 20),
+            deadline: Duration::from_millis(self.config().maintenance_deadline_ms),
+        }
+    }
+
+    /// Compact every registered class by the `[catalog]` policy, then reclaim:
+    ///
+    /// ```text
+    ///   maintenance hold (shared) => pin every view
+    ///   per class: seal  main's pending rows of the class >= seal_ops   (rows: n, n/2 .. 1)
+    ///              fold  a view's class run past fold_depth or the delta ratio
+    ///                    (the newest k of its unshared run: k, k/2 .. 2)
+    ///   each unit: claim => merge under its budget => append => publish (one ViewSwitch)
+    ///   => reclaim => bounded incremental vacuum => checkpoint tick once its interval elapsed
+    /// ```
+    ///
+    /// A claim another compaction holds skips the unit (`Claimed`); a unit its budget refuses
+    /// publishes nothing, hands its claim back and is retried smaller, and the smallest one
+    /// refused is reported, never raised; a refused switch is released and reported. A catalog
+    /// without a container (in memory) seals and folds nothing.
+    ///
+    /// # Errors
+    /// SQLite, container and storage errors (a budget refusal is a skip, never an error).
+    pub(crate) fn compact(
+        &self,
+        conn: &mut Connection,
+        budget: CompactBudget,
+    ) -> Result<CompactReport> {
+        let mut report = CompactReport::default();
+        if let Some(_hold) = self.maintenance_hold()? {
+            let pinned = self.pin_every_view(conn, budget)?;
+            for class in self.classes() {
+                self.seal_class(conn, &pinned, class.as_ref(), budget, &mut report)?;
+                for view in &pinned.views {
+                    self.fold_view(conn, &pinned, view, class.as_ref(), budget, &mut report)?;
+                }
+            }
+        }
+        report.reclaim = self.reclaim(conn)?;
+        report.vacuumed_pages = self.vacuum(conn)?;
+        if self.checkpoint_due() {
+            report.checkpoint = Some(self.checkpoint_tick(conn)?);
+            *self
+                .last_tick
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner) = Some(Instant::now());
+        }
+        Ok(report)
+    }
+
+    /// Purge `rids` from every class (spec 11 7.8: explicit omission): claim every live extent
+    /// of the class in any view, ask the class to rewrite each one without them, publish the
+    /// rewrites in place of the old extents in every chain that holds them (one switch per
+    /// class), retire the old ones, then reclaim. A class whose claim or switch is refused, or
+    /// whose rewrite its budget refuses, is reported skipped: the caller purges again.
+    ///
+    /// # Errors
+    /// SQLite, container and storage errors.
+    pub(crate) fn purge(&self, conn: &mut Connection, rids: &[i64]) -> Result<PurgeReport> {
+        let mut report = PurgeReport::default();
+        if let Some(_hold) = self.maintenance_hold()? {
+            let budget = self.maintenance_budget();
+            let pinned = self.pin_every_view(conn, budget)?;
+            for class in self.classes() {
+                let mut extents: Vec<ExtentRef> = Vec::new();
+                for e in pinned.views.iter().flat_map(|v| v.chain()) {
+                    if e.class == class.class() && !extents.contains(e) {
+                        extents.push(e.clone());
+                    }
+                }
+                if extents.is_empty() {
+                    continue;
+                }
+                let unit = Unit {
+                    class: class.as_ref(),
+                    kind: WorkKind::Purge,
+                    extents,
+                    rows: Vec::new(),
+                };
+                let outcome = self.run_unit(conn, &unit, || {
+                    let work = budget.unit();
+                    let mut added = Vec::new();
+                    let mut views = Vec::new();
+                    let mut retired = Vec::new();
+                    for e in &unit.extents {
+                        let Some(bytes) = class.purge(&pinned.pin, e, rids, &work)? else {
+                            continue;
+                        };
+                        for view in pinned.views.iter().filter(|v| v.chain().contains(e)) {
+                            views.push(ViewSwitch {
+                                view: view_name(view)?,
+                                replaced: vec![e.id],
+                                added: vec![added.len()],
+                            });
+                        }
+                        added.push(bytes);
+                        retired.push(e.id);
+                    }
+                    Ok((!added.is_empty()).then_some(Planned {
+                        added,
+                        views,
+                        retired,
+                        sediment: Vec::new(),
+                    }))
+                })?;
+                outcome.record(&unit, &mut report.published, &mut report.skipped);
+            }
+        }
+        report.reclaim = self.reclaim(conn)?;
+        Ok(report)
+    }
+
+    /// Seal `class`'s pending rows of `main` once they reach its trigger, halving the rows on
+    /// each budget refusal down to one.
+    fn seal_class(
+        &self,
+        conn: &mut Connection,
+        pinned: &Pinned,
+        class: &dyn IndexClass,
+        budget: CompactBudget,
+        report: &mut CompactReport,
+    ) -> Result<()> {
+        let Some(main) = pinned.views.iter().find(|v| view_is_main(v)) else {
+            return Ok(());
+        };
+        let rows: Vec<&SedimentRow> = main
+            .sediment()
+            .iter()
+            .filter(|r| r.class == class.class())
+            .collect();
+        let trigger = seal_trigger(class.class(), &self.config().seal_ops);
+        if rows.is_empty() || rows.len() < usize::try_from(trigger).unwrap_or(usize::MAX) {
+            return Ok(());
+        }
+        let main_name = view_name(main)?;
+        let mut n = rows.len();
+        loop {
+            let unit = Unit {
+                class,
+                kind: WorkKind::Seal,
+                extents: Vec::new(),
+                rows: rows[..n].to_vec(),
+            };
+            let outcome = self.run_unit(conn, &unit, || {
+                let work = budget.unit();
+                Ok(class
+                    .seal(&pinned.pin, &unit.rows, &work)?
+                    .map(|bytes| Planned {
+                        added: vec![bytes],
+                        views: vec![ViewSwitch {
+                            view: main_name.clone(),
+                            replaced: Vec::new(),
+                            added: vec![0],
+                        }],
+                        retired: Vec::new(),
+                        sediment: unit.rows.iter().map(|r| r.seq).collect(),
+                    }))
+            })?;
+            let retry = outcome.is_budget() && n > 1;
+            outcome.record(&unit, &mut report.published, &mut report.skipped);
+            if !retry {
+                return Ok(());
+            }
+            n /= 2;
+        }
+    }
+
+    /// Fold `class`'s run in `view` once its layers reach the fold depth or outweigh the base
+    /// by the delta ratio: the newest k extents of the run no other view holds, k halving on
+    /// each budget refusal down to two.
+    fn fold_view(
+        &self,
+        conn: &mut Connection,
+        pinned: &Pinned,
+        view: &PinnedView,
+        class: &dyn IndexClass,
+        budget: CompactBudget,
+        report: &mut CompactReport,
+    ) -> Result<()> {
+        let chain = view.chain();
+        let own: Vec<&ExtentRef> = chain.iter().filter(|e| e.class == class.class()).collect();
+        let Some((base, layers)) = own.split_first() else {
+            return Ok(());
+        };
+        let layer_bytes: u64 = layers.iter().map(|e| kbx_len(e)).sum();
+        let cfg = self.config();
+        let deep = layers.len() >= usize::try_from(cfg.fold_depth).unwrap_or(usize::MAX);
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "a ratio of byte counts: the policy needs no exact value"
+        )]
+        let heavy = layer_bytes as f64 > cfg.fold_delta_ratio * kbx_len(base) as f64;
+        if !(deep || heavy) {
+            return Ok(());
+        }
+        // the newest consecutive run of the class's extents that no other view holds
+        let shared = |e: &ExtentRef| {
+            pinned
+                .views
+                .iter()
+                .any(|v| !std::ptr::eq(v.as_ref(), view) && v.chain().contains(e))
+        };
+        let Some(last) = chain.iter().rposition(|e| e.class == class.class()) else {
+            return Ok(());
+        };
+        let first = chain[..=last]
+            .iter()
+            .rposition(|e| e.class != class.class() || shared(e))
+            .map_or(0, |p| p + 1);
+        let run = &chain[first..=last];
+        if run.len() < 2 {
+            return Ok(());
+        }
+        let name = view_name(view)?;
+        let mut k = run.len();
+        loop {
+            let unit = Unit {
+                class,
+                kind: WorkKind::Fold,
+                extents: run[run.len() - k..].to_vec(),
+                rows: Vec::new(),
+            };
+            let ids: Vec<ExtentId> = unit.extents.iter().map(|e| e.id).collect();
+            let outcome = self.run_unit(conn, &unit, || {
+                let work = budget.unit();
+                Ok(class
+                    .fold(&pinned.pin, &unit.extents, &work)?
+                    .map(|bytes| Planned {
+                        added: vec![bytes],
+                        views: vec![ViewSwitch {
+                            view: name.clone(),
+                            replaced: ids.clone(),
+                            added: vec![0],
+                        }],
+                        retired: ids.clone(),
+                        sediment: Vec::new(),
+                    }))
+            })?;
+            let retry = outcome.is_budget() && k > 2;
+            outcome.record(&unit, &mut report.published, &mut report.skipped);
+            if !retry {
+                return Ok(());
+            }
+            k = (k / 2).max(2);
+        }
+    }
+
+    /// One unit of work: claim its extents, run `work` (the merge, under its budget), append
+    /// what it wrote and publish the switch. Every path that publishes nothing hands the claim
+    /// back ([`Self::release`]).
+    fn run_unit(
+        &self,
+        conn: &mut Connection,
+        unit: &Unit<'_>,
+        work: impl FnOnce() -> Result<Option<Planned>>,
+    ) -> Result<Outcome> {
+        let inputs: Vec<ExtentId> = unit.extents.iter().map(|e| e.id).collect();
+        let Some(claim) = self.claim(conn, &inputs)? else {
+            return Ok(Outcome::Skipped(SkipReason::Claimed));
+        };
+        self.failpoint(Window::CompactClaimed);
+        let planned = match work() {
+            Ok(Some(planned)) => planned,
+            Ok(None) => {
+                self.release(conn, claim)?;
+                return Ok(Outcome::Nothing);
+            }
+            Err(e) => {
+                self.release(conn, claim)?;
+                return match budget_refusal(&e) {
+                    Some(refused) => Ok(Outcome::Skipped(SkipReason::Budget(refused))),
+                    None => Err(e),
+                };
+            }
+        };
+        match unit.kind {
+            WorkKind::Seal => fail::point("seal.mid"),
+            WorkKind::Fold => fail::point("fold.mid"),
+            WorkKind::Purge => {}
+        }
+        let mut added = Vec::with_capacity(planned.added.len());
+        for bytes in &planned.added {
+            match self.append_extent(unit.class.class(), bytes) {
+                Ok(extent) => added.push(extent),
+                Err(e) => {
+                    self.release(conn, claim)?;
+                    return Err(e);
+                }
+            }
+        }
+        fail::point("publish.after_append");
+        let published = self.publish(
+            conn,
+            Publication {
+                claim,
+                added,
+                views: planned.views,
+                retired: planned.retired,
+                sediment_consumed: planned.sediment,
+            },
+        );
+        match published {
+            Ok(generation) => Ok(Outcome::Published(generation)),
+            Err(failed) => {
+                let PublishFailed { error, claim } = *failed;
+                self.release(conn, claim)?;
+                match error {
+                    StoreError::StorageFatal { .. } => Err(error),
+                    refused => Ok(Outcome::Skipped(SkipReason::Refused(refusal_text(
+                        &refused,
+                    )))),
+                }
+            }
+        }
+    }
+
+    /// Pin the latest generation with every view that has a chain, and `main` (its sediment),
+    /// loaded under the maintenance budget.
+    fn pin_every_view(&self, conn: &Connection, budget: CompactBudget) -> Result<Pinned> {
+        let names: Vec<String> = self.read(conn, |tx| {
+            let mut stmt = tx
+                .prepare("SELECT DISTINCT view FROM cat_view_extent ORDER BY view")
+                .sql()?;
+            let rows = stmt.query_map([], |r| r.get(0)).sql()?;
+            rows.collect::<rusqlite::Result<_>>().sql()
+        })?;
+        let mut views = vec![ViewName::Main];
+        for name in names {
+            let view: ViewName = name.parse().map_err(|e| StoreError::Backend {
+                source: BackendSource::new(e),
+            })?;
+            if !views.contains(&view) {
+                views.push(view);
+            }
+        }
+        // the copy of the chains and pending rows has no ceiling of its own: the unit budgets
+        // bound the merge work
+        let pin = self.pin(
+            conn,
+            &QueryBudget::new(u64::MAX, Some(budget.deadline)),
+            &views,
+        )?;
+        let loaded = views
+            .iter()
+            .map(|v| pin.load_view(conn, v))
+            .collect::<Result<Vec<_>>>()?;
+        Ok(Pinned { pin, views: loaded })
+    }
+
+    /// Release up to [`VACUUM_PAGES`] of SQLite's free pages (`auto_vacuum = INCREMENTAL`) in
+    /// one commit; how many it released.
+    fn vacuum(&self, conn: &mut Connection) -> Result<u64> {
+        self.commit(conn, Durability::Normal, |txn| {
+            let free = |c: &Connection| -> Result<u64> {
+                c.query_row("PRAGMA freelist_count", [], |r| uint(r, 0))
+                    .sql()
+            };
+            let before = free(txn.conn())?;
+            txn.conn()
+                .execute_batch(&format!("PRAGMA incremental_vacuum({VACUUM_PAGES})"))
+                .sql()?;
+            Ok(before.saturating_sub(free(txn.conn())?))
+        })
+    }
+
+    /// Whether the scheduled checkpoint's interval (`[catalog]` `checkpoint_interval_ms`) has
+    /// elapsed since compaction last ticked it (always before the first tick).
+    fn checkpoint_due(&self) -> bool {
+        let interval = Duration::from_millis(self.config().checkpoint_interval_ms);
+        self.last_tick
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .is_none_or(|at| at.elapsed() >= interval)
+    }
+}
+
+/// How many free pages one compaction's incremental vacuum releases at most.
+const VACUUM_PAGES: u32 = 1024;
+
+/// A pin of every view with a chain, and the views it loaded (`main` first).
+struct Pinned {
+    pin: Pin,
+    views: Vec<Arc<PinnedView>>,
+}
+
+/// One unit of maintenance work of one class, and its inputs.
+struct Unit<'c> {
+    class: &'c dyn IndexClass,
+    kind: WorkKind,
+    extents: Vec<ExtentRef>,
+    rows: Vec<&'c SedimentRow>,
+}
+
+/// What a unit's merge wrote and how it switches the chains: the new extents' bytes, the
+/// chain changes (indices into `added`), the extents it retires and the rows it consumes.
+struct Planned {
+    added: Vec<Vec<u8>>,
+    views: Vec<ViewSwitch>,
+    retired: Vec<ExtentId>,
+    sediment: Vec<SedimentSeq>,
+}
+
+/// How one unit ended.
+enum Outcome {
+    /// Its switch published this generation.
+    Published(Generation),
+    /// It published nothing, for this reason.
+    Skipped(SkipReason),
+    /// Its class had nothing to write.
+    Nothing,
+}
+
+impl Outcome {
+    fn is_budget(&self) -> bool {
+        matches!(self, Self::Skipped(SkipReason::Budget(_)))
+    }
+
+    /// Add this outcome of `unit` to `published` or `skipped`.
+    fn record(self, unit: &Unit<'_>, published: &mut Vec<Compacted>, skipped: &mut Vec<Skipped>) {
+        let class = unit.class.class().as_str();
+        let extents = unit.extents.iter().map(|e| e.id.0).collect();
+        let sediment_rows = unit.rows.len();
+        match self {
+            Self::Published(generation) => published.push(Compacted {
+                class,
+                kind: unit.kind,
+                generation: generation.0,
+                extents,
+                sediment_rows,
+            }),
+            Self::Skipped(reason) => skipped.push(Skipped {
+                class,
+                kind: unit.kind,
+                extents,
+                sediment_rows,
+                reason,
+            }),
+            Self::Nothing => {}
+        }
+    }
+}
+
+/// The pending operations that make `class` seal (`[catalog.seal_ops]`; the test class seals
+/// under the graph trigger).
+fn seal_trigger(class: ExtentClass, ops: &SealOps) -> u32 {
+    match class {
+        ExtentClass::TextTier => ops.text,
+        ExtentClass::GraphBase | ExtentClass::GraphLayer => ops.graph,
+        ExtentClass::CodeBase | ExtentClass::CodeLayer => ops.code,
+        #[cfg(any(test, feature = "failpoints"))]
+        ExtentClass::Test => ops.graph,
+    }
+}
+
+/// The length of `e`'s bytes in the container (0 for a cold file).
+fn kbx_len(e: &ExtentRef) -> u64 {
+    match e.location {
+        ExtentLocation::Kbx { len, .. } => len,
+        ExtentLocation::File { .. } => 0,
+    }
+}
+
+/// Whether `view` is `main`.
+fn view_is_main(view: &PinnedView) -> bool {
+    view.name() == ViewName::Main.to_string()
+}
+
+/// `view`'s name as a [`ViewName`].
+fn view_name(view: &PinnedView) -> Result<ViewName> {
+    view.name().parse().map_err(|e| StoreError::Backend {
+        source: BackendSource::new(e),
+    })
+}
+
+/// The budget refusal behind `e` (a class's `seal`, `fold` or `purge` failed its
+/// reservation, its deadline or its cancellation), `None` for any other error.
+fn budget_refusal(e: &StoreError) -> Option<BudgetExceeded> {
+    match e {
+        StoreError::Backend { source } => source.driver().downcast_ref::<BudgetExceeded>().copied(),
+        _ => None,
+    }
+}
+
+/// The text a refused switch is reported by: the refusal's own (`catalog_switch_refused: ...`).
+fn refusal_text(e: &StoreError) -> String {
+    match e {
+        StoreError::Backend { source } => source.driver().to_string(),
+        other => other.to_string(),
+    }
 }

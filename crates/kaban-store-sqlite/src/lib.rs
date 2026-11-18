@@ -40,6 +40,12 @@ mod stamp;
 mod tantivy;
 mod traverse;
 
+pub use catalog::checkpoint::CheckpointReport;
+pub use catalog::compact::{
+    CompactBudget, CompactReport, Compacted, PurgeReport, SkipReason, Skipped, WorkKind,
+};
+pub use catalog::reclaim::ReclaimReport;
+pub use catalog::recover::{ClassExtents, RecoverReport, VerifyReport};
 pub use connection::{ExclusiveHold, exclusive_hold};
 
 /// Test access to the catalog for the integration suites; not a supported interface.

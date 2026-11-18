@@ -30,6 +30,7 @@ use super::capture::{self, BatchChanges};
 use super::class::ExtentClass;
 use super::kbx::{ContainerId, Parts, Unpublished};
 use super::phase::{Phase, Phases, Reader, Staged};
+use super::pins::MaintenanceHold;
 use super::tables::{ExtentId, Generation, SedimentSeq, sql_int, uint};
 use crate::sql_error::SqlResultExt;
 
@@ -45,6 +46,9 @@ pub(crate) struct Txn<'c> {
     container: Option<ContainerId>,
     /// The generation this commit publishes, once the writer phase allocated it.
     generation: Option<Generation>,
+    /// The maintenance holds of the extents it publishes: released only once the commit ends
+    /// (declared after `tx`, so a rollback precedes their release too).
+    holds: Vec<Arc<MaintenanceHold>>,
 }
 
 impl Txn<'_> {
@@ -72,7 +76,9 @@ impl Txn<'_> {
             len,
             container,
             sha256,
+            hold,
         } = extent.into_parts();
+        self.holds.extend(hold);
         if self.container != Some(container) {
             return Err(PublishRefused::ForeignContainer.into());
         }
@@ -348,6 +354,7 @@ impl Catalog {
             tx,
             container: self.container,
             generation: None,
+            holds: Vec::new(),
         };
         // declared after `txn`, so it drops first: an early exit's rollback runs unrestricted
         let phase = self.phases.enter();

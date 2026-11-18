@@ -23,26 +23,34 @@
 pub(crate) mod capture;
 pub(crate) mod checkpoint;
 pub(crate) mod class;
+pub(crate) mod classes;
+mod code_class;
 pub(crate) mod commit;
 pub(crate) mod compact;
+pub(crate) mod fail;
 pub(crate) mod failpoint;
+mod graph_class;
 pub(crate) mod io;
 pub(crate) mod kbx;
 pub(crate) mod phase;
 pub(crate) mod pin;
 pub(crate) mod pins;
 pub(crate) mod reclaim;
+pub(crate) mod recover;
 pub(crate) mod tables;
 #[cfg(feature = "failpoints")]
 pub mod testing;
 #[cfg(test)]
 mod tests;
+mod text_class;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, PoisonError, RwLock};
+use std::sync::{Arc, Mutex, PoisonError, RwLock};
+use std::time::Instant;
 
 use kaban_core::Result;
+use kaban_core::config::CatalogCfg;
 use rusqlite::Connection;
 
 use class::{ExtentClass, IndexClass};
@@ -72,6 +80,11 @@ pub(crate) struct Catalog {
     /// to it (`None`: an in-memory database, a reader, or an as-is open without a container).
     container: Option<kbx::ContainerId>,
     classes: RwLock<Vec<Arc<dyn IndexClass>>>,
+    /// The `[catalog]` settings (spec 11 7.6): the compaction policy, the checkpoint interval
+    /// and the maintenance budget ([`Self::configure`]; the defaults until then).
+    config: CatalogCfg,
+    /// When the last checkpoint tick ran (`None`: none yet), against the configured interval.
+    last_tick: Mutex<Option<Instant>>,
     /// Set only while [`Self::commit`] commits (and around an explicit maintenance statement,
     /// [`Self::outside_commit`]): the writer guard of test builds refuses any other commit on
     /// the writer connection.
@@ -194,6 +207,8 @@ impl Catalog {
             full_sync_refused: false,
             container: None,
             classes: RwLock::new(Vec::new()),
+            config: CatalogCfg::default(),
+            last_tick: Mutex::new(None),
             committing: Arc::new(AtomicBool::new(false)),
             phases: Arc::new(phase::Phases::default()),
             #[cfg(test)]
@@ -210,7 +225,18 @@ impl Catalog {
         capture::install(conn)?;
         phase::guard_phases(conn, &self.phases)?;
         commit::guard_writer(conn, &self.committing)?;
+        classes::register_all(&self);
         Ok(self)
+    }
+
+    /// Bind the `[catalog]` settings, already validated at load (`CatalogCfg::validate`).
+    pub(crate) fn configure(&mut self, config: CatalogCfg) {
+        self.config = config;
+    }
+
+    /// The `[catalog]` settings in force.
+    pub(crate) fn config(&self) -> &CatalogCfg {
+        &self.config
     }
 
     /// Install a unit test's observer of every row a later pin copies.
@@ -278,10 +304,6 @@ impl Catalog {
     /// the open's probe found no keep-size hole punching, or a release found its punch refused
     /// since ([`Self::reclaim_ranges`]). `false` means only that neither is known to have
     /// happened. Safe to read from any thread.
-    #[cfg_attr(
-        not(feature = "failpoints"),
-        expect(dead_code, reason = "T6's doctor and maintenance read the flag")
-    )]
     pub(crate) fn degraded_reclamation(&self) -> bool {
         self.reclamation == Some(io::Reclamation::ZeroFill)
             || self.punch_refused.load(Ordering::Acquire)
@@ -300,10 +322,6 @@ impl Catalog {
     /// `kbx::ContainerError` for a failed open, punch or write, or a catalog that probed no
     /// reclamation mode; `StoreError::StorageFatal` for the failed sync (never retried: the
     /// caller keeps the ranges' catalog rows).
-    #[cfg_attr(
-        not(feature = "failpoints"),
-        expect(dead_code, reason = "T6's reclamation releases through it")
-    )]
     pub(crate) fn reclaim_ranges(&self, ranges: &[(u64, u64)]) -> Result<io::Released> {
         if ranges.is_empty() {
             // nothing released, nothing to sync
@@ -339,13 +357,28 @@ impl Catalog {
 
     /// Append `bytes` to the container outside the writer lock: reserve a range under a short
     /// `flock` on `kaban.kbx.alloc`, then `pwrite` and `fdatasync` ([`kbx::append`]). Nothing
-    /// names the bytes until a commit publishes them ([`commit::Txn::publish`]).
+    /// names the bytes until a commit publishes them ([`commit::Txn::publish`]); the token
+    /// holds the maintenance lock shared until then, so recovery never reclaims its range.
     ///
     /// # Errors
     /// The container's I/O errors (`kbx::ContainerError`); `StoreError::StorageFatal` for the
-    /// failed sync, attempted once: the range stays unnamed and nothing is published.
+    /// failed sync, attempted once: the range stays unnamed and nothing is published; the
+    /// maintenance lock's errors.
     pub(crate) fn append_extent(&self, class: ExtentClass, bytes: &[u8]) -> Result<Unpublished> {
-        kbx::append(&self.kbx, class, bytes)
+        let hold = self.maintenance_hold()?.map(Arc::new);
+        kbx::append(&self.kbx, class, bytes, hold)
+    }
+
+    /// A shared hold of the maintenance lock ([`pins::MAINTENANCE`]), `None` for a catalog
+    /// without a container (nothing to append, claim or recover).
+    ///
+    /// # Errors
+    /// The lock's errors ([`pins::hold_maintenance`]).
+    pub(crate) fn maintenance_hold(&self) -> Result<Option<pins::MaintenanceHold>> {
+        match (&self.pins, self.container) {
+            (Some(pins), Some(_)) => pins::hold_maintenance(pins).map(Some),
+            _ => Ok(None),
+        }
     }
 }
 

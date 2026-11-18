@@ -553,6 +553,7 @@ fn race(window: Window, mode: Mode) -> Tally {
                 tally.count(reclaimer.done());
                 read_intact(pin.view(), keeper, id, i)
             }
+            Window::CompactClaimed => unreachable!("not a window of the pin protocol"),
         };
         assert!(
             !armed.load(Ordering::Acquire),

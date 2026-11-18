@@ -21,6 +21,8 @@ pub enum Window {
     ReaderInTransaction,
     /// A reclamation has committed its floor and not re-scanned the pin locks yet.
     ReclaimFloorCommitted,
+    /// A compaction unit's claim is committed and its merge work has not begun.
+    CompactClaimed,
 }
 
 #[cfg(any(test, feature = "failpoints"))]
@@ -39,7 +41,7 @@ mod hooks {
     /// The installed hooks of one catalog, and how often its readers retried (PC-8 step 4).
     #[derive(Default)]
     pub(crate) struct Failpoints {
-        hooks: Mutex<[Option<Hook>; 4]>,
+        hooks: Mutex<[Option<Hook>; 5]>,
         retries: AtomicU64,
     }
 
@@ -57,6 +59,7 @@ mod hooks {
             Window::ReaderLocked => 1,
             Window::ReaderInTransaction => 2,
             Window::ReclaimFloorCommitted => 3,
+            Window::CompactClaimed => 4,
         }
     }
 

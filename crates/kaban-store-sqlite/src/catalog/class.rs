@@ -2,13 +2,14 @@
 //! implementation commits through, and the class/location vocabulary of the catalog rows.
 
 use kaban_core::Result;
+use kaban_core::query_budget::QueryBudget;
 use rusqlite::Connection;
 
 use super::Catalog;
 use super::capture::BatchChanges;
 use super::commit::Stage;
 use super::pin::Pin;
-use super::tables::{ExtentRef, SedimentSeq};
+use super::tables::{ExtentRef, SedimentRow};
 
 /// The class of an extent: which index wrote it and which index reads it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -74,27 +75,15 @@ pub(crate) enum ExtentLocation {
     },
 }
 
-/// What a seal, fold or purge produced outside the writer lock: the new extent's bytes and the
-/// inputs they replace, published by a later commit.
-#[expect(dead_code, reason = "T6's compaction publishes it")]
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct SealOutput {
-    /// The new extent's bytes.
-    pub(crate) bytes: Vec<u8>,
-    /// The extents the output replaces.
-    pub(crate) extents: Vec<ExtentRef>,
-    /// The sediment rows the output folds in.
-    pub(crate) sediment: Vec<SedimentSeq>,
-}
-
 /// One index implementation over the catalog. `stage` runs inside [`Catalog::commit`] with the
 /// commit's frozen change set and must be idempotent per transaction; `seal`, `fold` and
-/// `purge` run outside the writer lock against a pin and return bytes plus the inputs they
-/// consumed. T7, T11 and T16 bring the concrete classes; T5 has a test class only.
-#[expect(
-    dead_code,
-    reason = "T6's compaction and rebuild call the methods besides `stage`"
-)]
+/// `purge` run outside the writer lock against a pin, on inputs the compaction already claimed
+/// (`super::compact`), and return the new extent's bytes (`None`: nothing to write). Each runs
+/// under its maintenance budget (spec 11 7.6): it reserves what it holds in `budget` and fails
+/// with the budget's error when a reservation is refused, so the compaction retries a smaller
+/// unit. T7, T11 and T16 bring the concrete classes (`super::classes`); the test class lives in
+/// `super::testing`.
+#[expect(dead_code, reason = "T7's reindex calls `rebuild`")]
 pub(crate) trait IndexClass: Send + Sync {
     /// The class of the extents and sediment this index owns.
     fn class(&self) -> ExtentClass;
@@ -104,21 +93,39 @@ pub(crate) trait IndexClass: Send + Sync {
     /// # Errors
     /// Any error rolls the whole commit back.
     fn stage(&self, txn: &mut Stage<'_>, changes: &BatchChanges) -> Result<()>;
-    /// Seal the pinned sediment into an extent.
+    /// Seal the pinned sediment rows `rows` (this class's, in sequence order) into one extent.
     ///
     /// # Errors
-    /// Read or encode failures.
-    fn seal(&self, pin: &Pin) -> Result<Option<SealOutput>>;
-    /// Fold the pinned extents into fewer.
+    /// The budget's refusal; read or encode failures.
+    fn seal(
+        &self,
+        pin: &Pin,
+        rows: &[&SedimentRow],
+        budget: &QueryBudget,
+    ) -> Result<Option<Vec<u8>>>;
+    /// Fold the pinned extents `extents` (consecutive in one view's chain, oldest first) into
+    /// one extent that takes their place.
     ///
     /// # Errors
-    /// Read or encode failures.
-    fn fold(&self, pin: &Pin) -> Result<Option<SealOutput>>;
-    /// Rewrite every pinned extent that still holds one of `rids`, omitting them.
+    /// The budget's refusal; read or encode failures.
+    fn fold(
+        &self,
+        pin: &Pin,
+        extents: &[ExtentRef],
+        budget: &QueryBudget,
+    ) -> Result<Option<Vec<u8>>>;
+    /// Rewrite the pinned extent `extent` without the records of `rids` (explicit omission,
+    /// spec 11 7.8); `None` when it holds none of them.
     ///
     /// # Errors
-    /// Read or encode failures.
-    fn purge(&self, pin: &Pin, rids: &[i64]) -> Result<Option<SealOutput>>;
+    /// The budget's refusal; read or encode failures.
+    fn purge(
+        &self,
+        pin: &Pin,
+        extent: &ExtentRef,
+        rids: &[i64],
+        budget: &QueryBudget,
+    ) -> Result<Option<Vec<u8>>>;
     /// Rebuild this index from the canonical rows.
     ///
     /// # Errors

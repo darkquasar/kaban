@@ -19,15 +19,11 @@
 //! the WAL is backfilled, so a power loss cannot bring back a catalog that names destroyed
 //! bytes. Only punched bytes count as reclaimed space; zero-filled bytes are reported apart.
 
-#![cfg_attr(
-    not(feature = "failpoints"),
-    expect(dead_code, reason = "T6's compact runs the reclamation")
-)]
-
 use kaban_core::{Durability, Result};
 use rusqlite::Connection;
 
 use super::Catalog;
+use super::fail;
 use super::failpoint::Window;
 use super::pin::latest_generation;
 use super::pins;
@@ -43,30 +39,30 @@ const SEDIMENT_CHUNK: u64 = 4096;
     clippy::struct_excessive_bools,
     reason = "independent report flags, each a named outcome"
 )]
-pub(crate) struct ReclaimReport {
+pub struct ReclaimReport {
     /// The `reclaim_floor` it committed.
-    pub(crate) floor: u64,
+    pub floor: u64,
     /// The retired extents it destroyed, in id order.
-    pub(crate) reclaimed: Vec<ExtentId>,
+    pub reclaimed: Vec<u64>,
     /// The retired extents left for a later round (still pinned, behind the barrier, in a
     /// pin race, or cold), in id order.
-    pub(crate) pending: Vec<ExtentId>,
+    pub pending: Vec<u64>,
     /// The allocated space of the container that the release freed, in bytes.
-    pub(crate) released_bytes: u64,
+    pub released_bytes: u64,
     /// The length of the ranges a punch processed (a partial block is only zeroed by it).
-    pub(crate) punched_range_bytes: u64,
+    pub punched_range_bytes: u64,
     /// Bytes only overwritten with zeros: logically gone, no space reclaimed.
-    pub(crate) zero_filled_bytes: u64,
+    pub zero_filled_bytes: u64,
     /// Its re-scan found a live pin below the floor: it destroyed nothing.
-    pub(crate) pin_race_retry: bool,
+    pub pin_race_retry: bool,
     /// The WAL was not backfilled through a commit that retired an extent no pin reaches.
-    pub(crate) barrier_pending: bool,
+    pub barrier_pending: bool,
     /// The platform's full sync is refused, so the barrier never holds (`degraded_durability`).
-    pub(crate) degraded_durability: bool,
+    pub degraded_durability: bool,
     /// The catalog cannot deallocate container ranges (`space_reclaim_unsupported`).
-    pub(crate) space_reclaim_unsupported: bool,
+    pub space_reclaim_unsupported: bool,
     /// Consumed sediment rows deleted.
-    pub(crate) sediment_deleted: u64,
+    pub sediment_deleted: u64,
 }
 
 impl Catalog {
@@ -120,6 +116,7 @@ impl Catalog {
                 .sql()
         })?;
         self.failpoint(Window::ReclaimFloorCommitted);
+        fail::point("reclaim.after_floor");
         let pin_race_retry = pins::lowest_live(&pins)?.is_some_and(|p| p < floor);
         let retired = self.read(conn, |tx| {
             let mut stmt = tx
@@ -151,7 +148,7 @@ impl Catalog {
                 Some(span) if unpinned && dead_since <= durable => doomed.push((id, span)),
                 _ => {
                     report.barrier_pending |= unpinned && dead_since > durable;
-                    report.pending.push(id);
+                    report.pending.push(id.0);
                 }
             }
         }
@@ -159,6 +156,7 @@ impl Catalog {
         let before = self.allocated()?;
         let released = self.reclaim_ranges(&ranges)?;
         let after = self.allocated()?;
+        fail::point("reclaim.mid_punch");
         if !doomed.is_empty() {
             // the ranges are released and synced: their rows go (a failed sync kept them)
             self.commit(conn, Durability::Normal, |txn| {
@@ -173,7 +171,7 @@ impl Catalog {
                 Ok(())
             })?;
         }
-        report.reclaimed = doomed.into_iter().map(|(id, _)| id).collect();
+        report.reclaimed = doomed.into_iter().map(|(id, _)| id.0).collect();
         // only blocks a punch wholly freed count: a partial block is merely zeroed
         report.released_bytes = before.saturating_sub(after);
         report.punched_range_bytes = released.punched;
@@ -220,7 +218,7 @@ impl Catalog {
 
 /// `ranges` (`(offset, len)`) sorted, with touching or overlapping ones merged, so blocks that
 /// several small dead extents fill wholly are punched as one range and freed.
-fn coalesce(mut ranges: Vec<(u64, u64)>) -> Vec<(u64, u64)> {
+pub(super) fn coalesce(mut ranges: Vec<(u64, u64)>) -> Vec<(u64, u64)> {
     ranges.sort_unstable();
     let mut out: Vec<(u64, u64)> = Vec::with_capacity(ranges.len());
     for (offset, len) in ranges {

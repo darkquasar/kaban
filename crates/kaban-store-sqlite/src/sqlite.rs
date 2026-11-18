@@ -397,6 +397,51 @@ impl SqliteStore {
         Ok(self)
     }
 
+    /// Bind the `[catalog]` settings (spec 11 7.6): the compaction policy, the checkpoint
+    /// interval and the maintenance budget every later [`Self::compact`] runs under.
+    ///
+    /// # Errors
+    /// `StoreError::InvalidName` naming the refused key (`CatalogCfg::validate`).
+    pub fn with_catalog_config(mut self, catalog: kaban_core::config::CatalogCfg) -> Result<Self> {
+        if let Err(e) = catalog.validate() {
+            let key = match e {
+                kaban_core::config::ConfigError::Range { path } => path,
+                _ => "catalog".into(),
+            };
+            return Err(StoreError::InvalidName(key, "invalid_configuration"));
+        }
+        self.catalog.configure(catalog);
+        Ok(self)
+    }
+
+    /// Compact the catalog under the configured maintenance budget (spec 11 KER-07, 7.6):
+    /// seal and fold every class by policy, reclaim what no pin reaches, vacuum SQLite's free
+    /// pages a bounded step and tick the checkpoint when its interval elapsed.
+    ///
+    /// # Errors
+    /// SQLite, container and storage errors; a unit refused by its budget is a skip.
+    pub fn compact(&self) -> Result<crate::CompactReport> {
+        let budget = self.catalog.maintenance_budget();
+        self.catalog.compact(&mut self.lock(), budget)
+    }
+
+    /// Recover the catalog after a crash (stale claims, unpublished ranges): see
+    /// `catalog::recover`.
+    ///
+    /// # Errors
+    /// SQLite, lock and container errors.
+    pub fn recover_catalog(&self) -> Result<crate::RecoverReport> {
+        self.catalog.recover(&mut self.lock())
+    }
+
+    /// Verify the catalog's rows, chains, ranges and hashes: see `catalog::recover`.
+    ///
+    /// # Errors
+    /// SQLite and container errors.
+    pub fn verify_catalog(&self) -> Result<crate::VerifyReport> {
+        self.catalog.verify(&self.lock())
+    }
+
     /// Bind validated recall settings.
     /// # Errors
     /// Invalid ranking configuration.

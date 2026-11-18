@@ -98,6 +98,10 @@ pub(crate) struct PinnedView {
 }
 
 impl PinnedView {
+    /// The view's name.
+    pub(crate) fn name(&self) -> &str {
+        &self.name
+    }
     /// The view's extent chain, oldest first.
     pub(crate) fn chain(&self) -> &[ExtentRef] {
         &self.chain
