@@ -125,21 +125,92 @@ pub(crate) const ADMISSION: &str = "admission";
 /// checkpoint holds it exclusive, so no new reader is admitted while admitted ones drain.
 pub(crate) const GATE: &str = "admission.gate";
 
+/// The marker of a waiting checkpoint (cross-process): created, locked exclusive and renamed
+/// into place by the tick before it waits for the gate, removed when it ends. A reader waits
+/// while a marker exists whose lock is held; one whose lock is free was left by a tick that
+/// died, and is ignored.
+pub(crate) const PENDING: &str = "admission.pending";
+
+/// Names this process's marker files while they are being put in place.
+static MARKERS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// A checkpoint's registration as waiting ([`PENDING`]): removed (if it is still the one in
+/// place) and unlocked on drop.
+#[derive(Debug)]
+pub(crate) struct Pending {
+    file: Option<File>,
+    path: PathBuf,
+}
+
+impl Pending {
+    /// Register a waiting checkpoint in `pins`: the marker is locked before it gets its name,
+    /// so no reader ever finds it unlocked while the tick lives.
+    ///
+    /// # Errors
+    /// `ContainerError` for a marker that cannot be created, locked or renamed.
+    pub(crate) fn register(pins: &Path) -> Result<Self> {
+        let n = MARKERS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let staged = pins.join(format!("{PENDING}.{}.{n}", std::process::id()));
+        let file = open(&staged, OFlags::CREATE)
+            .map_err(|e| failed("create the checkpoint marker", &staged, e))?;
+        rustix::fs::flock(&file, FlockOperation::NonBlockingLockExclusive)
+            .map_err(|e| failed("lock the checkpoint marker", &staged, e))?;
+        let path = pins.join(PENDING);
+        std::fs::rename(&staged, &path)
+            .map_err(|e| failed("place the checkpoint marker", &path, e))?;
+        Ok(Self {
+            file: Some(file),
+            path,
+        })
+    }
+}
+
+impl Drop for Pending {
+    fn drop(&mut self) {
+        if let Some(file) = self.file.take() {
+            if names(&self.path, &file).unwrap_or(false) {
+                let _ = rustix::fs::unlink(&self.path);
+            }
+            drop(file);
+        }
+    }
+}
+
+/// Whether a live checkpoint waits to drain the readers ([`PENDING`]).
+fn checkpoint_waiting(pins: &Path) -> Result<bool> {
+    let path = pins.join(PENDING);
+    let file = match open(&path, OFlags::empty()) {
+        Ok(file) => file,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(failed("open the checkpoint marker", &path, e)),
+    };
+    match rustix::fs::flock(&file, FlockOperation::NonBlockingLockShared) {
+        // free: left by a tick that died
+        Ok(()) => Ok(false),
+        Err(Errno::WOULDBLOCK) => Ok(true),
+        Err(e) => Err(failed("probe the checkpoint marker", &path, e)),
+    }
+}
+
 /// A reader's admission (shared [`ADMISSION`]), released on drop.
 #[derive(Debug)]
 pub(crate) struct Admitted {
     _lock: File,
 }
 
-/// Admit a reader of the catalog in `pins` within `budget`'s deadline: pass the gate shared,
-/// take the admission lock shared, leave the gate. A draining checkpoint holds the gate for at
-/// most its own short budget.
+/// Admit a reader of the catalog in `pins` within `budget`'s deadline: wait while a checkpoint
+/// is registered as waiting ([`PENDING`]), pass the gate shared, take the admission lock
+/// shared, leave the gate. A checkpoint waits and drains for at most its own short budget.
 ///
 /// # Errors
 /// `ContainerError` for a lock file that cannot be opened or locked; the budget's error once it
 /// is cancelled or past its deadline.
 pub(crate) fn admit(pins: &Path, budget: &QueryBudget) -> Result<Admitted> {
     let wait = || budget.check().map(|()| true).map_err(budget_exceeded);
+    while checkpoint_waiting(pins)? {
+        wait()?;
+        std::thread::sleep(LOCK_RETRY);
+    }
     let shared = FlockOperation::NonBlockingLockShared;
     let gate = lock_while(&pins.join(GATE), shared, wait)?;
     let admission = match gate {

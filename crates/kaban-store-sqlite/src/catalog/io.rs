@@ -142,6 +142,30 @@ pub(crate) fn probe_hole_punch(kbx: &Path) -> Result<Reclamation> {
     Ok(mode)
 }
 
+/// Whether the platform's full sync reaches the device for the container `kbx` (KER-10): on
+/// Apple systems one `F_FULLFSYNC` of the container (a file system may refuse it, and SQLite
+/// then falls back to a plain `fsync` silently); elsewhere a plain sync already does. A
+/// container that cannot be opened is not probed (`true`: it holds nothing to reclaim).
+pub(crate) fn full_sync_works(kbx: &Path) -> bool {
+    !faults::full_sync_refused(kbx) && full_sync(kbx)
+}
+
+/// One `F_FULLFSYNC` of the container `kbx`.
+#[cfg(target_vendor = "apple")]
+fn full_sync(kbx: &Path) -> bool {
+    match open_existing(kbx) {
+        Ok(file) => rustix::fs::fcntl_fullfsync(&file).is_ok(),
+        Err(_) => true,
+    }
+}
+
+/// A plain sync reaches the device here.
+#[cfg(not(target_vendor = "apple"))]
+fn full_sync(kbx: &Path) -> bool {
+    let _ = kbx;
+    true
+}
+
 /// Release the `len` bytes at `offset` of the container `file` (at `kbx`) by `mode`, clamped
 /// to the container's length: the container neither shrinks nor grows, and the range reads as
 /// zeros afterwards. A punch the file system refuses falls back to a zero-fill, and the outcome
@@ -246,6 +270,7 @@ pub(crate) mod faults {
     }
 
     /// The faults of one directory.
+    #[expect(clippy::struct_excessive_bools, reason = "independent fault switches")]
     struct Faults {
         dir: PathBuf,
         failing: Vec<&'static str>,
@@ -291,6 +316,11 @@ pub(crate) mod faults {
     /// that stops punching after the open's probe).
     pub(super) fn release_punch_refused(kbx: &Path) -> bool {
         with(kbx, |faults| faults.no_release_punch).unwrap_or(false)
+    }
+
+    /// Whether the full-sync probe of the container `kbx` must find the full sync refused.
+    pub(super) fn full_sync_refused(kbx: &Path) -> bool {
+        with(kbx, |faults| faults.no_full_sync).unwrap_or(false)
     }
 
     /// Start injecting under `dir` (replacing an earlier registration of it).
@@ -370,6 +400,12 @@ mod faults {
 
     #[inline]
     pub(super) fn release_punch_refused(kbx: &Path) -> bool {
+        let _ = kbx;
+        false
+    }
+
+    #[inline]
+    pub(super) fn full_sync_refused(kbx: &Path) -> bool {
         let _ = kbx;
         false
     }

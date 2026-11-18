@@ -4,6 +4,7 @@
 //!
 //! ```text
 //!   reader (Catalog::acquire)            checkpoint_tick
+//!   waits while a tick is pending        pending marker (locked, then named)
 //!   gate SH (instant) => admission SH    gate EX (no new reader passes)
 //!   => read transaction ... ends         => admission EX (admitted readers drained)
 //!   => admission released                => wal_checkpoint(RESTART) => both released
@@ -57,15 +58,18 @@ pub(crate) struct CheckpointReport {
     pub(crate) wal_frames: u64,
     /// Frames it checkpointed.
     pub(crate) checkpointed_frames: u64,
-    /// The platform's full fsync (macOS `checkpoint_fullfsync`) did not take effect.
+    /// The platform's full sync is refused (the open's `F_FULLFSYNC` probe on macOS, or the
+    /// pragmas did not take): the checkpoint is no KER-10 barrier.
     pub(crate) degraded_durability: bool,
 }
 
-/// The tick's hold of both admission locks, released (admission first) on drop.
+/// The tick's hold of both admission locks and its waiting marker, released (admission
+/// first) on drop.
 #[derive(Debug)]
 struct Drained {
     _admission: File,
     _gate: File,
+    _pending: pins::Pending,
 }
 
 impl Catalog {
@@ -81,7 +85,8 @@ impl Catalog {
         let deadline = Instant::now() + TICK_BUDGET;
         conn.pragma_update(None, "journal_size_limit", JOURNAL_SIZE_LIMIT)
             .sql()?;
-        let degraded_durability = !full_fsync(conn)?;
+        // the pragmas make SQLite ask for full syncs; only the open's probe says they work
+        let degraded_durability = !full_fsync(conn)? || self.full_sync_refused;
         let drained = match self.pins.as_deref() {
             Some(pins) => drain(pins, deadline)?,
             None => None,
@@ -116,9 +121,12 @@ impl Catalog {
     }
 }
 
-/// Take the gate, then the admission lock, exclusively before `deadline`; `None` when either
-/// is still held then (by a passing or an admitted reader).
+/// Register as waiting ([`pins::PENDING`]), then take the gate and the admission lock
+/// exclusively before `deadline`; `None` when either is still held then (by a passing or an
+/// admitted reader).
 fn drain(pins: &Path, deadline: Instant) -> Result<Option<Drained>> {
+    // registered first: no reader that looks after this passes the gate any more
+    let pending = pins::Pending::register(pins)?;
     let before = || Ok(Instant::now() < deadline);
     let Some(gate) = pins::lock_while(
         &pins.join(pins::GATE),
@@ -136,6 +144,7 @@ fn drain(pins: &Path, deadline: Instant) -> Result<Option<Drained>> {
     Ok(admission.map(|admission| Drained {
         _admission: admission,
         _gate: gate,
+        _pending: pending,
     }))
 }
 

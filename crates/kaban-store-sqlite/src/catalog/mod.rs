@@ -65,6 +65,9 @@ pub(crate) struct Catalog {
     /// Set once a release found its punch refused after the probe found punching (END-MED-03):
     /// from then on the catalog zero-fills and reports degraded reclamation.
     punch_refused: AtomicBool,
+    /// Whether the open's probe found the platform's full sync refused ([`io::full_sync_works`]):
+    /// then no checkpoint is a KER-10 barrier and reclamation destroys nothing.
+    full_sync_refused: bool,
     /// The identity of the container, once it exists: a commit publishes only ranges appended
     /// to it (`None`: an in-memory database, a reader, or an as-is open without a container).
     container: Option<kbx::ContainerId>,
@@ -140,6 +143,7 @@ impl Catalog {
         if self.reclamation.is_none() {
             self.reclamation = Some(io::probe_hole_punch(&self.kbx)?);
         }
+        self.full_sync_refused = !io::full_sync_works(&self.kbx);
         Ok(())
     }
 
@@ -157,6 +161,7 @@ impl Catalog {
         let mut catalog = Self::with_container(kbx::kbx_path(db_path));
         catalog.reclamation = io::probe_hole_punch(&catalog.kbx).ok();
         catalog.container = kbx::ContainerId::at(&catalog.kbx).ok();
+        catalog.full_sync_refused = !io::full_sync_works(&catalog.kbx);
         catalog.attach_writer(conn)
     }
 
@@ -186,6 +191,7 @@ impl Catalog {
             failpoints: failpoint::Failpoints::default(),
             reclamation: None,
             punch_refused: AtomicBool::new(false),
+            full_sync_refused: false,
             container: None,
             classes: RwLock::new(Vec::new()),
             committing: Arc::new(AtomicBool::new(false)),

@@ -3,11 +3,13 @@
 //! ```text
 //!   barrier:  latest generation L => checkpoint_tick => WAL wholly backfilled?
 //!               yes => every generation <= L is in the main file (durable = L)
-//!               no  => durable = 0: nothing retired may be destroyed this round
+//!               no, or the full sync is refused (degraded durability)
+//!                   => durable = 0: nothing retired may be destroyed this round
 //!   phase 1:  scan pins/ for the lowest live P => commit reclaim_floor = max(F, min(P, latest))
 //!   phase 2:  re-scan => a live pin below the floor: pin_race_retry, destroy nothing
-//!   destroy:  dead_since <= floor and dead_since <= durable => release the range (punch or
-//!             zero-fill), synced, then drop the rows; everything else retired stays pending
+//!   destroy:  dead_since <= floor and dead_since <= durable => release the ranges (touching
+//!             ones merged; punch or zero-fill), synced, then drop the rows; everything else
+//!             retired stays pending; released bytes are the allocated space that fell
 //!   tidy:     delete consumed sediment rows in chunks, one short commit each
 //! ```
 //!
@@ -37,6 +39,10 @@ const SEDIMENT_CHUNK: u64 = 4096;
 
 /// What one reclamation did.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent report flags, each a named outcome"
+)]
 pub(crate) struct ReclaimReport {
     /// The `reclaim_floor` it committed.
     pub(crate) floor: u64,
@@ -74,12 +80,15 @@ impl Catalog {
     /// `StoreError::StorageFatal` for a failed sync (the rows of the released ranges stay).
     pub(crate) fn reclaim(&self, conn: &mut Connection) -> Result<ReclaimReport> {
         let latest = self.read(conn, latest_generation)?;
-        let durable = if self.checkpoint_tick(conn)?.backfilled {
+        let tick = self.checkpoint_tick(conn)?;
+        // a checkpoint without a working full sync proves nothing durable (KER-10)
+        let durable = if tick.backfilled && !tick.degraded_durability {
             latest
         } else {
             0
         };
         let mut report = self.reclaim_through(conn, durable)?;
+        report.degraded_durability = tick.degraded_durability;
         report.sediment_deleted = self.delete_dead_sediment(conn)?;
         Ok(report)
     }
@@ -146,8 +155,10 @@ impl Catalog {
                 }
             }
         }
-        let ranges: Vec<(u64, u64)> = doomed.iter().map(|&(_, span)| span).collect();
+        let ranges = coalesce(doomed.iter().map(|&(_, span)| span).collect());
+        let before = self.allocated()?;
         let released = self.reclaim_ranges(&ranges)?;
+        let after = self.allocated()?;
         if !doomed.is_empty() {
             // the ranges are released and synced: their rows go (a failed sync kept them)
             self.commit(conn, Durability::Normal, |txn| {
@@ -163,11 +174,23 @@ impl Catalog {
             })?;
         }
         report.reclaimed = doomed.into_iter().map(|(id, _)| id).collect();
-        report.released_bytes = released.punched;
+        // only blocks a punch wholly freed count: a partial block is merely zeroed
+        report.released_bytes = before.saturating_sub(after);
         report.punched_range_bytes = released.punched;
         report.zero_filled_bytes = released.zero_filled;
         report.space_reclaim_unsupported = self.degraded_reclamation();
         Ok(report)
+    }
+
+    /// The container's allocated space in bytes (`st_blocks` of 512 bytes), 0 when it has
+    /// no container file.
+    fn allocated(&self) -> Result<u64> {
+        use std::os::unix::fs::MetadataExt;
+        match std::fs::metadata(&self.kbx) {
+            Ok(meta) => Ok(meta.blocks().saturating_mul(512)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(0),
+            Err(e) => Err(super::kbx::failed("measure", &self.kbx, e)),
+        }
     }
 
     /// Delete the sediment rows a compaction switch consumed, [`SEDIMENT_CHUNK`] rows per
@@ -193,4 +216,21 @@ impl Catalog {
             }
         }
     }
+}
+
+/// `ranges` (`(offset, len)`) sorted, with touching or overlapping ones merged, so blocks that
+/// several small dead extents fill wholly are punched as one range and freed.
+fn coalesce(mut ranges: Vec<(u64, u64)>) -> Vec<(u64, u64)> {
+    ranges.sort_unstable();
+    let mut out: Vec<(u64, u64)> = Vec::with_capacity(ranges.len());
+    for (offset, len) in ranges {
+        match out.last_mut() {
+            Some((start, n)) if offset <= start.saturating_add(*n) => {
+                let end = offset.saturating_add(len).max(start.saturating_add(*n));
+                *n = end - *start;
+            }
+            _ => out.push((offset, len)),
+        }
+    }
+    out
 }
