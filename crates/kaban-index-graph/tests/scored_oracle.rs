@@ -15,9 +15,13 @@ mod reference;
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use std::time::Duration;
+
+use kaban_core::query_budget::QueryBudget;
 use kaban_index_graph::{
-    Caps, GraphError, LocalId, RankParams, RelSelection, RowCap, adamic_adar, clustering, jaccard,
-    pagerank, ppr, time_window_expand, triangle_count, weighted_shortest_path,
+    Attr, Caps, EdgeOp, GraphError, LocalId, NodeOp, OpKind, RankParams, Records, RelId,
+    RelSelection, RowCap, adamic_adar, clustering, jaccard, pagerank, ppr, time_window_expand,
+    triangle_count, weighted_shortest_path,
 };
 use oracle::{Rng, budget};
 use reference::{Graph, IDS, Order, scored, selections};
@@ -261,60 +265,75 @@ fn caps_and_parameters_out_of_range_are_refused() {
     }
 }
 
-#[test]
-fn a_negative_weight_and_a_cut_weighted_search_are_refused() {
+/// A view over nodes `0..nodes` and `(src, dst, weight)` edges of relation 0, all in the base.
+fn weighted(nodes: u32, edges: &[(u32, u32, i64)]) -> reference::Fixture {
+    let base = Records {
+        nodes: (0..nodes)
+            .map(|n| NodeOp {
+                node: LocalId(n),
+                kind: OpKind::Add,
+            })
+            .collect(),
+        edges: edges
+            .iter()
+            .map(|&(src, dst, weight)| EdgeOp {
+                src: LocalId(src),
+                rel: RelId(0),
+                dst: LocalId(dst),
+                kind: OpKind::Add,
+                attr: Attr { weight, ts: 0 },
+            })
+            .collect(),
+        ..Records::default()
+    };
+    let empty = Records::default();
+    reference::Fixture::build(vec![base, empty.clone(), empty.clone(), empty])
+}
+
+fn cheapest(
+    f: &reference::Fixture,
+    src: u32,
+    dst: u32,
+    caps: Caps,
+) -> Result<Option<(i64, Vec<LocalId>)>, GraphError> {
     let order = Order::reversed(IDS);
-    let all = RelSelection::All;
-    let wide = Caps {
-        depth: 255,
-        rows: 1_500,
-    };
-    // A chain 0 -> 1 -> ... -> 9, weight 1 each, the last edge negative.
-    let mut base = kaban_index_graph::Records::default();
-    for i in 0..10u32 {
-        base.nodes.push(kaban_index_graph::NodeOp {
-            node: LocalId(i),
-            kind: kaban_index_graph::OpKind::Add,
-        });
-    }
-    for i in 0..9u32 {
-        base.edges.push(kaban_index_graph::EdgeOp {
-            src: LocalId(i),
-            rel: kaban_index_graph::RelId(0),
-            dst: LocalId(i + 1),
-            kind: kaban_index_graph::OpKind::Add,
-            attr: kaban_index_graph::Attr {
-                weight: if i == 8 { -1 } else { 1 },
-                ts: 0,
-            },
-        });
-    }
-    let empty = kaban_index_graph::Records::default();
-    let f = reference::Fixture::build(vec![base, empty.clone(), empty.clone(), empty]);
     let v = f.view();
-    let b = budget();
-    let path = |dst: u32, caps: Caps| {
-        weighted_shortest_path(&v, LocalId(0), LocalId(dst), &all, caps, &order, &b)
-            .map(|p| p.map(|c| c.into_parts().0))
-    };
-    assert_eq!(path(5, wide), Ok(Some((5, (0..=5).map(LocalId).collect()))));
+    weighted_shortest_path(&v, LocalId(src), LocalId(dst), &RelSelection::All, caps, &order, &budget())
+        .map(|p| p.map(|c| c.into_parts().0))
+}
+
+const WIDE: Caps = Caps {
+    depth: 255,
+    rows: 1_500,
+};
+
+#[test]
+fn a_negative_weight_anywhere_the_search_reaches_is_refused() {
+    // The destination settles at cost 1 before the edge a -> t of -10 is read; the cheapest
+    // path would cost -8, so the call must not answer 1.
+    let f = weighted(3, &[(0, 1, 1), (0, 2, 2), (2, 1, -10)]);
     assert_eq!(
-        path(9, wide),
+        cheapest(&f, 0, 1, WIDE),
         Err(GraphError::NegativeWeight {
-            src: LocalId(8),
-            rel: kaban_index_graph::RelId(0),
-            dst: LocalId(9),
+            src: LocalId(2),
+            rel: RelId(0),
+            dst: LocalId(1),
         })
+    );
+}
+
+#[test]
+fn rows_and_depth_caps_refuse_a_weighted_search_they_cut() {
+    // A chain 0 -> 1 -> ... -> 9, weight 1 each.
+    let chain: Vec<(u32, u32, i64)> = (0..9).map(|i| (i, i + 1, 1)).collect();
+    let f = weighted(10, &chain);
+    assert_eq!(
+        cheapest(&f, 0, 5, WIDE),
+        Ok(Some((5, (0..=5).map(LocalId).collect())))
     );
     // Settling 0..=3 is all four rows allow: node 5 lies past them and is not read as absent.
     assert_eq!(
-        path(
-            5,
-            Caps {
-                depth: 255,
-                rows: 4
-            }
-        ),
+        cheapest(&f, 0, 5, Caps { depth: 255, rows: 4 }),
         Err(GraphError::CapExceeded {
             limit: "rows",
             max: 4
@@ -322,16 +341,75 @@ fn a_negative_weight_and_a_cut_weighted_search_are_refused() {
     );
     // The cheapest path has five hops: a depth cap of four refuses rather than cut it.
     assert_eq!(
-        path(
-            5,
-            Caps {
-                depth: 4,
-                rows: 1_500
-            }
-        ),
+        cheapest(&f, 0, 5, Caps { depth: 4, rows: 1_500 }),
         Err(GraphError::CapExceeded {
             limit: "depth",
             max: 4
         })
+    );
+}
+
+#[test]
+fn the_depth_cap_bounds_the_weighted_search_itself() {
+    // A chain 0 -> 1 -> ... -> 49 and a present, unconnected destination 60. With depth 1 the
+    // search must stop after node 1: walking the chain would settle a third node and refuse
+    // the rows cap of 3 instead of the depth cap.
+    let chain: Vec<(u32, u32, i64)> = (0..49).map(|i| (i, i + 1, 1)).collect();
+    let f = weighted(61, &chain);
+    let short = Caps { depth: 1, rows: 3 };
+    assert_eq!(
+        cheapest(&f, 0, 60, short),
+        Err(GraphError::CapExceeded {
+            limit: "depth",
+            max: 1
+        })
+    );
+    // Nothing past the depth bound: the destination is unreachable.
+    let f = weighted(3, &[(0, 1, 1)]);
+    assert_eq!(cheapest(&f, 0, 2, short), Ok(None));
+    // A destination within depth, but a cheaper path past it: refused, not the dearer path.
+    let f = weighted(3, &[(0, 1, 10), (0, 2, 1), (2, 1, 1)]);
+    assert_eq!(
+        cheapest(&f, 0, 1, short),
+        Err(GraphError::CapExceeded {
+            limit: "depth",
+            max: 1
+        })
+    );
+    // An edge back into the explored set at no lower cost does not count as a cut.
+    let f = weighted(3, &[(0, 1, 1), (0, 2, 1), (2, 1, 5)]);
+    assert_eq!(
+        cheapest(&f, 0, 1, short),
+        Ok(Some((1, vec![LocalId(0), LocalId(1)])))
+    );
+}
+
+#[test]
+fn ranking_an_empty_view_still_sees_the_deadline() {
+    // No nodes, so every per-node loop is empty; the iteration loop itself must check the
+    // budget. Bounded: the call runs on its own thread and the test fails after 5 s.
+    let f: &'static reference::Fixture = Box::leak(Box::new(reference::Fixture::build(vec![
+        Records::default();
+        4
+    ])));
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let v = f.view();
+        let p = RankParams {
+            damping: 0.85,
+            iterations: u32::MAX,
+            tolerance: 0.0,
+        };
+        let budget = QueryBudget::new(u64::MAX, Some(Duration::from_millis(20)));
+        let got = pagerank(&v, &RelSelection::All, p, &Order::reversed(IDS), RowCap(5), &budget)
+            .map(|r| r.rows.len());
+        let _ = tx.send(got);
+    });
+    let got = rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("pagerank on an empty view returned within 5 s");
+    assert!(
+        matches!(got, Err(GraphError::BudgetExceeded { limit: "time", .. })),
+        "{got:?}"
     );
 }

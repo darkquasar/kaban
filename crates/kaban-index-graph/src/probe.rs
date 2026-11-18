@@ -246,13 +246,16 @@ mod cancellation {
     use super::watch;
     use crate::charge::{Grow, Phase};
     use crate::error::GraphError;
-    use crate::id::{Direction, LocalId, RelId, RelSelection};
+    use crate::id::{Direction, LocalId, RelId, RelSelection, StableOrder, TieRank};
     use crate::op::{Attr, EdgeOp, FactOp, NodeOp, OpKind, Records};
     use crate::paths::shortest_path;
+    use crate::rank::{RankParams, pagerank};
     use crate::sediment::{EMPTY, PreparedSediment};
     use crate::structure::{topo_order, wcc};
     use crate::traverse::{Caps, RowCap, expand};
+    use crate::triangles::{clustering, triangle_count};
     use crate::view::View;
+    use crate::weighted::weighted_shortest_path;
     use crate::{Base, Layer, build_base, seal};
 
     /// Records per fixture: every loop is many check intervals long.
@@ -310,6 +313,15 @@ mod cancellation {
             layers.push(Layer::open(OwnedBytes::new(bytes), &free).unwrap());
         }
         layers
+    }
+
+    /// Local-id order as the stable order.
+    struct ById;
+
+    impl StableOrder for ById {
+        fn rank(&self, n: LocalId) -> Result<TieRank, GraphError> {
+            Ok(TieRank(n.0))
+        }
     }
 
     fn drain<T>(it: impl Iterator<Item = Result<T, GraphError>>) -> Result<(), GraphError> {
@@ -537,8 +549,69 @@ mod cancellation {
         .unwrap();
         let forest = View::new(None, &[], &forest, &free).unwrap();
 
+        // Hub 0 with a self-loop and edges to 1..=N: clustering drops the hub from its N + 1
+        // neighbours before reading any other list.
+        let looped = PreparedSediment::prepare(
+            &[Records {
+                nodes: (0..=N).map(node).collect(),
+                edges: (0..=N).map(|m| edge(0, m, OpKind::Add)).collect(),
+                ..Records::default()
+            }],
+            &free,
+        )
+        .unwrap();
+        let looped = View::new(None, &[], &looped, &free).unwrap();
+        // N parallel edges 0 -> 1 (one per relation) and an unconnected 2: a weighted search
+        // pushes N entries for 1 and pops the N - 1 stale ones without reading a list.
+        let parallel = PreparedSediment::prepare(
+            &[Records {
+                nodes: (0..3).map(node).collect(),
+                edges: (0..N)
+                    .map(|r| EdgeOp {
+                        rel: RelId(u16::try_from(r).unwrap()),
+                        ..edge(0, 1, OpKind::Add)
+                    })
+                    .collect(),
+                ..Records::default()
+            }],
+            &free,
+        )
+        .unwrap();
+        let parallel = View::new(None, &[], &parallel, &free).unwrap();
+
         let first = At::Unit(1);
         let rows: Vec<(&str, Phase, At, Call<'_>)> = vec![
+            (
+                "listing the ranked rows",
+                Phase::Rank,
+                At::FromEnd(300),
+                Box::new(|b| {
+                    let p = RankParams::default();
+                    pagerank(&isolated, &all, p, &ById, RowCap(N), b).map(|_| ())
+                }),
+            ),
+            (
+                "dropping a node from its own neighbourhood",
+                Phase::Similarity,
+                first,
+                Box::new(|b| clustering(&looped, LocalId(0), &all, b).map(|_| ())),
+            ),
+            (
+                "counting triangles",
+                Phase::Triangles,
+                At::FromEnd(300),
+                Box::new(|b| triangle_count(&isolated, &all, RowCap(10 * N), b).map(|_| ())),
+            ),
+            (
+                "popping stale weighted entries",
+                Phase::Weighted,
+                At::FromEnd(300),
+                Box::new(|b| {
+                    let caps = Caps { depth: 3, rows: 10 };
+                    weighted_shortest_path(&parallel, LocalId(0), LocalId(2), &all, caps, &ById, b)
+                        .map(|_| ())
+                }),
+            ),
             (
                 "decoding",
                 Phase::Decode,
