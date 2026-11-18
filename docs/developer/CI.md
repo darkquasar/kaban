@@ -48,12 +48,13 @@ bash scripts/ci/ci.sh producer
 | --- | --- | --- |
 | `quality` | fmt, all three Clippy configurations, deny, store/dependency boundaries | Runtime suites and artifacts |
 | `helpers` | MCP catalog tests, build helper tests, Bash syntax under scripts/hooks | Rust tools and compilation |
-| `functional` | Workspace and Kaban no-default nextest; default library doctests | PDF variant, producer, artifacts and ignored/manual cases |
+| `functional` | Workspace and Kaban no-default nextest; kaban-vtab nextest on its own (its embedding-only tests); default library doctests | PDF variant, producer, artifacts and ignored/manual cases |
 | `pdf` | Full PDF-enabled ingest nextest suite and its library doctest | Default workspace, producer and artifacts |
 | `producer` | Locked fetch, fmt, locked workspace Clippy/tests, applicable doctests in tools/kaban-rust-scip | Root workspace and artifacts |
 | `gnu` | Default GNU release, MCP smoke, graph delta, optional size table | Functional tests, musl and producer |
 | `musl` | Native musl Kaban/index release and index size guard | GNU smoke, functional tests and producer |
 | `all` / `ci` | quality + helpers + functional + pdf + gnu + musl | Standalone producer and ignored/manual cases |
+| `vtab-memcheck` (CI job only; no ci.sh group or mise task) | kaban-vtab nextest under Valgrind memcheck, with default and with all features, following the fresh-process children (see docs/developer/SAFETY.md) | Not in the gates job, so it does not block readiness; every other crate, artifacts and macOS |
 
 Every group has a matching mise task (`mise run quality`, etc.; comprehensive is
 `mise run ci`). `core` is a local composition, not a dispatcher group. Unknown
