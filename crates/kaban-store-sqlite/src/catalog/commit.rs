@@ -344,7 +344,8 @@ impl Catalog {
     }
 
     /// [`Self::commit`], also returning how long it held the write transaction: from `BEGIN
-    /// IMMEDIATE` until `COMMIT` returned (the publish and switch holds KER-04 bounds).
+    /// IMMEDIATE` returning (the write lock taken; the wait for it is not counted) until
+    /// `COMMIT` returned (the publish and switch holds KER-04 bounds).
     ///
     /// # Errors
     /// As [`Self::commit`].
@@ -370,10 +371,11 @@ impl Catalog {
         conn: &mut Connection,
         stage: impl FnOnce(&mut Txn<'_>) -> Result<T>,
     ) -> Result<(T, Duration)> {
-        let began = Instant::now();
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .sql()?;
+        // the hold starts once BEGIN IMMEDIATE has the write lock: its wait is no hold
+        let began = Instant::now();
         let mut txn = Txn {
             tx,
             container: self.container,
