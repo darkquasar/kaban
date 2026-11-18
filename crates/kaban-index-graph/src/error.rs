@@ -2,7 +2,7 @@
 
 use kaban_core::query_budget::{BudgetExceeded, Limit};
 
-use crate::id::LocalId;
+use crate::id::{LocalId, RelId};
 
 /// Why a graph operation refused or failed.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -28,6 +28,23 @@ pub enum GraphError {
     NotPlanned {
         /// The refused function.
         function: &'static str,
+    },
+    /// A parameter is outside its documented range (a damping factor, a tolerance, an iteration
+    /// count or a time window).
+    #[error("invalid parameter: {name}")]
+    InvalidParam {
+        /// The refused parameter.
+        name: &'static str,
+    },
+    /// A weighted search met an edge with a negative weight; shortest costs need weights >= 0.
+    #[error("negative weight on edge {src:?} -{rel:?}-> {dst:?}")]
+    NegativeWeight {
+        /// The edge's source.
+        src: LocalId,
+        /// The edge's relation.
+        rel: RelId,
+        /// The edge's destination.
+        dst: LocalId,
     },
     /// A topological order was requested over a cycle.
     #[error("cycle through node {node:?}")]
