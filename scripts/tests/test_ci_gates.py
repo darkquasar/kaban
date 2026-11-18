@@ -531,6 +531,7 @@ class CiToolSelection(unittest.TestCase):
         self.assertEqual([c for c in calls if c[:2] == ["nextest", "run"]], [
             ["nextest", "run", "--workspace", "--no-fail-fast", "--success-output", "immediate"],
             ["nextest", "run", "-p", "kaban", "--no-default-features", "--success-output", "immediate"],
+            ["nextest", "run", "-p", "kaban-vtab", "--locked", "--success-output", "immediate"],
         ])
         self.assertIn(["test", "--doc", "--locked", "-p", "kaban-ingest", "-p", "fixture-core", "--", "--show-output"], calls)
         self.assertFalse(any("pdf" in c for c in calls))
