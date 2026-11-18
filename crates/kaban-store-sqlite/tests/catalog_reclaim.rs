@@ -139,10 +139,11 @@ fn a_persistent_reader_keeps_its_pinned_extent_and_lets_it_go_once_it_moves_on()
     // Assert: the next reclamation destroys it, its bytes counted once, punched or zero-filled
     assert_eq!(released.reclaimed, vec![doomed], "{released:?}");
     assert_eq!(
-        released.released_bytes + released.zero_filled_bytes,
+        released.punched_range_bytes + released.zero_filled_bytes,
         LEN as u64,
         "{released:?}"
     );
+    assert!(released.released_bytes <= LEN as u64, "{released:?}");
     if released.space_reclaim_unsupported {
         assert_eq!(released.released_bytes, 0, "{released:?}");
     }
@@ -323,4 +324,91 @@ fn checkpoints_complete_while_another_process_queries_continuously() {
         );
     }
     assert!(queries > 2, "the child stopped querying: {queries}");
+}
+
+#[test]
+fn without_a_full_sync_the_barrier_never_lets_reclamation_destroy() {
+    // Arrange: a file system whose full sync is refused, found at open; a retired extent
+    let s = Scratch::new("kaban-t6-reclaim", "no-full-sync");
+    let faults = catalog_testing::IoFaults::install(&s.0);
+    faults.no_full_sync();
+    let store = SqliteStore::open(&s.db(), &s.keys()).unwrap();
+    let doomed = catalog_testing::append_and_publish(&store, &pattern(51)).unwrap();
+    catalog_testing::retire(&store, &[doomed]).unwrap();
+
+    // Act
+    let r = catalog_testing::reclaim_retired(&store).unwrap();
+
+    // Assert: nothing is destroyed, and the report says why
+    assert!(r.degraded_durability, "{r:?}");
+    assert!(r.barrier_pending, "{r:?}");
+    assert_eq!(r.reclaimed, Vec::<u64>::new(), "{r:?}");
+    assert_eq!(r.pending, vec![doomed], "{r:?}");
+}
+
+#[test]
+fn a_small_extent_sharing_a_block_with_live_data_frees_no_allocated_space() {
+    // Arrange: two 100-byte extents in one block; one of them retired
+    let s = Scratch::new("kaban-t6-reclaim", "partial-block");
+    let store = SqliteStore::open(&s.db(), &s.keys()).unwrap();
+    let ids =
+        catalog_testing::append_and_publish_all(&store, &[vec![61_u8; 100], vec![63_u8; 100]])
+            .unwrap();
+    catalog_testing::retire(&store, &ids[1..]).unwrap();
+
+    // Act
+    let r = catalog_testing::reclaim_retired(&store).unwrap();
+
+    // Assert: the range was processed, but no allocated block was freed
+    assert_eq!(r.reclaimed, vec![ids[1]], "{r:?}");
+    assert_eq!(r.released_bytes, 0, "{r:?}");
+    assert_eq!(r.punched_range_bytes + r.zero_filled_bytes, 100, "{r:?}");
+}
+
+#[test]
+fn a_waiting_checkpoint_is_not_overtaken_by_a_stream_of_overlapping_readers() {
+    // Arrange: readers on their own stores, each re-entering a 5 ms snapshot at once, staggered
+    // so the gate and the admission lock are never free for long
+    let s = Scratch::new("kaban-t6-reclaim", "reader-stream");
+    let store = SqliteStore::open(&s.db(), &s.keys()).unwrap();
+    catalog_testing::append_and_publish(&store, &pattern(1)).unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let (done, finished) = mpsc::channel();
+    for i in 0..6_u64 {
+        let (db, keys, stop, done) = (s.db(), s.keys(), Arc::clone(&stop), done.clone());
+        std::thread::spawn(move || {
+            let reader = SqliteStore::open(&db, &keys).unwrap();
+            std::thread::sleep(Duration::from_millis(i));
+            let started = Instant::now();
+            let mut n = 0_u64;
+            while !stop.load(Ordering::Acquire) && started.elapsed() < ROLE_DEADLINE {
+                catalog_testing::with_snapshot(&reader, &budget(), |_| {
+                    std::thread::sleep(Duration::from_millis(5));
+                    Ok(())
+                })
+                .unwrap();
+                n += 1;
+            }
+            let _ = done.send(n);
+        });
+    }
+    std::thread::sleep(Duration::from_millis(50));
+
+    // Act: writes, each followed by a tick, while the readers keep coming
+    let ticks: Vec<catalog_testing::Checkpoint> = (0..10_u8)
+        .map(|i| {
+            catalog_testing::append_and_publish(&store, &pattern(i + 2)).unwrap();
+            catalog_testing::checkpoint_tick(&store).unwrap()
+        })
+        .collect();
+    stop.store(true, Ordering::Release);
+    let reads: Vec<u64> = (0..6)
+        .map(|_| finished.recv_timeout(STEP).expect("a reader did not stop"))
+        .collect();
+
+    // Assert: every tick drained the readers within its budget and backfilled the WAL
+    for (i, tick) in ticks.iter().enumerate() {
+        assert!(tick.drained && tick.backfilled, "tick {i}: {tick:?}");
+    }
+    assert!(reads.iter().all(|n| *n > 0), "{reads:?}");
 }

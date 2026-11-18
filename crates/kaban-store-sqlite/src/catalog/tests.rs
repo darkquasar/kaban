@@ -1304,6 +1304,73 @@ fn a_pin_on_a_connection_with_an_open_transaction_is_refused_by_name() {
     conn.execute_batch("ROLLBACK").unwrap();
 }
 
+#[test]
+fn a_snapshot_on_a_connection_with_a_live_cursor_is_refused_by_name() {
+    use super::pin::OuterTransaction;
+    use kaban_core::query_budget::QueryBudget;
+
+    // Arrange: a SELECT stepped once and not finished: autocommit, but its read transaction
+    // (an older snapshot) is still open
+    let store = SqliteStore::open_memory().unwrap();
+    sediment_rows(&store, 2);
+    let conn = store.lock();
+    let mut stmt = conn.prepare("SELECT seq FROM cat_sediment").unwrap();
+    let mut rows = stmt.query([]).unwrap();
+    assert!(rows.next().unwrap().is_some());
+    assert!(conn.is_autocommit());
+    let budget = QueryBudget::new(u64::MAX, None);
+
+    // Act
+    let out = store.catalog().with_snapshot(&conn, &budget, |_, _| Ok(()));
+
+    // Assert
+    let err = out.expect_err("a snapshot adopted a live cursor's transaction");
+    let StoreError::Backend { source } = &err else {
+        panic!("{err:?}");
+    };
+    assert!(
+        source.driver().downcast_ref::<OuterTransaction>().is_some(),
+        "{err:?}"
+    );
+}
+
+#[test]
+fn a_view_does_not_load_through_another_database_at_the_same_generation() {
+    use super::pin::OutsidePin;
+    use kaban_core::query_budget::QueryBudget;
+
+    // Arrange: two databases, each at generation 1
+    let (ours, theirs) = (
+        SqliteStore::open_memory().unwrap(),
+        SqliteStore::open_memory().unwrap(),
+    );
+    sediment_rows(&ours, 1);
+    sediment_rows(&theirs, 1);
+    let budget = QueryBudget::new(u64::MAX, None);
+    let other = theirs.lock();
+
+    // Act: inside our snapshot, load main through a read transaction on the other database
+    let out = ours
+        .catalog()
+        .with_snapshot(&ours.lock(), &budget, |_, pin| {
+            let tx = other.unchecked_transaction().unwrap();
+            let loaded = pin.load_view(&tx, &ViewName::Main).map(|_| ());
+            tx.finish().unwrap();
+            Ok(loaded)
+        })
+        .unwrap();
+
+    // Assert
+    let err = out.expect_err("a pin loaded another database's view");
+    let StoreError::Backend { source } = &err else {
+        panic!("{err:?}");
+    };
+    assert!(
+        source.driver().downcast_ref::<OutsidePin>().is_some(),
+        "{err:?}"
+    );
+}
+
 // One owner per published range (END-MAJ-01): an appended range is published at most once, only
 // by the catalog of the container it was appended to, and never over a range a catalog row
 // already names; retiring one extent never releases bytes another live extent owns.

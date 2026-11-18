@@ -109,7 +109,15 @@ fn a_publication_switches_the_chain_and_hides_what_it_consumed_from_later_pins_o
         .expect("the inputs were free");
     let seqs: Vec<u64> = sediment.iter().map(|(seq, _)| *seq).collect();
     let generation =
-        catalog_testing::publish(&store, claim, &[pattern(13, 200)], &ids[..2], &seqs).unwrap();
+        catalog_testing::publish(
+            &store,
+            claim,
+            &[pattern(13, 200)],
+            &[("main", &ids[..2])],
+            &ids[..2],
+            &seqs,
+        )
+        .unwrap();
     let later = catalog_testing::pin(&store, &budget()).unwrap();
 
     // Assert: the new extent takes the inputs' place in the chain, the consumed sediment is
@@ -153,7 +161,8 @@ fn consumed_sediment_rows_are_deleted_after_the_switch_by_reclamation() {
     let claim = catalog_testing::claim(&store, &[])
         .unwrap()
         .expect("a claim of no extents (a seal) was refused");
-    catalog_testing::publish(&store, claim, &[pattern(17, 50)], &[], &seqs).unwrap();
+    catalog_testing::publish(&store, claim, &[pattern(17, 50)], &[("main", &[])], &[], &seqs)
+        .unwrap();
 
     // Act
     let first = catalog_testing::reclaim_retired(&store).unwrap();
@@ -162,4 +171,112 @@ fn consumed_sediment_rows_are_deleted_after_the_switch_by_reclamation() {
     // Assert: the switch only marked the row; the reclamation deleted it, once
     assert_eq!(first.sediment_deleted, 1, "{first:?}");
     assert_eq!(second.sediment_deleted, 0, "{second:?}");
+}
+
+/// A code view's name (`code@<40 hex>`).
+fn code_view() -> String {
+    format!("code@{}", "7".repeat(40))
+}
+
+#[test]
+fn a_fold_in_one_view_leaves_another_view_over_the_same_base_as_it_was() {
+    // Arrange: `main` is [B, A] and a code view is [B, C]: they share the base B
+    let s = Scratch::new("kaban-t6-compact", "shared-base");
+    let store = SqliteStore::open(&s.db(), &s.keys()).unwrap();
+    let code = code_view();
+    let b = catalog_testing::append_and_publish_into(&store, &pattern(2, 64), &["main", &code])
+        .unwrap();
+    let a = catalog_testing::append_and_publish_into(&store, &pattern(4, 64), &["main"]).unwrap();
+    let c = catalog_testing::append_and_publish_into(&store, &pattern(6, 64), &[&code]).unwrap();
+    let claim = catalog_testing::claim(&store, &[b, a]).unwrap().unwrap();
+
+    // Act: fold main's [B, A] into F, first retiring B too (the code view still needs it)
+    let (refused, claim) = catalog_testing::publish(
+        &store,
+        claim,
+        &[pattern(8, 128)],
+        &[("main", &[b, a])],
+        &[b, a],
+        &[],
+    )
+    .expect_err("a base another view still holds was retired");
+    let unchanged = (
+        catalog_testing::chain(&store, "main").unwrap(),
+        catalog_testing::chain(&store, &code).unwrap(),
+    );
+    catalog_testing::publish(
+        &store,
+        claim,
+        &[pattern(8, 128)],
+        &[("main", &[b, a])],
+        &[a],
+        &[],
+    )
+    .unwrap();
+
+    // Assert: the refusal named the base and changed nothing; the fold changed main only
+    assert!(refused.to_string().contains(&format!("extent {b}")), "{refused}");
+    assert_eq!(unchanged, (vec![b, a], vec![b, c]));
+    let main = catalog_testing::chain(&store, "main").unwrap();
+    assert_eq!(main.len(), 1, "{main:?}");
+    assert!(![a, b, c].contains(&main[0]), "{main:?}");
+    assert_eq!(catalog_testing::chain(&store, &code).unwrap(), vec![b, c]);
+}
+
+#[test]
+fn a_replacement_of_layers_that_are_not_consecutive_is_refused() {
+    // Arrange: main is [L1, L2, L3]
+    let s = Scratch::new("kaban-t6-compact", "non-contiguous");
+    let store = SqliteStore::open(&s.db(), &s.keys()).unwrap();
+    let ids = catalog_testing::append_and_publish_all(
+        &store,
+        &[pattern(1, 32), pattern(2, 32), pattern(3, 32)],
+    )
+    .unwrap();
+    let claim = catalog_testing::claim(&store, &[ids[0], ids[2]])
+        .unwrap()
+        .unwrap();
+
+    // Act: fold L1 and L3 around the surviving L2
+    let outcome = catalog_testing::publish(
+        &store,
+        claim,
+        &[pattern(9, 64)],
+        &[("main", &[ids[0], ids[2]])],
+        &[ids[0], ids[2]],
+        &[],
+    );
+
+    // Assert: refused, and L3's updates never move before L2
+    let (refused, _claim) = outcome.expect_err("a non-consecutive run was replaced");
+    assert!(refused.to_string().contains("consecutive"), "{refused}");
+    assert_eq!(catalog_testing::chain(&store, "main").unwrap(), ids);
+}
+
+#[test]
+fn a_refused_publication_keeps_its_claim_for_release_and_its_inputs_can_be_claimed_again() {
+    // Arrange: a claim on A, and a publication that retires B, which it does not hold
+    let s = Scratch::new("kaban-t6-compact", "claim-release");
+    let store = SqliteStore::open(&s.db(), &s.keys()).unwrap();
+    let ids =
+        catalog_testing::append_and_publish_all(&store, &[pattern(5, 32), pattern(7, 32)])
+            .unwrap();
+    let claim = catalog_testing::claim(&store, &ids[..1]).unwrap().unwrap();
+    let (_refused, claim) = catalog_testing::publish(
+        &store,
+        claim,
+        &[pattern(9, 64)],
+        &[("main", &ids[..1])],
+        &ids,
+        &[],
+    )
+    .expect_err("an unclaimed extent was retired");
+
+    // Act
+    catalog_testing::release(&store, claim).unwrap();
+    let again = catalog_testing::claim(&store, &ids[..1]).unwrap();
+
+    // Assert: the refusal rolled the switch back, and the released inputs are free again
+    assert_eq!(catalog_testing::chain(&store, "main").unwrap(), ids);
+    assert_eq!(again.map(|c| c.inputs()), Some(vec![ids[0]]));
 }

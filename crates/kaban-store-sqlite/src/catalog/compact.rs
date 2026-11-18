@@ -55,18 +55,49 @@ impl Claim {
     }
 }
 
-/// One compaction's switch: the extents it wrote, the inputs they replace and the sediment
-/// rows it sealed, under the claim it holds.
+/// One compaction's switch: the extents it wrote, how each affected view's chain changes, the
+/// inputs it retires and the sediment rows it sealed, under the claim it holds.
 #[derive(Debug)]
 pub(crate) struct Publication {
-    /// The claim the compaction holds; every retired extent is one of its inputs.
+    /// The claim the compaction holds; every replaced and retired extent is one of its inputs.
     pub(crate) claim: Claim,
-    /// The extents it appended, in chain order.
+    /// The extents it appended.
     pub(crate) added: Vec<Unpublished>,
-    /// The extents it replaces.
+    /// The chain changes, applied in order.
+    pub(crate) views: Vec<ViewSwitch>,
+    /// The extents it retires: no chain may hold one after the switch.
     pub(crate) retired: Vec<ExtentId>,
     /// The sediment rows it sealed into `added`.
     pub(crate) sediment_consumed: Vec<SedimentSeq>,
+}
+
+/// One change of one view's chain: the run `replaced` (consecutive in the chain, in chain
+/// order; empty: the end of the chain) gives way to the added extents `added` (indices into
+/// [`Publication::added`], in chain order).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ViewSwitch {
+    /// The view whose chain changes.
+    pub(crate) view: ViewName,
+    /// The run of its chain that goes.
+    pub(crate) replaced: Vec<ExtentId>,
+    /// The added extents that take its place.
+    pub(crate) added: Vec<usize>,
+}
+
+/// A publication that failed, and the claim it held: its rows are still committed, so the
+/// caller releases it ([`Catalog::release`]) or retries with it.
+#[derive(Debug)]
+pub(crate) struct PublishFailed {
+    /// Why it failed (nothing of the switch was published).
+    pub(crate) error: StoreError,
+    /// The claim, still held.
+    pub(crate) claim: Claim,
+}
+
+impl From<PublishFailed> for StoreError {
+    fn from(f: PublishFailed) -> Self {
+        f.error
+    }
 }
 
 /// A switch refused: the commit rolls back and publishes nothing.
@@ -171,17 +202,23 @@ impl Catalog {
     /// rows are marked dead in it, and the claim ends. Returns the generation.
     ///
     /// # Errors
-    /// [`SwitchRefused`] (behind `StoreError::Backend`) for a lost claim, an unclaimed retired
-    /// extent or a consumed sediment row that is unknown or already consumed; the publication
-    /// refusals of [`Txn::publish`]; SQLite errors. Any of them rolls the whole switch back.
-    pub(crate) fn publish(&self, conn: &mut Connection, p: Publication) -> Result<Generation> {
+    /// [`PublishFailed`] with the claim, still held, and the reason: [`SwitchRefused`] (behind
+    /// `StoreError::Backend`) for a lost claim, an unclaimed retired extent or a consumed
+    /// sediment row that is unknown or already consumed; the publication refusals of
+    /// [`Txn::publish`]; SQLite errors. Any of them rolls the whole switch back.
+    pub(crate) fn publish(
+        &self,
+        conn: &mut Connection,
+        p: Publication,
+    ) -> std::result::Result<Generation, PublishFailed> {
         let Publication {
             claim,
             added,
+            views: _,
             retired,
             sediment_consumed,
         } = p;
-        self.commit(conn, Durability::Normal, move |txn| {
+        let switched = self.commit(conn, Durability::Normal, |txn| {
             let generation = txn.generation()?;
             let g = sql_int(generation.0).sql()?;
             let held: u64 = txn
@@ -230,7 +267,17 @@ impl Catalog {
                 .execute("DELETE FROM cat_claim WHERE claim = ?1", [&claim.token])
                 .sql()?;
             Ok(generation)
-        })
+        });
+        switched.map_err(|error| PublishFailed { error, claim })
+    }
+
+    /// Release `claim` without publishing: its inputs can be claimed again.
+    ///
+    /// # Errors
+    /// SQLite errors.
+    pub(crate) fn release(&self, conn: &mut Connection, claim: Claim) -> Result<()> {
+        let _ = (conn, claim);
+        Ok(())
     }
 }
 

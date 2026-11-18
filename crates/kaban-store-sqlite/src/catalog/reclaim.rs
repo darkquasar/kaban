@@ -45,14 +45,18 @@ pub(crate) struct ReclaimReport {
     /// The retired extents left for a later round (still pinned, behind the barrier, in a
     /// pin race, or cold), in id order.
     pub(crate) pending: Vec<ExtentId>,
-    /// Bytes whose blocks a punch freed: the allocated space released.
+    /// The allocated space of the container that the release freed, in bytes.
     pub(crate) released_bytes: u64,
+    /// The length of the ranges a punch processed (a partial block is only zeroed by it).
+    pub(crate) punched_range_bytes: u64,
     /// Bytes only overwritten with zeros: logically gone, no space reclaimed.
     pub(crate) zero_filled_bytes: u64,
     /// Its re-scan found a live pin below the floor: it destroyed nothing.
     pub(crate) pin_race_retry: bool,
     /// The WAL was not backfilled through a commit that retired an extent no pin reaches.
     pub(crate) barrier_pending: bool,
+    /// The platform's full sync is refused, so the barrier never holds (`degraded_durability`).
+    pub(crate) degraded_durability: bool,
     /// The catalog cannot deallocate container ranges (`space_reclaim_unsupported`).
     pub(crate) space_reclaim_unsupported: bool,
     /// Consumed sediment rows deleted.
@@ -160,6 +164,7 @@ impl Catalog {
         }
         report.reclaimed = doomed.into_iter().map(|(id, _)| id).collect();
         report.released_bytes = released.punched;
+        report.punched_range_bytes = released.punched;
         report.zero_filled_bytes = released.zero_filled;
         report.space_reclaim_unsupported = self.degraded_reclamation();
         Ok(report)

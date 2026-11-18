@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use kaban_core::query_budget::QueryBudget;
-use kaban_core::{Durability, Result, ViewName};
+use kaban_core::{Durability, Result, StoreError, ViewName};
 use rusqlite::Connection;
 use tantivy::directory::OwnedBytes;
 
@@ -24,7 +24,7 @@ use super::Catalog;
 use super::capture::{BatchChanges, CaptureOp};
 use super::class::{ExtentClass, ExtentLocation, IndexClass, SealOutput};
 use super::commit::Stage;
-use super::compact::{Claim, Publication};
+use super::compact::{Claim, Publication, ViewSwitch};
 use super::pin::{Pin, PinnedView};
 use super::tables::{ExtentId, ExtentRef, SedimentSeq};
 use crate::SqliteStore;
@@ -365,7 +365,7 @@ pub fn reclaim(store: &SqliteStore) -> Result<Reclaimed> {
         floor: r.floor,
         punched: r.reclaimed.into_iter().map(|id| id.0).collect(),
         pin_race_retry: r.pin_race_retry,
-        punched_bytes: r.released_bytes,
+        punched_bytes: r.punched_range_bytes,
         zero_filled_bytes: r.zero_filled_bytes,
     })
 }
@@ -396,36 +396,115 @@ pub fn claim(store: &SqliteStore, ids: &[u64]) -> Result<Option<TestClaim>> {
 }
 
 /// Publish a compaction of `store`'s catalog ([`Catalog::publish`]): `added` appended as
-/// test-class extents with one write, `retired` and the sediment rows `consumed` (by
-/// sequence) switched out under `claim`. Returns the generation it published.
+/// test-class extents with one write; in each of `switches` (view name, replaced run) the run
+/// gives way to every added extent; `retired` and the sediment rows `consumed` (by sequence)
+/// go under `claim`. Returns the generation it published, or the error with the claim, still
+/// held.
 ///
 /// # Errors
-/// The append's or the publication's errors.
+/// The append's or the publication's error, with the claim.
 pub fn publish(
     store: &SqliteStore,
     claim: TestClaim,
     added: &[Vec<u8>],
+    switches: &[(&str, &[u64])],
     retired: &[u64],
     consumed: &[u64],
-) -> Result<u64> {
-    let added = if added.is_empty() {
-        Vec::new()
+) -> std::result::Result<u64, (StoreError, TestClaim)> {
+    let appended = if added.is_empty() {
+        Ok(Vec::new())
     } else {
-        let whole = store
+        store
             .catalog()
-            .append_extent(ExtentClass::Test, &added.concat())?;
-        let Some(parts) = whole.split(added) else {
-            unreachable!("the parts sum to the appended range")
-        };
-        parts
+            .append_extent(ExtentClass::Test, &added.concat())
+            .map(|whole| whole.split(added).unwrap_or_default())
     };
+    let added_parts = match appended {
+        Ok(parts) => parts,
+        Err(e) => return Err((e, claim)),
+    };
+    let mut views = Vec::with_capacity(switches.len());
+    for (view, replaced) in switches {
+        let view = match view.parse::<ViewName>() {
+            Ok(view) => view,
+            Err(e) => {
+                let e = StoreError::Backend {
+                    source: kaban_core::BackendSource::new(e),
+                };
+                return Err((e, claim));
+            }
+        };
+        views.push(ViewSwitch {
+            view,
+            replaced: replaced.iter().copied().map(ExtentId).collect(),
+            added: (0..added_parts.len()).collect(),
+        });
+    }
     let p = Publication {
         claim: claim.0,
-        added,
+        added: added_parts,
+        views,
         retired: retired.iter().copied().map(ExtentId).collect(),
         sediment_consumed: consumed.iter().copied().map(SedimentSeq).collect(),
     };
-    Ok(store.catalog().publish(&mut store.lock(), p)?.0)
+    store
+        .catalog()
+        .publish(&mut store.lock(), p)
+        .map(|g| g.0)
+        .map_err(|f| (f.error, TestClaim(f.claim)))
+}
+
+/// Release `claim` without publishing ([`Catalog::release`]).
+///
+/// # Errors
+/// The release's errors.
+pub fn release(store: &SqliteStore, claim: TestClaim) -> Result<()> {
+    store.catalog().release(&mut store.lock(), claim.0)
+}
+
+/// Append `bytes` as an extent of the test class and publish it into each of `views` (by
+/// name) in one commit; returns its extent id.
+///
+/// # Errors
+/// A view name that does not parse; the append's or the commit's errors.
+pub fn append_and_publish_into(store: &SqliteStore, bytes: &[u8], views: &[&str]) -> Result<u64> {
+    let views = views
+        .iter()
+        .map(|v| v.parse::<ViewName>())
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|e| StoreError::Backend {
+            source: kaban_core::BackendSource::new(e),
+        })?;
+    let extent = store.catalog().append_extent(ExtentClass::Test, bytes)?;
+    let id = store
+        .catalog()
+        .commit(&mut store.lock(), Durability::Normal, |txn| {
+            txn.publish(extent, &views)
+        })?;
+    Ok(id.0)
+}
+
+/// The test-class extent ids in the chain of the view `view` (by name) at the latest
+/// generation, in chain order.
+///
+/// # Errors
+/// A view name that does not parse; the pin's errors.
+pub fn chain(store: &SqliteStore, view: &str) -> Result<Vec<u64>> {
+    let view = view.parse::<ViewName>().map_err(|e| StoreError::Backend {
+        source: kaban_core::BackendSource::new(e),
+    })?;
+    let budget = QueryBudget::new(u64::MAX, None);
+    let conn = store.lock();
+    let pin = store
+        .catalog()
+        .pin(&conn, &budget, std::slice::from_ref(&view))?;
+    Ok(pin
+        .load_view(&conn, &view)?
+        .chain()
+        .iter()
+        .filter(|e| e.class == ExtentClass::Test)
+        .map(|e| e.id.0)
+        .collect())
 }
 
 /// Pin `store`'s catalog and return the test class's pending sediment rows of `main` as
@@ -460,14 +539,18 @@ pub struct ReclaimOutcome {
     pub reclaimed: Vec<u64>,
     /// The retired extents it left for a later round, in id order.
     pub pending: Vec<u64>,
-    /// The released bytes whose blocks a punch freed (reclaimed space).
+    /// The container's allocated space the release freed, in bytes (reclaimed space).
     pub released_bytes: u64,
+    /// The length of the ranges a punch processed (a partial block is only zeroed).
+    pub punched_range_bytes: u64,
     /// The released bytes only overwritten with zeros (no space reclaimed).
     pub zero_filled_bytes: u64,
     /// Its re-scan found a live pin below the floor: it destroyed nothing.
     pub pin_race_retry: bool,
     /// The WAL was not backfilled through a retiring commit: those extents stay.
     pub barrier_pending: bool,
+    /// The platform's full sync is refused: the barrier never holds.
+    pub degraded_durability: bool,
     /// The platform cannot deallocate container ranges (zero-fill only).
     pub space_reclaim_unsupported: bool,
     /// Consumed sediment rows it deleted.
@@ -488,9 +571,11 @@ pub fn reclaim_retired(store: &SqliteStore) -> Result<ReclaimOutcome> {
         reclaimed: ids(r.reclaimed),
         pending: ids(r.pending),
         released_bytes: r.released_bytes,
+        punched_range_bytes: r.punched_range_bytes,
         zero_filled_bytes: r.zero_filled_bytes,
         pin_race_retry: r.pin_race_retry,
         barrier_pending: r.barrier_pending,
+        degraded_durability: r.degraded_durability,
         space_reclaim_unsupported: r.space_reclaim_unsupported,
         sediment_deleted: r.sediment_deleted,
     })
@@ -555,6 +640,11 @@ impl IoFaults {
     /// Make every later hole-punch probe find no hole punching.
     pub fn no_punch(&self) {
         io::faults::no_punch(&self.0);
+    }
+    /// Make every later full-sync probe find the platform's full sync refused (the macOS
+    /// `F_FULLFSYNC` a file system may not honour): set before the store opens.
+    pub fn no_full_sync(&self) {
+        io::faults::no_full_sync(&self.0);
     }
     /// Make every later release of a reclaimed range find its punch refused, as a file
     /// system that stops punching after the open's probe found it punching.

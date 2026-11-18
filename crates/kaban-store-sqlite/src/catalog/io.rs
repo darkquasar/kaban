@@ -252,6 +252,7 @@ pub(crate) mod faults {
         skipping: bool,
         no_punch: bool,
         no_release_punch: bool,
+        no_full_sync: bool,
         calls: HashMap<&'static str, u64>,
     }
 
@@ -302,6 +303,7 @@ pub(crate) mod faults {
             skipping: false,
             no_punch: false,
             no_release_punch: false,
+            no_full_sync: false,
             calls: HashMap::new(),
         });
     }
@@ -331,6 +333,10 @@ pub(crate) mod faults {
     /// Make every later release under `dir` find its punch refused.
     pub(crate) fn no_release_punch(dir: &Path) {
         with(dir, |faults| faults.no_release_punch = true);
+    }
+    /// Make the full-sync probe under `dir` find the full sync refused.
+    pub(crate) fn no_full_sync(dir: &Path) {
+        with(dir, |faults| faults.no_full_sync = true);
     }
     /// How many syncs of `op` under `dir` were attempted.
     pub(crate) fn sync_calls(dir: &Path, op: &str) -> u64 {
