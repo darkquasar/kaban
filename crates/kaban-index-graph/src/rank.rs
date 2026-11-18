@@ -196,6 +196,8 @@ fn rank(
     let links =
         |i: usize| start.get(i).copied().unwrap_or(0)..start.get(i + 1).copied().unwrap_or(0);
     for _ in 0..p.iterations {
+        // One unit per iteration, so an empty view still sees the budget.
+        tick.tick(Phase::Rank)?;
         let mut dangling = 0.0;
         for (i, &s) in score.iter().enumerate() {
             tick.tick(Phase::Rank)?;
