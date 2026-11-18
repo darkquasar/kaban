@@ -2984,7 +2984,7 @@
   ],
   "inputs": {
     ".cargo/config.toml": "f2e2fc8a56c1cf62697357291c53fe0321748664ac3abf68cce3f5c6970f06e5",
-    "Cargo.lock": "fc8e942268942293493a7cd2701fcfd77be54537735168262074f635a9263bc4",
+    "Cargo.lock": "e902af1d46f6daa035484dfcabb9b12f0f78b6d6d24860c3b09cfe56fc0985b1",
     "Cargo.toml": "f6d1e684a2b5fe5f6148410c353d6fc84c1914f686bc2a88ebe6a821c07b41df",
     "crates/kaban-api/Cargo.toml": "1de884ce53783382b4ed50b3fab1a4623602252ece62c851c20929ba916591b8",
     "crates/kaban-codegraph/Cargo.toml": "6c8d67acaf1146426d68cee04ae060d3f9caa26700115797b47b90adad770a99",
@@ -2995,7 +2995,7 @@
     "crates/kaban-ingest/Cargo.toml": "e78d235170a59d4abbed306de52b66a475f67d08df32dff48fd0d5703d82726a",
     "crates/kaban-policy/Cargo.toml": "9785c2500a62b391594002610c5485385de7496e34ce1be3c42bcfec43ed1949",
     "crates/kaban-store-sqlite/Cargo.toml": "6717d94c81e4c188bbd8c281c33695387dfaa7f1ea9298b2f45ff90be0ed2a60",
-    "crates/kaban-vtab/Cargo.toml": "cf50fd12be7d2f275a13169f49f8144b410d2da095c3e109917f82c851c25fed",
+    "crates/kaban-vtab/Cargo.toml": "a8b2d547df5ccf0236160be2114fb509026b97b4777f74328eee30ab00d66683",
     "crates/kaban/Cargo.toml": "86b7d88cde21da673444e45bef19f5c813acd1c22a9f27a93e4aa664c9f92cc9",
     "licenses/release/upstream/alloc-stdlib-0.3.0-LICENSE": "c0c56f26d9c051cac4d200c34c84e7ae9aaa853e01a982a1df08b09931e518ae",
     "licenses/release/upstream/brotli-9.0.0-LICENSE.MIT": "3d180008e36922a4e8daec11c34c7af264fed5962d07924aea928c38e8663c94",
