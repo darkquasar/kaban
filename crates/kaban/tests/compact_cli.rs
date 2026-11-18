@@ -9,19 +9,54 @@ mod common;
 
 use common::Scratch;
 use serde_json::Value;
-use std::process::{Command, Output, Stdio};
+use std::process::{Child, Command, ExitStatus, Output, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
-/// Run the binary on the scratch database with `args` (stdin closed).
+/// The wall-clock bound of every child: past it the child is killed and the test fails.
+const CHILD_BOUND: Duration = Duration::from_secs(30);
+
+/// Wait for `child` within [`CHILD_BOUND`]; past it, kill it and fail.
+fn wait_bounded(mut child: Child) -> ExitStatus {
+    let deadline = Instant::now() + CHILD_BOUND;
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            return status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("the child ran past {CHILD_BOUND:?} and was killed");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Names each run's output files apart.
+static RUNS: AtomicU64 = AtomicU64::new(0);
+
+/// Run the binary on the scratch database with `args` (stdin closed), within [`CHILD_BOUND`].
+/// Its output goes to files, so a full pipe never stalls it.
 fn kaban(s: &Scratch, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_kaban"))
+    let n = RUNS.fetch_add(1, Ordering::Relaxed);
+    let (out, err) = (s.0.join(format!("run{n}.out")), s.0.join(format!("run{n}.err")));
+    let child = Command::new(env!("CARGO_BIN_EXE_kaban"))
         .current_dir(&s.0)
         .env("KABAN_HOME", s.home())
         .env_remove("KABAN_DB")
         .args(["--json", "--db", s.db().to_str().unwrap()])
         .args(args)
         .stdin(Stdio::null())
-        .output()
-        .unwrap()
+        .stdout(std::fs::File::create(&out).unwrap())
+        .stderr(std::fs::File::create(&err).unwrap())
+        .spawn()
+        .unwrap();
+    let status = wait_bounded(child);
+    Output {
+        status,
+        stdout: std::fs::read(&out).unwrap(),
+        stderr: std::fs::read(&err).unwrap(),
+    }
 }
 
 /// The one JSON document a successful run printed.
@@ -139,7 +174,7 @@ fn a_write_over_a_10000_row_sediment_acknowledges_before_its_post_ack_checkpoint
     let file = std::fs::File::create(&log).unwrap();
 
     // Act: stdout and stderr into one file, in write order
-    let status = Command::new(env!("CARGO_BIN_EXE_kaban"))
+    let child = Command::new(env!("CARGO_BIN_EXE_kaban"))
         .current_dir(&s.0)
         .env("KABAN_HOME", s.home())
         .env("RUST_LOG", "kaban=debug")
@@ -148,8 +183,9 @@ fn a_write_over_a_10000_row_sediment_acknowledges_before_its_post_ack_checkpoint
         .stdin(Stdio::null())
         .stdout(file.try_clone().unwrap())
         .stderr(file)
-        .status()
+        .spawn()
         .unwrap();
+    let status = wait_bounded(child);
 
     // Assert: the receipt came first, then the checkpoint; the write compacted nothing
     let text = std::fs::read_to_string(&log).unwrap();
