@@ -396,6 +396,9 @@ pub struct CatalogCfg {
     pub maintenance_memory_mib: u64,
     /// Deadline of one maintenance unit of work, in ms.
     pub maintenance_deadline_ms: u64,
+    /// Live views besides `main` that compaction keeps, newest by last use (amendment 3.2):
+    /// the older ones are marked `needs_reimport` and their extents retire.
+    pub view_retention: u32,
 }
 
 impl Default for CatalogCfg {
@@ -410,6 +413,8 @@ impl Default for CatalogCfg {
             maintenance_memory_mib: 1_024,
             // 7.6 (2026-11-18): fold of 5M edges, VmHWM 1,605,864 KiB, ran 9.9 s (debug build)
             maintenance_deadline_ms: 30_000,
+            // amendment 3.2: the retention count of views besides `main`
+            view_retention: 200,
         }
     }
 }
@@ -454,7 +459,7 @@ fn physical_memory_mib() -> Option<u64> {
 
 impl CatalogCfg {
     /// Refuse a value out of range, naming its key (spec 11 7.6: never clamped): a count,
-    /// depth or interval of 0, a ratio that is not a positive number, a memory ceiling below
+    /// depth, interval or view retention of 0, a ratio that is not a positive number, a memory ceiling below
     /// the smallest unit of work or above physical memory, a deadline below the smallest unit
     /// of work.
     ///
@@ -484,6 +489,7 @@ impl CatalogCfg {
                 "catalog.maintenance_deadline_ms",
                 self.maintenance_deadline_ms < MIN_MAINTENANCE_DEADLINE_MS,
             ),
+            ("catalog.view_retention", self.view_retention == 0),
         ];
         match refused.into_iter().find(|(_, out_of_range)| *out_of_range) {
             Some((path, _)) => Err(ConfigError::Range { path: path.into() }),
@@ -802,6 +808,7 @@ mod catalog_tests {
                 "maintenance_deadline_ms: 99",
                 "catalog.maintenance_deadline_ms",
             ),
+            ("view_retention: 0", "catalog.view_retention"),
         ];
         if physical_memory_mib().is_some() {
             // above any machine's physical memory
