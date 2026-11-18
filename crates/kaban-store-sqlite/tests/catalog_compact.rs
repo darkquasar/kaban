@@ -513,6 +513,8 @@ fn a_smallest_unit_refused_is_reported_and_its_inputs_stay_claimable() {
     assert_eq!(report.published, Vec::new());
     assert_eq!(chain_bytes(&store), parts);
     assert!(catalog_testing::claim(&store, &ids).unwrap().is_some());
+    // the one unit refused at its smallest size is recorded for doctor (7.6)
+    assert_eq!(store.catalog_status().unwrap().refused_units, 1);
 }
 
 #[test]

@@ -90,6 +90,18 @@ pub struct CatalogVerify {
     pub indexes: Vec<CatalogIndexStatus>,
     /// One line per inconsistency (0 lines: the catalog is consistent).
     pub inconsistencies: Vec<String>,
+    /// Views in `needs_reimport` (retired by retention or refused): a state doctor fails on.
+    pub needs_reimport: Vec<String>,
+}
+
+/// The catalog's cheap summary (`stats`, doctor's `catalog_budget` row): one SQL summary, no
+/// container scan and no hashing.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CatalogStatus {
+    /// Text, graph and code, in that order.
+    pub indexes: Vec<CatalogIndexStatus>,
+    /// Units the last compaction refused at their smallest size (7.6).
+    pub refused_units: u64,
 }
 
 /// Which derived indexes `reindex` rebuilds (PC-7).

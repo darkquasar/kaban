@@ -39,7 +39,7 @@ pub struct DoctorCheck {
     /// `text_index_watermark`, the payload watermark, and `text_index_lag`, the canonical
     /// head minus it), `ident_terms_version`, one `producer_<producer>` row per producer
     /// (PC-16), `stale_anchors` (E3.11: `CodeRef`s whose symbol the current snapshot lacks),
-    /// `catalog_verify` (spec 11 T6, when a catalog is wired), `vacuum`, `optimize` and
+    /// `catalog_verify` and `catalog_budget` (spec 11 T6, when a catalog is wired), `vacuum`, `optimize` and
     /// `catalog_recover` when asked.
     pub name: String,
     /// Whether the check passed.
@@ -167,14 +167,54 @@ impl KabanApi {
         );
         report.push_outcome("integrity", self.store.integrity_check());
         report.push_outcome("fts_integrity", self.store.fts_integrity_check());
-        // spec 11 T6: the catalog's structural verification, every inconsistency named
+        // spec 11 T6: the catalog's structural verification, every inconsistency and every
+        // view that needs a reimport named; then its effective budget (7.6)
         if let Some(catalog) = &self.catalog {
             match catalog.verify() {
-                Ok(found) if found.inconsistencies.is_empty() => {
+                Ok(found) if found.inconsistencies.is_empty() && found.needs_reimport.is_empty() => {
                     report.push("catalog_verify", true, "ok");
                 }
-                Ok(found) => report.push("catalog_verify", false, found.inconsistencies.join("; ")),
+                Ok(found) => {
+                    let mut lines = found.inconsistencies;
+                    if !found.needs_reimport.is_empty() {
+                        lines.push(format!(
+                            "views need reimport: {}",
+                            found.needs_reimport.join(", ")
+                        ));
+                    }
+                    report.push("catalog_verify", false, lines.join("; "));
+                }
                 Err(e) => report.push("catalog_verify", false, format!("not checked: {e}")),
+            }
+            let c = &self.engine().catalog;
+            let values = format!(
+                "maintenance_memory_mib {}, maintenance_deadline_ms {}, seal_ops text {} graph {} \
+                 code {}, fold_depth {}, fold_delta_ratio {}, checkpoint_interval_ms {}, \
+                 view_retention {}",
+                c.maintenance_memory_mib,
+                c.maintenance_deadline_ms,
+                c.seal_ops.text,
+                c.seal_ops.graph,
+                c.seal_ops.code,
+                c.fold_depth,
+                c.fold_delta_ratio,
+                c.checkpoint_interval_ms,
+                c.view_retention
+            );
+            match catalog.status() {
+                Ok(status) if status.refused_units == 0 => {
+                    report.push("catalog_budget", true, values);
+                }
+                Ok(status) => report.push(
+                    "catalog_budget",
+                    false,
+                    format!(
+                        "{} units refused at the smallest size: raise \
+                         catalog.maintenance_memory_mib or the deadline ({values})",
+                        status.refused_units
+                    ),
+                ),
+                Err(e) => report.push("catalog_budget", false, format!("not checked: {e}")),
             }
         }
         match self

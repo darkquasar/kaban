@@ -242,8 +242,9 @@ fn a_healthy_database_passes_and_a_corrupted_fts_shadow_table_fails_deterministi
             "db_modes",
             "integrity",
             "fts_integrity",
-            // spec 11 T6: the catalog's structural verification
+            // spec 11 T6: the catalog's structural verification and its effective budget
             "catalog_verify",
+            "catalog_budget",
             "claim_exhausted",
             "stale_artifacts",
             "schema_version",
@@ -371,8 +372,8 @@ fn fts_integrity_passes_with_archived_and_tombstoned_rows_and_vacuum_is_its_own_
     // the checks without the governance, audit and lag rows (REC-08): the stale-artifact
     // check (`retired_producers` went with layer retirement, OD-P1), the E3.11 `stale_anchors` line, the spec 05 SS-21 `text_index`, `text_index_watermark`
     // and `text_index_lag` lines, one line per producer (seven, PC-16), the spec 11 T6
-    // `catalog_verify` line and the vacuum line
-    assert_eq!(v["checks"].as_array().unwrap().len(), 20);
+    // `catalog_verify` and `catalog_budget` lines and the vacuum line
+    assert_eq!(v["checks"].as_array().unwrap().len(), 21);
     // without the flag there is no vacuum line
     let v = report(&doctor(&s, &s.db(), &[]));
     assert!(

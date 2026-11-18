@@ -493,6 +493,9 @@ pub struct CompactReport {
     pub checkpoint: Option<CheckpointReport>,
     /// The views the retention step marked `needs_reimport` (amendment 3.2), in name order.
     pub views_retired: Vec<String>,
+    /// Units refused by their budget at their smallest size (a skipped pass counts one):
+    /// recorded in `cat_meta` `last_refused_units` for doctor (7.6).
+    pub refused_units: u64,
 }
 
 /// What one purge did ([`Catalog::purge`]).
@@ -559,10 +562,14 @@ impl Catalog {
                     }
                 }
                 // the inputs did not load within the budget: the whole pass is a skip
-                Err(e) => report.pass_skipped = Some(budget_refusal(&e).ok_or(e)?),
+                Err(e) => {
+                    report.pass_skipped = Some(budget_refusal(&e).ok_or(e)?);
+                    report.refused_units += 1;
+                }
             }
             // no view is git-live yet: T16 supplies the protected views
             report.views_retired = self.retain_views(conn, self.config().view_retention, &[])?;
+            self.record_refused(conn, report.refused_units)?;
         }
         report.reclaim = self.reclaim(conn)?;
         report.vacuumed_pages = self.vacuum(conn)?;
@@ -700,6 +707,7 @@ impl Catalog {
                     }))
             })?;
             let retry = outcome.is_budget() && n > 1;
+            report.refused_units += u64::from(outcome.is_budget() && !retry);
             outcome.record(&unit, &mut report.published, &mut report.skipped);
             if !retry {
                 return Ok(());
@@ -782,6 +790,7 @@ impl Catalog {
                     }))
             })?;
             let retry = outcome.is_budget() && k > 2;
+            report.refused_units += u64::from(outcome.is_budget() && !retry);
             outcome.record(&unit, &mut report.published, &mut report.skipped);
             if !retry {
                 return Ok(());
@@ -884,6 +893,20 @@ impl Catalog {
             .map(|v| pin.load_view(conn, v))
             .collect::<Result<Vec<_>>>()?;
         Ok(Pinned { pin, views: loaded })
+    }
+
+    /// Record `units` as the refused units of the last pass (`cat_meta` `last_refused_units`).
+    fn record_refused(&self, conn: &mut Connection, units: u64) -> Result<()> {
+        self.commit(conn, Durability::Normal, |txn| {
+            txn.conn()
+                .execute(
+                    "INSERT INTO cat_meta(key, value) VALUES ('last_refused_units', ?1)
+                     ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    [sql_int(units).sql()?],
+                )
+                .sql()
+                .map(|_| ())
+        })
     }
 
     /// Release up to [`VACUUM_PAGES`] of SQLite's free pages (`auto_vacuum = INCREMENTAL`) in

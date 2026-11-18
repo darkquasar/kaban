@@ -6,7 +6,7 @@
 
 use crate::cli::{output::Format, seam};
 use kaban_api::{
-    CatalogIndexStatus, CatalogMaintenance, CatalogVerify, CompactReport, CompactUnit, IndexName,
+    CatalogIndexStatus, CatalogMaintenance, CatalogStatus, CatalogVerify, CompactReport, CompactUnit, IndexName,
     KabanApi,
 };
 use kaban_core::StoreError;
@@ -93,21 +93,6 @@ impl CatalogMaintenance for StoreCatalog {
 
     fn verify(&self) -> Result<CatalogVerify, StoreError> {
         let r = self.0.verify_catalog()?;
-        let class = |name: &str| r.classes.iter().find(|c| c.class == name);
-        let index = |index: IndexName, base: &str, layer: &str| {
-            let (base, layer) = (class(base), class(layer));
-            let sediment = |c: Option<&ClassExtents>| c.map_or(0, |c| c.sediment_rows);
-            let newest = |c: Option<&ClassExtents>| c.and_then(|c| c.newest_generation);
-            CatalogIndexStatus {
-                index,
-                sediment_rows: sediment(base) + sediment(layer),
-                layers: layer.map_or(0, |c| u32::try_from(c.live).unwrap_or(u32::MAX)),
-                base_generation: newest(base),
-                last_compaction: newest(base)
-                    .max(newest(layer))
-                    .map(|g| i64::try_from(g).unwrap_or(i64::MAX)),
-            }
-        };
         let mut inconsistencies = Vec::new();
         if !r.maintenance_live {
             for (offset, len) in &r.unreferenced_ranges {
@@ -125,19 +110,48 @@ impl CatalogMaintenance for StoreCatalog {
             inconsistencies.push(format!("extent {extent}: content hash mismatch"));
         }
         Ok(CatalogVerify {
-            indexes: vec![
-                // text has tiers and no base
-                index(IndexName::Text, "", "text_tier"),
-                index(IndexName::Graph, "graph_base", "graph_layer"),
-                index(IndexName::Code, "code_base", "code_layer"),
-            ],
+            indexes: indexes(&r.classes),
             inconsistencies,
+            needs_reimport: r.needs_reimport,
+        })
+    }
+
+    fn status(&self) -> Result<CatalogStatus, StoreError> {
+        let s = self.0.catalog_status()?;
+        Ok(CatalogStatus {
+            indexes: indexes(&s.classes),
+            refused_units: s.refused_units,
         })
     }
 
     fn checkpoint_if_due(&self) -> Result<bool, StoreError> {
         Ok(self.0.checkpoint_if_due()?.is_some())
     }
+}
+
+/// The text, graph and code index states from the catalog's per-class counts.
+fn indexes(classes: &[ClassExtents]) -> Vec<CatalogIndexStatus> {
+    let class = |name: &str| classes.iter().find(|c| c.class == name);
+    let index = |index: IndexName, base: &str, layer: &str| {
+        let (base, layer) = (class(base), class(layer));
+        let sediment = |c: Option<&ClassExtents>| c.map_or(0, |c| c.sediment_rows);
+        let newest = |c: Option<&ClassExtents>| c.and_then(|c| c.newest_generation);
+        CatalogIndexStatus {
+            index,
+            sediment_rows: sediment(base) + sediment(layer),
+            layers: layer.map_or(0, |c| u32::try_from(c.live).unwrap_or(u32::MAX)),
+            base_generation: newest(base),
+            last_compaction: newest(base)
+                .max(newest(layer))
+                .map(|g| i64::try_from(g).unwrap_or(i64::MAX)),
+        }
+    };
+    vec![
+        // text has tiers and no base
+        index(IndexName::Text, "", "text_tier"),
+        index(IndexName::Graph, "graph_base", "graph_layer"),
+        index(IndexName::Code, "code_base", "code_layer"),
+    ]
 }
 
 /// Run one compaction through the seam and print its report.

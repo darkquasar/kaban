@@ -67,6 +67,19 @@ pub struct ClassExtents {
     pub newest_generation: Option<u64>,
 }
 
+/// The catalog's cheap summary ([`Catalog::status`]): one read of its rows, no container scan
+/// and no hashing.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CatalogStatus {
+    /// Every class with an extent or a pending sediment row, in name order.
+    pub classes: Vec<ClassExtents>,
+    /// Views in `needs_reimport`, in name order.
+    pub needs_reimport: Vec<String>,
+    /// Units the last compaction refused at their smallest size (`cat_meta`
+    /// `last_refused_units`; 7.6).
+    pub refused_units: u64,
+}
+
 /// What one verification found ([`Catalog::verify`]). It names its checks: they are
 /// structural and byte-level (rows, chains, ranges, hashes), not the semantic integrity of an
 /// index's contents (7.8).
@@ -169,34 +182,10 @@ impl Catalog {
         };
         let maintenance_live = matches!(probe, Some(None));
         let (mut report, extents) = self.read(conn, |tx| {
+            let summary = summary(tx)?;
             let mut report = VerifyReport {
-                classes: query(
-                    tx,
-                    "SELECT class, sum(live), sum(dead), sum(sediment), max(newest) FROM (
-                       SELECT class, dead_since IS NULL AS live, dead_since IS NOT NULL AS dead,
-                              0 AS sediment,
-                              CASE WHEN dead_since IS NULL THEN generation END AS newest
-                       FROM cat_extent
-                       UNION ALL
-                       SELECT class, 0, 0, 1, NULL FROM cat_sediment WHERE dead IS NULL
-                     ) GROUP BY class ORDER BY class",
-                    |r| {
-                        Ok(ClassExtents {
-                            class: r.get(0)?,
-                            live: uint(r, 1)?,
-                            dead: uint(r, 2)?,
-                            sediment_rows: uint(r, 3)?,
-                            newest_generation: r
-                                .get::<_, Option<i64>>(4)?
-                                .map(|g| u64::try_from(g).unwrap_or(0)),
-                        })
-                    },
-                )?,
-                needs_reimport: query(
-                    tx,
-                    "SELECT name FROM cat_view WHERE state = 'needs_reimport' ORDER BY name",
-                    |r| r.get(0),
-                )?,
+                classes: summary.classes,
+                needs_reimport: summary.needs_reimport,
                 chain_inconsistencies: chain_inconsistencies(tx)?,
                 stale_claims: if maintenance_live {
                     Vec::new()
@@ -258,6 +247,16 @@ impl Catalog {
         Ok(report)
     }
 
+    /// The cheap summary (`stats`, doctor's budget row): the classes' counts and newest
+    /// generations, the views in `needs_reimport` and the refused units of the last compaction,
+    /// from one read transaction; no container scan, no hashing.
+    ///
+    /// # Errors
+    /// SQLite errors.
+    pub(crate) fn status(&self, conn: &Connection) -> Result<CatalogStatus> {
+        self.read(conn, |tx| summary(tx))
+    }
+
     /// The container opened for reading, `None` when this catalog has none.
     fn open_container(&self) -> Result<Option<File>> {
         if self.container.is_none() {
@@ -303,6 +302,46 @@ impl Catalog {
         }
         Ok(leaks)
     }
+}
+
+/// The cheap summary of the catalog rows `tx` sees ([`Catalog::status`]).
+fn summary(tx: &Connection) -> Result<CatalogStatus> {
+    Ok(CatalogStatus {
+        classes: query(
+            tx,
+            "SELECT class, sum(live), sum(dead), sum(sediment), max(newest) FROM (
+               SELECT class, dead_since IS NULL AS live, dead_since IS NOT NULL AS dead,
+                      0 AS sediment,
+                      CASE WHEN dead_since IS NULL THEN generation END AS newest
+               FROM cat_extent
+               UNION ALL
+               SELECT class, 0, 0, 1, NULL FROM cat_sediment WHERE dead IS NULL
+             ) GROUP BY class ORDER BY class",
+            |r| {
+                Ok(ClassExtents {
+                    class: r.get(0)?,
+                    live: uint(r, 1)?,
+                    dead: uint(r, 2)?,
+                    sediment_rows: uint(r, 3)?,
+                    newest_generation: r
+                        .get::<_, Option<i64>>(4)?
+                        .map(|g| u64::try_from(g).unwrap_or(0)),
+                })
+            },
+        )?,
+        needs_reimport: query(
+            tx,
+            "SELECT name FROM cat_view WHERE state = 'needs_reimport' ORDER BY name",
+            |r| r.get(0),
+        )?,
+        refused_units: tx
+            .query_row(
+                "SELECT COALESCE((SELECT value FROM cat_meta WHERE key = 'last_refused_units'), 0)",
+                [],
+                |r| uint(r, 0),
+            )
+            .sql()?,
+    })
 }
 
 /// Every container range a catalog row names (live or retired), as `(offset, len)`.

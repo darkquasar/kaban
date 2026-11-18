@@ -30,7 +30,7 @@ pub use traverse::{EdgeFilter, TraverseRequest, TraverseResponse};
 pub use schema::{Naming, SchemaExtendRequest, SchemaResponse};
 
 pub use stats::{
-    CatalogIndexStatus, CatalogVerify, CompactReport, CompactUnit, IndexName, PolicyStats,
+    CatalogIndexStatus, CatalogStatus, CatalogVerify, CompactReport, CompactUnit, IndexName, PolicyStats,
     ReindexReport, ReindexTarget, StatsRequest, StatsResponse,
 };
 

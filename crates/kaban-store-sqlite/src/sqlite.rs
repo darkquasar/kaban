@@ -444,6 +444,15 @@ impl SqliteStore {
         self.catalog.recover(&mut self.lock())
     }
 
+    /// The catalog's cheap summary (counts, newest generations, views needing a reimport,
+    /// the refused units of the last compaction): no container scan, no hashing.
+    ///
+    /// # Errors
+    /// SQLite errors.
+    pub fn catalog_status(&self) -> Result<crate::CatalogStatus> {
+        self.catalog.status(&self.lock())
+    }
+
     /// Verify the catalog's rows, chains, ranges and hashes: see `catalog::recover`.
     ///
     /// # Errors

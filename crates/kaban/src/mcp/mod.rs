@@ -850,6 +850,9 @@ mod tests {
         fn verify(&self) -> Result<CatalogVerify, StoreError> {
             Ok(CatalogVerify::default())
         }
+        fn status(&self) -> Result<kaban_api::CatalogStatus, StoreError> {
+            Ok(kaban_api::CatalogStatus::default())
+        }
         fn checkpoint_if_due(&self) -> Result<bool, StoreError> {
             self.0.fetch_add(1, Ordering::SeqCst);
             Ok(true)

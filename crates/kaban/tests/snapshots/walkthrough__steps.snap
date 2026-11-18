@@ -2196,6 +2196,11 @@ expression: a
           "ok": true
         },
         {
+          "detail": "maintenance_memory_mib 1024, maintenance_deadline_ms 30000, seal_ops text 10000 graph 10000 code 10000, fold_depth 8, fold_delta_ratio 0.25, checkpoint_interval_ms 1000, view_retention 200",
+          "name": "catalog_budget",
+          "ok": true
+        },
+        {
           "detail": "0",
           "name": "claim_exhausted",
           "ok": true

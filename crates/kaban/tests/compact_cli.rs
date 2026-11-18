@@ -270,3 +270,84 @@ fn checkpoint_if_due_ticks_once_per_interval() {
     assert!(first.is_some_and(|tick| tick.backfilled), "{first:?}");
     assert_eq!(second, None);
 }
+
+/// The doctor check `name` of `report`.
+fn doctor_check(report: &Value, name: &str) -> Value {
+    report["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == name)
+        .cloned()
+        .unwrap_or_else(|| panic!("no {name} check: {report}"))
+}
+
+#[test]
+fn doctor_fails_its_catalog_row_naming_a_view_that_needs_reimport() {
+    // Arrange: a code view retired to needs_reimport
+    let s = Scratch::new("kaban-compact-cli", "reimport");
+    remembered(&s);
+    let view = format!("code@{}", "3".repeat(40));
+    sql(&s)
+        .execute(
+            "INSERT INTO cat_view(name, state) VALUES (?1, 'needs_reimport')",
+            [&view],
+        )
+        .unwrap();
+
+    // Act
+    let out = kaban(&s, &["doctor"]);
+
+    // Assert
+    assert_eq!(out.status.code(), Some(5), "{out:?}");
+    let report: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let verify = doctor_check(&report, "catalog_verify");
+    assert_eq!(verify["ok"], false, "{verify}");
+    assert!(
+        verify["detail"].as_str().unwrap().contains(&view),
+        "{verify}"
+    );
+}
+
+#[test]
+fn doctor_shows_the_catalog_budget_and_fails_it_after_refused_units() {
+    // Arrange: the last compaction refused three units at their smallest size
+    let s = Scratch::new("kaban-compact-cli", "budget");
+    remembered(&s);
+    let before = document(&kaban(&s, &["doctor"]));
+    sql(&s)
+        .execute(
+            "INSERT INTO cat_meta(key, value) VALUES ('last_refused_units', 3)",
+            [],
+        )
+        .unwrap();
+
+    // Act
+    let after = kaban(&s, &["doctor"]);
+
+    // Assert: the effective values first, then the refusal and what to raise
+    let budget = doctor_check(&before, "catalog_budget");
+    assert_eq!(budget["ok"], true, "{budget}");
+    let detail = budget["detail"].as_str().unwrap();
+    for key in [
+        "maintenance_memory_mib",
+        "maintenance_deadline_ms",
+        "seal_ops",
+        "fold_depth",
+        "fold_delta_ratio",
+        "checkpoint_interval_ms",
+        "view_retention",
+    ] {
+        assert!(detail.contains(key), "{detail}");
+    }
+    let after: Value = serde_json::from_slice(&after.stdout).unwrap();
+    let budget = doctor_check(&after, "catalog_budget");
+    assert_eq!(budget["ok"], false, "{budget}");
+    assert!(
+        budget["detail"]
+            .as_str()
+            .unwrap()
+            .contains("3 units refused at the smallest size: raise catalog.maintenance_memory_mib"),
+        "{budget}"
+    );
+}

@@ -20,7 +20,7 @@ use crate::enrich::Enricher;
 use crate::error::ApiError;
 use crate::ontology::OntologyRegistry;
 use crate::types::{
-    CatalogVerify, CompactReport, ReceiptIdentities, ReindexReport, ReindexTarget, WriteReceipt,
+    CatalogStatus, CatalogVerify, CompactReport, ReceiptIdentities, ReindexReport, ReindexTarget, WriteReceipt,
 };
 use kaban_codegraph::SnapshotProvider;
 use kaban_core::config::EngineConfig;
@@ -72,6 +72,12 @@ pub trait CatalogMaintenance: Send + Sync {
     /// # Errors
     /// Store errors.
     fn verify(&self) -> Result<CatalogVerify, StoreError>;
+    /// The cheap summary (`stats`, doctor's budget row): the index states and the units the
+    /// last compaction refused at their smallest size, with no container scan and no hashing.
+    ///
+    /// # Errors
+    /// Store errors.
+    fn status(&self) -> Result<CatalogStatus, StoreError>;
     /// The bounded checkpoint after a one-shot write's acknowledgement (KER-09): whether it
     /// ran (it runs once its interval elapsed).
     ///
@@ -428,5 +434,50 @@ mod tests {
 
         // Assert
         assert_eq!(ctx.durability, Durability::Full);
+    }
+
+    /// A catalog whose verification always fails and whose cheap status names one index.
+    struct StatusOnly;
+
+    impl CatalogMaintenance for StatusOnly {
+        fn compact(&self) -> Result<CompactReport, StoreError> {
+            Ok(CompactReport::default())
+        }
+        fn recover(&self) -> Result<String, StoreError> {
+            Ok(String::new())
+        }
+        fn verify(&self) -> Result<CatalogVerify, StoreError> {
+            Err(StoreError::NotFound("verify is not for stats".into()))
+        }
+        fn status(&self) -> Result<CatalogStatus, StoreError> {
+            Ok(CatalogStatus {
+                indexes: vec![crate::types::CatalogIndexStatus {
+                    index: crate::types::IndexName::Text,
+                    sediment_rows: 7,
+                    layers: 0,
+                    base_generation: None,
+                    last_compaction: None,
+                }],
+                refused_units: 0,
+            })
+        }
+        fn checkpoint_if_due(&self) -> Result<bool, StoreError> {
+            Ok(false)
+        }
+    }
+
+    #[test]
+    fn stats_reads_the_cheap_catalog_status_not_its_verification() {
+        // Arrange
+        let store = Arc::new(SqliteStore::open_memory().unwrap());
+        let signer = store.signer();
+        let api = KabanApi::new(store, Policy::empty(), signer).with_catalog(Arc::new(StatusOnly));
+
+        // Act
+        let stats = api.stats(crate::types::StatsRequest::default()).unwrap();
+
+        // Assert
+        assert_eq!(stats.indexes.len(), 1, "{:?}", stats.indexes);
+        assert_eq!(stats.indexes[0].sediment_rows, 7);
     }
 }
