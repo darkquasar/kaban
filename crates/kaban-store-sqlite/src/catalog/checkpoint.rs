@@ -118,7 +118,9 @@ impl Catalog {
 /// admitted reader).
 fn drain(pins: &Path, deadline: Instant) -> Result<Option<Drained>> {
     // registered first: no reader that looks after this passes the gate any more
-    let pending = pins::Pending::register(pins)?;
+    let Some(pending) = pins::Pending::register(pins, deadline)? else {
+        return Ok(None);
+    };
     let before = || Ok(Instant::now() < deadline);
     let Some(gate) = pins::lock_while(
         &pins.join(pins::GATE),

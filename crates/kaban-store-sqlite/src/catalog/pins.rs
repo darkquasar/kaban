@@ -125,7 +125,7 @@ pub(crate) const ADMISSION: &str = "admission";
 /// checkpoint holds it exclusive, so no new reader is admitted while admitted ones drain.
 pub(crate) const GATE: &str = "admission.gate";
 
-/// The marker of a waiting checkpoint (cross-process): created, locked exclusive and renamed
+/// The marker of a waiting checkpoint (cross-process): created, locked exclusive and linked
 /// into place by the tick before it waits for the gate, removed when it ends. A reader waits
 /// while a marker exists whose lock is held; one whose lock is free was left by a tick that
 /// died, and is ignored.
@@ -144,24 +144,47 @@ pub(crate) struct Pending {
 
 impl Pending {
     /// Register a waiting checkpoint in `pins`: the marker is locked before it gets its name,
-    /// so no reader ever finds it unlocked while the tick lives.
+    /// so no reader ever finds it unlocked while the tick lives. A marker in place whose lock
+    /// is held (a live waiting checkpoint) is never replaced: the newcomer waits behind it
+    /// until `deadline`, then gives up (`None`); only a marker whose holder died is replaced.
     ///
     /// # Errors
-    /// `ContainerError` for a marker that cannot be created, locked or renamed.
-    pub(crate) fn register(pins: &Path) -> Result<Self> {
+    /// `ContainerError` for a marker that cannot be created, locked or placed.
+    pub(crate) fn register(pins: &Path, deadline: Instant) -> Result<Option<Self>> {
         let n = MARKERS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let staged = pins.join(format!("{PENDING}.{}.{n}", std::process::id()));
         let file = open(&staged, OFlags::CREATE)
             .map_err(|e| failed("create the checkpoint marker", &staged, e))?;
-        rustix::fs::flock(&file, FlockOperation::NonBlockingLockExclusive)
-            .map_err(|e| failed("lock the checkpoint marker", &staged, e))?;
-        let path = pins.join(PENDING);
-        std::fs::rename(&staged, &path)
-            .map_err(|e| failed("place the checkpoint marker", &path, e))?;
-        Ok(Self {
+        let placed = Self::place(&file, &staged, &pins.join(PENDING), deadline);
+        // the staged name goes however the placement ended (the placed marker is a link)
+        let _ = rustix::fs::unlink(&staged);
+        Ok(placed?.then(|| Self {
             file: Some(file),
-            path,
-        })
+            path: pins.join(PENDING),
+        }))
+    }
+
+    /// Lock `file` (named `staged`) and link it to `path` unless a live marker is there,
+    /// waiting for it until `deadline`; a marker nobody holds is removed first (under its own
+    /// lock, [`live`]). Whether it was placed.
+    fn place(file: &File, staged: &Path, path: &Path, deadline: Instant) -> Result<bool> {
+        rustix::fs::flock(file, FlockOperation::NonBlockingLockExclusive)
+            .map_err(|e| failed("lock the checkpoint marker", staged, e))?;
+        loop {
+            // a link never replaces a name in place: a live marker stays
+            match std::fs::hard_link(staged, path) {
+                Ok(()) => return Ok(true),
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(e) => return Err(failed("place the checkpoint marker", path, e)),
+            }
+            if !live(path).map_err(|e| failed("probe the checkpoint marker", path, e))? {
+                continue;
+            }
+            if Instant::now() >= deadline {
+                return Ok(false);
+            }
+            std::thread::sleep(LOCK_RETRY);
+        }
     }
 }
 
@@ -356,4 +379,52 @@ fn live(path: &Path) -> io::Result<bool> {
 /// Remove the lock file `path` unless a reader holds it.
 fn tidy(path: &Path) -> io::Result<()> {
     live(path).map(|_| ())
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)] // test code: failures are the assertion
+
+    use super::*;
+
+    /// A fresh pins directory of its own.
+    fn pins_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("kaban-pins-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_second_checkpoint_waits_behind_a_live_marker_and_does_not_replace_it() {
+        // Arrange: a live waiting checkpoint
+        let dir = pins_dir("live-marker");
+        let first = Pending::register(&dir, Instant::now()).unwrap().unwrap();
+
+        // Act: a newcomer that may wait 50 ms
+        let second = Pending::register(&dir, Instant::now() + Duration::from_millis(50)).unwrap();
+
+        // Assert: it gave up, and the marker in place is still the first one's
+        assert!(second.is_none(), "a live marker was replaced");
+        assert!(names(&first.path, first.file.as_ref().unwrap()).unwrap());
+        drop(first);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_marker_left_by_a_dead_checkpoint_is_replaced() {
+        // Arrange: a marker in place that nobody holds
+        let dir = pins_dir("dead-marker");
+        std::fs::write(dir.join(PENDING), b"").unwrap();
+
+        // Act
+        let mine = Pending::register(&dir, Instant::now()).unwrap();
+
+        // Assert: the newcomer's marker is in place and holds the lock
+        let mine = mine.unwrap();
+        assert!(names(&mine.path, mine.file.as_ref().unwrap()).unwrap());
+        assert!(checkpoint_waiting(&dir).unwrap());
+        drop(mine);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
