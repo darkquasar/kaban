@@ -246,19 +246,23 @@ impl<'b, T> Grow<'b, T> {
         Ok(())
     }
 
-    /// Insert `item` at `at` (at most the length), growing first when full; moving the tail is
-    /// one unit of work per [`MOVE_CHUNK`] bytes.
+    /// Insert `item` at `at` (at most the length), growing first when full. The tail moves up
+    /// one place in chunks of [`MOVE_CHUNK`] bytes, one unit of work each, so a long move is
+    /// checked from inside. After an error the order may be broken: callers propagate the error
+    /// and drop the vector.
     pub(crate) fn insert(&mut self, at: usize, item: T) -> Result<(), GraphError> {
         self.reserve(1)?;
-        let tail = self
-            .items
-            .len()
-            .saturating_sub(at)
-            .saturating_mul(size_of::<T>());
-        for _ in 0..tail.div_ceil(MOVE_CHUNK).max(1) {
+        self.items.push(item);
+        let chunk = (MOVE_CHUNK / size_of::<T>().max(1)).max(1);
+        let mut end = self.items.len() - 1;
+        while end > at {
             self.ticker.tick(Phase::Grow)?;
+            let start = end.saturating_sub(chunk).max(at);
+            if let Some(part) = self.items.get_mut(start..=end) {
+                part.rotate_right(1);
+            }
+            end = start;
         }
-        self.items.insert(at, item);
         Ok(())
     }
 

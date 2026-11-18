@@ -32,17 +32,20 @@ pub fn clustering(
     budget: &QueryBudget,
 ) -> Result<f64, GraphError> {
     budget.check()?;
+    let tick = Ticker::new(budget);
     let mut around = distinct(v, n, rels, Direction::Both, budget)?;
+    // Drop `n` itself (a self-loop), one element moved per unit of work.
     if let Ok(at) = around.binary_search(&n) {
-        let tail = around.len() - 1;
-        around.copy_within(at + 1.., at);
-        around.truncate(tail);
+        for i in at + 1..around.len() {
+            tick.tick(Phase::Similarity)?;
+            around[i - 1] = around[i];
+        }
+        around.truncate(around.len() - 1);
     }
     let k = around.len();
     if k < 2 {
         return Ok(0.0);
     }
-    let tick = Ticker::new(budget);
     let mut links = 0usize;
     for (i, &u) in around.iter().enumerate() {
         tick.tick(Phase::Similarity)?;
