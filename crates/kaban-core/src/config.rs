@@ -370,11 +370,13 @@ impl Default for Bench {
 
 /// The smallest memory a maintenance unit of work (one seal, fold or base build) needs, in MiB:
 /// a `catalog.maintenance_memory_mib` below it is refused.
-const MIN_MAINTENANCE_MEMORY_MIB: u64 = 16; // placeholder: the 7.6 measurement has not run yet
+// 7.6 (2026-11-18): seal of 10,000 ops, VmHWM 21,384 KiB, 3.75 MiB over its start: 4x margin
+const MIN_MAINTENANCE_MEMORY_MIB: u64 = 16;
 
 /// The shortest deadline a maintenance unit of work can meet, in ms: a
 /// `catalog.maintenance_deadline_ms` below it is refused.
-const MIN_MAINTENANCE_DEADLINE_MS: u64 = 100; // placeholder: the 7.6 measurement has not run yet
+// 7.6 (2026-11-18): seal of 10,000 ops, VmHWM 21,384 KiB, ran 13 ms (debug build)
+const MIN_MAINTENANCE_DEADLINE_MS: u64 = 100;
 
 /// `[catalog]` (spec 11 PC-10, Task 6, 7.6): compaction policy, the scheduled checkpoint and
 /// the maintenance budget of the catalog. Validated at load ([`CatalogCfg::validate`]): a value
@@ -402,9 +404,12 @@ impl Default for CatalogCfg {
             seal_ops: SealOps::default(),
             fold_depth: 8,
             fold_delta_ratio: 0.25,
-            checkpoint_interval_ms: 1_000, // placeholder: the 7.6 measurement has not run yet
-            maintenance_memory_mib: 256,   // placeholder: the 7.6 measurement has not run yet
-            maintenance_deadline_ms: 30_000, // placeholder: the 7.6 measurement has not run yet
+            // `bench catalog` (2026-11-18): 60 s, 1 to 4 writers, WAL high-water 1,512,072 B
+            checkpoint_interval_ms: 1_000,
+            // 7.6 (2026-11-18): fold of 1M edges, VmHWM 361,472 KiB (353 MiB): 2.9x headroom
+            maintenance_memory_mib: 1_024,
+            // 7.6 (2026-11-18): fold of 5M edges, VmHWM 1,605,864 KiB, ran 9.9 s (debug build)
+            maintenance_deadline_ms: 30_000,
         }
     }
 }
@@ -423,7 +428,7 @@ pub struct SealOps {
 
 impl Default for SealOps {
     fn default() -> Self {
-        // placeholder: the 7.6 measurement has not run yet
+        // 7.6 (2026-11-18): graph seal of 10,000 ops, VmHWM 21,384 KiB, ran 13 ms (debug build)
         Self {
             text: 10_000,
             graph: 10_000,
@@ -764,6 +769,7 @@ mod catalog_tests {
         assert_eq!(cfg.catalog, CatalogCfg::default());
         assert_eq!(cfg.catalog.fold_depth, 8);
         assert!((cfg.catalog.fold_delta_ratio - 0.25).abs() < f64::EPSILON);
+        assert_eq!(cfg.catalog.maintenance_memory_mib, 1_024);
         assert_eq!(cfg.effective_overrides(), Vec::new());
     }
 
