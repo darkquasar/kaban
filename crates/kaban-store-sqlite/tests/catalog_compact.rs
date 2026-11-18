@@ -11,8 +11,8 @@
 mod common;
 
 use common::{Scratch, created, ctx, nid};
-use kaban_core::MemoryStore;
 use kaban_core::query_budget::QueryBudget;
+use kaban_core::{MemoryStore, StoreError};
 use kaban_store_sqlite::SqliteStore;
 use kaban_store_sqlite::catalog_testing;
 use std::sync::{Arc, Barrier};
@@ -108,16 +108,15 @@ fn a_publication_switches_the_chain_and_hides_what_it_consumed_from_later_pins_o
         .unwrap()
         .expect("the inputs were free");
     let seqs: Vec<u64> = sediment.iter().map(|(seq, _)| *seq).collect();
-    let generation =
-        catalog_testing::publish(
-            &store,
-            claim,
-            &[pattern(13, 200)],
-            &[("main", &ids[..2])],
-            &ids[..2],
-            &seqs,
-        )
-        .unwrap();
+    let generation = catalog_testing::publish(
+        &store,
+        claim,
+        &[pattern(13, 200)],
+        &[("main", &ids[..2])],
+        &ids[..2],
+        &seqs,
+    )
+    .unwrap();
     let later = catalog_testing::pin(&store, &budget()).unwrap();
 
     // Assert: the new extent takes the inputs' place in the chain, the consumed sediment is
@@ -161,8 +160,15 @@ fn consumed_sediment_rows_are_deleted_after_the_switch_by_reclamation() {
     let claim = catalog_testing::claim(&store, &[])
         .unwrap()
         .expect("a claim of no extents (a seal) was refused");
-    catalog_testing::publish(&store, claim, &[pattern(17, 50)], &[("main", &[])], &[], &seqs)
-        .unwrap();
+    catalog_testing::publish(
+        &store,
+        claim,
+        &[pattern(17, 50)],
+        &[("main", &[])],
+        &[],
+        &seqs,
+    )
+    .unwrap();
 
     // Act
     let first = catalog_testing::reclaim_retired(&store).unwrap();
@@ -171,6 +177,14 @@ fn consumed_sediment_rows_are_deleted_after_the_switch_by_reclamation() {
     // Assert: the switch only marked the row; the reclamation deleted it, once
     assert_eq!(first.sediment_deleted, 1, "{first:?}");
     assert_eq!(second.sediment_deleted, 0, "{second:?}");
+}
+
+/// The driver's text of a backend error (what names the refusal), else the error's own.
+fn driver_text(err: &StoreError) -> String {
+    match err {
+        StoreError::Backend { source } => source.driver().to_string(),
+        other => other.to_string(),
+    }
 }
 
 /// A code view's name (`code@<40 hex>`).
@@ -191,7 +205,7 @@ fn a_fold_in_one_view_leaves_another_view_over_the_same_base_as_it_was() {
     let claim = catalog_testing::claim(&store, &[b, a]).unwrap().unwrap();
 
     // Act: fold main's [B, A] into F, first retiring B too (the code view still needs it)
-    let (refused, claim) = catalog_testing::publish(
+    let (refused, claim) = *catalog_testing::publish(
         &store,
         claim,
         &[pattern(8, 128)],
@@ -215,7 +229,8 @@ fn a_fold_in_one_view_leaves_another_view_over_the_same_base_as_it_was() {
     .unwrap();
 
     // Assert: the refusal named the base and changed nothing; the fold changed main only
-    assert!(refused.to_string().contains(&format!("extent {b}")), "{refused}");
+    let text = driver_text(&refused);
+    assert!(text.contains(&format!("extent {b} is retired")), "{text}");
     assert_eq!(unchanged, (vec![b, a], vec![b, c]));
     let main = catalog_testing::chain(&store, "main").unwrap();
     assert_eq!(main.len(), 1, "{main:?}");
@@ -248,8 +263,9 @@ fn a_replacement_of_layers_that_are_not_consecutive_is_refused() {
     );
 
     // Assert: refused, and L3's updates never move before L2
-    let (refused, _claim) = outcome.expect_err("a non-consecutive run was replaced");
-    assert!(refused.to_string().contains("consecutive"), "{refused}");
+    let (refused, _claim) = *outcome.expect_err("a non-consecutive run was replaced");
+    let text = driver_text(&refused);
+    assert!(text.contains("not consecutive"), "{text}");
     assert_eq!(catalog_testing::chain(&store, "main").unwrap(), ids);
 }
 
@@ -259,10 +275,9 @@ fn a_refused_publication_keeps_its_claim_for_release_and_its_inputs_can_be_claim
     let s = Scratch::new("kaban-t6-compact", "claim-release");
     let store = SqliteStore::open(&s.db(), &s.keys()).unwrap();
     let ids =
-        catalog_testing::append_and_publish_all(&store, &[pattern(5, 32), pattern(7, 32)])
-            .unwrap();
+        catalog_testing::append_and_publish_all(&store, &[pattern(5, 32), pattern(7, 32)]).unwrap();
     let claim = catalog_testing::claim(&store, &ids[..1]).unwrap().unwrap();
-    let (_refused, claim) = catalog_testing::publish(
+    let (_refused, claim) = *catalog_testing::publish(
         &store,
         claim,
         &[pattern(9, 64)],

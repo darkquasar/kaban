@@ -12,14 +12,18 @@
 //! Two compactions never claim one input: the claim commits before any merge work, and a
 //! claim of an input that is claimed, retired or unknown claims nothing.
 //!
-//! The chain rule of a switch: a retired extent's chain rows are deleted in the switch itself,
-//! and the added extents take the place of the first retired extent in each chain that held
-//! one (a seal, which retires nothing, appends to `main`). A pin reads its chains inside its
-//! own read transaction (`Pin::load_view`), so a pin taken before the switch still sees the
-//! old rows and one taken after sees only the new ones. Consumed sediment rows are only marked
-//! dead in the switch (`cat_sediment.dead`, the switch's generation) and pins skip dead rows
-//! by the same snapshot rule; reclamation deletes them later, in chunks
-//! (`Catalog::reclaim`), so the switch transaction stays short (PC-9 item 1).
+//! The chain rule of a switch: each affected view names its own change ([`ViewSwitch`]): a
+//! run of consecutive extents of its chain, in chain order, gives way to added extents in the
+//! same place (an empty run appends, as a seal does to `main`). A run that is not consecutive
+//! is refused, so a fold never moves later layers before surviving ones, and a retired extent
+//! that any chain still holds after the switch is refused, so a fold in one view never takes a
+//! base another view still reads. A pin reads its chains inside its own read transaction
+//! (`Pin::load_view`), so a pin taken before the switch still sees the old rows and one taken
+//! after sees only the new ones. Consumed sediment rows are only marked dead in the switch
+//! (`cat_sediment.dead`, the switch's generation) and pins skip dead rows by the same snapshot
+//! rule; reclamation deletes them later, in chunks (`Catalog::reclaim`), so the switch
+//! transaction stays short (PC-9 item 1). A refused switch rolls back and hands its claim back
+//! ([`PublishFailed`]): the caller retries or releases it ([`Catalog::release`]).
 
 #![cfg_attr(
     not(feature = "failpoints"),
@@ -32,7 +36,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use kaban_core::{BackendSource, Durability, Result, StoreError, ViewName};
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 
 use super::Catalog;
 use super::commit::Txn;
@@ -94,8 +98,8 @@ pub(crate) struct PublishFailed {
     pub(crate) claim: Claim,
 }
 
-impl From<PublishFailed> for StoreError {
-    fn from(f: PublishFailed) -> Self {
+impl From<Box<PublishFailed>> for StoreError {
+    fn from(f: Box<PublishFailed>) -> Self {
         f.error
     }
 }
@@ -109,6 +113,17 @@ pub(crate) enum SwitchRefused {
     Unclaimed(ExtentId),
     /// A consumed sediment row is unknown or already consumed.
     SedimentConsumed(SedimentSeq),
+    /// A view's replaced run is not consecutive in its chain, in chain order.
+    NotConsecutive(String),
+    /// An added extent is placed in no view, or a view places one that does not exist.
+    Unplaced(usize),
+    /// A retired extent is still in the chain of a view after the switch.
+    StillNeeded {
+        /// The retired extent.
+        extent: ExtentId,
+        /// A view whose chain still holds it.
+        view: String,
+    },
 }
 
 impl std::fmt::Display for SwitchRefused {
@@ -124,6 +139,19 @@ impl std::fmt::Display for SwitchRefused {
                 f,
                 "catalog_switch_refused: sediment row {} is unknown or already consumed",
                 seq.0
+            ),
+            Self::NotConsecutive(view) => write!(
+                f,
+                "catalog_switch_refused: the run replaced in view {view} is not consecutive in its chain"
+            ),
+            Self::Unplaced(i) => write!(
+                f,
+                "catalog_switch_refused: added extent {i} is placed in no view or does not exist"
+            ),
+            Self::StillNeeded { extent, view } => write!(
+                f,
+                "catalog_switch_refused: extent {} is retired but view {view} still holds it",
+                extent.0
             ),
         }
     }
@@ -210,11 +238,11 @@ impl Catalog {
         &self,
         conn: &mut Connection,
         p: Publication,
-    ) -> std::result::Result<Generation, PublishFailed> {
+    ) -> std::result::Result<Generation, Box<PublishFailed>> {
         let Publication {
             claim,
             added,
-            views: _,
+            views,
             retired,
             sediment_consumed,
         } = p;
@@ -232,18 +260,43 @@ impl Catalog {
             if usize::try_from(held).ok() != Some(claim.inputs.len()) {
                 return Err(SwitchRefused::ClaimLost.into());
             }
-            if let Some(id) = retired.iter().find(|id| !claim.inputs.contains(id)) {
+            let replaced = views.iter().flat_map(|v| &v.replaced);
+            if let Some(id) = retired
+                .iter()
+                .chain(replaced)
+                .find(|id| !claim.inputs.contains(id))
+            {
                 return Err(SwitchRefused::Unclaimed(*id).into());
             }
-            let views = chains_of(txn, &retired)?;
+            let placed = |i: usize| views.iter().any(|v| v.added.contains(&i));
+            let unknown = views
+                .iter()
+                .flat_map(|v| &v.added)
+                .copied()
+                .find(|i| *i >= added.len());
+            if let Some(i) = unknown.or_else(|| (0..added.len()).find(|i| !placed(*i))) {
+                return Err(SwitchRefused::Unplaced(i).into());
+            }
             let mut ids = Vec::with_capacity(added.len());
             for extent in added {
                 ids.push(txn.publish(extent, &[])?);
             }
-            for view in &views {
-                rechain(txn, view, &retired, &ids)?;
+            for switch in &views {
+                switch_view(txn, switch, &ids)?;
             }
             for id in &retired {
+                let holder: Option<String> = txn
+                    .conn()
+                    .query_row(
+                        "SELECT view FROM cat_view_extent WHERE extent_id = ?1 LIMIT 1",
+                        [sql_int(id.0).sql()?],
+                        |r| r.get(0),
+                    )
+                    .optional()
+                    .sql()?;
+                if let Some(view) = holder {
+                    return Err(SwitchRefused::StillNeeded { extent: *id, view }.into());
+                }
                 txn.conn()
                     .execute(
                         "UPDATE cat_extent SET dead_since = ?1 WHERE id = ?2 AND dead_since IS NULL",
@@ -268,73 +321,57 @@ impl Catalog {
                 .sql()?;
             Ok(generation)
         });
-        switched.map_err(|error| PublishFailed { error, claim })
+        switched.map_err(|error| Box::new(PublishFailed { error, claim }))
     }
 
-    /// Release `claim` without publishing: its inputs can be claimed again.
+    /// Release `claim` without publishing (after a refused publication, 7.6): its inputs can be
+    /// claimed again.
     ///
     /// # Errors
     /// SQLite errors.
     pub(crate) fn release(&self, conn: &mut Connection, claim: Claim) -> Result<()> {
-        let _ = (conn, claim);
-        Ok(())
+        let Claim { token, .. } = claim;
+        self.commit(conn, Durability::Normal, |txn| {
+            txn.conn()
+                .execute("DELETE FROM cat_claim WHERE claim = ?1", [&token])
+                .sql()
+                .map(|_| ())
+        })
     }
 }
 
-/// The views whose chains hold any of `retired`, by name; `main` alone when nothing is retired
-/// (a seal appends to `main`'s chain).
-fn chains_of(txn: &Txn<'_>, retired: &[ExtentId]) -> Result<Vec<String>> {
-    if retired.is_empty() {
-        return Ok(vec![ViewName::Main.to_string()]);
-    }
-    let mut views: Vec<String> = Vec::new();
-    let mut stmt = txn
-        .conn()
-        .prepare("SELECT view FROM cat_view_extent WHERE extent_id = ?1")
-        .sql()?;
-    for id in retired {
-        let rows = stmt
-            .query_map([sql_int(id.0).sql()?], |r| r.get::<_, String>(0))
-            .sql()?;
-        for view in rows {
-            let view = view.sql()?;
-            if !views.contains(&view) {
-                views.push(view);
-            }
-        }
-    }
-    Ok(views)
-}
-
-/// Rewrite the chain of `view`: `retired` removed, `added` in the place of the first retired
-/// extent it held (at the end when it held none), positions renumbered from 0.
-fn rechain(txn: &Txn<'_>, view: &str, retired: &[ExtentId], added: &[ExtentId]) -> Result<()> {
+/// Apply `switch` to its view's chain: the replaced run, which must be consecutive and in
+/// chain order, gives way to the added extents (`ids` by index) in its place; an empty run
+/// appends them. Positions are renumbered from 0.
+fn switch_view(txn: &Txn<'_>, switch: &ViewSwitch, ids: &[ExtentId]) -> Result<()> {
     let conn = txn.conn();
+    let view = switch.view.to_string();
     let old: Vec<ExtentId> = {
         let mut stmt = conn
             .prepare("SELECT extent_id FROM cat_view_extent WHERE view = ?1 ORDER BY position")
             .sql()?;
-        let rows = stmt.query_map([view], |r| uint(r, 0)).sql()?;
+        let rows = stmt.query_map([&view], |r| uint(r, 0)).sql()?;
         rows.map(|r| r.map(ExtentId))
             .collect::<rusqlite::Result<_>>()
             .sql()?
     };
-    let mut chain: Vec<ExtentId> = Vec::with_capacity(old.len() + added.len());
-    let mut placed = false;
-    for id in old {
-        if retired.contains(&id) {
-            if !placed {
-                chain.extend_from_slice(added);
-                placed = true;
-            }
-        } else {
-            chain.push(id);
-        }
-    }
-    if !placed {
-        chain.extend_from_slice(added);
-    }
-    conn.execute("DELETE FROM cat_view_extent WHERE view = ?1", [view])
+    let run = switch.replaced.as_slice();
+    let at = match run.first() {
+        None => old.len(),
+        Some(first) => old
+            .iter()
+            .position(|id| id == first)
+            .filter(|&p| old.get(p..p + run.len()) == Some(run))
+            .ok_or_else(|| SwitchRefused::NotConsecutive(view.clone()))?,
+    };
+    let added = switch.added.iter().filter_map(|&i| ids.get(i).copied());
+    let chain: Vec<ExtentId> = old[..at]
+        .iter()
+        .copied()
+        .chain(added)
+        .chain(old[at + run.len()..].iter().copied())
+        .collect();
+    conn.execute("DELETE FROM cat_view_extent WHERE view = ?1", [&view])
         .sql()?;
     let mut insert = conn
         .prepare("INSERT INTO cat_view_extent(view, position, extent_id) VALUES (?1, ?2, ?3)")

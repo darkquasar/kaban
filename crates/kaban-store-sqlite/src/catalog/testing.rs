@@ -410,7 +410,7 @@ pub fn publish(
     switches: &[(&str, &[u64])],
     retired: &[u64],
     consumed: &[u64],
-) -> std::result::Result<u64, (StoreError, TestClaim)> {
+) -> std::result::Result<u64, Box<(StoreError, TestClaim)>> {
     let appended = if added.is_empty() {
         Ok(Vec::new())
     } else {
@@ -421,7 +421,7 @@ pub fn publish(
     };
     let added_parts = match appended {
         Ok(parts) => parts,
-        Err(e) => return Err((e, claim)),
+        Err(e) => return Err(Box::new((e, claim))),
     };
     let mut views = Vec::with_capacity(switches.len());
     for (view, replaced) in switches {
@@ -431,7 +431,7 @@ pub fn publish(
                 let e = StoreError::Backend {
                     source: kaban_core::BackendSource::new(e),
                 };
-                return Err((e, claim));
+                return Err(Box::new((e, claim)));
             }
         };
         views.push(ViewSwitch {
@@ -451,7 +451,7 @@ pub fn publish(
         .catalog()
         .publish(&mut store.lock(), p)
         .map(|g| g.0)
-        .map_err(|f| (f.error, TestClaim(f.claim)))
+        .map_err(|f| Box::new((f.error, TestClaim(f.claim))))
 }
 
 /// Release `claim` without publishing ([`Catalog::release`]).
@@ -532,6 +532,10 @@ pub fn pin_sediment_rows(store: &SqliteStore) -> Result<Vec<(u64, String)>> {
 
 /// What one reclamation of the catalog ([`Catalog::reclaim`]) did.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent report flags, each a named outcome"
+)]
 pub struct ReclaimOutcome {
     /// The `reclaim_floor` it committed.
     pub floor: u64,
