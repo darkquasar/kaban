@@ -80,12 +80,12 @@ pub(crate) struct Catalog {
     test_derived: std::sync::Mutex<Option<commit::TestDerivedRows>>,
     /// A unit test's observer of every row a pin copies ([`Self::set_test_copy_hook`]).
     #[cfg(test)]
-    test_copy: std::sync::Mutex<Option<TestCopyHook>>,
+    test_copy: std::sync::Mutex<Option<pin::CopyHook>>,
 }
 
 /// A unit test's observer of the rows a pin copies, by copy index.
 #[cfg(test)]
-pub(crate) type TestCopyHook = Box<dyn Fn(usize) + Send>;
+pub(crate) type TestCopyHook = Box<dyn Fn(usize) + Send + Sync>;
 
 impl std::fmt::Debug for Catalog {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -204,26 +204,22 @@ impl Catalog {
         Ok(self)
     }
 
-    /// Install a unit test's observer of every row a pin copies.
+    /// Install a unit test's observer of every row a later pin copies.
     #[cfg(test)]
     pub(crate) fn set_test_copy_hook(&self, hook: TestCopyHook) {
         *self
             .test_copy
             .lock()
-            .unwrap_or_else(PoisonError::into_inner) = Some(hook);
+            .unwrap_or_else(PoisonError::into_inner) = Some(pin::CopyHook(Arc::from(hook)));
     }
 
-    /// Tell the unit test's observer that a pin copied row `n`.
+    /// The unit test's observer a new pin keeps.
     #[cfg(test)]
-    fn copied(&self, n: usize) {
-        if let Some(hook) = self
-            .test_copy
+    fn copy_hook(&self) -> Option<pin::CopyHook> {
+        self.test_copy
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .as_ref()
-        {
-            hook(n);
-        }
+            .clone()
     }
 
     /// Run the race tests' hook of `window` (test builds only).

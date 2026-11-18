@@ -19,7 +19,7 @@ use super::Catalog;
 use super::capture::{BatchChanges, CaptureOp};
 use super::class::{ExtentClass, IndexClass, SealOutput};
 use super::commit::Stage;
-use super::pin::Pin;
+use super::pin::{Pin, PinnedView};
 use crate::SqliteStore;
 
 fn ctx() -> WriteCtx {
@@ -813,7 +813,9 @@ fn a_pin_cancelled_while_copying_returns_the_budget_error_and_releases_everythin
     }));
 
     // Act
-    let out = store.catalog().pin(&store.lock(), &budget);
+    let out = store
+        .catalog()
+        .pin(&store.lock(), &budget, &[ViewName::Main]);
 
     // Assert
     let err = out.expect_err("a cancelled copy produced a pin");
@@ -1008,6 +1010,50 @@ fn catalog_rows(store: &SqliteStore, classes: &[&str], rows: usize, len: usize, 
             Ok(())
         })
         .unwrap();
+    chain_into_main(store);
+}
+
+/// Append every extent row that `main`'s chain does not name to it, in id order (what a
+/// publication into `main` records), for rows a test inserted directly.
+fn chain_into_main(store: &SqliteStore) {
+    store
+        .catalog()
+        .commit(&mut store.lock(), Durability::Normal, |txn| {
+            txn.conn()
+                .execute(
+                    "INSERT INTO cat_view_extent(view, position, extent_id)
+                     SELECT 'main', (SELECT COALESCE(max(position), -1) FROM cat_view_extent
+                                     WHERE view = 'main') + row_number() OVER (ORDER BY id), id
+                     FROM cat_extent
+                     WHERE id NOT IN (SELECT extent_id FROM cat_view_extent WHERE view = 'main')",
+                    [],
+                )
+                .map_err(|e| StoreError::Backend {
+                    source: kaban_core::BackendSource::new(e),
+                })
+        })
+        .unwrap();
+}
+
+/// A detached pin of `store` with `main` loaded, and `main`'s inputs.
+fn pin_main(store: &SqliteStore) -> (Pin, Arc<PinnedView>) {
+    let budget = kaban_core::query_budget::QueryBudget::new(u64::MAX, None);
+    let conn = store.lock();
+    let pin = store
+        .catalog()
+        .pin(&conn, &budget, &[ViewName::Main])
+        .unwrap();
+    let main = pin.load_view(&conn, &ViewName::Main).unwrap();
+    (pin, main)
+}
+
+/// The extents of the test class in `main`'s chain.
+fn test_extents(main: &PinnedView) -> Vec<super::tables::ExtentRef> {
+    main.chain()
+        .iter()
+        .filter(|e| e.class == ExtentClass::Test)
+        .cloned()
+        .collect()
 }
 
 /// What the pin retains, charged by the budget's own rule for one allocation.
@@ -1049,7 +1095,10 @@ fn a_pin_reserves_every_allocation_it_retains_before_it_copies() {
 
         // Act: an unbounded pin tells the charge, held while it is measured
         let open = QueryBudget::new(u64::MAX, None);
-        let pin = store.catalog().pin(&store.lock(), &open).unwrap();
+        let pin = store
+            .catalog()
+            .pin(&store.lock(), &open, &[ViewName::Main])
+            .unwrap();
         let charge = open.live_bytes();
 
         // Assert: every retained allocation is paid for, and the charge returns on drop
@@ -1063,14 +1112,17 @@ fn a_pin_reserves_every_allocation_it_retains_before_it_copies() {
 
         // Act: exactly the charge admits, one byte less refuses before any row is copied
         let at = QueryBudget::new(charge, None);
-        let pinned = store.catalog().pin(&store.lock(), &at);
+        let pinned = store.catalog().pin(&store.lock(), &at, &[ViewName::Main]);
         assert!(pinned.is_ok(), "{name}: refused at its own charge {charge}");
         drop(pinned);
         assert_eq!(at.live_bytes(), 0);
         if charge > 0 {
             copied.store(0, Ordering::SeqCst);
             let below = QueryBudget::new(charge - 1, None);
-            let err = store.catalog().pin(&store.lock(), &below).unwrap_err();
+            let err = store
+                .catalog()
+                .pin(&store.lock(), &below, &[ViewName::Main])
+                .unwrap_err();
             assert_eq!(budget_limit(&err), Some(Limit::Memory), "{name}: {err:?}");
             assert_eq!(
                 copied.load(Ordering::SeqCst),
@@ -1123,13 +1175,9 @@ fn an_extent_keeps_a_stable_id_that_is_never_reused() {
 
     // Assert: the third extent does not take the deleted one's id, and a pin carries the ids
     assert_eq!(ids(&store), [1, 3], "a deleted extent's id was reused");
-    let budget = kaban_core::query_budget::QueryBudget::new(u64::MAX, None);
-    let pin = store.catalog().pin(&store.lock(), &budget).unwrap();
-    let pinned: Vec<u64> = pin
-        .extents(ExtentClass::Test)
-        .iter()
-        .map(|e| e.id.0)
-        .collect();
+    chain_into_main(&store);
+    let (_pin, main) = pin_main(&store);
+    let pinned: Vec<u64> = test_extents(&main).iter().map(|e| e.id.0).collect();
     assert_eq!(pinned, [1, 3]);
 }
 
@@ -1153,15 +1201,15 @@ fn a_dead_extent_is_not_pinned() {
         })
         .unwrap();
 
+    chain_into_main(&store);
+
     // Act
-    let budget = kaban_core::query_budget::QueryBudget::new(u64::MAX, None);
-    let pin = store.catalog().pin(&store.lock(), &budget).unwrap();
+    let (_pin, main) = pin_main(&store);
 
     // Assert
-    let paths: Vec<_> = pin
-        .extents(ExtentClass::Test)
-        .iter()
-        .map(|e| e.location.clone())
+    let paths: Vec<_> = test_extents(&main)
+        .into_iter()
+        .map(|e| e.location)
         .collect();
     assert_eq!(
         paths,
@@ -1198,10 +1246,11 @@ fn a_span_beyond_the_container_is_refused_and_a_span_inside_it_reads() {
         })
         .unwrap();
 
+    chain_into_main(store);
+
     // Act
-    let budget = kaban_core::query_budget::QueryBudget::new(u64::MAX, None);
-    let pin = store.catalog().pin(&store.lock(), &budget).unwrap();
-    let extents = pin.extents(ExtentClass::Test);
+    let (pin, main) = pin_main(store);
+    let extents = test_extents(&main);
 
     // Assert: the range inside reads; one byte past the end and an offset past it refuse
     assert_eq!(extents.len(), 3);
@@ -1237,7 +1286,7 @@ fn a_pin_on_a_connection_with_an_open_transaction_is_refused_by_name() {
     conn.execute_batch("SAVEPOINT outer").unwrap();
 
     // Act
-    let pinned = store.catalog().pin(&conn, &budget).map(|_| ());
+    let pinned = store.catalog().pin(&conn, &budget, &[]).map(|_| ());
     let snapshot = store.catalog().with_snapshot(&conn, &budget, |_, _| Ok(()));
 
     // Assert: both refuse with the named error, and the outer transaction is left as it was
@@ -1309,9 +1358,8 @@ fn raw_range(fs: &FileStore, (offset, len): (u64, u64)) -> Vec<u8> {
 
 /// The container range of the pinned test-class extent `id` and its bytes through the pin.
 fn pinned_extent(store: &SqliteStore, id: u64) -> Option<((u64, u64), Vec<u8>)> {
-    let budget = kaban_core::query_budget::QueryBudget::new(u64::MAX, None);
-    let pin = store.catalog().pin(&store.lock(), &budget).unwrap();
-    let extents = pin.extents(ExtentClass::Test);
+    let (pin, main) = pin_main(store);
+    let extents = test_extents(&main);
     let e = extents.iter().find(|e| e.id.0 == id)?;
     let super::class::ExtentLocation::Kbx { offset, len } = e.location else {
         panic!("extent {id} is not in the container");
@@ -1536,8 +1584,8 @@ fn views_sharing_a_base_resolve_to_their_own_ordered_chains_and_rows_carry_conte
     };
     let written: [&[u8]; 3] = [b"the shared base", b"layer over a", b"layer over b"];
     let base = publish(ExtentClass::CodeBase, written[0], &[a.clone(), b.clone()]);
-    let layer_a = publish(ExtentClass::CodeLayer, written[1], &[a.clone()]);
-    let layer_b = publish(ExtentClass::CodeLayer, written[2], &[b.clone()]);
+    let layer_a = publish(ExtentClass::CodeLayer, written[1], std::slice::from_ref(&a));
+    let layer_b = publish(ExtentClass::CodeLayer, written[2], std::slice::from_ref(&b));
 
     // Act
     let (chain_a, chain_b) = (chain(store, &a), chain(store, &b));
@@ -1562,4 +1610,107 @@ fn views_sharing_a_base_resolve_to_their_own_ordered_chains_and_rows_carry_conte
     for (hash, bytes) in hashes.iter().zip(written) {
         assert_eq!(hash.as_deref(), Some(Sha256::digest(bytes).as_slice()));
     }
+}
+
+/// A file-backed catalog whose `main` holds a text, a graph base and a graph layer extent and
+/// three sediment rows, and whose code view `code` holds `code_layers` code extents.
+fn view_catalog(name: &str, code: &ViewName, code_layers: usize) -> FileStore {
+    let fs = FileStore::new(name);
+    let store = &fs.store;
+    let publish = |class: ExtentClass, views: &[ViewName]| {
+        let token = store.catalog().append_extent(class, &[3_u8; 64]).unwrap();
+        store
+            .catalog()
+            .commit(&mut store.lock(), Durability::Normal, |txn| {
+                txn.publish(token, views)
+            })
+            .unwrap();
+    };
+    for class in [
+        ExtentClass::TextTier,
+        ExtentClass::GraphBase,
+        ExtentClass::GraphLayer,
+    ] {
+        publish(class, &[ViewName::Main]);
+    }
+    for _ in 0..code_layers {
+        publish(ExtentClass::CodeLayer, std::slice::from_ref(code));
+    }
+    store
+        .catalog()
+        .commit(&mut store.lock(), Durability::Normal, |txn| {
+            let generation = i64::try_from(txn.generation()?.0).unwrap();
+            for i in 0..3 {
+                txn.conn()
+                    .execute(
+                        "INSERT INTO cat_sediment(class, generation, payload) VALUES ('test', ?1, ?2)",
+                        rusqlite::params![generation, format!("row {i}").into_bytes()],
+                    )
+                    .map_err(|e| StoreError::Backend {
+                        source: kaban_core::BackendSource::new(e),
+                    })?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    fs
+}
+
+/// What one snapshot of `store` charged: on pinning, after loading `main`, after loading it
+/// again, after loading `code`; the two chains' lengths; whether loading `main` again returned
+/// the cached view.
+fn view_charges(store: &SqliteStore, code: &ViewName) -> ([u64; 4], [usize; 2], bool) {
+    let budget = kaban_core::query_budget::QueryBudget::new(u64::MAX, None);
+    let out = store
+        .catalog()
+        .with_snapshot(&store.lock(), &budget, |tx, pin| {
+            let pinned = budget.live_bytes();
+            let main = pin.load_view(tx, &ViewName::Main)?;
+            let with_main = budget.live_bytes();
+            let again = pin.load_view(tx, &ViewName::Main)?;
+            let cached = budget.live_bytes();
+            let code = pin.load_view(tx, code)?;
+            let with_code = budget.live_bytes();
+            Ok((
+                [pinned, with_main, cached, with_code],
+                [main.chain().len(), code.chain().len()],
+                Arc::ptr_eq(&main, &again),
+            ))
+        })
+        .unwrap();
+    assert_eq!(budget.live_bytes(), 0, "a view's charge outlived its pin");
+    out
+}
+
+#[test]
+fn a_pin_charges_a_view_only_once_it_is_loaded_and_only_for_that_view() {
+    // Arrange: the same `main` in two catalogs, one of them with 40 code extents besides
+    let code: ViewName = format!("code@{}", "c".repeat(40)).parse().unwrap();
+    let with_code = view_catalog("views-code", &code, 40);
+    let main_only = view_catalog("views-main", &code, 0);
+
+    // Act
+    let ([pinned, with_main, cached, loaded_code], chains, reused) =
+        view_charges(&with_code.store, &code);
+    let ([pinned_alone, with_main_alone, ..], ..) = view_charges(&main_only.store, &code);
+
+    // Assert: the code extents cost nothing until the code view loads; loading `main` costs
+    // what `main` alone costs; a loaded view is cached; loading the code view charges it
+    assert_eq!(
+        pinned, pinned_alone,
+        "the pin charged for views it did not load"
+    );
+    assert!(with_main > pinned, "loading main charged nothing");
+    assert_eq!(
+        with_main - pinned,
+        with_main_alone - pinned_alone,
+        "loading main charged for another view's rows"
+    );
+    assert_eq!(cached, with_main, "a cached view was charged again");
+    assert!(
+        loaded_code > cached,
+        "loading the code view charged nothing"
+    );
+    assert_eq!(chains, [3, 40]);
+    assert!(reused, "a loaded view was loaded again");
 }

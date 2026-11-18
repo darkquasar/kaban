@@ -29,25 +29,6 @@ pub(crate) enum ExtentClass {
 }
 
 impl ExtentClass {
-    /// How many classes this build knows.
-    #[cfg(not(any(test, feature = "failpoints")))]
-    pub(crate) const COUNT: usize = 5;
-    /// How many classes this build knows (the test class among them).
-    #[cfg(any(test, feature = "failpoints"))]
-    pub(crate) const COUNT: usize = 6;
-
-    /// The class's position among the [`Self::COUNT`] classes.
-    pub(crate) fn index(self) -> usize {
-        match self {
-            Self::TextTier => 0,
-            Self::GraphBase => 1,
-            Self::GraphLayer => 2,
-            Self::CodeLayer => 3,
-            Self::CodeBase => 4,
-            #[cfg(any(test, feature = "failpoints"))]
-            Self::Test => 5,
-        }
-    }
     /// The class's name in the catalog rows.
     pub(crate) fn as_str(self) -> &'static str {
         match self {

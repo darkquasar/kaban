@@ -25,7 +25,8 @@ use super::Catalog;
 use super::capture::{BatchChanges, CaptureOp};
 use super::class::{ExtentClass, ExtentLocation, IndexClass, SealOutput};
 use super::commit::Stage;
-use super::pin::Pin;
+use super::pin::{Pin, PinnedView};
+use super::tables::ExtentRef;
 use crate::SqliteStore;
 
 /// What happened to an observed row.
@@ -114,16 +115,20 @@ pub fn install_edge_sediment_class(store: &SqliteStore) -> Observed {
     observed
 }
 
-/// Pin `store`'s catalog and return the test class's sediment payloads, in sequence order.
+/// Pin `store`'s catalog and return the test class's sediment payloads of `main`, in
+/// sequence order.
 ///
 /// # Errors
 /// The pin's errors.
 pub fn pin_sediment(store: &SqliteStore) -> Result<Vec<String>> {
     let budget = QueryBudget::new(u64::MAX, None);
-    let pin = store.catalog().pin(&store.lock(), &budget)?;
+    let conn = store.lock();
+    let pin = store.catalog().pin(&conn, &budget, &[ViewName::Main])?;
     Ok(pin
-        .sediment(ExtentClass::Test)
+        .load_view(&conn, &ViewName::Main)?
+        .sediment()
         .iter()
+        .filter(|row| row.class == ExtentClass::Test)
         .map(|row| String::from_utf8_lossy(&row.payload).into_owned())
         .collect())
 }
@@ -165,44 +170,54 @@ pub fn append_and_publish_all(store: &SqliteStore, extents: &[Vec<u8>]) -> Resul
         })
 }
 
-/// A detached pin of `store`'s catalog ([`Catalog::pin`]).
+/// A detached pin of `store`'s catalog with `main` loaded ([`Catalog::pin`]).
 #[derive(Debug)]
-pub struct TestPin(Pin);
+pub struct TestPin {
+    pin: Pin,
+    main: Arc<PinnedView>,
+}
 
 impl TestPin {
     /// The pin's view.
     #[must_use]
     pub fn view(&self) -> PinView<'_> {
-        PinView(&self.0)
+        PinView {
+            pin: &self.pin,
+            main: &self.main,
+        }
     }
 }
 
-/// A pin as a test reads it: the test class's extents and their bytes.
+/// A pin as a test reads it: the test class's extents of `main` and their bytes.
 #[derive(Debug, Clone, Copy)]
-pub struct PinView<'p>(&'p Pin);
+pub struct PinView<'p> {
+    pin: &'p Pin,
+    main: &'p PinnedView,
+}
 
 impl PinView<'_> {
     /// The pinned generation.
     #[must_use]
     pub fn generation(&self) -> u64 {
-        self.0.generation().0
+        self.pin.generation().0
     }
-    /// The ids of the pinned extents of the test class, in id order.
+    /// The test class's extents in `main`'s chain, in chain order.
+    fn test_extents(&self) -> impl Iterator<Item = &ExtentRef> {
+        self.main
+            .chain()
+            .iter()
+            .filter(|e| e.class == ExtentClass::Test)
+    }
+    /// The ids of the pinned extents of the test class, in chain order (publication order).
     #[must_use]
     pub fn extents(&self) -> Vec<u64> {
-        self.0
-            .extents(ExtentClass::Test)
-            .iter()
-            .map(|e| e.id.0)
-            .collect()
+        self.test_extents().map(|e| e.id.0).collect()
     }
     /// Where the pinned test-class extent `id` lies in the container (`(offset, len)`), `None`
     /// when the pin does not hold it or it is not in the container.
     #[must_use]
     pub fn span(&self, id: u64) -> Option<(u64, u64)> {
-        self.0
-            .extents(ExtentClass::Test)
-            .iter()
+        self.test_extents()
             .find(|e| e.id.0 == id)
             .and_then(|e| match e.location {
                 ExtentLocation::Kbx { offset, len } => Some((offset, len)),
@@ -231,15 +246,10 @@ impl PinView<'_> {
     /// # Errors
     /// [`Pin::bytes`]'s errors, a refusal among them when this pin does not hold the extent.
     pub fn bytes_of(&self, other: PinView<'_>, id: u64) -> Result<Option<OwnedBytes>> {
-        let Some(e) = other
-            .0
-            .extents(ExtentClass::Test)
-            .iter()
-            .find(|e| e.id.0 == id)
-        else {
+        let Some(e) = other.test_extents().find(|e| e.id.0 == id) else {
             return Ok(None);
         };
-        self.0.bytes(e).map(Some)
+        self.pin.bytes(e).map(Some)
     }
 }
 
@@ -248,10 +258,14 @@ impl PinView<'_> {
 /// # Errors
 /// The pin's errors.
 pub fn pin(store: &SqliteStore, budget: &QueryBudget) -> Result<TestPin> {
-    Ok(TestPin(store.catalog().pin(&store.lock(), budget)?))
+    let conn = store.lock();
+    let pin = store.catalog().pin(&conn, budget, &[ViewName::Main])?;
+    let main = pin.load_view(&conn, &ViewName::Main)?;
+    Ok(TestPin { pin, main })
 }
 
-/// Run `f` inside a snapshot of `store`'s catalog under `budget` ([`Catalog::with_snapshot`]).
+/// Run `f` inside a snapshot of `store`'s catalog under `budget` ([`Catalog::with_snapshot`]),
+/// with `main` loaded in the snapshot's transaction.
 ///
 /// # Errors
 /// The snapshot's or `f`'s errors.
@@ -262,7 +276,10 @@ pub fn with_snapshot<T>(
 ) -> Result<T> {
     store
         .catalog()
-        .with_snapshot(&store.lock(), budget, |_, pin| f(PinView(pin)))
+        .with_snapshot(&store.lock(), budget, |tx, pin| {
+            let main = pin.load_view(tx, &ViewName::Main)?;
+            f(PinView { pin, main: &main })
+        })
 }
 
 /// Install `hook` in `window` of `store`'s catalog (`None` removes it). A reader's windows run
