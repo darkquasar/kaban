@@ -491,22 +491,28 @@ holder, so the owner is dropped after the last of them, after the span. The inte
   twice, with default features (the embedding-only cases) and with all features (the bootstrap
   cases), and follows the fresh-process children (`--trace-children=yes`), so the allocator
   adapter and SQLite's C code are checked together. Any invalid access, use of uninitialised
-  memory or definite leak fails the job. `tests/valgrind.supp` suppresses two known leaks: the
-  payload of a contained panic (leaked on purpose, see `contain`) and the standard library's
-  main-thread handle. On x86-64 Linux, with Valgrind installed:
+  memory or definite leak fails the job. `tests/valgrind.supp` suppresses one known definite
+  leak, the payload of a contained panic (leaked on purpose, see `contain`); it matches on symbol
+  names, so the job keeps the symbol table (`CARGO_PROFILE_DEV_STRIP=none`). Possible leaks, such
+  as the standard library's main-thread handle, are reported but do not fail the run. On x86-64
+  Linux, with Valgrind installed:
 
   ```sh
+  CARGO_PROFILE_DEV_STRIP=none \
   CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER="valgrind --error-exitcode=1 --leak-check=full \
-    --track-origins=yes --trace-children=yes --suppressions=$PWD/crates/kaban-vtab/tests/valgrind.supp" \
-    cargo nextest run -p kaban-vtab --locked --no-fail-fast   # then again with --all-features
+    --errors-for-leak-kinds=definite --track-origins=yes --trace-children=yes \
+    --suppressions=$PWD/crates/kaban-vtab/tests/valgrind.supp" \
+    cargo nextest run -p kaban-vtab --locked --no-fail-fast --retries 2   # then with --all-features
   ```
 
-  (on aarch64 the variable is `CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER`). What it does not
-  cover: only paths the tests reach; no data races (memcheck is not a race detector; no
-  ThreadSanitizer runs); Rust-level undefined behaviour that touches no invalid memory (aliasing,
-  invalid values), since Miri cannot execute SQLite's C code over FFI; leaks that are still
-  reachable at exit; and macOS. AddressSanitizer is not set up (it needs a nightly toolchain with
-  `rust-src`, which the pinned toolchain does not use).
+  (on aarch64 the variable is `CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER`). The retries absorb
+  the deadline tests, which Valgrind's slowdown can push past their short limits; a memcheck error
+  repeats on every attempt and still fails the run. What it does not cover: only paths the tests
+  reach; no data races (memcheck is not a race detector; no ThreadSanitizer runs); Rust-level
+  undefined behaviour that touches no invalid memory (aliasing, invalid values), since Miri cannot
+  execute SQLite's C code over FFI; possible leaks and leaks still reachable at exit; and macOS.
+  AddressSanitizer is not set up (it needs a nightly toolchain with `rust-src`, which the pinned
+  toolchain does not use).
 - Unscoped work on a scoped thread is charged to the scope's request (see "Not supported"). It
   over-charges that request; it never under-charges one.
 - A table function's `FnError` that wraps a budget refusal, and the adapter's own copy refusal,

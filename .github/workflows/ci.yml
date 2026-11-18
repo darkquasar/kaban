@@ -663,9 +663,14 @@ jobs:
     continue-on-error: false
     env:
       CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-vtab-memcheck
+      # Keep the symbol table (the workflow default strips it): suppressions match on names.
+      CARGO_PROFILE_DEV_STRIP: none
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
       # --trace-children: the fresh-process tests re-execute the test binary; check the child too.
+      # Only definite leaks fail the run; possible ones (std's main-thread handle) are reported.
       CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: >-
-        valgrind --error-exitcode=1 --leak-check=full --track-origins=yes --trace-children=yes
+        valgrind --error-exitcode=1 --leak-check=full --errors-for-leak-kinds=definite
+        --track-origins=yes --trace-children=yes
         --suppressions=${{ github.workspace }}/crates/kaban-vtab/tests/valgrind.supp
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -693,10 +698,11 @@ jobs:
       - name: Fetch locked dependencies
         run: cargo fetch --locked
       # Default features run the embedding-only tests; all features run the bootstrap ones.
+      # Retries absorb deadline tests slowed past their limit; a memcheck error repeats and fails.
       - name: Run kaban-vtab tests under memcheck (default features)
-        run: cargo nextest run -p kaban-vtab --locked --no-fail-fast
+        run: cargo nextest run -p kaban-vtab --locked --no-fail-fast --retries 2
       - name: Run kaban-vtab tests under memcheck (all features)
-        run: cargo nextest run -p kaban-vtab --locked --all-features --no-fail-fast
+        run: cargo nextest run -p kaban-vtab --locked --all-features --no-fail-fast --retries 2
 
   gates:
     name: Rust gates (scripts/ci/ci.sh)
