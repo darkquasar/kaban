@@ -652,6 +652,52 @@ jobs:
       - name: Run helper checks once
         run: bash scripts/ci/ci.sh helpers
 
+  # Memory checker over the one unsafe crate (docs/developer/SAFETY.md). Separate from the
+  # gates below and from the release build; it changes no toolchain.
+  vtab-memcheck:
+    name: kaban-vtab under Valgrind memcheck
+    needs: selection
+    if: ${{ needs.selection.outputs.rust == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    continue-on-error: false
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-vtab-memcheck
+      # --trace-children: the fresh-process tests re-execute the test binary; check the child too.
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: >-
+        valgrind --error-exitcode=1 --leak-check=full --track-origins=yes --trace-children=yes
+        --suppressions=${{ github.workspace }}/crates/kaban-vtab/tests/valgrind.supp
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Prepare tool directory
+        run: sudo install -d -o "$(id -u)" -g "$(id -g)" -m 755 "$MISE_DATA_DIR"
+      - name: Install pinned tools (no executable cache)
+        uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4
+        with:
+          version: 2026.10.24
+          cache: false
+          install_args: --locked python aqua:nextest-rs/nextest/cargo-nextest
+      - name: Install Valgrind
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends valgrind
+          valgrind --version
+      - name: Prepare pinned Rust toolchain
+        run: |
+          # Read the owning toolchain file; do not replace it with an image default.
+          channel=$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')
+          rustup toolchain install "$channel" --profile minimal
+          rustc --version && cargo --version
+      - name: Fetch locked dependencies
+        run: cargo fetch --locked
+      # Default features run the embedding-only tests; all features run the bootstrap ones.
+      - name: Run kaban-vtab tests under memcheck (default features)
+        run: cargo nextest run -p kaban-vtab --locked --no-fail-fast
+      - name: Run kaban-vtab tests under memcheck (all features)
+        run: cargo nextest run -p kaban-vtab --locked --all-features --no-fail-fast
+
   gates:
     name: Rust gates (scripts/ci/ci.sh)
     if: ${{ always() }}
