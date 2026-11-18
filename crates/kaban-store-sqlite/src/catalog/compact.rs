@@ -544,14 +544,26 @@ impl Catalog {
         }
         report.reclaim = self.reclaim(conn)?;
         report.vacuumed_pages = self.vacuum(conn)?;
-        if self.checkpoint_due() {
-            report.checkpoint = Some(self.checkpoint_tick(conn)?);
-            *self
-                .last_tick
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner) = Some(Instant::now());
-        }
+        report.checkpoint = self.checkpoint_if_due(conn)?;
         Ok(report)
+    }
+
+    /// One checkpoint tick when its interval (`[catalog]` `checkpoint_interval_ms`) has
+    /// elapsed since this catalog's last one (always before the first), `None` otherwise:
+    /// compaction's tick and the one a one-shot write runs after its acknowledgement (KER-09).
+    ///
+    /// # Errors
+    /// The tick's errors.
+    pub(crate) fn checkpoint_if_due(&self, conn: &Connection) -> Result<Option<CheckpointReport>> {
+        if !self.checkpoint_due() {
+            return Ok(None);
+        }
+        let tick = self.checkpoint_tick(conn)?;
+        *self
+            .last_tick
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(Instant::now());
+        Ok(Some(tick))
     }
 
     /// Purge `rids` from every class (spec 11 7.8: explicit omission): claim every live extent

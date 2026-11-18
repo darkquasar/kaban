@@ -425,6 +425,16 @@ impl SqliteStore {
         self.catalog.compact(&mut self.lock(), budget)
     }
 
+    /// The bounded checkpoint a one-shot write command runs after its acknowledgement (spec 11
+    /// KER-09): one checkpoint tick when the `[catalog]` `checkpoint_interval_ms` has elapsed
+    /// since this store's last one (always in a fresh process), `None` otherwise.
+    ///
+    /// # Errors
+    /// The tick's errors (`StoreError::StorageFatal` for a failed sync, SQLite errors).
+    pub fn checkpoint_if_due(&self) -> Result<Option<crate::CheckpointReport>> {
+        self.catalog.checkpoint_if_due(&self.lock())
+    }
+
     /// Recover the catalog after a crash (stale claims, unpublished ranges): see
     /// `catalog::recover`.
     ///

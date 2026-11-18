@@ -57,6 +57,11 @@ pub struct ClassExtents {
     pub live: u64,
     /// Retired extents not yet reclaimed.
     pub dead: u64,
+    /// Pending (not yet sealed) sediment rows of the class.
+    pub sediment_rows: u64,
+    /// The newest generation that published a live extent of the class (`None`: no live
+    /// extent).
+    pub newest_generation: Option<u64>,
 }
 
 /// What one verification found ([`Catalog::verify`]). It names its checks: they are
@@ -64,7 +69,7 @@ pub struct ClassExtents {
 /// index's contents (7.8).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct VerifyReport {
-    /// Every extent class in the catalog, in name order.
+    /// Every class with an extent or a pending sediment row, in name order.
     pub classes: Vec<ClassExtents>,
     /// Container ranges (`(offset, len)`) no catalog row names that still hold data: appended
     /// and never published (a leak recovery reclaims).
@@ -157,14 +162,23 @@ impl Catalog {
             let mut report = VerifyReport {
                 classes: query(
                     tx,
-                    "SELECT class, count(*) FILTER (WHERE dead_since IS NULL),
-                            count(*) FILTER (WHERE dead_since IS NOT NULL)
-                     FROM cat_extent GROUP BY class ORDER BY class",
+                    "SELECT class, sum(live), sum(dead), sum(sediment), max(newest) FROM (
+                       SELECT class, dead_since IS NULL AS live, dead_since IS NOT NULL AS dead,
+                              0 AS sediment,
+                              CASE WHEN dead_since IS NULL THEN generation END AS newest
+                       FROM cat_extent
+                       UNION ALL
+                       SELECT class, 0, 0, 1, NULL FROM cat_sediment WHERE dead IS NULL
+                     ) GROUP BY class ORDER BY class",
                     |r| {
                         Ok(ClassExtents {
                             class: r.get(0)?,
                             live: uint(r, 1)?,
                             dead: uint(r, 2)?,
+                            sediment_rows: uint(r, 3)?,
+                            newest_generation: r
+                                .get::<_, Option<i64>>(4)?
+                                .map(|g| u64::try_from(g).unwrap_or(0)),
                         })
                     },
                 )?,
