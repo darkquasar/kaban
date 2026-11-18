@@ -448,12 +448,42 @@ fn physical_memory_mib() -> Option<u64> {
 }
 
 impl CatalogCfg {
-    /// Refuse a value out of range, naming its key.
+    /// Refuse a value out of range, naming its key (spec 11 7.6: never clamped): a count,
+    /// depth or interval of 0, a ratio that is not a positive number, a memory ceiling below
+    /// the smallest unit of work or above physical memory, a deadline below the smallest unit
+    /// of work.
     ///
     /// # Errors
-    /// [`ConfigError::Range`] with the key's dotted path.
+    /// [`ConfigError::Range`] with the key's dotted path (the first refused key).
     pub fn validate(&self) -> Result<(), ConfigError> {
-        Ok(())
+        let memory = self.maintenance_memory_mib;
+        let refused = [
+            ("catalog.seal_ops.text", self.seal_ops.text == 0),
+            ("catalog.seal_ops.graph", self.seal_ops.graph == 0),
+            ("catalog.seal_ops.code", self.seal_ops.code == 0),
+            ("catalog.fold_depth", self.fold_depth == 0),
+            (
+                "catalog.fold_delta_ratio",
+                !(self.fold_delta_ratio.is_finite() && self.fold_delta_ratio > 0.0),
+            ),
+            (
+                "catalog.checkpoint_interval_ms",
+                self.checkpoint_interval_ms == 0,
+            ),
+            (
+                "catalog.maintenance_memory_mib",
+                memory < MIN_MAINTENANCE_MEMORY_MIB
+                    || physical_memory_mib().is_some_and(|physical| memory > physical),
+            ),
+            (
+                "catalog.maintenance_deadline_ms",
+                self.maintenance_deadline_ms < MIN_MAINTENANCE_DEADLINE_MS,
+            ),
+        ];
+        match refused.into_iter().find(|(_, out_of_range)| *out_of_range) {
+            Some((path, _)) => Err(ConfigError::Range { path: path.into() }),
+            None => Ok(()),
+        }
     }
 }
 
@@ -746,13 +776,22 @@ mod catalog_tests {
             ("fold_depth: 0", "catalog.fold_depth"),
             ("fold_delta_ratio: 0.0", "catalog.fold_delta_ratio"),
             ("fold_delta_ratio: -1.0", "catalog.fold_delta_ratio"),
-            ("checkpoint_interval_ms: 0", "catalog.checkpoint_interval_ms"),
-            ("maintenance_memory_mib: 0", "catalog.maintenance_memory_mib"),
+            (
+                "checkpoint_interval_ms: 0",
+                "catalog.checkpoint_interval_ms",
+            ),
+            (
+                "maintenance_memory_mib: 0",
+                "catalog.maintenance_memory_mib",
+            ),
             (
                 "maintenance_memory_mib: 15",
                 "catalog.maintenance_memory_mib",
             ),
-            ("maintenance_deadline_ms: 0", "catalog.maintenance_deadline_ms"),
+            (
+                "maintenance_deadline_ms: 0",
+                "catalog.maintenance_deadline_ms",
+            ),
             (
                 "maintenance_deadline_ms: 99",
                 "catalog.maintenance_deadline_ms",
