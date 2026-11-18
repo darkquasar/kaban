@@ -11,7 +11,7 @@ Usage: bash scripts/ci/ci.sh [all|quality|helpers|functional|pdf|macos|producer|
 No argument means all: quality + helpers + functional + PDF + GNU + musl gates.
 quality: fmt, three Clippy variants, deny and dependency boundaries.
 helpers: Python build/catalog tests and shell syntax (no Rust tools needed).
-functional: workspace/no-default nextest suites and applicable default library doctests.
+functional: workspace/no-default/kaban-vtab nextest suites and library doctests.
 pdf: full PDF-enabled ingest nextest suite and its library doctest.
 macos: focused native ARM64 boundaries, full-feature ingest and public app paths.
 KABAN_MACOS_PRODUCER_QUALIFY=1 adds Darwin producer qualification; default 0.
@@ -307,6 +307,8 @@ functional() {
     step rust_runner "${CARGO:-cargo}" nextest run --workspace --no-fail-fast --success-output immediate
   fi
   step rust_runner "${CARGO:-cargo}" nextest run -p kaban --no-default-features --success-output immediate
+  # Alone, without the CLI's process-bootstrap feature, so the embedding-only tests run.
+  step rust_runner "${CARGO:-cargo}" nextest run -p kaban-vtab --locked --success-output immediate
   step doctests
 }
 
