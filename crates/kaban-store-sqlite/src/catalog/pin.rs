@@ -4,10 +4,11 @@
 //!
 //! The copy is charged to the reader's budget before it is made (PC-17): the rows are counted
 //! first, every allocation the pin keeps (one vector per class, each payload and cold path,
-//! the container path) is reserved at its exact capacity, and only then copied into that
-//! capacity, never past it. Loading and the snapshot's statements obey the budget's deadline:
-//! the copy loops check it at bounded intervals, a progress handler interrupts a long
-//! statement, and a cancelled or expired budget turns any outcome into its error.
+//! the container path, the shared pin lock) is reserved at its exact capacity, and only then
+//! copied into that capacity, never past it. Loading and the snapshot's statements obey the
+//! budget's deadline: the copy loops check it at bounded intervals, a progress handler
+//! interrupts a long statement, and a cancelled or expired budget turns any outcome into its
+//! error.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -33,6 +34,13 @@ const CHECK_EVERY: usize = 256;
 
 /// How many SQLite virtual-machine steps pass between two budget checks of a statement.
 const PROGRESS_STEPS: i32 = 1000;
+
+/// The one allocation of a pin's shared lock (`Arc`: its two counts and the lock), as
+/// `(bytes, alignment)`: charged with the copy.
+const SHARED_LOCK: (usize, usize) = (
+    2 * size_of::<usize>() + size_of::<PinLock>(),
+    align_of::<PinLock>(),
+);
 
 /// One collection per extent class in a fixed layout: no map nodes to account for.
 #[derive(Debug)]
@@ -75,15 +83,17 @@ pub(crate) struct Pin {
     generation: Generation,
     kbx: PathBuf,
     /// The container's mapping, shared with the catalog's other pins (excluded from the
-    /// copy's charge: a shared immutable mapping, PC-17).
+    /// copy's charge: a shared immutable mapping, PC-17). It holds no pin lock; only the
+    /// bytes [`Pin::bytes`] hands out do.
     mapping: Arc<Mapping>,
     extents: ByClass<ExtentRef>,
     sediment: ByClass<SedimentRow>,
     /// The copy's charge against the reader's budget, released with the pin.
     _copy: BudgetLease,
     /// The lock at the candidate generation that keeps reclamation off what the pin can
-    /// reach (PC-8); `None` for an in-memory database, which has no container.
-    _lock: Option<PinLock>,
+    /// reach (PC-8), shared with every byte span the pin hands out; `None` for an in-memory
+    /// database, which has no container.
+    lock: Option<Arc<PinLock>>,
 }
 
 #[expect(
@@ -104,22 +114,47 @@ impl Pin {
         self.sediment.get(class)
     }
     /// The bytes of `e`, one of this pin's extents: a slice of the container's mapping,
-    /// re-mapped when the span lies beyond it, bounds-checked against the file. The slice is
-    /// what the pin protects: read it while the pin lives (once the pin is released,
-    /// reclamation may zero the range under a slice still held).
+    /// re-mapped when the span lies beyond it, bounds-checked against the file. The bytes
+    /// carry the pin's lock: the extent stays protected from reclamation for as long as any
+    /// clone or slice of them lives, after the pin itself is dropped. Protection is not
+    /// snapshot validity: once [`Catalog::with_snapshot`] returns, its SQL transaction is
+    /// over, and bytes that escaped it keep only their extent's protection.
     ///
     /// # Errors
-    /// `kbx::ContainerError` for a span beyond the container or a container that cannot be
-    /// mapped, and for a cold extent (`ExtentLocation::File`), which this stream never reads.
+    /// `kbx::ContainerError` for an extent this pin does not hold, a span beyond the container
+    /// or a container that cannot be mapped, and for a cold extent (`ExtentLocation::File`),
+    /// which this stream never reads.
     pub(crate) fn bytes(&self, e: &ExtentRef) -> Result<OwnedBytes> {
-        match &e.location {
-            ExtentLocation::Kbx { offset, len } => self.mapping.span(&self.kbx, *offset, *len),
-            ExtentLocation::File { relpath } => Err(failed(
-                "read a cold extent outside",
+        if !self.holds(e) {
+            return Err(failed(
+                "read an extent this pin does not hold from",
                 &self.kbx,
-                std::io::Error::new(std::io::ErrorKind::Unsupported, relpath.clone()),
-            )),
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("extent {}", e.id.0),
+                ),
+            ));
         }
+        let span = match &e.location {
+            ExtentLocation::Kbx { offset, len } => self.mapping.span(&self.kbx, *offset, *len)?,
+            ExtentLocation::File { relpath } => {
+                return Err(failed(
+                    "read a cold extent outside",
+                    &self.kbx,
+                    std::io::Error::new(std::io::ErrorKind::Unsupported, relpath.clone()),
+                ));
+            }
+        };
+        Ok(match &self.lock {
+            Some(lock) => kaban_vtab::retain_owner(span, Arc::clone(lock)),
+            None => span,
+        })
+    }
+    /// Whether `e` is one of this pin's extents (each class's extents are in id order).
+    fn holds(&self, e: &ExtentRef) -> bool {
+        let held = self.extents.get(e.class);
+        held.binary_search_by_key(&e.id, |h| h.id)
+            .is_ok_and(|i| held[i] == *e)
     }
     /// The container's path.
     pub(crate) fn kbx_path(&self) -> &Path {
@@ -133,6 +168,9 @@ impl Pin {
     /// test checks the copy's charge against.
     pub(crate) fn retained_allocations(&self) -> Vec<(usize, usize)> {
         let mut out = vec![(self.kbx.capacity(), 1)];
+        if self.lock.is_some() {
+            out.push(SHARED_LOCK);
+        }
         for rows in &self.extents.rows {
             out.push((
                 rows.capacity() * size_of::<ExtentRef>(),
@@ -187,10 +225,12 @@ fn settle<T>(budget: &QueryBudget, out: Result<T>) -> Result<T> {
 
 impl Catalog {
     /// Pin by PC-8 and run `f` with the pin's own read transaction, held open while `f`
-    /// evaluates rows and indexes; the transaction and the pin lock end on every exit.
-    /// Acquisition and execution share `budget`: a statement of `f` is interrupted once it is
-    /// cancelled or past its deadline, and then the budget's error is the outcome even when
-    /// `f` returned `Ok`.
+    /// evaluates rows and indexes; the transaction ends on every exit, and the pin lock with
+    /// it unless bytes taken from the pin ([`Pin::bytes`]) still live: those keep the lock,
+    /// and so their extents' protection from reclamation, but not the snapshot. Acquisition
+    /// and execution share `budget`: a statement of `f` is interrupted once it is cancelled or
+    /// past its deadline, and then the budget's error is the outcome even when `f` returned
+    /// `Ok`.
     ///
     /// # Errors
     /// [`OuterTransaction`] when `conn` already has a transaction open; the closure's, the
@@ -212,8 +252,9 @@ impl Catalog {
 
     /// Pin as [`Self::with_snapshot`] does, copy every index input under `budget`, end the
     /// transaction and return the detached pin. It keeps its candidate's pin lock (and the
-    /// container's mapping) until it is dropped, after the store that took it if need be; it
-    /// serves no statement that reads live rows.
+    /// container's mapping) until it is dropped, after the store that took it if need be, and
+    /// bytes taken from it keep that lock in the same way while any of them lives; it serves
+    /// no statement that reads live rows.
     ///
     /// # Errors
     /// [`OuterTransaction`] when `conn` already has a transaction open; the budget's, the pin
@@ -294,7 +335,12 @@ impl Catalog {
     ) -> Result<Pin> {
         budget.check().map_err(budget_exceeded)?;
         let plan = CopyPlan::count(tx, &self.kbx)?;
-        let copy = budget.reserve(plan.charge).map_err(budget_exceeded)?;
+        let shared_lock = match lock {
+            Some(_) => allocation(SHARED_LOCK.0, SHARED_LOCK.1)?,
+            None => 0,
+        };
+        let charge = plan.charge.checked_add(shared_lock).ok_or_else(overflow)?;
+        let copy = budget.reserve(charge).map_err(budget_exceeded)?;
         let kbx = self.kbx.clone();
         let extents = self.copy_extents(tx, budget, &plan.extents)?;
         let sediment = self.copy_sediment(tx, budget, &plan.sediment)?;
@@ -306,7 +352,7 @@ impl Catalog {
             extents,
             sediment,
             _copy: copy,
-            _lock: lock,
+            lock: lock.map(Arc::new),
         })
     }
 
