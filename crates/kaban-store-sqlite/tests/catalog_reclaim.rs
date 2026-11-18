@@ -368,17 +368,26 @@ fn a_small_extent_sharing_a_block_with_live_data_frees_no_allocated_space() {
 #[test]
 fn a_waiting_checkpoint_is_not_overtaken_by_a_stream_of_overlapping_readers() {
     // Arrange: readers on their own stores, each re-entering a 5 ms snapshot at once, staggered
-    // so the gate and the admission lock are never free for long
+    // so the gate and the admission lock are never free for long; no write starts before every
+    // reader has its store open and is about to enter its loop
     let s = Scratch::new("kaban-t6-reclaim", "reader-stream");
     let store = SqliteStore::open(&s.db(), &s.keys()).unwrap();
     catalog_testing::append_and_publish(&store, &pattern(1)).unwrap();
     let stop = Arc::new(AtomicBool::new(false));
     let (done, finished) = mpsc::channel();
+    let (opened, open_readers) = mpsc::channel();
     for i in 0..6_u64 {
-        let (db, keys, stop, done) = (s.db(), s.keys(), Arc::clone(&stop), done.clone());
+        let (db, keys, stop, done, opened) = (
+            s.db(),
+            s.keys(),
+            Arc::clone(&stop),
+            done.clone(),
+            opened.clone(),
+        );
         std::thread::spawn(move || {
             let reader = SqliteStore::open(&db, &keys).unwrap();
             std::thread::sleep(Duration::from_millis(i));
+            let _ = opened.send(());
             let started = Instant::now();
             let mut n = 0_u64;
             while !stop.load(Ordering::Acquire) && started.elapsed() < ROLE_DEADLINE {
@@ -391,6 +400,11 @@ fn a_waiting_checkpoint_is_not_overtaken_by_a_stream_of_overlapping_readers() {
             }
             let _ = done.send(n);
         });
+    }
+    for i in 0..6 {
+        open_readers
+            .recv_timeout(STEP)
+            .unwrap_or_else(|e| panic!("only {i} of 6 readers opened their store: {e}"));
     }
     std::thread::sleep(Duration::from_millis(50));
 
