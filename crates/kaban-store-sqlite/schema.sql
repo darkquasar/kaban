@@ -207,14 +207,19 @@ CREATE INDEX cat_extent_class ON cat_extent(class, generation);
 -- range ends past the new range's start.
 CREATE INDEX cat_extent_kbx_end ON cat_extent(kbx_offset + kbx_len) WHERE kbx_offset IS NOT NULL;
 
+-- `dead` is the generation whose compaction switch consumed the row (NULL while it is
+-- pending): a pin skips dead rows, and reclamation deletes them later in chunks (PC-9).
 CREATE TABLE cat_sediment(
   seq INTEGER PRIMARY KEY AUTOINCREMENT,
   class TEXT NOT NULL,
   generation INTEGER NOT NULL,
-  payload BLOB NOT NULL
+  payload BLOB NOT NULL,
+  dead INTEGER
 );
 
 CREATE INDEX cat_sediment_class ON cat_sediment(class, seq);
+
+CREATE INDEX cat_sediment_dead ON cat_sediment(seq) WHERE dead IS NOT NULL;
 
 CREATE TABLE cat_claim(
   extent INTEGER PRIMARY KEY REFERENCES cat_extent(id),

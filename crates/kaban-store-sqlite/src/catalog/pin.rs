@@ -85,7 +85,7 @@ struct Views {
 }
 
 /// One view's inputs as a pin loaded them: its extent chain, oldest first, and its pending
-/// sediment rows, in sequence order. Its charge is released when the last holder drops it.
+/// sediment rows (those no compaction switch consumed: `dead` unset), in sequence order. Its charge is released when the last holder drops it.
 #[derive(Debug)]
 pub(crate) struct PinnedView {
     name: Box<str>,
@@ -237,7 +237,7 @@ impl Pin {
     fn copy_sediment(&self, conn: &Connection, counted: usize) -> Result<Vec<SedimentRow>> {
         let mut out = Vec::with_capacity(counted);
         let mut stmt = conn
-            .prepare("SELECT seq, class, payload FROM cat_sediment ORDER BY seq")
+            .prepare("SELECT seq, class, payload FROM cat_sediment WHERE dead IS NULL ORDER BY seq")
             .sql()?;
         let mut rows = stmt.query([]).sql()?;
         while let Some(r) = rows.next().sql()? {
@@ -539,7 +539,7 @@ impl ViewPlan {
                 conn,
                 "SELECT count(*), COALESCE(sum(length(payload)), 0),
                         COALESCE(sum(length(payload) > 0), 0)
-                 FROM cat_sediment",
+                 FROM cat_sediment WHERE dead IS NULL",
                 [],
                 (size_of::<SedimentRow>(), align_of::<SedimentRow>()),
             )?
