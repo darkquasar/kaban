@@ -324,7 +324,7 @@ impl Reclaimer {
     /// The reclamation on a thread of this process, with its own store of `s`'s database.
     fn thread(s: &Scratch) -> Self {
         let (commands, inbox): (Sender<Command>, Receiver<Command>) = channel();
-        let (outbox, replies) = channel();
+        let (replies_tx, replies) = channel();
         let (db, keys) = (s.db(), s.keys());
         let handle = std::thread::spawn(move || {
             let store = SqliteStore::open(&db, &keys).unwrap();
@@ -337,7 +337,7 @@ impl Reclaimer {
                     .unwrap_or(Command::Exit)
             });
             let answer: Answer = Arc::new(move |reply| {
-                let _ = outbox.send(reply);
+                let _ = replies_tx.send(reply);
             });
             serve(&store, &next, &answer);
         });
@@ -368,12 +368,12 @@ impl Reclaimer {
             .unwrap();
         let stdin: Mutex<ChildStdin> = Mutex::new(child.stdin.take().unwrap());
         let stdout = child.stdout.take().unwrap();
-        let (outbox, replies) = channel();
+        let (replies_tx, replies) = channel();
         std::thread::spawn(move || {
             for line in std::io::BufReader::new(stdout).lines() {
                 let Ok(line) = line else { return };
                 if let Some(reply) = Reply::decode(&line)
-                    && outbox.send(reply).is_err()
+                    && replies_tx.send(reply).is_err()
                 {
                     return;
                 }

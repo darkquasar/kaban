@@ -864,8 +864,9 @@ fn a_long_statement_in_a_cancelled_snapshot_is_interrupted() {
         .with_snapshot(&mut store.lock(), &budget, |tx, _| {
             budget.cancel();
             let row = tx.query_row(
-                "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 20000000)
-                 SELECT count(*) FROM c",
+                "WITH d(x) AS (VALUES (1), (2), (3), (4), (5), (6), (7), (8),
+                                     (9), (10), (11), (12), (13), (14), (15), (16))
+                 SELECT count(*) FROM d AS a, d AS b, d AS c, d AS e, d AS f, d AS g",
                 [],
                 |r| r.get::<_, i64>(0),
             );
