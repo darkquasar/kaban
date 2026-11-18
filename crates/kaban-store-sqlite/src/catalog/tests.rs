@@ -104,8 +104,8 @@ impl Scripted {
 }
 
 impl IndexClass for Scripted {
-    fn class(&self) -> ExtentClass {
-        ExtentClass::Test
+    fn classes(&self) -> &[ExtentClass] {
+        &[ExtentClass::Test]
     }
     fn stage(&self, txn: &mut Stage<'_>, changes: &BatchChanges) -> Result<()> {
         self.seen
@@ -1803,19 +1803,20 @@ fn a_writer_catalog_registers_the_text_graph_and_code_classes() {
     // Arrange, Act
     let store = SqliteStore::open_memory().unwrap();
 
-    // Assert: the three production classes, in that order, before any test class
-    let classes: Vec<ExtentClass> = store
+    // Assert: the three production classes, in that order, before any test class; graph and
+    // code own their bases beside their layers
+    let classes: Vec<Vec<ExtentClass>> = store
         .catalog()
         .classes()
         .iter()
-        .map(|c| c.class())
+        .map(|c| c.classes().to_vec())
         .collect();
     assert_eq!(
         classes,
         vec![
-            ExtentClass::TextTier,
-            ExtentClass::GraphLayer,
-            ExtentClass::CodeLayer
+            vec![ExtentClass::TextTier],
+            vec![ExtentClass::GraphLayer, ExtentClass::GraphBase],
+            vec![ExtentClass::CodeLayer, ExtentClass::CodeBase]
         ]
     );
 }

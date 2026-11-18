@@ -599,7 +599,7 @@ impl Catalog {
             for class in self.classes() {
                 let mut extents: Vec<ExtentRef> = Vec::new();
                 for e in pinned.views.iter().flat_map(|v| v.chain()) {
-                    if e.class == class.class() && !extents.contains(e) {
+                    if class.classes().contains(&e.class) && !extents.contains(e) {
                         extents.push(e.clone());
                     }
                 }
@@ -628,7 +628,7 @@ impl Catalog {
                                 added: vec![added.len()],
                             });
                         }
-                        added.push(bytes);
+                        added.push((e.class, bytes));
                         retired.push(e.id);
                     }
                     Ok((!added.is_empty()).then_some(Planned {
@@ -661,9 +661,12 @@ impl Catalog {
         let rows: Vec<&SedimentRow> = main
             .sediment()
             .iter()
-            .filter(|r| r.class == class.class())
+            .filter(|r| class.classes().contains(&r.class))
             .collect();
-        let trigger = seal_trigger(class.class(), &self.config().seal_ops);
+        let Some(&layer) = class.classes().first() else {
+            return Ok(());
+        };
+        let trigger = seal_trigger(layer, &self.config().seal_ops);
         if rows.is_empty() || rows.len() < usize::try_from(trigger).unwrap_or(usize::MAX) {
             return Ok(());
         }
@@ -681,7 +684,7 @@ impl Catalog {
                 Ok(class
                     .seal(&pinned.pin, &unit.rows, &work)?
                     .map(|bytes| Planned {
-                        added: vec![bytes],
+                        added: vec![(layer, bytes)],
                         views: vec![ViewSwitch {
                             view: main_name.clone(),
                             replaced: Vec::new(),
@@ -713,7 +716,8 @@ impl Catalog {
         report: &mut CompactReport,
     ) -> Result<()> {
         let chain = view.chain();
-        let own: Vec<&ExtentRef> = chain.iter().filter(|e| e.class == class.class()).collect();
+        let owns = |e: &ExtentRef| class.classes().contains(&e.class);
+        let own: Vec<&ExtentRef> = chain.iter().filter(|e| owns(e)).collect();
         let Some((base, layers)) = own.split_first() else {
             return Ok(());
         };
@@ -735,12 +739,12 @@ impl Catalog {
                 .iter()
                 .any(|v| !std::ptr::eq(v.as_ref(), view) && v.chain().contains(e))
         };
-        let Some(last) = chain.iter().rposition(|e| e.class == class.class()) else {
+        let Some(last) = chain.iter().rposition(owns) else {
             return Ok(());
         };
         let first = chain[..=last]
             .iter()
-            .rposition(|e| e.class != class.class() || shared(e))
+            .rposition(|e| !owns(e) || shared(e))
             .map_or(0, |p| p + 1);
         let run = &chain[first..=last];
         if run.len() < 2 {
@@ -761,7 +765,8 @@ impl Catalog {
                 Ok(class
                     .fold(&pinned.pin, &unit.extents, &work)?
                     .map(|bytes| Planned {
-                        added: vec![bytes],
+                        // the fold takes the class of its oldest input (a base stays a base)
+                        added: vec![(unit.extents[0].class, bytes)],
                         views: vec![ViewSwitch {
                             view: name.clone(),
                             replaced: ids.clone(),
@@ -814,8 +819,8 @@ impl Catalog {
             WorkKind::Purge => {}
         }
         let mut added = Vec::with_capacity(planned.added.len());
-        for bytes in &planned.added {
-            match self.append_extent(unit.class.class(), bytes) {
+        for (class, bytes) in &planned.added {
+            match self.append_extent(*class, bytes) {
                 Ok(extent) => added.push(extent),
                 Err(e) => {
                     self.release(conn, claim)?;
@@ -920,10 +925,10 @@ struct Unit<'c> {
     rows: Vec<&'c SedimentRow>,
 }
 
-/// What a unit's merge wrote and how it switches the chains: the new extents' bytes, the
+/// What a unit's merge wrote and how it switches the chains: the new extents' classes and bytes, the
 /// chain changes (indices into `added`), the extents it retires and the rows it consumes.
 struct Planned {
-    added: Vec<Vec<u8>>,
+    added: Vec<(ExtentClass, Vec<u8>)>,
     views: Vec<ViewSwitch>,
     retired: Vec<ExtentId>,
     sediment: Vec<SedimentSeq>,
@@ -946,7 +951,7 @@ impl Outcome {
 
     /// Add this outcome of `unit` to `published` or `skipped`.
     fn record(self, unit: &Unit<'_>, published: &mut Vec<Compacted>, skipped: &mut Vec<Skipped>) {
-        let class = unit.class.class().as_str();
+        let class = unit.class.classes().first().map_or("", |c| c.as_str());
         let extents = unit.extents.iter().map(|e| e.id.0).collect();
         let sediment_rows = unit.rows.len();
         match self {

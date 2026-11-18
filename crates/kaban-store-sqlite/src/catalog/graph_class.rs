@@ -18,8 +18,8 @@ use super::tables::{ExtentRef, SedimentRow};
 pub(crate) struct GraphClass;
 
 impl IndexClass for GraphClass {
-    fn class(&self) -> ExtentClass {
-        ExtentClass::GraphLayer
+    fn classes(&self) -> &[ExtentClass] {
+        &[ExtentClass::GraphLayer, ExtentClass::GraphBase]
     }
     /// Stages nothing until T11.
     fn stage(&self, _txn: &mut Stage<'_>, _changes: &BatchChanges) -> Result<()> {

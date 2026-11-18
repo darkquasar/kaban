@@ -85,8 +85,9 @@ pub(crate) enum ExtentLocation {
 /// `super::testing`.
 #[expect(dead_code, reason = "T7's reindex calls `rebuild`")]
 pub(crate) trait IndexClass: Send + Sync {
-    /// The class of the extents and sediment this index owns.
-    fn class(&self) -> ExtentClass;
+    /// The classes of the extents and sediment this index owns (a layer class and its base
+    /// class): compaction and purge select by them. The first is the class its seals write.
+    fn classes(&self) -> &[ExtentClass];
     /// Stage this commit's changes (sediment rows) inside the writer transaction; `txn` stages
     /// sediment and nothing else.
     ///

@@ -18,8 +18,8 @@ use super::tables::{ExtentRef, SedimentRow};
 pub(crate) struct CodeClass;
 
 impl IndexClass for CodeClass {
-    fn class(&self) -> ExtentClass {
-        ExtentClass::CodeLayer
+    fn classes(&self) -> &[ExtentClass] {
+        &[ExtentClass::CodeLayer, ExtentClass::CodeBase]
     }
     /// Stages nothing until T16.
     fn stage(&self, _txn: &mut Stage<'_>, _changes: &BatchChanges) -> Result<()> {

@@ -684,8 +684,8 @@ struct EdgeSediment {
 }
 
 impl IndexClass for EdgeSediment {
-    fn class(&self) -> ExtentClass {
-        ExtentClass::Test
+    fn classes(&self) -> &[ExtentClass] {
+        &[ExtentClass::Test]
     }
     fn stage(&self, txn: &mut Stage<'_>, changes: &BatchChanges) -> Result<()> {
         for e in changes.edges() {
