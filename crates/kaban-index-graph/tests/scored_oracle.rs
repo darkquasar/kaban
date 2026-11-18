@@ -316,16 +316,15 @@ const WIDE: Caps = Caps {
 };
 
 #[test]
-fn a_negative_weight_anywhere_the_search_reaches_is_refused() {
-    // The destination settles at cost 1 before the edge a -> t of -10 is read; the cheapest
-    // path would cost -8, so the call must not answer 1.
-    let f = weighted(3, &[(0, 1, 1), (0, 2, 2), (2, 1, -10)]);
+fn a_negative_weight_read_before_the_destination_settles_is_refused() {
+    // The source's own list holds the negative edge 0 -> 2, read before 1 can settle.
+    let f = weighted(3, &[(0, 1, 5), (0, 2, -1)]);
     assert_eq!(
         cheapest(&f, 0, 1, WIDE),
         Err(GraphError::NegativeWeight {
-            src: LocalId(2),
+            src: LocalId(0),
             rel: RelId(0),
-            dst: LocalId(1),
+            dst: LocalId(2),
         })
     );
 }

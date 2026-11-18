@@ -64,22 +64,25 @@ fn heap_pop(h: &mut Grow<'_, Entry>) -> Option<Entry> {
 /// the one with the lowest `order` rank (equal-cost choices follow the stable public order, not
 /// local ids).
 ///
-/// Weights must be non-negative, and a cheapest path is only exact when every edge it could
-/// depend on is: a negative edge anywhere `src` reaches can undercut any cost found. So the
-/// search does not stop at `dst`; it settles everything `src` reaches within the caps, checks
-/// every edge it reads, and answers only after that.
+/// Correctness relies on the store's invariant that every weight is non-negative (the store
+/// refuses a negative weight at write time). The search stops once `dst` settles, so it reads
+/// only the lists of the nodes settled before it; a negative weight among the edges it reads is
+/// refused, but that check is a defence, not a guarantee: a negative edge the search never
+/// reads is not seen.
 ///
 /// Caps bound the search itself and a cut never reads as an answer:
 /// - `rows`: the search settles at most `caps.rows` nodes (`src` included) and refuses when
-///   there are more to settle;
+///   it would settle more before `dst`;
 /// - `depth`: a node settled `caps.depth` hops from `src` is not expanded further. Its edges
-///   are still checked, and the call refuses unless each leads to a settled node at no greater
-///   cost (so no path past the bound can be cheaper or reach a node the search missed).
+///   are still read and recorded. With `dst` settled, the call refuses when a recorded edge
+///   gives a lower cost than the path found (a cheaper path may lie past the bound); without
+///   it, unless each recorded edge leads to a settled node at no greater cost (the bound may
+///   hide `dst`).
 ///
-/// Work: a Dijkstra search over the nodes `src` reaches within the caps; each settled node's
-/// outgoing list is read once and every edge read pushes at most one heap entry. The heap, the
-/// settled set, the edges past the depth bound and the path are reserved on `budget`; the path
-/// holds its charge.
+/// Work: a Dijkstra search that stops when `dst` settles; each settled node's outgoing list is
+/// read once and every edge read pushes at most one heap entry. The heap, the settled set, the
+/// edges past the depth bound and the path are reserved on `budget`; the path holds its
+/// charge.
 ///
 /// # Errors
 /// [`GraphError::CapMissing`] for a zero cap; [`GraphError::CapExceeded`] naming `rows` or
@@ -133,6 +136,7 @@ pub fn weighted_shortest_path(
         settled.insert(at, (node, parent, hops, cost))?;
         if node == dst.0 {
             found = Some((cost, hops));
+            break;
         }
         for row in v.neighbours(LocalId(node), rels, Direction::Out, budget) {
             let (m, rel, attr) = row?;
@@ -165,7 +169,11 @@ pub fn weighted_shortest_path(
     }
     for &(m, cost) in past.iter() {
         tick.tick(Phase::Weighted)?;
-        if find(&settled, m).is_none_or(|(.., settled_cost)| settled_cost > cost) {
+        let cut = match found {
+            Some((found_cost, _)) => cost < found_cost,
+            None => find(&settled, m).is_none_or(|(.., settled_cost)| settled_cost > cost),
+        };
+        if cut {
             return Err(GraphError::CapExceeded {
                 limit: "depth",
                 max: u64::from(caps.depth),
