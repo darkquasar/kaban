@@ -814,6 +814,19 @@ pub fn append_unpublished(store: &SqliteStore, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// Set the label of the view `view` (by name) of `store`'s catalog ([`Catalog::set_view_label`]).
+///
+/// # Errors
+/// A view name that does not parse; the commit's errors.
+pub fn set_view_label(store: &SqliteStore, view: &str, label: Option<&str>) -> Result<()> {
+    let view = view.parse::<ViewName>().map_err(|e| StoreError::Backend {
+        source: kaban_core::BackendSource::new(e),
+    })?;
+    store
+        .catalog()
+        .set_view_label(&mut store.lock(), &view, label)
+}
+
 /// Run `sql` in one catalog commit of `store`: a test's corruption of the catalog rows.
 ///
 /// # Errors

@@ -404,7 +404,8 @@ impl Catalog {
     }
 
     /// Pin as [`Self::with_snapshot`] does, load each of `views` under `budget`, end the
-    /// transaction and return the detached pin. It keeps its candidate's pin lock (and the
+    /// transaction, record now as the views' last use (`cat_view.last_used`, amendment 3.3)
+    /// and return the detached pin. It keeps its candidate's pin lock (and the
     /// container's mapping) until it is dropped, after the store that took it if need be, and
     /// bytes taken from it keep that lock in the same way while any of them lives; it serves
     /// no statement that reads live rows, and loads no other view.
@@ -413,6 +414,22 @@ impl Catalog {
     /// [`OuterTransaction`] when `conn` already has a transaction open or a live statement; the budget's, the pin
     /// lock's or SQLite's error.
     pub(crate) fn pin(
+        &self,
+        conn: &Connection,
+        budget: &QueryBudget,
+        views: &[ViewName],
+    ) -> Result<Pin> {
+        let pin = self.pin_untouched(conn, budget, views)?;
+        self.touch_views(conn, views);
+        Ok(pin)
+    }
+
+    /// [`Self::pin`] without recording the views' last use: maintenance's own pins
+    /// (compaction, verification) are no use of a view.
+    ///
+    /// # Errors
+    /// As [`Self::pin`].
+    pub(crate) fn pin_untouched(
         &self,
         conn: &Connection,
         budget: &QueryBudget,

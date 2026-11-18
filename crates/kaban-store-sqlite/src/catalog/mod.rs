@@ -43,6 +43,7 @@ pub mod testing;
 #[cfg(test)]
 mod tests;
 mod text_class;
+mod views;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};

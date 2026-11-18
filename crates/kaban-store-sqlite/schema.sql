@@ -227,10 +227,16 @@ CREATE TABLE cat_claim(
   claimed_at INTEGER NOT NULL
 );
 
+-- One row per view a publication or a pin named (amendment 3.2, 3.3): `last_used` is the unix
+-- second of its latest pin, `label` a name for people (T16 sets it); compaction keeps the
+-- newest `[catalog] view_retention` live views besides `main` and marks the rest
+-- `needs_reimport`.
 CREATE TABLE cat_view(
   name TEXT PRIMARY KEY,
   parent TEXT,
-  state TEXT NOT NULL DEFAULT 'live' CHECK(state IN ('live','needs_reimport'))
+  state TEXT NOT NULL DEFAULT 'live' CHECK(state IN ('live','needs_reimport')),
+  last_used INTEGER,
+  label TEXT
 );
 
 -- Each view's ordered extent chain (spec 11 7.4), for every view kind (`main`, `code@<sha>`):

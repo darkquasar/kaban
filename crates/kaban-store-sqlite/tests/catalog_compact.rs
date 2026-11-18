@@ -542,6 +542,91 @@ fn inputs_beyond_the_maintenance_memory_skip_the_pass_instead_of_loading() {
     assert_eq!(catalog_testing::pin_sediment_rows(&store).unwrap().len(), 20);
 }
 
+/// A code view's name, every hex digit `c`.
+fn code_of(c: char) -> String {
+    format!("code@{}", c.to_string().repeat(40))
+}
+
+#[test]
+fn compaction_retires_the_least_recently_used_views_past_the_retention_but_keeps_a_parent() {
+    // Arrange: code views P, A, B and C, last used in that order, C's parent P, a retention of
+    // two; A and B share one extent, A holds one of its own
+    let s = Scratch::new("kaban-t6-compact", "retention");
+    let store = SqliteStore::open(&s.db(), &s.keys())
+        .unwrap()
+        .with_catalog_config(CatalogCfg {
+            view_retention: 2,
+            ..policy()
+        })
+        .unwrap();
+    let _observed = catalog_testing::install_edge_sediment_class(&store);
+    let (p, a, b, c) = (code_of('1'), code_of('2'), code_of('3'), code_of('4'));
+    catalog_testing::append_and_publish_into(&store, &pattern(1, 32), &[&p]).unwrap();
+    let shared =
+        catalog_testing::append_and_publish_into(&store, &pattern(2, 32), &[&a, &b]).unwrap();
+    let own = catalog_testing::append_and_publish_into(&store, &pattern(3, 32), &[&a]).unwrap();
+    catalog_testing::append_and_publish_into(&store, &pattern(4, 32), &[&c]).unwrap();
+    catalog_testing::corrupt(
+        &store,
+        &format!(
+            "UPDATE cat_view SET last_used = 50 WHERE name = '{p}';
+             UPDATE cat_view SET last_used = 100 WHERE name = '{a}';
+             UPDATE cat_view SET last_used = 200 WHERE name = '{b}';
+             UPDATE cat_view SET last_used = 300, parent = '{p}' WHERE name = '{c}';"
+        ),
+    )
+    .unwrap();
+
+    // Act
+    let report = catalog_testing::compact(&store, unit(u64::MAX)).unwrap();
+
+    // Assert: A is retired (needs reimport, its chain gone, its own extent retired); P stays as
+    // C's parent; the shared extent stays live in B
+    assert_eq!(report.views_retired, vec![a.clone()], "{report:?}");
+    let verified = store.verify_catalog().unwrap();
+    assert_eq!(verified.needs_reimport, vec![a.clone()], "{verified:?}");
+    assert_eq!(verified.chain_inconsistencies, Vec::<String>::new());
+    assert_eq!(catalog_testing::chain(&store, &a).unwrap(), Vec::<u64>::new());
+    assert_eq!(catalog_testing::chain(&store, &b).unwrap(), vec![shared]);
+    assert!(
+        catalog_testing::claim(&store, &[own]).unwrap().is_none(),
+        "A's own extent is still live"
+    );
+    assert!(catalog_testing::claim(&store, &[shared]).unwrap().is_some());
+}
+
+#[test]
+fn a_pin_records_when_it_used_its_view_and_a_label_names_a_view() {
+    // Arrange
+    let s = Scratch::new("kaban-t6-compact", "last-used");
+    let store = open(&s);
+    let view = code_of('5');
+    catalog_testing::append_and_publish_into(&store, &pattern(1, 32), &[&view]).unwrap();
+    let before = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    // Act: a pin of the view, then a label
+    catalog_testing::chain(&store, &view).unwrap();
+    catalog_testing::set_view_label(&store, &view, Some("the feature branch")).unwrap();
+
+    // Assert
+    let conn = rusqlite::Connection::open(s.db()).unwrap();
+    let (last_used, label): (Option<i64>, Option<String>) = conn
+        .query_row(
+            "SELECT last_used, label FROM cat_view WHERE name = ?1",
+            [&view],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert!(
+        last_used.is_some_and(|t| u64::try_from(t).unwrap() >= before),
+        "{last_used:?}"
+    );
+    assert_eq!(label.as_deref(), Some("the feature branch"));
+}
+
 /// The `rid`s of a sealed edge payload line (`<op> <src> <dst> <rel>`).
 fn rids_of(payload: &str) -> (i64, i64) {
     let mut fields = payload.split_whitespace().skip(1);

@@ -64,8 +64,9 @@ impl Txn<'_> {
     /// (live, or dead and not yet reclaimed: reclaiming it would release the new extent's
     /// bytes), is refused by name and the commit rolls back. A token whose commit rolls back is
     /// gone with it: its range stays unnamed until T6's recovery reclaims it. The row records
-    /// the bytes' SHA-256, and the extent is appended to the chain of each of `views` in the
-    /// same commit (spec 11 7.4): views share an extent, such as a base, by each naming it.
+    /// the bytes' SHA-256, and the extent is appended to the chain of each of `views` (each
+    /// gains its `cat_view` row) in the same commit (spec 11 7.4): views share an extent, such
+    /// as a base, by each naming it.
     ///
     /// # Errors
     /// [`PublishRefused`] (behind `StoreError::Backend`); SQLite errors.
@@ -120,6 +121,12 @@ impl Txn<'_> {
             )
             .sql()?;
         for view in views {
+            self.tx
+                .execute(
+                    "INSERT OR IGNORE INTO cat_view(name) VALUES (?1)",
+                    [view.to_string()],
+                )
+                .sql()?;
             self.tx
                 .execute(
                     "INSERT INTO cat_view_extent(view, position, extent_id)

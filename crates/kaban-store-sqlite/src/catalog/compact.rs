@@ -491,6 +491,8 @@ pub struct CompactReport {
     pub vacuumed_pages: u64,
     /// The checkpoint tick, when the configured interval had elapsed since the last one.
     pub checkpoint: Option<CheckpointReport>,
+    /// The views the retention step marked `needs_reimport` (amendment 3.2), in name order.
+    pub views_retired: Vec<String>,
 }
 
 /// What one purge did ([`Catalog::purge`]).
@@ -522,6 +524,7 @@ impl Catalog {
     ///              fold  a view's class run past fold_depth or the delta ratio
     ///                    (the newest k of its unshared run: k, k/2 .. 2)
     ///   each unit: claim => merge under its budget => append => publish (one ViewSwitch)
+    ///   => retention (views past view_retention: needs_reimport, their extents retire)
     ///   => reclaim => bounded incremental vacuum => checkpoint tick once its interval elapsed
     /// ```
     ///
@@ -558,6 +561,8 @@ impl Catalog {
                 // the inputs did not load within the budget: the whole pass is a skip
                 Err(e) => report.pass_skipped = Some(budget_refusal(&e).ok_or(e)?),
             }
+            // no view is git-live yet: T16 supplies the protected views
+            report.views_retired = self.retain_views(conn, self.config().view_retention, &[])?;
         }
         report.reclaim = self.reclaim(conn)?;
         report.vacuumed_pages = self.vacuum(conn)?;
@@ -873,7 +878,7 @@ impl Catalog {
                 views.push(view);
             }
         }
-        let pin = self.pin(conn, &budget.unit(), &views)?;
+        let pin = self.pin_untouched(conn, &budget.unit(), &views)?;
         let loaded = views
             .iter()
             .map(|v| pin.load_view(conn, v))

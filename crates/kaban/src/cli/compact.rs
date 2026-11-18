@@ -74,6 +74,7 @@ impl CatalogMaintenance for StoreCatalog {
             space_reclaim_unsupported: r.reclaim.space_reclaim_unsupported,
             vacuumed_pages: r.vacuumed_pages,
             checkpointed: r.checkpoint.is_some(),
+            views_retired: r.views_retired,
         })
     }
 

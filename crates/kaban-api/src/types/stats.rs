@@ -165,4 +165,6 @@ pub struct CompactReport {
     pub vacuumed_pages: u64,
     /// The scheduled checkpoint ran (its interval had elapsed).
     pub checkpointed: bool,
+    /// Views past the `[catalog] view_retention` marked `needs_reimport`, in name order.
+    pub views_retired: Vec<String>,
 }
