@@ -11,6 +11,7 @@
 mod common;
 
 use common::Scratch;
+use kaban_core::StoreError;
 use kaban_core::query_budget::QueryBudget;
 use kaban_store_sqlite::SqliteStore;
 use kaban_store_sqlite::catalog_testing::{self, IoFaults, PinView, Window};
@@ -675,6 +676,85 @@ fn a_detached_pin_outlives_its_store_and_still_guards_its_extents() {
     drop(pin);
     let released = catalog_testing::reclaim(&other).unwrap();
     assert_eq!(released.punched, vec![id], "{released:?}");
+}
+
+#[test]
+fn bytes_from_a_pin_keep_their_extent_from_reclamation_after_the_pin_is_dropped() {
+    // Arrange: bytes of a pinned extent, a clone and a slice of them; the pin and the original
+    // bytes dropped, the extent retired
+    let s = Scratch::new("kaban-t5-pin", "bytes-outlive-pin");
+    let store = SqliteStore::open(&s.db(), &s.keys()).unwrap();
+    let written = pattern(13, EXTENT_LEN);
+    let id = catalog_testing::append_and_publish(&store, &written).unwrap();
+    let pin = catalog_testing::pin(&store, &budget()).unwrap();
+    let bytes = pin
+        .view()
+        .bytes(id)
+        .unwrap()
+        .expect("the pin holds the extent");
+    let clone = bytes.clone();
+    let slice = bytes.slice(1..EXTENT_LEN - 1);
+    drop(pin);
+    drop(bytes);
+    catalog_testing::retire(&store, &[id]).unwrap();
+
+    // Act / Assert: nothing is released while the clone or the slice lives, and both stay intact
+    let held = catalog_testing::reclaim(&store).unwrap();
+    assert_eq!(
+        held.punched,
+        Vec::<u64>::new(),
+        "released under a live clone and slice: {held:?}"
+    );
+    assert_eq!(clone.as_slice(), written.as_slice());
+    drop(clone);
+    let held = catalog_testing::reclaim(&store).unwrap();
+    assert_eq!(
+        held.punched,
+        Vec::<u64>::new(),
+        "released under a live slice: {held:?}"
+    );
+    assert_eq!(slice.as_slice(), &written[1..EXTENT_LEN - 1]);
+
+    // Act: the last holder is dropped on another thread
+    let (done, finished) = channel();
+    std::thread::spawn(move || {
+        drop(slice);
+        done.send(()).unwrap();
+    });
+    finished
+        .recv_timeout(STEP)
+        .expect("the other thread did not drop the slice in time");
+
+    // Assert: with no holder left the extent is reclaimed
+    let released = catalog_testing::reclaim(&store).unwrap();
+    assert_eq!(released.punched, vec![id], "{released:?}");
+}
+
+#[test]
+fn a_pin_refuses_the_bytes_of_an_extent_it_does_not_hold() {
+    // Arrange: an earlier pin, and a later one that also holds an extent published after it
+    let s = Scratch::new("kaban-t5-pin", "foreign-extent");
+    let store = SqliteStore::open(&s.db(), &s.keys()).unwrap();
+    let shared = catalog_testing::append_and_publish(&store, &pattern(21, 100)).unwrap();
+    let earlier = catalog_testing::pin(&store, &budget()).unwrap();
+    let foreign = catalog_testing::append_and_publish(&store, &pattern(23, 100)).unwrap();
+    let later = catalog_testing::pin(&store, &budget()).unwrap();
+
+    // Act
+    let refused = earlier.view().bytes_of(later.view(), foreign);
+    let accepted = earlier.view().bytes_of(later.view(), shared);
+
+    // Assert: the extent the earlier pin does not hold is refused by name; one it holds reads
+    let err = refused.expect_err("a pin read an extent it does not hold");
+    let StoreError::Backend { source } = &err else {
+        panic!("not a backend error: {err:?}");
+    };
+    let text = source.driver().to_string();
+    assert!(text.contains("an extent this pin does not hold"), "{text}");
+    assert_eq!(
+        accepted.unwrap().map(|b| b.as_slice().to_vec()),
+        Some(pattern(21, 100))
+    );
 }
 
 /// The database the pin-holding child opens (set only for that child process).

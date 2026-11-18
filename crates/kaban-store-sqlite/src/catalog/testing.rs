@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use kaban_core::query_budget::QueryBudget;
 use kaban_core::{Durability, Result};
 use rusqlite::Connection;
+use tantivy::directory::OwnedBytes;
 
 pub use super::failpoint::Window;
 use super::io;
@@ -214,7 +215,23 @@ impl PinView<'_> {
     /// # Errors
     /// [`Pin::bytes`]'s errors.
     pub fn read(&self, id: u64) -> Result<Option<Vec<u8>>> {
-        let Some(e) = self
+        Ok(self.bytes(id)?.map(|bytes| bytes.as_slice().to_vec()))
+    }
+    /// The bytes of the pinned test-class extent `id` as [`Pin::bytes`] returns them, `None`
+    /// when the pin does not hold it.
+    ///
+    /// # Errors
+    /// [`Pin::bytes`]'s errors.
+    pub fn bytes(&self, id: u64) -> Result<Option<OwnedBytes>> {
+        self.bytes_of(*self, id)
+    }
+    /// The bytes of `other`'s test-class extent `id`, asked of this pin ([`Pin::bytes`]),
+    /// `None` when `other` does not hold it.
+    ///
+    /// # Errors
+    /// [`Pin::bytes`]'s errors, a refusal among them when this pin does not hold the extent.
+    pub fn bytes_of(&self, other: PinView<'_>, id: u64) -> Result<Option<OwnedBytes>> {
+        let Some(e) = other
             .0
             .extents(ExtentClass::Test)
             .iter()
@@ -222,7 +239,7 @@ impl PinView<'_> {
         else {
             return Ok(None);
         };
-        Ok(Some(self.0.bytes(e)?.as_slice().to_vec()))
+        self.0.bytes(e).map(Some)
     }
 }
 
