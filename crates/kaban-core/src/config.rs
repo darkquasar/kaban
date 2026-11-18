@@ -409,8 +409,8 @@ impl Default for CatalogCfg {
             fold_delta_ratio: 0.25,
             // `bench catalog` (2026-11-18): 60 s, 1 to 4 writers, WAL high-water 1,512,072 B
             checkpoint_interval_ms: 1_000,
-            // 7.6 (2026-11-18): fold of 1M edges, VmHWM 361,472 KiB (353 MiB): 2.9x headroom
-            maintenance_memory_mib: 1_024,
+            // a value the machine can hold: refused above physical memory only when configured
+            maintenance_memory_mib: default_maintenance_memory_mib(physical_memory_mib()),
             // 7.6 (2026-11-18): fold of 5M edges, VmHWM 1,605,864 KiB, ran 9.9 s (debug build)
             maintenance_deadline_ms: 30_000,
             // amendment 3.2: the retention count of views besides `main`
@@ -440,6 +440,20 @@ impl Default for SealOps {
             code: 10_000,
         }
     }
+}
+
+/// The maintenance memory ceiling when `catalog.maintenance_memory_mib` is not set, in MiB.
+// 7.6 (2026-11-18): fold of 1M edges, VmHWM 361,472 KiB (353 MiB): 2.9x headroom
+const DEFAULT_MAINTENANCE_MEMORY_MIB: u64 = 1_024;
+
+/// The effective default of `catalog.maintenance_memory_mib`: [`DEFAULT_MAINTENANCE_MEMORY_MIB`],
+/// or half of `physical_mib` (the machine's physical memory, where known) when that is less, so
+/// an untouched configuration loads on every machine; a configured value is still refused
+/// above physical memory ([`CatalogCfg::validate`]).
+fn default_maintenance_memory_mib(physical_mib: Option<u64>) -> u64 {
+    physical_mib.map_or(DEFAULT_MAINTENANCE_MEMORY_MIB, |physical| {
+        DEFAULT_MAINTENANCE_MEMORY_MIB.min(physical / 2)
+    })
 }
 
 /// The machine's physical memory in MiB (`MemTotal` of `/proc/meminfo`), `None` where it is
@@ -775,8 +789,19 @@ mod catalog_tests {
         assert_eq!(cfg.catalog, CatalogCfg::default());
         assert_eq!(cfg.catalog.fold_depth, 8);
         assert!((cfg.catalog.fold_delta_ratio - 0.25).abs() < f64::EPSILON);
-        assert_eq!(cfg.catalog.maintenance_memory_mib, 1_024);
+        assert_eq!(
+            cfg.catalog.maintenance_memory_mib,
+            default_maintenance_memory_mib(physical_memory_mib())
+        );
         assert_eq!(cfg.effective_overrides(), Vec::new());
+    }
+
+    #[test]
+    fn the_default_maintenance_memory_fits_a_small_machine() {
+        // half of a 1 GiB machine, the full 1024 MiB on a large one or where it is not known
+        assert_eq!(default_maintenance_memory_mib(Some(1_024)), 512);
+        assert_eq!(default_maintenance_memory_mib(Some(16_384)), 1_024);
+        assert_eq!(default_maintenance_memory_mib(None), 1_024);
     }
 
     #[test]
