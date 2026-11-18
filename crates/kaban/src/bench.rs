@@ -54,6 +54,8 @@ pub(crate) mod recall_runtime;
 mod report;
 pub(crate) mod rollup;
 mod runner;
+#[cfg(feature = "bench")]
+mod synthetic;
 pub(crate) mod text;
 
 pub(crate) use runner::{Shape, run};
