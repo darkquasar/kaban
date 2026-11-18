@@ -1668,7 +1668,9 @@ version = "3.0.0"
 dependencies = [
  "kaban-core",
  "kaban-vtab",
+ "ownedbytes",
  "rusqlite",
+ "stable_deref_trait",
 ]
 
 [[package]]
