@@ -56,7 +56,10 @@ struct Repinner {
 
 impl Repinner {
     fn start(s: &Scratch) -> Self {
-        let (stop, pinned) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicU64::new(0)));
+        let (stop, pinned) = (
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicU64::new(0)),
+        );
         let (tx, done) = mpsc::channel();
         let (db, keys, halt, at) = (s.db(), s.keys(), Arc::clone(&stop), Arc::clone(&pinned));
         std::thread::spawn(move || {
@@ -84,11 +87,7 @@ impl Repinner {
             drop(held);
             let _ = tx.send(outcome);
         });
-        Self {
-            stop,
-            pinned,
-            done,
-        }
+        Self { stop, pinned, done }
     }
 
     /// Wait (bounded) until the reader's pin is at `generation` or later.
@@ -229,8 +228,12 @@ fn continuous_query_role() {
         assert!(started.elapsed() < STEP, "the queries never ran");
         std::thread::sleep(Duration::from_millis(5));
     }
-    println!("\n{REPLY}ready");
-    std::io::stdout().flush().unwrap();
+    let reply = |text: String| {
+        let mut out = std::io::stdout().lock();
+        writeln!(out, "\n{REPLY}{text}").unwrap();
+        out.flush().unwrap();
+    };
+    reply("ready".into());
     // end of input (the test is done or gone) stops the queries
     let mut rest = Vec::new();
     let _ = std::io::stdin().read_to_end(&mut rest);
@@ -238,7 +241,7 @@ fn continuous_query_role() {
     for w in workers {
         w.join().unwrap();
     }
-    println!("\n{REPLY}queries {}", count.load(Ordering::Acquire));
+    reply(format!("queries {}", count.load(Ordering::Acquire)));
 }
 
 /// A child process of this binary, killed and reaped however the test ends.
@@ -260,7 +263,12 @@ fn checkpoints_complete_while_another_process_queries_continuously() {
     let stderr = std::fs::File::create(s.0.join("query.stderr")).unwrap();
     let mut child = Supervised(
         Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "continuous_query_role", "--ignored", "--nocapture"])
+            .args([
+                "--exact",
+                "continuous_query_role",
+                "--ignored",
+                "--nocapture",
+            ])
             .env(QUERY_DB, s.db())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -309,7 +317,10 @@ fn checkpoints_complete_while_another_process_queries_continuously() {
     // queries kept running throughout
     for (i, tick) in ticks.iter().enumerate() {
         assert!(tick.drained && tick.backfilled, "tick {i}: {tick:?}");
-        assert_eq!(tick.checkpointed_frames, tick.wal_frames, "tick {i}: {tick:?}");
+        assert_eq!(
+            tick.checkpointed_frames, tick.wal_frames,
+            "tick {i}: {tick:?}"
+        );
     }
     assert!(queries > 2, "the child stopped querying: {queries}");
 }

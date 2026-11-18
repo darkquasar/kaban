@@ -17,8 +17,7 @@ use tantivy::directory::OwnedBytes;
 pub use super::failpoint::Window;
 use super::io;
 use super::kbx::failed;
-use super::pins;
-use super::tables::{sql_int, uint};
+use super::tables::sql_int;
 use crate::sql_error::SqlResultExt;
 
 use super::Catalog;
@@ -285,8 +284,8 @@ pub fn with_snapshot<T>(
 
 /// Install `hook` in `window` of `store`'s catalog (`None` removes it). A reader's windows run
 /// on the reader's thread with its connection held; the reclamation's on the thread of
-/// [`reclaim`], with no connection held. A hook may block to hold its window open; the test
-/// bounds that wait.
+/// [`reclaim`] or [`reclaim_retired`], with its own store's connection held. A hook may block
+/// to hold its window open; the test bounds that wait.
 pub fn set_failpoint(
     store: &SqliteStore,
     window: Window,
@@ -340,93 +339,34 @@ pub struct Reclaimed {
     pub zero_filled_bytes: u64,
 }
 
-/// Reclaim `store`'s container by T6's two-phase rule (PC-8), releasing ranges through the
-/// catalog's own primitive ([`Catalog::reclaim_ranges`]: punched, or zero-filled when
-/// reclamation is degraded):
-/// scan the live pin locks for the lowest generation P (the latest generation when none is
-/// live), commit `reclaim_floor = max(floor, P)`, [`Window::ReclaimFloorCommitted`], re-scan;
-/// a live pin below the floor makes it a `pin_race_retry` that releases nothing, else it
-/// releases every container range of an extent dead since a generation at or below the floor
-/// and, once that release is synced, drops those rows (a failed sync keeps them).
+/// Reclaim `store`'s container by T6's two-phase rule (PC-8) without the KER-10 barrier
+/// ([`Catalog::reclaim_through`] with every generation taken as durable; [`reclaim_retired`]
+/// is the catalog's own reclamation): scan the live pin locks for the lowest generation P (the
+/// latest generation when none is live), commit `reclaim_floor = max(floor, P)`,
+/// [`Window::ReclaimFloorCommitted`], re-scan; a live pin below the floor makes it a
+/// `pin_race_retry` that releases nothing, else it releases every container range of an extent
+/// dead since a generation at or below the floor through the catalog's own primitive
+/// ([`Catalog::reclaim_ranges`]: punched, or zero-filled when reclamation is degraded) and,
+/// once that release is synced, drops those rows (a failed sync keeps them).
 ///
 /// # Errors
 /// The scans', commits' and container writes' errors; a catalog without a container.
 pub fn reclaim(store: &SqliteStore) -> Result<Reclaimed> {
     let catalog = store.catalog();
-    let Some(pins) = catalog.pins.as_deref() else {
+    if catalog.pins.is_none() {
         return Err(failed(
             "reclaim",
             &catalog.kbx,
             std::io::Error::new(std::io::ErrorKind::NotFound, "no container"),
         ));
-    };
-    let latest = catalog.read(&store.lock(), |tx| {
-        tx.query_row(
-            "SELECT COALESCE(max(generation), 0) FROM cat_generation",
-            [],
-            |r| uint(r, 0),
-        )
-        .sql()
-    })?;
-    let lowest = pins::lowest_live(pins)?.map_or(latest, |p| p.min(latest));
-    let floor = catalog.commit(&mut store.lock(), Durability::Normal, |txn| {
-        txn.conn()
-            .query_row(
-                "UPDATE cat_meta SET value = max(value, ?1) WHERE key = 'reclaim_floor'
-                 RETURNING value",
-                [sql_int(lowest).sql()?],
-                |r| uint(r, 0),
-            )
-            .sql()
-    })?;
-    catalog.failpoint(Window::ReclaimFloorCommitted);
-    if pins::lowest_live(pins)?.is_some_and(|p| p < floor) {
-        return Ok(Reclaimed {
-            floor,
-            punched: Vec::new(),
-            pin_race_retry: true,
-            punched_bytes: 0,
-            zero_filled_bytes: 0,
-        });
     }
-    let doomed = catalog.read(&store.lock(), |tx| {
-        let mut stmt = tx
-            .prepare(
-                "SELECT id, kbx_offset, kbx_len FROM cat_extent
-                 WHERE dead_since IS NOT NULL AND dead_since <= ?1 AND kbx_offset IS NOT NULL
-                 ORDER BY id",
-            )
-            .sql()?;
-        let rows = stmt
-            .query_map([sql_int(floor).sql()?], |r| {
-                Ok((uint(r, 0)?, uint(r, 1)?, uint(r, 2)?))
-            })
-            .sql()?;
-        rows.collect::<rusqlite::Result<Vec<_>>>().sql()
-    })?;
-    let ranges: Vec<(u64, u64)> = doomed
-        .iter()
-        .map(|&(_, offset, len)| (offset, len))
-        .collect();
-    let released = catalog.reclaim_ranges(&ranges)?;
-    let punched: Vec<u64> = doomed.into_iter().map(|(id, _, _)| id).collect();
-    catalog.commit(&mut store.lock(), Durability::Normal, |txn| {
-        for id in &punched {
-            txn.conn()
-                .execute(
-                    "DELETE FROM cat_extent WHERE id = ?1",
-                    [sql_int(*id).sql()?],
-                )
-                .sql()?;
-        }
-        Ok(())
-    })?;
+    let r = catalog.reclaim_through(&mut store.lock(), u64::MAX)?;
     Ok(Reclaimed {
-        floor,
-        punched,
-        pin_race_retry: false,
-        punched_bytes: released.punched,
-        zero_filled_bytes: released.zero_filled,
+        floor: r.floor,
+        punched: r.reclaimed.into_iter().map(|id| id.0).collect(),
+        pin_race_retry: r.pin_race_retry,
+        punched_bytes: r.released_bytes,
+        zero_filled_bytes: r.zero_filled_bytes,
     })
 }
 
@@ -502,7 +442,12 @@ pub fn pin_sediment_rows(store: &SqliteStore) -> Result<Vec<(u64, String)>> {
         .sediment()
         .iter()
         .filter(|row| row.class == ExtentClass::Test)
-        .map(|row| (row.seq.0, String::from_utf8_lossy(&row.payload).into_owned()))
+        .map(|row| {
+            (
+                row.seq.0,
+                String::from_utf8_lossy(&row.payload).into_owned(),
+            )
+        })
         .collect())
 }
 

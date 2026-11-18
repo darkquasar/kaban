@@ -779,11 +779,13 @@ fn killed_pin_holder_role() {
     std::thread::sleep(Duration::from_secs(30));
 }
 
-/// The pin lock files in `s`'s pins directory.
+/// The pin lock files in `s`'s pins directory (named by generation; the directory also holds
+/// the checkpoint's read-admission locks).
 fn lock_files(s: &Scratch) -> Vec<String> {
     let mut names: Vec<String> = std::fs::read_dir(s.0.join("kaban.kbx.pins"))
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| name.parse::<u64>().is_ok())
         .collect();
     names.sort();
     names

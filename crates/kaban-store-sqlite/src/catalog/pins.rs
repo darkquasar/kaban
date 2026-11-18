@@ -16,6 +16,9 @@
 //! locked, so no reader holds a lock a scan cannot see. A crashed holder's lock dies with its
 //! process: its file stays behind unlocked, and the next tidy or scan finds it stale and
 //! removes it, so it never blocks reclamation.
+//!
+//! The directory also holds the two read-admission locks of the scheduled checkpoint
+//! ([`admit`], `super::checkpoint`).
 
 use std::fs::File;
 use std::io;
@@ -111,6 +114,73 @@ pub(crate) fn lowest_live(pins: &Path) -> Result<Option<u64>> {
         }
     }
     Ok(lowest)
+}
+
+/// The read-admission lock in the pins directory (`super::checkpoint`): shared by every reader
+/// while its read transaction is open, exclusive for a draining checkpoint. Its name is no
+/// generation, so the pin scans skip it; it is never unlinked.
+pub(crate) const ADMISSION: &str = "admission";
+
+/// The gate before [`ADMISSION`]: a reader passes it shared for an instant, a draining
+/// checkpoint holds it exclusive, so no new reader is admitted while admitted ones drain.
+pub(crate) const GATE: &str = "admission.gate";
+
+/// A reader's admission (shared [`ADMISSION`]), released on drop.
+#[derive(Debug)]
+pub(crate) struct Admitted {
+    _lock: File,
+}
+
+/// Admit a reader of the catalog in `pins` within `budget`'s deadline: pass the gate shared,
+/// take the admission lock shared, leave the gate. A draining checkpoint holds the gate for at
+/// most its own short budget.
+///
+/// # Errors
+/// `ContainerError` for a lock file that cannot be opened or locked; the budget's error once it
+/// is cancelled or past its deadline.
+pub(crate) fn admit(pins: &Path, budget: &QueryBudget) -> Result<Admitted> {
+    let wait = || budget.check().map(|()| true).map_err(budget_exceeded);
+    let shared = FlockOperation::NonBlockingLockShared;
+    let gate = lock_while(&pins.join(GATE), shared, wait)?;
+    let admission = match gate {
+        Some(_) => lock_while(&pins.join(ADMISSION), shared, wait)?,
+        None => None,
+    };
+    drop(gate);
+    admission
+        .map(|lock| Admitted { _lock: lock })
+        .ok_or_else(|| {
+            failed(
+                "admit a reader in",
+                pins,
+                io::Error::from(io::ErrorKind::TimedOut),
+            )
+        })
+}
+
+/// Lock `path` (created owner-only where missing) with the non-blocking `op`, trying again
+/// every [`LOCK_RETRY`] while `wait` says to; `None` once it says not to.
+///
+/// # Errors
+/// `ContainerError` for a lock file that cannot be opened or locked; `wait`'s errors.
+pub(crate) fn lock_while(
+    path: &Path,
+    op: FlockOperation,
+    wait: impl Fn() -> Result<bool>,
+) -> Result<Option<File>> {
+    let file =
+        open(path, OFlags::CREATE).map_err(|e| failed("open the admission lock", path, e))?;
+    loop {
+        match rustix::fs::flock(&file, op) {
+            Ok(()) => return Ok(Some(file)),
+            Err(Errno::WOULDBLOCK) => {}
+            Err(e) => return Err(failed("lock the admission lock", path, e)),
+        }
+        if !wait()? {
+            return Ok(None);
+        }
+        std::thread::sleep(LOCK_RETRY);
+    }
 }
 
 /// The lock file of `generation` in `pins`.

@@ -27,7 +27,7 @@ use super::Catalog;
 use super::class::{ExtentClass, ExtentLocation};
 use super::failpoint::Window;
 use super::kbx::{Mapping, failed};
-use super::pins::PinLock;
+use super::pins::{self, PinLock};
 use super::tables::{ExtentId, ExtentRef, Generation, SedimentRow, SedimentSeq, uint};
 use crate::rows::bad_enum;
 use crate::sql_error::SqlResultExt;
@@ -418,7 +418,9 @@ impl Catalog {
         settle(budget, out)
     }
 
-    /// PC-8 acquisition, then `f` over the pin and the transaction it was built from:
+    /// PC-8 acquisition, then `f` over the pin and the transaction it was built from, all
+    /// under the reader's admission (`pins::admit`, taken first and released last), so a
+    /// draining checkpoint waits only for transactions that are already open:
     ///
     /// 1. read a candidate generation g;
     /// 2. lock `kaban.kbx.pins/<g>` shared ([`PinLock`]);
@@ -440,6 +442,12 @@ impl Catalog {
                 source: BackendSource::new(OuterTransaction),
             });
         }
+        // held until every transaction of the acquisition (and `f`) has ended: dropped last
+        let _admitted = self
+            .pins
+            .as_deref()
+            .map(|dir| pins::admit(dir, budget))
+            .transpose()?;
         let mut candidate = self.read(conn, latest_generation)?;
         let mut f = f;
         loop {
@@ -626,7 +634,7 @@ enum Attempt<T, F> {
 }
 
 /// The latest generation `tx` sees.
-fn latest_generation(tx: &Transaction<'_>) -> Result<u64> {
+pub(super) fn latest_generation(tx: &Transaction<'_>) -> Result<u64> {
     tx.query_row(
         "SELECT COALESCE(max(generation), 0) FROM cat_generation",
         [],

@@ -36,8 +36,7 @@ fn two_compactions_over_the_same_inputs_get_one_claim_between_them() {
     let s = Scratch::new("kaban-t6-compact", "claim-race");
     let store = SqliteStore::open(&s.db(), &s.keys()).unwrap();
     let inputs =
-        catalog_testing::append_and_publish_all(&store, &[pattern(3, 64), pattern(5, 64)])
-            .unwrap();
+        catalog_testing::append_and_publish_all(&store, &[pattern(3, 64), pattern(5, 64)]).unwrap();
     let start = Arc::new(Barrier::new(2));
     let (tx, rx) = std::sync::mpsc::channel();
     for _ in 0..2 {
@@ -85,7 +84,14 @@ fn a_publication_switches_the_chain_and_hides_what_it_consumed_from_later_pins_o
     let b = created(&store, "Fact", "the harbour master reads the log");
     for (from, to) in [(&a, &b), (&b, &a)] {
         store
-            .link(&nid(&from.id), &nid(&to.id), "RELATES_TO", None, None, &ctx())
+            .link(
+                &nid(&from.id),
+                &nid(&to.id),
+                "RELATES_TO",
+                None,
+                None,
+                &ctx(),
+            )
             .unwrap();
     }
     let ids = catalog_testing::append_and_publish_all(
@@ -121,7 +127,11 @@ fn a_publication_switches_the_chain_and_hides_what_it_consumed_from_later_pins_o
     assert_eq!(earlier.view().read(ids[0]).unwrap(), Some(pattern(7, 100)));
     // the claim ended with the switch: a retired input cannot be claimed, the new one can
     assert!(catalog_testing::claim(&store, &ids[..1]).unwrap().is_none());
-    assert!(catalog_testing::claim(&store, &chain[..1]).unwrap().is_some());
+    assert!(
+        catalog_testing::claim(&store, &chain[..1])
+            .unwrap()
+            .is_some()
+    );
 }
 
 #[test]
