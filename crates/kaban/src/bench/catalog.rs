@@ -3,16 +3,20 @@
 //! high-water mark (informational), written as JSONL.
 //!
 //! ```text
-//!   writer x W  => append_and_publish(256 B test extent)   timed per call: publish_ms
+//!   writer x W  => append_and_publish(256 B test extent)   publish_ms, publish_hold_ms
+//!                  + one linked node (an edge: test-class sediment, so seals happen)
 //!   merge       => SqliteStore::compact (seal, fold, reclaim, checkpoint)
-//!                                       timed per call that published: switch_ms
+//!                                       per call that published: switch_ms;
+//!                                       per published unit: switch_hold_ms
 //!   main        => size of kaban.db-wal every 5 ms          wal_high_water_bytes
 //! ```
 //!
 //! Each writer and the merge thread own a store of the same database, as separate processes
-//! would. Both timings are of the whole call, so they bound the lock holds from above: a
-//! publication includes its container append and sync, a compaction its merge work and
-//! reclamation. One run per writer count of `--writers`, one JSONL line per run.
+//! would. The `*_hold_ms` numbers are the store's own measure of how long a commit held the
+//! write transaction (KER-04: a publication's commit, a seal's or fold's switch); `publish_ms`
+//! and `switch_ms` time the whole calls (append and sync; merge work and reclamation). Every
+//! thread is joined within a grace after `--secs`, else the run fails naming it. One run per
+//! writer count of `--writers`, one JSONL line per run.
 //!
 //! The hidden `--memory seal|fold|build-base --edges N` arm (spec 11 7.6) instead runs one
 //! graph writer over a synthetic layer of N edges in a child process and prints the child's
@@ -97,9 +101,13 @@ mod writers {
     use std::io::Write;
     use std::path::Path;
     use std::process::ExitCode;
+    use std::sync::Arc;
+    use std::sync::mpsc;
     use std::time::{Duration, Instant};
 
     use anyhow::{Context, Result, bail};
+    use kaban_core::config::{CatalogCfg, SealOps};
+    use kaban_core::{Actor, MemoryStore, NewNode, RememberOutcome, WorkspaceId, WriteCtx};
     use kaban_store_sqlite::{SqliteStore, WorkKind, catalog_testing};
     use serde_json::{Value, json};
 
@@ -107,11 +115,18 @@ mod writers {
 
     /// Bytes of one writer publication.
     const EXTENT: [u8; 256] = [0x5A; 256];
+    /// Pending edge rows that make the test class seal (low, so seals are sampled in a run).
+    const SEAL_OPS: u32 = 256;
+    /// How long after `--secs` a writer or the merge thread may take to stop.
+    const GRACE: Duration = Duration::from_secs(10);
 
     /// Timings of one thread, in ms, with its error count and first error.
     #[derive(Default)]
     struct Timed {
+        /// Whole calls (a publication with its append and sync; a compaction that published).
         ms: Vec<f64>,
+        /// Write transaction holds (publish holds; switch holds of seals and folds).
+        hold_ms: Vec<f64>,
         seals: u64,
         folds: u64,
         errors: u64,
@@ -122,6 +137,14 @@ mod writers {
         fn failed(&mut self, e: &dyn std::fmt::Display) {
             self.errors += 1;
             self.first_error.get_or_insert_with(|| e.to_string());
+        }
+        fn merge(&mut self, other: Self) {
+            self.ms.extend(other.ms);
+            self.hold_ms.extend(other.hold_ms);
+            self.seals += other.seals;
+            self.folds += other.folds;
+            self.errors += other.errors;
+            self.first_error = self.first_error.take().or(other.first_error);
         }
     }
 
@@ -136,18 +159,62 @@ mod writers {
     }
 
     fn open(db: &Path) -> Result<SqliteStore> {
-        let store = SqliteStore::open(db, &db.with_file_name("keys"))?;
+        let store = SqliteStore::open(db, &db.with_file_name("keys"))?.with_catalog_config(
+            CatalogCfg {
+                seal_ops: SealOps {
+                    graph: SEAL_OPS,
+                    ..SealOps::default()
+                },
+                ..CatalogCfg::default()
+            },
+        )?;
         let _observed = catalog_testing::install_edge_sediment_class(&store);
         Ok(store)
     }
 
-    fn writer(store: &SqliteStore, until: Instant) -> Timed {
+    /// A fresh node of `text` on `store`.
+    fn node(store: &SqliteStore, ctx: &WriteCtx, text: String) -> Result<kaban_core::NodeId> {
+        let new = NewNode {
+            kind: "Fact".into(),
+            text,
+            ..Default::default()
+        };
+        let id = match store.remember(new, &[], ctx)? {
+            RememberOutcome::Created(n) => n.id,
+            RememberOutcome::Existing { node, .. } => node.id,
+        };
+        kaban_core::NodeId::parse(&id).map_err(|_| anyhow::anyhow!("node id {id} does not parse"))
+    }
+
+    /// Publish test extents (timed: the whole call and the publish hold) and write sediment
+    /// (one linked node per round, staged by the test class) until `until`.
+    fn writer(store: &SqliteStore, w: usize, until: Instant) -> Timed {
         let mut t = Timed::default();
+        let ctx = WriteCtx::new(WorkspaceId::default(), Actor::Agent);
+        let hub = match node(store, &ctx, format!("writer {w} hub")) {
+            Ok(hub) => hub,
+            Err(e) => {
+                t.failed(&e);
+                return t;
+            }
+        };
+        let mut round = 0_u64;
         while Instant::now() < until {
             let started = Instant::now();
-            match catalog_testing::append_and_publish(store, &EXTENT) {
-                Ok(_) => t.ms.push(started.elapsed().as_secs_f64() * 1e3),
+            match catalog_testing::append_and_publish_held(store, &EXTENT) {
+                Ok((_, hold)) => {
+                    t.ms.push(started.elapsed().as_secs_f64() * 1e3);
+                    t.hold_ms.push(hold.as_secs_f64() * 1e3);
+                }
                 Err(e) => t.failed(&e),
+            }
+            round += 1;
+            let linked = node(store, &ctx, format!("writer {w} round {round}")).and_then(|to| {
+                store.link(&hub, &to, "RELATES_TO", None, None, &ctx)?;
+                Ok(())
+            });
+            if let Err(e) = linked {
+                t.failed(&e);
             }
         }
         t
@@ -161,6 +228,7 @@ mod writers {
                 Ok(r) if !r.published.is_empty() => {
                     t.ms.push(started.elapsed().as_secs_f64() * 1e3);
                     for unit in &r.published {
+                        t.hold_ms.push(unit.switch_hold.as_secs_f64() * 1e3);
                         match unit.kind {
                             WorkKind::Seal => t.seals += 1,
                             WorkKind::Fold => t.folds += 1,
@@ -177,6 +245,8 @@ mod writers {
     }
 
     /// One run of `writers` writers (and the merge thread when `merge`) over a fresh store.
+    /// Every thread is joined within [`GRACE`] after `--secs`: a role still running then is
+    /// reported by name and the run fails.
     fn one(writers: usize, merge: bool, secs: u64) -> Result<Value> {
         let dir =
             std::env::temp_dir().join(format!("kaban-catalog-{}-{writers}", std::process::id()));
@@ -185,38 +255,57 @@ mod writers {
         let db = dir.join("kaban.db");
         let wal = dir.join("kaban.db-wal");
         let stores = (0..=writers)
-            .map(|_| open(&db))
+            .map(|_| open(&db).map(Arc::new))
             .collect::<Result<Vec<_>>>()?;
         let until = Instant::now() + Duration::from_secs(secs);
-        let (published, merged, wal_high_water) = std::thread::scope(|s| {
-            let (merge_store, writer_stores) = stores.split_first().context("no store")?;
-            let handles: Vec<_> = writer_stores
-                .iter()
-                .map(|store| s.spawn(move || writer(store, until)))
-                .collect();
-            let merging = merge.then(|| s.spawn(move || merger(merge_store, until)));
-            let mut high = 0;
-            while Instant::now() < until {
-                high = high.max(std::fs::metadata(&wal).map_or(0, |m| m.len()));
-                std::thread::sleep(Duration::from_millis(5));
-            }
-            let mut published = Timed::default();
-            for handle in handles {
-                let Ok(t) = handle.join() else {
-                    bail!("a writer panicked")
-                };
-                published.ms.extend(t.ms);
-                published.errors += t.errors;
-                published.first_error = published.first_error.or(t.first_error);
-            }
-            let merged = match merging.map(std::thread::ScopedJoinHandle::join) {
-                Some(Ok(t)) => t,
-                Some(Err(_)) => bail!("the merge thread panicked"),
-                None => Timed::default(),
+        let (done, finished) = mpsc::channel::<(String, std::thread::Result<Timed>)>();
+        let mut running: Vec<String> = Vec::new();
+        for (i, store) in stores.iter().enumerate() {
+            let role = match i {
+                0 if merge => "merge".to_owned(),
+                0 => continue,
+                w => format!("writer {w}"),
             };
+            let (store, done, name) = (Arc::clone(store), done.clone(), role.clone());
+            std::thread::spawn(move || {
+                let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    if i == 0 {
+                        merger(&store, until)
+                    } else {
+                        writer(&store, i, until)
+                    }
+                }));
+                let _ = done.send((name, ran));
+            });
+            running.push(role);
+        }
+        drop(done);
+        let mut high = 0;
+        while Instant::now() < until {
             high = high.max(std::fs::metadata(&wal).map_or(0, |m| m.len()));
-            Ok((published, merged, high))
-        })?;
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let (mut published, mut merged) = (Timed::default(), Timed::default());
+        let deadline = until + GRACE;
+        while !running.is_empty() {
+            let wait = deadline.saturating_duration_since(Instant::now());
+            let Ok((role, ran)) = finished.recv_timeout(wait) else {
+                bail!(
+                    "bench catalog: {} did not stop within {GRACE:?} after --secs",
+                    running.join(", ")
+                );
+            };
+            running.retain(|r| *r != role);
+            let Ok(t) = ran else {
+                bail!("bench catalog: {role} panicked")
+            };
+            if role == "merge" {
+                merged = t;
+            } else {
+                published.merge(t);
+            }
+        }
+        high = high.max(std::fs::metadata(&wal).map_or(0, |m| m.len()));
         drop(stores);
         std::fs::remove_dir_all(&dir)?;
         Ok(json!({
@@ -224,14 +313,16 @@ mod writers {
             "merge_thread": merge,
             "secs": secs,
             "publish_ms": summary(published.ms),
+            "publish_hold_ms": summary(published.hold_ms),
             "publish_errors": published.errors,
             "publish_first_error": published.first_error,
             "switch_ms": summary(merged.ms),
+            "switch_hold_ms": summary(merged.hold_ms),
             "seals": merged.seals,
             "folds": merged.folds,
             "compact_errors": merged.errors,
             "compact_first_error": merged.first_error,
-            "wal_high_water_bytes": wal_high_water,
+            "wal_high_water_bytes": high,
         }))
     }
 
