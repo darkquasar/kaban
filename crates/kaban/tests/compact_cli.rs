@@ -39,7 +39,10 @@ static RUNS: AtomicU64 = AtomicU64::new(0);
 /// Its output goes to files, so a full pipe never stalls it.
 fn kaban(s: &Scratch, args: &[&str]) -> Output {
     let n = RUNS.fetch_add(1, Ordering::Relaxed);
-    let (out, err) = (s.0.join(format!("run{n}.out")), s.0.join(format!("run{n}.err")));
+    let (out, err) = (
+        s.0.join(format!("run{n}.out")),
+        s.0.join(format!("run{n}.err")),
+    );
     let child = Command::new(env!("CARGO_BIN_EXE_kaban"))
         .current_dir(&s.0)
         .env("KABAN_HOME", s.home())

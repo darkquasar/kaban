@@ -602,7 +602,10 @@ fn inputs_beyond_the_maintenance_memory_skip_the_pass_instead_of_loading() {
     );
     assert_eq!(report.published, Vec::new(), "{report:?}");
     assert_eq!(report.skipped, Vec::new(), "{report:?}");
-    assert_eq!(catalog_testing::pin_sediment_rows(&store).unwrap().len(), 20);
+    assert_eq!(
+        catalog_testing::pin_sediment_rows(&store).unwrap().len(),
+        20
+    );
 }
 
 /// A code view's name, every hex digit `c`.
@@ -623,19 +626,19 @@ fn compaction_retires_the_least_recently_used_views_past_the_retention_but_keeps
         })
         .unwrap();
     let _observed = catalog_testing::install_edge_sediment_class(&store);
-    let (p, a, b, c) = (code_of('1'), code_of('2'), code_of('3'), code_of('4'));
-    catalog_testing::append_and_publish_into(&store, &pattern(1, 32), &[&p]).unwrap();
+    let (parent, old, kept, child) = (code_of('1'), code_of('2'), code_of('3'), code_of('4'));
+    catalog_testing::append_and_publish_into(&store, &pattern(1, 32), &[&parent]).unwrap();
     let shared =
-        catalog_testing::append_and_publish_into(&store, &pattern(2, 32), &[&a, &b]).unwrap();
-    let own = catalog_testing::append_and_publish_into(&store, &pattern(3, 32), &[&a]).unwrap();
-    catalog_testing::append_and_publish_into(&store, &pattern(4, 32), &[&c]).unwrap();
+        catalog_testing::append_and_publish_into(&store, &pattern(2, 32), &[&old, &kept]).unwrap();
+    let own = catalog_testing::append_and_publish_into(&store, &pattern(3, 32), &[&old]).unwrap();
+    catalog_testing::append_and_publish_into(&store, &pattern(4, 32), &[&child]).unwrap();
     catalog_testing::corrupt(
         &store,
         &format!(
-            "UPDATE cat_view SET last_used = 50 WHERE name = '{p}';
-             UPDATE cat_view SET last_used = 100 WHERE name = '{a}';
-             UPDATE cat_view SET last_used = 200 WHERE name = '{b}';
-             UPDATE cat_view SET last_used = 300, parent = '{p}' WHERE name = '{c}';"
+            "UPDATE cat_view SET last_used = 50 WHERE name = '{parent}';
+             UPDATE cat_view SET last_used = 100 WHERE name = '{old}';
+             UPDATE cat_view SET last_used = 200 WHERE name = '{kept}';
+             UPDATE cat_view SET last_used = 300, parent = '{parent}' WHERE name = '{child}';"
         ),
     )
     .unwrap();
@@ -645,12 +648,15 @@ fn compaction_retires_the_least_recently_used_views_past_the_retention_but_keeps
 
     // Assert: A is retired (needs reimport, its chain gone, its own extent retired); P stays as
     // C's parent; the shared extent stays live in B
-    assert_eq!(report.views_retired, vec![a.clone()], "{report:?}");
+    assert_eq!(report.views_retired, vec![old.clone()], "{report:?}");
     let verified = store.verify_catalog().unwrap();
-    assert_eq!(verified.needs_reimport, vec![a.clone()], "{verified:?}");
+    assert_eq!(verified.needs_reimport, vec![old.clone()], "{verified:?}");
     assert_eq!(verified.chain_inconsistencies, Vec::<String>::new());
-    assert_eq!(catalog_testing::chain(&store, &a).unwrap(), Vec::<u64>::new());
-    assert_eq!(catalog_testing::chain(&store, &b).unwrap(), vec![shared]);
+    assert_eq!(
+        catalog_testing::chain(&store, &old).unwrap(),
+        Vec::<u64>::new()
+    );
+    assert_eq!(catalog_testing::chain(&store, &kept).unwrap(), vec![shared]);
     assert!(
         catalog_testing::claim(&store, &[own]).unwrap().is_none(),
         "A's own extent is still live"

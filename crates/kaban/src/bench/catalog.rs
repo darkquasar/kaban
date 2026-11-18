@@ -159,15 +159,14 @@ mod writers {
     }
 
     fn open(db: &Path) -> Result<SqliteStore> {
-        let store = SqliteStore::open(db, &db.with_file_name("keys"))?.with_catalog_config(
-            CatalogCfg {
+        let store =
+            SqliteStore::open(db, &db.with_file_name("keys"))?.with_catalog_config(CatalogCfg {
                 seal_ops: SealOps {
                     graph: SEAL_OPS,
                     ..SealOps::default()
                 },
                 ..CatalogCfg::default()
-            },
-        )?;
+            })?;
         let _observed = catalog_testing::install_edge_sediment_class(&store);
         Ok(store)
     }

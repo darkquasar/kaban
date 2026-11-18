@@ -578,7 +578,8 @@ impl Catalog {
                 }
             }
             // no view is git-live yet: T16 supplies the protected views
-            report.views_retired = self.retain_views(&mut step(conn), self.config().view_retention, &[])?;
+            report.views_retired =
+                self.retain_views(&mut step(conn), self.config().view_retention, &[])?;
             self.record_refused(&mut step(conn), report.refused_units)?;
         }
         report.reclaim = self.reclaim(&mut step(conn))?;

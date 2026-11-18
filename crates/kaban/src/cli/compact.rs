@@ -6,8 +6,8 @@
 
 use crate::cli::{output::Format, seam};
 use kaban_api::{
-    CatalogIndexStatus, CatalogMaintenance, CatalogStatus, CatalogVerify, CompactReport, CompactUnit, IndexName,
-    KabanApi,
+    CatalogIndexStatus, CatalogMaintenance, CatalogStatus, CatalogVerify, CompactReport,
+    CompactUnit, IndexName, KabanApi,
 };
 use kaban_core::StoreError;
 use kaban_core::query_budget::Limit;

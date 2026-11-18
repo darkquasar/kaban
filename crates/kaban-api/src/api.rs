@@ -20,7 +20,8 @@ use crate::enrich::Enricher;
 use crate::error::ApiError;
 use crate::ontology::OntologyRegistry;
 use crate::types::{
-    CatalogStatus, CatalogVerify, CompactReport, ReceiptIdentities, ReindexReport, ReindexTarget, WriteReceipt,
+    CatalogStatus, CatalogVerify, CompactReport, ReceiptIdentities, ReindexReport, ReindexTarget,
+    WriteReceipt,
 };
 use kaban_codegraph::SnapshotProvider;
 use kaban_core::config::EngineConfig;

@@ -171,7 +171,9 @@ impl KabanApi {
         // view that needs a reimport named; then its effective budget (7.6)
         if let Some(catalog) = &self.catalog {
             match catalog.verify() {
-                Ok(found) if found.inconsistencies.is_empty() && found.needs_reimport.is_empty() => {
+                Ok(found)
+                    if found.inconsistencies.is_empty() && found.needs_reimport.is_empty() =>
+                {
                     report.push("catalog_verify", true, "ok");
                 }
                 Ok(found) => {

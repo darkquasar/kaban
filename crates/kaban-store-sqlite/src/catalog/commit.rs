@@ -339,7 +339,8 @@ impl Catalog {
         durability: Durability,
         stage: impl FnOnce(&mut Txn<'_>) -> Result<T>,
     ) -> Result<T> {
-        self.commit_held(conn, durability, stage).map(|(out, _)| out)
+        self.commit_held(conn, durability, stage)
+            .map(|(out, _)| out)
     }
 
     /// [`Self::commit`], also returning how long it held the write transaction: from `BEGIN

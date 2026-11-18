@@ -79,9 +79,7 @@ impl Catalog {
                          ORDER BY last_used IS NULL, last_used DESC, name",
                     )
                     .sql()?;
-                let rows = stmt
-                    .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
-                    .sql()?;
+                let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).sql()?;
                 rows.collect::<rusqlite::Result<_>>().sql()?
             };
             let candidates: Vec<&str> = views

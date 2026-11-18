@@ -162,12 +162,11 @@ pub fn append_and_publish_held(
     bytes: &[u8],
 ) -> Result<(u64, std::time::Duration)> {
     let extent = store.catalog().append_extent(ExtentClass::Test, bytes)?;
-    let (id, hold) =
-        store
-            .catalog()
-            .commit_held(&mut store.lock(), Durability::Normal, |txn| {
-                txn.publish(extent, &[ViewName::Main])
-            })?;
+    let (id, hold) = store
+        .catalog()
+        .commit_held(&mut store.lock(), Durability::Normal, |txn| {
+            txn.publish(extent, &[ViewName::Main])
+        })?;
     Ok((id.0, hold))
 }
 

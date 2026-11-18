@@ -286,8 +286,8 @@ impl Catalog {
         let Some(file) = self.open_container()? else {
             return Ok((Vec::new(), false));
         };
-        let holes = self.reclamation == Some(super::io::Reclamation::Punch)
-            && !self.degraded_reclamation();
+        let holes =
+            self.reclamation == Some(super::io::Reclamation::Punch) && !self.degraded_reclamation();
         let block = {
             use std::os::unix::fs::MetadataExt;
             file.metadata()
