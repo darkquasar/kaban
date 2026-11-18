@@ -25,8 +25,9 @@ use super::Catalog;
 use super::capture::{BatchChanges, CaptureOp};
 use super::class::{ExtentClass, ExtentLocation, IndexClass, SealOutput};
 use super::commit::Stage;
+use super::compact::{Claim, Publication};
 use super::pin::{Pin, PinnedView};
-use super::tables::ExtentRef;
+use super::tables::{ExtentId, ExtentRef, SedimentSeq};
 use crate::SqliteStore;
 
 /// What happened to an observed row.
@@ -426,6 +427,154 @@ pub fn reclaim(store: &SqliteStore) -> Result<Reclaimed> {
         pin_race_retry: false,
         punched_bytes: released.punched,
         zero_filled_bytes: released.zero_filled,
+    })
+}
+
+/// A compaction's claim on extents of a store's catalog ([`Catalog::claim`]).
+#[derive(Debug)]
+pub struct TestClaim(Claim);
+
+impl TestClaim {
+    /// The claimed extent ids, in the order they were asked for.
+    #[must_use]
+    pub fn inputs(&self) -> Vec<u64> {
+        self.0.inputs().iter().map(|id| id.0).collect()
+    }
+}
+
+/// Claim the extents `ids` of `store`'s catalog ([`Catalog::claim`]); `None` when any of them
+/// is already claimed or not live.
+///
+/// # Errors
+/// The claim's errors.
+pub fn claim(store: &SqliteStore, ids: &[u64]) -> Result<Option<TestClaim>> {
+    let ids: Vec<ExtentId> = ids.iter().copied().map(ExtentId).collect();
+    Ok(store
+        .catalog()
+        .claim(&mut store.lock(), &ids)?
+        .map(TestClaim))
+}
+
+/// Publish a compaction of `store`'s catalog ([`Catalog::publish`]): `added` appended as
+/// test-class extents with one write, `retired` and the sediment rows `consumed` (by
+/// sequence) switched out under `claim`. Returns the generation it published.
+///
+/// # Errors
+/// The append's or the publication's errors.
+pub fn publish(
+    store: &SqliteStore,
+    claim: TestClaim,
+    added: &[Vec<u8>],
+    retired: &[u64],
+    consumed: &[u64],
+) -> Result<u64> {
+    let added = if added.is_empty() {
+        Vec::new()
+    } else {
+        let whole = store
+            .catalog()
+            .append_extent(ExtentClass::Test, &added.concat())?;
+        let Some(parts) = whole.split(added) else {
+            unreachable!("the parts sum to the appended range")
+        };
+        parts
+    };
+    let p = Publication {
+        claim: claim.0,
+        added,
+        retired: retired.iter().copied().map(ExtentId).collect(),
+        sediment_consumed: consumed.iter().copied().map(SedimentSeq).collect(),
+    };
+    Ok(store.catalog().publish(&mut store.lock(), p)?.0)
+}
+
+/// Pin `store`'s catalog and return the test class's pending sediment rows of `main` as
+/// `(sequence, payload)`, in sequence order.
+///
+/// # Errors
+/// The pin's errors.
+pub fn pin_sediment_rows(store: &SqliteStore) -> Result<Vec<(u64, String)>> {
+    let budget = QueryBudget::new(u64::MAX, None);
+    let conn = store.lock();
+    let pin = store.catalog().pin(&conn, &budget, &[ViewName::Main])?;
+    Ok(pin
+        .load_view(&conn, &ViewName::Main)?
+        .sediment()
+        .iter()
+        .filter(|row| row.class == ExtentClass::Test)
+        .map(|row| (row.seq.0, String::from_utf8_lossy(&row.payload).into_owned()))
+        .collect())
+}
+
+/// What one reclamation of the catalog ([`Catalog::reclaim`]) did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReclaimOutcome {
+    /// The `reclaim_floor` it committed.
+    pub floor: u64,
+    /// The retired extents it destroyed, in id order.
+    pub reclaimed: Vec<u64>,
+    /// The retired extents it left for a later round, in id order.
+    pub pending: Vec<u64>,
+    /// The released bytes whose blocks a punch freed (reclaimed space).
+    pub released_bytes: u64,
+    /// The released bytes only overwritten with zeros (no space reclaimed).
+    pub zero_filled_bytes: u64,
+    /// Its re-scan found a live pin below the floor: it destroyed nothing.
+    pub pin_race_retry: bool,
+    /// The WAL was not backfilled through a retiring commit: those extents stay.
+    pub barrier_pending: bool,
+    /// The platform cannot deallocate container ranges (zero-fill only).
+    pub space_reclaim_unsupported: bool,
+    /// Consumed sediment rows it deleted.
+    pub sediment_deleted: u64,
+}
+
+/// Reclaim `store`'s retired extents with the catalog's own reclamation ([`Catalog::reclaim`]:
+/// PC-8's two phases behind the KER-10 barrier), unlike [`reclaim`], which plays the two
+/// phases alone.
+///
+/// # Errors
+/// The reclamation's errors.
+pub fn reclaim_retired(store: &SqliteStore) -> Result<ReclaimOutcome> {
+    let r = store.catalog().reclaim(&mut store.lock())?;
+    let ids = |v: Vec<ExtentId>| v.into_iter().map(|id| id.0).collect();
+    Ok(ReclaimOutcome {
+        floor: r.floor,
+        reclaimed: ids(r.reclaimed),
+        pending: ids(r.pending),
+        released_bytes: r.released_bytes,
+        zero_filled_bytes: r.zero_filled_bytes,
+        pin_race_retry: r.pin_race_retry,
+        barrier_pending: r.barrier_pending,
+        space_reclaim_unsupported: r.space_reclaim_unsupported,
+        sediment_deleted: r.sediment_deleted,
+    })
+}
+
+/// What one checkpoint tick ([`Catalog::checkpoint_tick`]) did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Checkpoint {
+    /// It drained the admitted readers within its budget.
+    pub drained: bool,
+    /// Every WAL frame is in the main file.
+    pub backfilled: bool,
+    /// Frames in the WAL.
+    pub wal_frames: u64,
+    /// Frames checkpointed.
+    pub checkpointed_frames: u64,
+}
+
+/// Run one checkpoint tick on `store`'s writer connection.
+///
+/// # Errors
+/// The tick's errors.
+pub fn checkpoint_tick(store: &SqliteStore) -> Result<Checkpoint> {
+    let r = store.catalog().checkpoint_tick(&store.lock())?;
+    Ok(Checkpoint {
+        drained: r.drained,
+        backfilled: r.backfilled,
+        wal_frames: r.wal_frames,
+        checkpointed_frames: r.checkpointed_frames,
     })
 }
 

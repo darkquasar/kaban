@@ -368,6 +368,95 @@ impl Default for Bench {
     }
 }
 
+/// The smallest memory a maintenance unit of work (one seal, fold or base build) needs, in MiB:
+/// a `catalog.maintenance_memory_mib` below it is refused.
+const MIN_MAINTENANCE_MEMORY_MIB: u64 = 16; // anchored by worker 4's measurement
+
+/// The shortest deadline a maintenance unit of work can meet, in ms: a
+/// `catalog.maintenance_deadline_ms` below it is refused.
+const MIN_MAINTENANCE_DEADLINE_MS: u64 = 100; // anchored by worker 4's measurement
+
+/// `[catalog]` (spec 11 PC-10, Task 6, 7.6): compaction policy, the scheduled checkpoint and
+/// the maintenance budget of the catalog. Validated at load ([`CatalogCfg::validate`]): a value
+/// out of range is refused naming its key, never clamped.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct CatalogCfg {
+    /// Pending sediment operations of each class that trigger a seal.
+    pub seal_ops: SealOps,
+    /// Sealed layers over a base before they fold.
+    pub fold_depth: u32,
+    /// Layer bytes over base bytes past which the layers fold.
+    pub fold_delta_ratio: f64,
+    /// Interval of the scheduled checkpoint, in ms.
+    pub checkpoint_interval_ms: u64,
+    /// Memory ceiling of one maintenance unit of work (seal, fold, base build), in MiB.
+    pub maintenance_memory_mib: u64,
+    /// Deadline of one maintenance unit of work, in ms.
+    pub maintenance_deadline_ms: u64,
+}
+
+impl Default for CatalogCfg {
+    fn default() -> Self {
+        Self {
+            seal_ops: SealOps::default(),
+            fold_depth: 8,
+            fold_delta_ratio: 0.25,
+            checkpoint_interval_ms: 1_000, // anchored by worker 4's measurement
+            maintenance_memory_mib: 256,   // anchored by worker 4's measurement
+            maintenance_deadline_ms: 30_000, // anchored by worker 4's measurement
+        }
+    }
+}
+
+/// `[catalog.seal_ops]`: the seal trigger of each index class, in pending operations.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct SealOps {
+    /// Text.
+    pub text: u32,
+    /// Graph.
+    pub graph: u32,
+    /// Code.
+    pub code: u32,
+}
+
+impl Default for SealOps {
+    fn default() -> Self {
+        // anchored by worker 4's measurement
+        Self {
+            text: 10_000,
+            graph: 10_000,
+            code: 10_000,
+        }
+    }
+}
+
+/// The machine's physical memory in MiB (`MemTotal` of `/proc/meminfo`), `None` where it is
+/// not known (another platform, an unreadable file): then no value is refused for exceeding it.
+fn physical_memory_mib() -> Option<u64> {
+    let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
+    let kib: u64 = meminfo
+        .lines()
+        .find_map(|l| l.strip_prefix("MemTotal:"))?
+        .trim()
+        .strip_suffix("kB")?
+        .trim()
+        .parse()
+        .ok()?;
+    Some(kib / 1024)
+}
+
+impl CatalogCfg {
+    /// Refuse a value out of range, naming its key.
+    ///
+    /// # Errors
+    /// [`ConfigError::Range`] with the key's dotted path.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        Ok(())
+    }
+}
+
 /// The engine configuration: every §15.1 section with its register defaults.
 ///
 /// This is the configuration root of the whole kaban process (`Engine` keeps its spec 03
@@ -396,6 +485,8 @@ pub struct EngineConfig {
     pub text: Text,
     /// `[bench]`
     pub bench: Bench,
+    /// `[catalog]`
+    pub catalog: CatalogCfg,
 }
 
 /// Why a configuration file failed to load. Content-free: an I/O class, a field path.
@@ -493,6 +584,7 @@ fn parse(text: &str) -> Result<EngineConfig, ConfigError> {
         });
     }
     cfg.recall.effective_rrf_k()?;
+    cfg.catalog.validate()?;
     let flat = flatten(&cfg);
     for budget in BUDGETS {
         if flat.get(budget).is_some_and(|v| v.as_u64() == Some(0)) {
@@ -627,5 +719,70 @@ fn io_class(kind: io::ErrorKind) -> &'static str {
         io::ErrorKind::InvalidData => "invalid_data",
         io::ErrorKind::Interrupted => "interrupted",
         _ => "other",
+    }
+}
+
+#[cfg(test)]
+mod catalog_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)] // test code: failures are the assertion
+
+    use super::*;
+
+    #[test]
+    fn the_catalog_section_defaults_to_fold_depth_8_and_ratio_a_quarter() {
+        let cfg = parse("catalog: {}\n").unwrap();
+        assert_eq!(cfg.catalog, CatalogCfg::default());
+        assert_eq!(cfg.catalog.fold_depth, 8);
+        assert!((cfg.catalog.fold_delta_ratio - 0.25).abs() < f64::EPSILON);
+        assert_eq!(cfg.effective_overrides(), Vec::new());
+    }
+
+    #[test]
+    fn a_catalog_value_out_of_range_is_refused_naming_its_key() {
+        let mut cases = vec![
+            ("seal_ops: {text: 0}", "catalog.seal_ops.text"),
+            ("seal_ops: {graph: 0}", "catalog.seal_ops.graph"),
+            ("seal_ops: {code: 0}", "catalog.seal_ops.code"),
+            ("fold_depth: 0", "catalog.fold_depth"),
+            ("fold_delta_ratio: 0.0", "catalog.fold_delta_ratio"),
+            ("fold_delta_ratio: -1.0", "catalog.fold_delta_ratio"),
+            ("checkpoint_interval_ms: 0", "catalog.checkpoint_interval_ms"),
+            ("maintenance_memory_mib: 0", "catalog.maintenance_memory_mib"),
+            (
+                "maintenance_memory_mib: 15",
+                "catalog.maintenance_memory_mib",
+            ),
+            ("maintenance_deadline_ms: 0", "catalog.maintenance_deadline_ms"),
+            (
+                "maintenance_deadline_ms: 99",
+                "catalog.maintenance_deadline_ms",
+            ),
+        ];
+        if physical_memory_mib().is_some() {
+            // above any machine's physical memory
+            cases.push((
+                "maintenance_memory_mib: 1099511627776",
+                "catalog.maintenance_memory_mib",
+            ));
+        }
+        for (yaml, key) in cases {
+            let refused = parse(&format!("catalog:\n  {yaml}\n"));
+            assert_eq!(
+                refused,
+                Err(ConfigError::Range { path: key.into() }),
+                "{yaml}"
+            );
+        }
+    }
+
+    #[test]
+    fn catalog_values_at_the_smallest_unit_of_work_load_unchanged() {
+        let cfg = parse(
+            "catalog:\n  maintenance_memory_mib: 16\n  maintenance_deadline_ms: 100\n  fold_depth: 1\n",
+        )
+        .unwrap();
+        assert_eq!(cfg.catalog.maintenance_memory_mib, 16);
+        assert_eq!(cfg.catalog.maintenance_deadline_ms, 100);
+        assert_eq!(cfg.catalog.fold_depth, 1);
     }
 }

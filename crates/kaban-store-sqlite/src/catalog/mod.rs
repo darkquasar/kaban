@@ -21,14 +21,17 @@
 //! failed sync is `StoreError::StorageFatal`, never retried (KER-11).
 
 pub(crate) mod capture;
+pub(crate) mod checkpoint;
 pub(crate) mod class;
 pub(crate) mod commit;
+pub(crate) mod compact;
 pub(crate) mod failpoint;
 pub(crate) mod io;
 pub(crate) mod kbx;
 pub(crate) mod phase;
 pub(crate) mod pin;
 pub(crate) mod pins;
+pub(crate) mod reclaim;
 pub(crate) mod tables;
 #[cfg(feature = "failpoints")]
 pub mod testing;
