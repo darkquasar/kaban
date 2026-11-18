@@ -18,6 +18,10 @@ test-hooks = []
 [dependencies]
 kaban-core.workspace = true
 rusqlite = { workspace = true, features = ["vtab"] }
+# `retain_owner`: an owner attached to an `OwnedBytes` span (PC-8). Both already come in through
+# tantivy; pinned to the versions it resolves so no second copy enters the build.
+ownedbytes = "=0.9.0"
+stable_deref_trait = "=1.2.1"
 
 [dev-dependencies]
 # The tests' fault injection in every build of them, including the workspace run, where feature

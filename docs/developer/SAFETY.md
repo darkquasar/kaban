@@ -12,13 +12,15 @@ module exposes the first as `unsafe` traits and raw pointers, and installing req
 allocation hooks goes through SQLite's raw configuration interface, so neither can be written in
 safe Rust.
 
-**What it may contain.** Two things and nothing else (PC-17, QRY-07):
+**What it may contain.** Three things and nothing else (PC-8, PC-17, QRY-07):
 
 - The virtual-table glue: the module implementation, cursor and row-production code.
 - The allocator adapter: hooks that charge request-scoped SQLite allocations to a `QueryBudget`,
   the unsafe embedding initializer that installs them, the request scope and its dedicated query
   connection, and the process-level bootstrap behind the `process-bootstrap` feature, which
   installs them for the standalone CLI.
+- The byte-owner adapter behind `retain_owner`: it attaches an owner (a pin's lock) to an
+  `OwnedBytes` span, so the owner lives as long as any clone or slice of the span.
 
 It parses no SQL and holds no policy. Its only I/O is the request's database connection, which it
 opens through SQLite (`RequestScope::open_query_connection`), and, behind `process-bootstrap`, one
@@ -461,6 +463,17 @@ on refusal.
 | `bootstrap.rs` `bootstrap`: `initialize_for_embedding()` | `unsafe` block | Runs from the init array before `main`: one thread and no SQLite entry unless an earlier hook made one, which is detected and refused (abort); the startup-hook review above shows no earlier hook touches SQLite or starts a thread; kaban never replaces the allocator or shuts SQLite down. |
 | `bootstrap.rs` `#[unsafe(link_section = ".init_array.00101")] static BOOTSTRAP` | unsafe attribute | The section is an array of startup function pointers; the static is exactly one, to an `extern "C" fn()` that reads no arguments and never unwinds. |
 | `bootstrap.rs` `#[unsafe(link_section = "__DATA,__mod_init_func,mod_init_funcs")] static BOOTSTRAP` | unsafe attribute | As above, for dyld's initializer array. |
+
+### Byte-owner adapter (`retain_owner`)
+
+`retain_owner(bytes, owner)` wraps the span and its owner in a private holder and hands it to
+`OwnedBytes::new`, which requires `StableDeref`. Every clone and slice of the result shares that
+holder, so the owner is dropped after the last of them, after the span. The interface is safe;
+`Send` and `Sync` follow from the fields.
+
+| Site | Kind | Invariant relied on |
+|---|---|---|
+| `bytes.rs` `unsafe impl<O> StableDeref for Retained<O>` | `unsafe impl` | `deref` returns the span of the held `OwnedBytes`, which points into that span's own heap buffer or file mapping, never into the holder, so moving the holder does not move it; the span is private, set once and never replaced, and `deref` reads no other state, so it returns the same span until the holder is dropped. |
 
 ### Residual risks
 

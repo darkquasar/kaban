@@ -9,7 +9,8 @@
 //!
 //! This crate is the workspace's sole `unsafe` exception (see `docs/developer/SAFETY.md`): the
 //! virtual-table glue, the allocator adapter, the embedding initializer, the request scope's
-//! connection settings and the startup constructor.
+//! connection settings, the startup constructor and the byte-owner adapter behind
+//! [`retain_owner`].
 
 #![deny(unsafe_op_in_unsafe_fn)]
 
@@ -19,12 +20,14 @@ mod allocator;
 #[cfg(feature = "process-bootstrap")]
 pub mod bootstrap;
 mod budget_scope;
+mod bytes;
 mod plan;
 mod runtime;
 mod value;
 
 pub use adapter::{FnError, Rows, TableFunction, register};
 pub use budget_scope::{QueryConnection, QueryError, RequestScope, ScopeActive};
+pub use bytes::retain_owner;
 pub use plan::{
     Arg, BoundArg, BoundConstraint, ColumnDef, ColumnKind, ConstraintOp, MAX_CONSTRAINTS,
     OrderTerm, Plan, PlanInput, ResultConstraint, Scan,
