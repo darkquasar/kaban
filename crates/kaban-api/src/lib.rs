@@ -27,7 +27,7 @@ mod snapshot; // the CG-JOIN v1 §2/§4 adapter: the one `SnapshotAttach` constr
 mod types;
 
 pub use api::doctor::{DoctorCheck, DoctorContext, DoctorReport};
-pub use api::{ApiConfig, KabanApi};
+pub use api::{ApiConfig, CatalogMaintenance, KabanApi};
 pub use code::{
     CodeContextRequest, CodeContextResponse, CodeDefinitionRequest, CodeDefinitionResponse,
     CodeError, CodeImplementersRequest, CodeIndexResponse, CodeListResponse, CodeMembersRequest,

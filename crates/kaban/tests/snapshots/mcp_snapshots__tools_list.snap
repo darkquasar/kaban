@@ -8417,6 +8417,72 @@ expression: tools
           ],
           "type": "object"
         },
+        "CatalogIndexStatus": {
+          "description": "The catalog state of one derived index (PC-16's `IndexStatus`; named apart from the\ndocument index's `index_status` response), from the catalog's verification.",
+          "properties": {
+            "base_generation": {
+              "description": "The generation that published the live base, if the index has one.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "index": {
+              "$ref": "#/$defs/IndexName",
+              "description": "Which index."
+            },
+            "last_compaction": {
+              "description": "The newest generation that published a live extent of the index (the last compaction\nthat changed it), if any.",
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "layers": {
+              "description": "Live layers (extents over the base).",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "sediment_rows": {
+              "description": "Pending sediment rows not yet sealed into a layer.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "index",
+            "sediment_rows",
+            "layers",
+            "base_generation",
+            "last_compaction"
+          ],
+          "type": "object"
+        },
+        "IndexName": {
+          "description": "A derived index on the catalog (PC-16).",
+          "oneOf": [
+            {
+              "const": "text",
+              "description": "The text index.",
+              "type": "string"
+            },
+            {
+              "const": "graph",
+              "description": "The memory graph.",
+              "type": "string"
+            },
+            {
+              "const": "code",
+              "description": "The code graph.",
+              "type": "string"
+            }
+          ]
+        },
         "PolicyStats": {
           "description": "Policy summary in `stats`.",
           "properties": {
@@ -8555,6 +8621,14 @@ expression: tools
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": true,
       "properties": {
+        "indexes": {
+          "default": [],
+          "description": "The derived indexes on the catalog (PC-16), text, graph and code in that order; empty\nwhen the service has no catalog wired.",
+          "items": {
+            "$ref": "#/$defs/CatalogIndexStatus"
+          },
+          "type": "array"
+        },
         "policy": {
           "$ref": "#/$defs/PolicyStats",
           "description": "Policy summary."
@@ -8578,7 +8652,8 @@ expression: tools
       "required": [
         "stores",
         "policy",
-        "producers"
+        "producers",
+        "indexes"
       ],
       "type": "object"
     }

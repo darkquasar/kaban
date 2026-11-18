@@ -19,10 +19,14 @@ use crate::api::write_barrier::{
 use crate::enrich::Enricher;
 use crate::error::ApiError;
 use crate::ontology::OntologyRegistry;
-use crate::types::{ReceiptIdentities, WriteReceipt};
+use crate::types::{
+    CatalogVerify, CompactReport, ReceiptIdentities, ReindexReport, ReindexTarget, WriteReceipt,
+};
 use kaban_codegraph::SnapshotProvider;
 use kaban_core::config::EngineConfig;
-use kaban_core::{Actor, GraphStore, NodeId, RuleSet, WorkspaceId, WriteCtx};
+use kaban_core::{
+    Actor, Durability, GraphStore, NodeId, RuleSet, StoreError, WorkspaceId, WriteCtx,
+};
 use kaban_policy::{AuditSigner, Policy};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock, RwLockReadGuard};
@@ -47,6 +51,33 @@ pub struct ApiConfig {
     /// startup from `<KABAN_HOME>/config.yaml`, the register defaults otherwise. Every
     /// threshold the service applies is read from here and nowhere else.
     pub engine: Arc<EngineConfig>,
+}
+
+/// The catalog maintenance of the store a service writes through (spec 11 T6): the store's
+/// operations the role traits do not carry, wired by the binary ([`KabanApi::with_catalog`]).
+pub trait CatalogMaintenance: Send + Sync {
+    /// Seal, fold and reclaim by the configured policy, then vacuum and checkpoint.
+    ///
+    /// # Errors
+    /// Store errors (a unit its budget refuses is a skip, not an error).
+    fn compact(&self) -> Result<CompactReport, StoreError>;
+    /// Clear what a crashed process left (stale claims, unpublished ranges); a one-line
+    /// summary of what it did.
+    ///
+    /// # Errors
+    /// Store errors.
+    fn recover(&self) -> Result<String, StoreError>;
+    /// Verify the catalog: the index states and every inconsistency found.
+    ///
+    /// # Errors
+    /// Store errors.
+    fn verify(&self) -> Result<CatalogVerify, StoreError>;
+    /// The bounded checkpoint after a one-shot write's acknowledgement (KER-09): whether it
+    /// ran (it runs once its interval elapsed).
+    ///
+    /// # Errors
+    /// Store errors.
+    fn checkpoint_if_due(&self) -> Result<bool, StoreError>;
 }
 
 /// The capability surface: store + denylist policy + keyed-hash signer.
@@ -82,6 +113,11 @@ pub struct KabanApi {
     pub(crate) receipt_identities: Arc<ReceiptIdentities>,
     /// The barrier's clock (the process clock; a fake in the barrier's tests).
     pub(crate) clock: Arc<dyn Clock>,
+    /// The store's catalog maintenance (`None`: compact, verify and recover are refused and
+    /// `stats.indexes` is empty).
+    pub(crate) catalog: Option<Arc<dyn CatalogMaintenance>>,
+    /// How hard every write's commit waits for the disk (`--durable`: `Full`, KER-04).
+    pub(crate) durability: Durability,
 }
 
 impl std::fmt::Debug for KabanApi {
@@ -135,7 +171,57 @@ impl KabanApi {
             snapshot_provider: None,
             head: Arc::new(crate::code::HeadSource::default()),
             clock: Arc::new(SystemClock),
+            catalog: None,
+            durability: Durability::Normal,
         }
+    }
+
+    /// The same service maintaining the store's catalog through `catalog`.
+    #[must_use]
+    pub fn with_catalog(mut self, catalog: Arc<dyn CatalogMaintenance>) -> Self {
+        self.catalog = Some(catalog);
+        self
+    }
+
+    /// The same service committing every write with `durability` (`--durable`: `Full`).
+    #[must_use]
+    pub fn with_durability(mut self, durability: Durability) -> Self {
+        self.durability = durability;
+        self
+    }
+
+    /// The store's catalog maintenance, if wired.
+    pub fn catalog(&self) -> Option<&Arc<dyn CatalogMaintenance>> {
+        self.catalog.as_ref()
+    }
+
+    /// Compact the catalog (`kaban compact`, PC-7).
+    ///
+    /// # Errors
+    /// `ApiError::Invalid` when no catalog is wired; store errors.
+    pub fn compact(&self) -> Result<CompactReport, ApiError> {
+        let catalog = self
+            .catalog
+            .as_ref()
+            .ok_or_else(|| ApiError::Invalid("compact needs the store's catalog".into()))?;
+        Ok(catalog.compact()?)
+    }
+
+    /// Rebuild the derived indexes `which` names from the canonical rows (`kaban reindex`,
+    /// PC-7); canonical records are never changed.
+    ///
+    /// # Errors
+    /// Store errors.
+    pub fn reindex(&self, which: ReindexTarget) -> Result<ReindexReport, ApiError> {
+        let rows = match which {
+            ReindexTarget::Text | ReindexTarget::All => Some(self.store.reindex_text()?),
+            ReindexTarget::Graph => None,
+        };
+        // the memory graph has no index on the catalog to rebuild until T11
+        Ok(ReindexReport {
+            rows,
+            graph_rebuilt: false,
+        })
     }
 
     /// The same service resolving code-graph snapshots through `provider` over
@@ -313,11 +399,34 @@ impl KabanApi {
             workspace.map_or_else(|| self.config.workspace.clone(), WorkspaceId::new),
             Actor::Agent,
         )
+        .with_durability(self.durability)
     }
 
     /// A gated id string as a [`NodeId`] (D2): a string that is not a node id names no node,
     /// so it is `NotFound` echoing the gated (masked) form, never a parse error.
     pub(crate) fn node_id(gated: &str) -> Result<NodeId, ApiError> {
         NodeId::parse(gated).map_err(|_| ApiError::NotFound(gated.to_owned()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)] // test code: failures are the assertion
+
+    use super::*;
+    use kaban_store_sqlite::SqliteStore;
+
+    #[test]
+    fn a_durable_service_commits_every_write_with_a_full_sync() {
+        // Arrange
+        let store = Arc::new(SqliteStore::open_memory().unwrap());
+        let signer = store.signer();
+        let api = KabanApi::new(store, Policy::empty(), signer).with_durability(Durability::Full);
+
+        // Act
+        let ctx = api.write_ctx(None);
+
+        // Assert
+        assert_eq!(ctx.durability, Durability::Full);
     }
 }

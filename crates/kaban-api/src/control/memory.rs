@@ -59,6 +59,9 @@ pub const METHOD_VALUES: &[&str] = &[
 
 const RECALL_MODES: &[&str] = &["lexical", "fuzzy"];
 
+/// `stats.indexes[].index` wire values (`IndexName`, `rename_all = "snake_case"`; PC-16).
+const INDEX_NAMES: &[&str] = &["text", "graph", "code"];
+
 /// The memory tools' rows of [`super::REGISTRY`].
 pub(super) const ROWS: &[ControlEntry] = &[
     entry("remember", Direction::Request, "links[].to", Shape::NodeId),
@@ -157,6 +160,12 @@ pub(super) const ROWS: &[ControlEntry] = &[
         Direction::Response,
         "policy.effective_hash",
         Shape::Hex { min: 64, max: 64 },
+    ),
+    entry(
+        "stats",
+        Direction::Response,
+        "indexes[].index",
+        Shape::Enum(INDEX_NAMES),
     ),
     entry(
         "remember",

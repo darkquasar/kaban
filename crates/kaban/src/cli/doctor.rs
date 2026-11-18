@@ -28,11 +28,27 @@ use std::path::Path;
 use std::process::ExitCode;
 use std::sync::Arc;
 
-/// The request the seam scans: the two flags, no caller string.
+/// The request the seam scans: the flags, no caller string.
 #[derive(Debug, Deserialize)]
 struct DoctorArgs {
     vacuum: bool,
     optimize: bool,
+    recover: bool,
+}
+
+/// The actions doctor runs besides its checks (`--vacuum`, `--optimize`, `--recover`).
+#[derive(Debug, Clone, Copy)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent command-line flags, each one action"
+)]
+pub(crate) struct Actions {
+    /// `--vacuum`: run VACUUM after the checks.
+    pub(crate) vacuum: bool,
+    /// `--optimize`: optimize the full-text index segments once.
+    pub(crate) optimize: bool,
+    /// `--recover`: recover the catalog before the checks.
+    pub(crate) recover: bool,
 }
 
 /// Run the checks against `cli.db` with the audit key under `keys_dir` and print the report.
@@ -40,8 +56,7 @@ pub(crate) fn run(
     cli: &Cli,
     policy: kaban_policy::Policy,
     keys_dir: &Path,
-    vacuum: bool,
-    optimize: bool,
+    actions: Actions,
     format: Format,
 ) -> ExitCode {
     let engine = match crate::load_engine() {
@@ -80,6 +95,7 @@ pub(crate) fn run(
     // report reads its payload watermark (no loop, no drain, nothing created: doctor
     // publishes nothing and a missing index is reported, never built, T4 review t4-9)
     let store = Arc::new(store);
+    let catalog = Arc::new(super::compact::StoreCatalog(Arc::clone(&store)));
     // the same binding rule as the server (S6; `open_api`): the workspace only stamps the
     // audit rows a gate rejection would write
     let workspace = match &cli.workspace {
@@ -120,7 +136,8 @@ pub(crate) fn run(
             repo,
             engine,
         },
-    );
+    )
+    .with_catalog(catalog);
     let api = match wiring {
         Some(wiring) => api.with_snapshot_provider(wiring.dir, wiring.provider),
         None => api,
@@ -131,7 +148,11 @@ pub(crate) fn run(
     let code = seam::run_tool::<DoctorArgs, DoctorReport, _>(
         &api,
         "doctor",
-        json!({ "vacuum": vacuum, "optimize": optimize }),
+        json!({
+            "vacuum": actions.vacuum,
+            "optimize": actions.optimize,
+            "recover": actions.recover,
+        }),
         format,
         |api, args| {
             let context = DoctorContext {
@@ -140,7 +161,9 @@ pub(crate) fn run(
                 keys_dir: keys_dir.to_path_buf(),
                 vacuum: args.vacuum,
             };
-            let mut report = if args.optimize {
+            let mut report = if args.recover {
+                api.doctor_recover(&context)?
+            } else if args.optimize {
                 api.doctor_optimize(&context)?
             } else {
                 api.doctor(&context)

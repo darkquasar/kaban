@@ -64,6 +64,7 @@ pub(crate) struct Flags {
 
 impl ToolArgs for Flags {
     const NAME: &'static str = "remember";
+    const WRITES: bool = true;
 
     fn any_given(&self) -> bool {
         self.kind.is_some()

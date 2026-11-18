@@ -49,6 +49,9 @@ struct Cli {
     /// Read the request as one JSON object from stdin (at most 1 MiB) instead of arguments
     #[arg(long, global = true)]
     stdin_json: bool,
+    /// Commit every write with a full sync before it is acknowledged (KER-04)
+    #[arg(long, global = true)]
+    durable: bool,
     #[command(subcommand)]
     cmd: Option<Cmd>,
 }
@@ -57,11 +60,12 @@ struct Cli {
 enum Cmd {
     /// Report counters, policy and the producer rows (same response as MCP stats)
     Stats(cli::stats::Flags),
-    /// Recompute derived indexes from this database; canonical records are never changed
-    Reindex {
-        #[command(subcommand)]
-        command: cli::reindex::Command,
-    },
+    /// Rebuild derived indexes (text, graph or all) from this database; canonical records are
+    /// never changed
+    Reindex(cli::reindex::Flags),
+    /// Maintain the catalog: seal, fold and punch by its policy, then checkpoint (spec 11
+    /// PC-7)
+    Compact,
     /// Serve MCP over stdio (default)
     Serve {
         /// Loopback HTTP transport; not available in this build (M7)
@@ -115,6 +119,10 @@ enum Cmd {
         /// Also run VACUUM to reclaim free pages (reported as its own check)
         #[arg(long)]
         vacuum: bool,
+        /// First recover the catalog after a crash: clear stale claims and reclaim unpublished
+        /// ranges (reported as `catalog_recover`)
+        #[arg(long, conflicts_with = "optimize")]
+        recover: bool,
     },
     /// Host hook handler (core-spec F8): reads the host's event envelope as one JSON object
     /// from stdin, prints one JSON document and always exits 0; never creates or migrates the
@@ -139,10 +147,27 @@ enum Cmd {
     Ingest(cli::ingest::Flags),
 }
 
-/// `kaban bench cg ...` (stage1-plan §18, CG7.3; feature `bench`), `kaban bench recall` and
-/// `kaban bench edges`.
+/// `kaban bench cg ...` (stage1-plan §18, CG7.3; feature `bench`), `kaban bench recall`,
+/// `kaban bench edges` and the spec 11 benches (`catalog crash text graph rollup query code
+/// git`), registered by T6 and filled by their owning tasks.
 #[derive(Subcommand)]
 enum BenchCg {
+    /// Catalog lock holds and WAL high-water mark under writers and a merge thread
+    Catalog(bench::catalog::Args),
+    /// Kill children at catalog crash points, then recover and verify
+    Crash(bench::crash::Args),
+    /// The text index bench
+    Text,
+    /// The memory graph bench
+    Graph,
+    /// The rollup bench
+    Rollup,
+    /// The query bench
+    Query,
+    /// The code graph bench
+    Code,
+    /// The git history bench
+    Git,
     /// Judge public-service recall and retain paired warm lexical/fuzzy timing evidence
     Recall(bench::recall_runtime::RecallArgs),
     /// Judge actual gazetteer MENTIONS edges using a retained stable source map
@@ -372,12 +397,17 @@ fn open_api(
     let store = kaban_store_sqlite::SqliteStore::open_as(&cli.db, &keys_dir, &cli.actor_id)
         .map_err(OpenError::Store)?
         .with_recall_config(engine.recall.clone())
+        .map_err(OpenError::Store)?
+        .with_catalog_config(engine.catalog.clone())
         .map_err(OpenError::Store)?;
     let store = Arc::new(store.serving(serving).map_err(OpenError::Store)?);
+    let catalog = Arc::new(cli::compact::StoreCatalog(Arc::clone(&store)));
     // the one registry of this process (engine-plan E1.5): the service reads every mixin
     // decision from it, and `kaban ontology load` loads through it
     let registry = kaban_api::OntologyRegistry::new(ontology_root()).map_err(open_error)?;
-    let api = assemble_api_with(cli, policy, store, engine)?.with_registry(Arc::new(registry));
+    let api = assemble_api_with(cli, policy, store, engine)?
+        .with_registry(Arc::new(registry))
+        .with_catalog(catalog);
     let api = match codegraph {
         Some(wiring) => api.with_snapshot_provider(wiring.dir, wiring.provider),
         None => api,
@@ -452,6 +482,11 @@ fn assemble_api_with(
     // repository identity, computed once without a subprocess (M3-23)
     let repo_root = repo_root(&cwd);
     let repo = repo_root.as_deref().and_then(repo_name);
+    let durability = if cli.durable {
+        kaban_core::Durability::Full
+    } else {
+        kaban_core::Durability::Normal
+    };
     Ok(kaban_api::KabanApi::with_config(
         store,
         policy,
@@ -462,7 +497,8 @@ fn assemble_api_with(
             repo,
             engine: Arc::new(engine),
         },
-    ))
+    )
+    .with_durability(durability))
 }
 
 /// Parse the command line and run it (`cli::run`). A usage error prints a fixed text and exits

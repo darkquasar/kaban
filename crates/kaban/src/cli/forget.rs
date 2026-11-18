@@ -41,6 +41,7 @@ struct ForgetDocumentRequest {
 
 impl ToolArgs for Flags {
     const NAME: &'static str = "forget";
+    const WRITES: bool = true;
 
     fn any_given(&self) -> bool {
         #[cfg(feature = "ingest")]

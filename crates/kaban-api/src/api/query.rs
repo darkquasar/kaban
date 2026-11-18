@@ -285,6 +285,16 @@ impl KabanApi {
                 |_| crate::producers::ProducerRegistry.enabled(self.engine()),
                 |meta| crate::producers::ProducerRegistry.with_runs(self.engine(), &meta),
             ),
+            // the catalog's index states; a failed verification hides no other counter
+            indexes: self.catalog.as_ref().map_or_else(Vec::new, |catalog| {
+                catalog.verify().map_or_else(
+                    |e| {
+                        tracing::warn!(error = %e, "stats: the catalog could not be verified");
+                        Vec::new()
+                    },
+                    |found| found.indexes,
+                )
+            }),
         })
     }
 }

@@ -33,13 +33,18 @@ const REMOVED_PATHS: [(&str, &str); 12] = [
     ("stats", "#LayerRow/reason_off"),
 ];
 
-/// The `outputSchema` path prefixes a tool may gain: the `stats.producers` rows (PC-16) and
-/// the budget rows they carry.
-const ADDED_PREFIXES: [(&str, &str); 3] = [
+/// The `outputSchema` path prefixes a tool may gain: the `stats.producers` rows (PC-16), the
+/// budget rows they carry and the catalog's `stats.indexes` rows (PC-16, spec 11 T6).
+const ADDED_PREFIXES: [(&str, &str); 5] = [
     ("stats", "/producers"),
     ("stats", "#ProducerRow/"),
     ("stats", "#BudgetRow/"),
+    ("stats", "/indexes"),
+    ("stats", "#CatalogIndexStatus/"),
 ];
+
+/// The `doctor` checks it may gain: the catalog's verification (spec 11 T6).
+const ADDED_CHECKS: [&str; 1] = ["catalog_verify"];
 
 /// The `stats` counters that go: projector lag and the conflict count.
 const REMOVED_STATS: [&str; 3] = ["changes_lag", "outbox_lag", "conflicts"];
@@ -197,7 +202,7 @@ fn doctor_drops_only_the_governance_audit_and_lag_checks() {
         .collect();
     let unknown: Vec<&&str> = names
         .difference(&before)
-        .filter(|name| !name.starts_with("producer_"))
+        .filter(|name| !name.starts_with("producer_") && !ADDED_CHECKS.contains(name))
         .collect();
     assert!(
         unknown.is_empty(),

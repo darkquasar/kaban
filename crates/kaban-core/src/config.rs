@@ -370,11 +370,11 @@ impl Default for Bench {
 
 /// The smallest memory a maintenance unit of work (one seal, fold or base build) needs, in MiB:
 /// a `catalog.maintenance_memory_mib` below it is refused.
-const MIN_MAINTENANCE_MEMORY_MIB: u64 = 16; // anchored by worker 4's measurement
+const MIN_MAINTENANCE_MEMORY_MIB: u64 = 16; // placeholder: the 7.6 measurement has not run yet
 
 /// The shortest deadline a maintenance unit of work can meet, in ms: a
 /// `catalog.maintenance_deadline_ms` below it is refused.
-const MIN_MAINTENANCE_DEADLINE_MS: u64 = 100; // anchored by worker 4's measurement
+const MIN_MAINTENANCE_DEADLINE_MS: u64 = 100; // placeholder: the 7.6 measurement has not run yet
 
 /// `[catalog]` (spec 11 PC-10, Task 6, 7.6): compaction policy, the scheduled checkpoint and
 /// the maintenance budget of the catalog. Validated at load ([`CatalogCfg::validate`]): a value
@@ -402,9 +402,9 @@ impl Default for CatalogCfg {
             seal_ops: SealOps::default(),
             fold_depth: 8,
             fold_delta_ratio: 0.25,
-            checkpoint_interval_ms: 1_000, // anchored by worker 4's measurement
-            maintenance_memory_mib: 256,   // anchored by worker 4's measurement
-            maintenance_deadline_ms: 30_000, // anchored by worker 4's measurement
+            checkpoint_interval_ms: 1_000, // placeholder: the 7.6 measurement has not run yet
+            maintenance_memory_mib: 256,   // placeholder: the 7.6 measurement has not run yet
+            maintenance_deadline_ms: 30_000, // placeholder: the 7.6 measurement has not run yet
         }
     }
 }
@@ -423,7 +423,7 @@ pub struct SealOps {
 
 impl Default for SealOps {
     fn default() -> Self {
-        // anchored by worker 4's measurement
+        // placeholder: the 7.6 measurement has not run yet
         Self {
             text: 10_000,
             graph: 10_000,

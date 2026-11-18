@@ -35,17 +35,32 @@
     clippy::cast_sign_loss
 )] // benchmark arithmetic on small counts/durations
 
+pub(crate) mod catalog;
 #[cfg(feature = "bench")]
 pub(crate) mod cg;
 #[cfg(feature = "ingest")]
 mod chunks;
+pub(crate) mod code;
 mod corpus;
+pub(crate) mod crash;
+pub(crate) mod git;
+pub(crate) mod graph;
 #[cfg(feature = "ingest")]
 mod layers;
+pub(crate) mod query;
 #[allow(dead_code)] // E3.5 early pure metric seam; CLI consumer is a separately admitted slice.
 pub(crate) mod recall_classes;
 pub(crate) mod recall_runtime;
 mod report;
+pub(crate) mod rollup;
 mod runner;
+pub(crate) mod text;
 
 pub(crate) use runner::{Shape, run};
+
+/// Refuse a spec 11 bench its owning task has not filled yet (`name`: kaban's own bench name):
+/// `bench <name> not delivered`, exit 4.
+fn not_delivered(name: &str) -> std::process::ExitCode {
+    crate::cli::output::print_error(&format!("error: bench {name} not delivered"));
+    std::process::ExitCode::from(crate::cli::output::EXIT_INVALID)
+}

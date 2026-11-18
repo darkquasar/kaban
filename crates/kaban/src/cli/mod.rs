@@ -8,6 +8,7 @@
 //! unshipped flags and modes exit 4 through [`stubs`]; `ingest` (docs-ingest DI1.6, behind the
 //! `ingest` feature) runs the document pipeline as the tool `index_docs`.
 
+pub(crate) mod compact;
 pub(crate) mod doctor;
 pub(crate) mod forget;
 pub(crate) mod hook;
@@ -37,6 +38,9 @@ use std::process::ExitCode;
 pub(crate) trait ToolArgs {
     /// The subcommand's own name, for its fixed messages (never caller data).
     const NAME: &'static str;
+    /// Whether the subcommand writes: then the bounded checkpoint runs after its
+    /// acknowledgement ([`compact::after_ack`], KER-09).
+    const WRITES: bool = false;
     /// Whether any argument was given (then `--stdin-json` is refused).
     fn any_given(&self) -> bool;
     /// The raw request as one JSON object. A missing required argument or a structured flag
@@ -200,6 +204,18 @@ pub(crate) fn run(mut cli: Cli) -> ExitCode {
                 );
             }
             // the code-graph bench (stage1-plan §18, CG7.3) lives behind the `bench` feature
+            // the spec 11 benches (T6 registers all eight; each owning task fills its own)
+            match &cg {
+                Some(crate::BenchCg::Catalog(args)) => return crate::bench::catalog::run(args),
+                Some(crate::BenchCg::Crash(args)) => return crate::bench::crash::run(args),
+                Some(crate::BenchCg::Text) => return crate::bench::text::run(),
+                Some(crate::BenchCg::Graph) => return crate::bench::graph::run(),
+                Some(crate::BenchCg::Rollup) => return crate::bench::rollup::run(),
+                Some(crate::BenchCg::Query) => return crate::bench::query::run(),
+                Some(crate::BenchCg::Code) => return crate::bench::code::run(),
+                Some(crate::BenchCg::Git) => return crate::bench::git::run(),
+                _ => {}
+            }
             if let Some(cg) = cg {
                 #[cfg(feature = "bench")]
                 {
@@ -238,7 +254,11 @@ pub(crate) fn run(mut cli: Cli) -> ExitCode {
         // the explicit job: a policy that does not load is a config error (exit 4), the store
         // decides exit 5 inside `rescan::run`
         Cmd::Rescan => match open_service(cli) {
-            Ok(api) => finish(rescan::run(&api, format)),
+            Ok(api) => compact::after_ack(&api, finish(rescan::run(&api, format))),
+            Err(code) => code,
+        },
+        Cmd::Compact => match open_service(cli) {
+            Ok(api) => compact::run(&api, format),
             Err(code) => code,
         },
         Cmd::Remember(flags) => run_tool_command(cli, format, flags, remember::run),
@@ -267,20 +287,27 @@ pub(crate) fn run(mut cli: Cli) -> ExitCode {
         },
         // its own open (diagnostic, never creating or migrating); a policy that does not load
         // is a config error like everywhere else
-        Cmd::Doctor { vacuum, optimize } => {
-            match (load_policy(cli.policy.as_deref()), keys_dir()) {
-                (Ok(policy), Ok(keys)) => {
-                    doctor::run(&cli, policy, &keys, vacuum, optimize, format)
-                }
-                (Err(code), _) | (_, Err(code)) => code,
+        Cmd::Doctor {
+            vacuum,
+            optimize,
+            recover,
+        } => match (load_policy(cli.policy.as_deref()), keys_dir()) {
+            (Ok(policy), Ok(keys)) => {
+                let actions = doctor::Actions {
+                    vacuum,
+                    optimize,
+                    recover,
+                };
+                doctor::run(&cli, policy, &keys, actions, format)
             }
-        }
+            (Err(code), _) | (_, Err(code)) => code,
+        },
         // every hook path exits 0 (M4-8); the module owns the open, the watchdog and the body
         Cmd::Hook { event, host } => hook::run(cli, event, host),
-        Cmd::Reindex { command } => reindex::run(cli, &command, format),
+        Cmd::Reindex(flags) => reindex::run(cli, &flags, format),
         // E1.3: the registry runs through the tool seam like every tool subcommand
         Cmd::Ontology { cmd } => match open_service(cli) {
-            Ok(api) => ontology::run(&api, cmd, format),
+            Ok(api) => compact::after_ack(&api, ontology::run(&api, cmd, format)),
             Err(code) => code,
         },
         // DI1.6: the document pipeline runs through the tool seam as `index_docs`
@@ -300,11 +327,12 @@ pub(crate) fn run(mut cli: Cli) -> ExitCode {
             };
             match open_service(cli) {
                 Ok(api) => {
-                    if let Some(raw) = body {
+                    let code = if let Some(raw) = body {
                         ingest::run_submit(&api, flags, raw, format)
                     } else {
                         ingest::run(&api, flags, format)
-                    }
+                    };
+                    compact::after_ack(&api, code)
                 }
                 Err(code) => code,
             }
@@ -340,6 +368,7 @@ fn run_tool_command<A: ToolArgs>(
         }
     };
     match open_service(cli) {
+        Ok(api) if A::WRITES => compact::after_ack(&api, run(&api, raw, format)),
         Ok(api) => run(&api, raw, format),
         Err(code) => code,
     }

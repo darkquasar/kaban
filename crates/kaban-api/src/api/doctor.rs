@@ -39,7 +39,8 @@ pub struct DoctorCheck {
     /// `text_index_watermark`, the payload watermark, and `text_index_lag`, the canonical
     /// head minus it), `ident_terms_version`, one `producer_<producer>` row per producer
     /// (PC-16), `stale_anchors` (E3.11: `CodeRef`s whose symbol the current snapshot lacks),
-    /// `vacuum` and `optimize` when asked.
+    /// `catalog_verify` (spec 11 T6, when a catalog is wired), `vacuum`, `optimize` and
+    /// `catalog_recover` when asked.
     pub name: String,
     /// Whether the check passed.
     pub ok: bool,
@@ -120,6 +121,23 @@ impl KabanApi {
         report.push_outcome("optimize", self.store.optimize_fts());
         Ok(report)
     }
+    /// Recover the catalog after a crash (`doctor --recover`: stale claims and unpublished
+    /// ranges a dead process left), then run every doctor check; the recovery is the
+    /// `catalog_recover` row.
+    ///
+    /// # Errors
+    /// Request gate refusal. Store failures remain named failed checks in the report.
+    pub fn doctor_recover(&self, ctx: &DoctorContext) -> Result<DoctorReport, crate::ApiError> {
+        self.prepare_args("doctor", &serde_json::json!({"recover":true}))?;
+        let recovered = self.catalog.as_ref().map(|catalog| catalog.recover());
+        let mut report = self.doctor(ctx);
+        match recovered {
+            Some(Ok(detail)) => report.push("catalog_recover", true, detail),
+            Some(Err(e)) => report.push("catalog_recover", false, format!("not run: {e}")),
+            None => report.push("catalog_recover", false, "not run: no catalog"),
+        }
+        Ok(report)
+    }
     /// Run every doctor check and report (core-spec §7): the pre-open file modes, the engine's
     /// structural check, the FTS index check, exhausted ingest claims, stale derived artifacts,
     /// the schema version against the binary's, the text index and its lag, the producer rows,
@@ -149,6 +167,16 @@ impl KabanApi {
         );
         report.push_outcome("integrity", self.store.integrity_check());
         report.push_outcome("fts_integrity", self.store.fts_integrity_check());
+        // spec 11 T6: the catalog's structural verification, every inconsistency named
+        if let Some(catalog) = &self.catalog {
+            match catalog.verify() {
+                Ok(found) if found.inconsistencies.is_empty() => {
+                    report.push("catalog_verify", true, "ok");
+                }
+                Ok(found) => report.push("catalog_verify", false, found.inconsistencies.join("; ")),
+                Err(e) => report.push("catalog_verify", false, format!("not checked: {e}")),
+            }
+        }
         match self
             .store
             .jobs_exhausted(self.workspace(), self.engine().ingest.claim_max_attempts)
