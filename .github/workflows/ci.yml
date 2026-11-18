@@ -672,6 +672,12 @@ jobs:
         valgrind --error-exitcode=1 --leak-check=full --errors-for-leak-kinds=definite
         --track-origins=yes --trace-children=yes
         --suppressions=${{ github.workspace }}/crates/kaban-vtab/tests/valgrind.supp
+      # Valgrind's slowdown breaks wall-clock deadline assertions; these stay in the normal suite.
+      MEMCHECK_FILTER: >-
+        not (test(=a_query_past_the_deadline_is_interrupted_with_the_named_limit)
+        | test(=a_genuine_sqlite_failure_is_not_reported_as_a_limit)
+        | test(=a_deadline_during_a_lock_wait_ends_promptly_as_the_time_limit)
+        | test(=a_cancellation_during_a_lock_wait_ends_promptly_as_cancelled))
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -698,11 +704,11 @@ jobs:
       - name: Fetch locked dependencies
         run: cargo fetch --locked
       # Default features run the embedding-only tests; all features run the bootstrap ones.
-      # Retries absorb deadline tests slowed past their limit; a memcheck error repeats and fails.
+      # Retries absorb timing failures under the slowdown; a memcheck error repeats and fails.
       - name: Run kaban-vtab tests under memcheck (default features)
-        run: cargo nextest run -p kaban-vtab --locked --no-fail-fast --retries 2
+        run: cargo nextest run -p kaban-vtab --locked --no-fail-fast --retries 2 -E "$MEMCHECK_FILTER"
       - name: Run kaban-vtab tests under memcheck (all features)
-        run: cargo nextest run -p kaban-vtab --locked --all-features --no-fail-fast --retries 2
+        run: cargo nextest run -p kaban-vtab --locked --all-features --no-fail-fast --retries 2 -E "$MEMCHECK_FILTER"
 
   gates:
     name: Rust gates (scripts/ci/ci.sh)

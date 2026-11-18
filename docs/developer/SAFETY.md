@@ -502,15 +502,22 @@ holder, so the owner is dropped after the last of them, after the span. The inte
   CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER="valgrind --error-exitcode=1 --leak-check=full \
     --errors-for-leak-kinds=definite --track-origins=yes --trace-children=yes \
     --suppressions=$PWD/crates/kaban-vtab/tests/valgrind.supp" \
-    cargo nextest run -p kaban-vtab --locked --no-fail-fast --retries 2   # then with --all-features
+    cargo nextest run -p kaban-vtab --locked --no-fail-fast --retries 2 -E "$MEMCHECK_FILTER"
   ```
 
-  (on aarch64 the variable is `CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER`). The retries absorb
-  the deadline tests, which Valgrind's slowdown can push past their short limits; a memcheck error
-  repeats on every attempt and still fails the run. What it does not cover: only paths the tests
-  reach; no data races (memcheck is not a race detector; no ThreadSanitizer runs); Rust-level
-  undefined behaviour that touches no invalid memory (aliasing, invalid values), since Miri cannot
-  execute SQLite's C code over FFI; possible leaks and leaks still reachable at exit; and macOS.
+  Run it again with `--all-features`; `MEMCHECK_FILTER` is the filter expression set in the
+  `vtab-memcheck` job of `.github/workflows/ci.yml` (on aarch64 the runner variable is
+  `CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER`). The retries absorb timing failures under
+  Valgrind's slowdown; a memcheck error repeats on every attempt and still fails the run. What it
+  does not cover: only paths the tests reach; four tests whose assertions depend on wall-clock
+  deadlines or timers, which the slowdown breaks, are excluded from this job and run only in the
+  normal suite (`budget_scope`: `a_query_past_the_deadline_is_interrupted_with_the_named_limit`,
+  `a_genuine_sqlite_failure_is_not_reported_as_a_limit`; `connection`:
+  `a_deadline_during_a_lock_wait_ends_promptly_as_the_time_limit`,
+  `a_cancellation_during_a_lock_wait_ends_promptly_as_cancelled`); no data races (memcheck is
+  not a race detector; no ThreadSanitizer runs); Rust-level undefined behaviour that touches no
+  invalid memory (aliasing, invalid values), since Miri cannot execute SQLite's C code over FFI;
+  possible leaks and leaks still reachable at exit; and macOS.
   AddressSanitizer is not set up (it needs a nightly toolchain with `rust-src`, which the pinned
   toolchain does not use).
 - Unscoped work on a scoped thread is charged to the scope's request (see "Not supported"). It
