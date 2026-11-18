@@ -35,7 +35,11 @@ pub const REPORT_LINE: &str = "kaban-vtab: sqlite allocator adapter installed be
 /// constructor part of the binary. The call itself does nothing at run time.
 #[inline(never)]
 pub fn ensure_linked() {
-    std::hint::black_box(&BOOTSTRAP);
+    // Name the constructor function, not the `BOOTSTRAP` static: either keeps this object, and
+    // with it the `#[used]` static, in the link. On Mach-O, Apple's linker rewrites the
+    // `__mod_init_func` pointers into `__init_offsets` for recent deployment targets, so the
+    // static has no address left and a code reference to it fails to link (ADRP fixup error).
+    std::hint::black_box(bootstrap as extern "C" fn());
 }
 
 /// The startup constructor: install the adapter, or refuse startup by name.
