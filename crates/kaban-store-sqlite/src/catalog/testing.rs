@@ -811,7 +811,7 @@ impl IndexClass for EdgeSediment {
 /// # Errors
 /// The compaction's errors.
 pub fn compact(store: &SqliteStore, budget: CompactBudget) -> Result<CompactReport> {
-    store.catalog().compact(&mut store.lock(), budget)
+    store.catalog().compact(store.connection(), budget)
 }
 
 /// Purge `rids` from every class's extents of `store`'s catalog ([`Catalog::purge`]).
@@ -819,7 +819,7 @@ pub fn compact(store: &SqliteStore, budget: CompactBudget) -> Result<CompactRepo
 /// # Errors
 /// The purge's errors.
 pub fn purge(store: &SqliteStore, rids: &[i64]) -> Result<PurgeReport> {
-    store.catalog().purge(&mut store.lock(), rids)
+    store.catalog().purge(store.connection(), rids)
 }
 
 /// Append `bytes` to `store`'s container as a test-class extent and never publish it: a leaked

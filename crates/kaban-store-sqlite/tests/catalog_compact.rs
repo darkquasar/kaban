@@ -480,6 +480,53 @@ fn two_compactions_over_the_same_inputs_fold_once_and_the_other_reports_them_ski
     );
 }
 
+#[test]
+fn a_write_on_the_same_store_completes_while_a_merge_is_in_flight() {
+    // Arrange: a foldable chain; the compaction stops right after its claim (its merge in
+    // flight) until the test lets it go
+    let s = Scratch::new("kaban-t6-compact", "merge-unlocked");
+    let store = Arc::new(open(&s));
+    catalog_testing::append_and_publish_all(
+        &store,
+        &[pattern(1, 64), pattern(2, 64), pattern(3, 64)],
+    )
+    .unwrap();
+    let (claimed, on_claim) = std::sync::mpsc::channel();
+    let (go, wait) = std::sync::mpsc::channel::<()>();
+    let wait = Mutex::new(wait);
+    catalog_testing::set_failpoint(
+        &store,
+        Window::CompactClaimed,
+        Some(Arc::new(move || {
+            let _ = claimed.send(());
+            let _ = wait.lock().unwrap().recv_timeout(STEP);
+        })),
+    );
+    let compacting = {
+        let store = Arc::clone(&store);
+        std::thread::spawn(move || catalog_testing::compact(&store, unit(u64::MAX)))
+    };
+    on_claim
+        .recv_timeout(STEP)
+        .expect("the compaction never claimed");
+
+    // Act: a remember on the same store while the merge is in flight
+    let (wrote, written) = std::sync::mpsc::channel();
+    {
+        let store = Arc::clone(&store);
+        std::thread::spawn(move || {
+            let _ = wrote.send(created(&store, "Fact", "the merge is running").id);
+        });
+    }
+    let during = written.recv_timeout(Duration::from_secs(5));
+    go.send(()).unwrap();
+    let report = compacting.join().unwrap().unwrap();
+
+    // Assert: the write did not wait for the merge, and the fold still published
+    assert!(during.is_ok(), "the write waited for the merge to end");
+    assert_eq!(report.published.len(), 1, "{report:?}");
+}
+
 /// Whether `reason` is a refusal of the memory ceiling.
 fn memory_refused(reason: &SkipReason) -> bool {
     matches!(reason, SkipReason::Budget(e) if e.limit == Limit::Memory)

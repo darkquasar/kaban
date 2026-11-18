@@ -38,7 +38,7 @@
 )]
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use kaban_core::config::SealOps;
@@ -534,6 +534,11 @@ impl Catalog {
     ///   => reclaim => bounded incremental vacuum => checkpoint tick once its interval elapsed
     /// ```
     ///
+    /// The connection is locked per step, never for the pass: each claim, publication and
+    /// release, the retention, the reclamation, the vacuum and the checkpoint take it in turn,
+    /// and a unit's merge and append run without it (the committed claim protects the inputs),
+    /// so the store's other writers and readers proceed meanwhile.
+    ///
     /// A claim another compaction holds skips the unit (`Claimed`); a unit its budget refuses
     /// publishes nothing, hands its claim back and is retried smaller, and the smallest one
     /// refused is reported, never raised; a refused switch is released and reported. A catalog
@@ -543,12 +548,14 @@ impl Catalog {
     /// SQLite, container and storage errors (a budget refusal is a skip, never an error).
     pub(crate) fn compact(
         &self,
-        conn: &mut Connection,
+        conn: &Mutex<Connection>,
         budget: CompactBudget,
     ) -> Result<CompactReport> {
         let mut report = CompactReport::default();
         if let Some(_hold) = self.maintenance_hold()? {
-            match self.pin_every_view(conn, budget) {
+            // the guard is a temporary of this statement: no merge runs under it
+            let pinned = self.pin_every_view(&step(conn), budget);
+            match pinned {
                 Ok(pinned) => {
                     for class in self.classes() {
                         self.seal_class(conn, &pinned, class.as_ref(), budget, &mut report)?;
@@ -571,12 +578,12 @@ impl Catalog {
                 }
             }
             // no view is git-live yet: T16 supplies the protected views
-            report.views_retired = self.retain_views(conn, self.config().view_retention, &[])?;
-            self.record_refused(conn, report.refused_units)?;
+            report.views_retired = self.retain_views(&mut step(conn), self.config().view_retention, &[])?;
+            self.record_refused(&mut step(conn), report.refused_units)?;
         }
-        report.reclaim = self.reclaim(conn)?;
-        report.vacuumed_pages = self.vacuum(conn)?;
-        report.checkpoint = self.checkpoint_if_due(conn)?;
+        report.reclaim = self.reclaim(&mut step(conn))?;
+        report.vacuumed_pages = self.vacuum(&mut step(conn))?;
+        report.checkpoint = self.checkpoint_if_due(&step(conn))?;
         Ok(report)
     }
 
@@ -606,11 +613,11 @@ impl Catalog {
     ///
     /// # Errors
     /// SQLite, container and storage errors.
-    pub(crate) fn purge(&self, conn: &mut Connection, rids: &[i64]) -> Result<PurgeReport> {
+    pub(crate) fn purge(&self, conn: &Mutex<Connection>, rids: &[i64]) -> Result<PurgeReport> {
         let mut report = PurgeReport::default();
         if let Some(_hold) = self.maintenance_hold()? {
             let budget = self.maintenance_budget();
-            let pinned = self.pin_every_view(conn, budget)?;
+            let pinned = self.pin_every_view(&step(conn), budget)?;
             for class in self.classes() {
                 let mut extents: Vec<ExtentRef> = Vec::new();
                 for e in pinned.views.iter().flat_map(|v| v.chain()) {
@@ -656,7 +663,7 @@ impl Catalog {
                 outcome.record(&unit, &mut report.published, &mut report.skipped);
             }
         }
-        report.reclaim = self.reclaim(conn)?;
+        report.reclaim = self.reclaim(&mut step(conn))?;
         Ok(report)
     }
 
@@ -664,7 +671,7 @@ impl Catalog {
     /// each budget refusal down to one.
     fn seal_class(
         &self,
-        conn: &mut Connection,
+        conn: &Mutex<Connection>,
         pinned: &Pinned,
         class: &dyn IndexClass,
         budget: CompactBudget,
@@ -724,7 +731,7 @@ impl Catalog {
     /// each budget refusal down to two.
     fn fold_view(
         &self,
-        conn: &mut Connection,
+        conn: &Mutex<Connection>,
         pinned: &Pinned,
         view: &PinnedView,
         class: &dyn IndexClass,
@@ -807,23 +814,23 @@ impl Catalog {
     /// back ([`Self::release`]).
     fn run_unit(
         &self,
-        conn: &mut Connection,
+        conn: &Mutex<Connection>,
         unit: &Unit<'_>,
         work: impl FnOnce() -> Result<Option<Planned>>,
     ) -> Result<Outcome> {
         let inputs: Vec<ExtentId> = unit.extents.iter().map(|e| e.id).collect();
-        let Some(claim) = self.claim(conn, &inputs)? else {
+        let Some(claim) = self.claim(&mut step(conn), &inputs)? else {
             return Ok(Outcome::Skipped(SkipReason::Claimed));
         };
         self.failpoint(Window::CompactClaimed);
         let planned = match work() {
             Ok(Some(planned)) => planned,
             Ok(None) => {
-                self.release(conn, claim)?;
+                self.release(&mut step(conn), claim)?;
                 return Ok(Outcome::Nothing);
             }
             Err(e) => {
-                self.release(conn, claim)?;
+                self.release(&mut step(conn), claim)?;
                 return match budget_refusal(&e) {
                     Some(refused) => Ok(Outcome::Skipped(SkipReason::Budget(refused))),
                     None => Err(e),
@@ -840,14 +847,14 @@ impl Catalog {
             match self.append_extent(*class, bytes) {
                 Ok(extent) => added.push(extent),
                 Err(e) => {
-                    self.release(conn, claim)?;
+                    self.release(&mut step(conn), claim)?;
                     return Err(e);
                 }
             }
         }
         fail::point("publish.after_append");
         let published = self.publish(
-            conn,
+            &mut step(conn),
             Publication {
                 claim,
                 added,
@@ -860,7 +867,7 @@ impl Catalog {
             Ok((generation, hold)) => Ok(Outcome::Published(generation, hold)),
             Err(failed) => {
                 let PublishFailed { error, claim } = *failed;
-                self.release(conn, claim)?;
+                self.release(&mut step(conn), claim)?;
                 match error {
                     StoreError::StorageFatal { .. } => Err(error),
                     refused => Ok(Outcome::Skipped(SkipReason::Refused(refusal_text(
@@ -937,6 +944,14 @@ impl Catalog {
             .unwrap_or_else(PoisonError::into_inner)
             .is_none_or(|at| at.elapsed() >= interval)
     }
+}
+
+/// `conn` locked for one step of a pass (a claim, a publication, a release, the reclamation,
+/// the vacuum, the checkpoint): the merge work between steps runs without it, its inputs
+/// protected by the committed claim rows. A lock a panicked call poisoned is taken over, as
+/// the store's own lock does.
+fn step(conn: &Mutex<Connection>) -> MutexGuard<'_, Connection> {
+    conn.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// How many free pages one compaction's incremental vacuum releases at most.

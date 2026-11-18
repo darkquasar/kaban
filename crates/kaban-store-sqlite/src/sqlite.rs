@@ -416,13 +416,14 @@ impl SqliteStore {
 
     /// Compact the catalog under the configured maintenance budget (spec 11 KER-07, 7.6):
     /// seal and fold every class by policy, reclaim what no pin reaches, vacuum SQLite's free
-    /// pages a bounded step and tick the checkpoint when its interval elapsed.
+    /// pages a bounded step and tick the checkpoint when its interval elapsed. The connection
+    /// is locked per step, so the store's writes and reads proceed while a merge runs.
     ///
     /// # Errors
     /// SQLite, container and storage errors; a unit refused by its budget is a skip.
     pub fn compact(&self) -> Result<crate::CompactReport> {
         let budget = self.catalog.maintenance_budget();
-        self.catalog.compact(&mut self.lock(), budget)
+        self.catalog.compact(&self.conn, budget)
     }
 
     /// The bounded checkpoint a one-shot write command runs after its acknowledgement (spec 11
