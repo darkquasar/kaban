@@ -261,14 +261,35 @@ impl KabanServer {
     }
 
     /// [`Self::tool_call`] for a public write (spec 05 SS-10): a refusal carries the typed
-    /// `rejected` receipt beside its error text.
+    /// `rejected` receipt beside its error text. A write that succeeded is followed by the
+    /// bounded checkpoint ([`Self::checkpoint_after_write`]).
     async fn write_tool_call<T, F>(&self, tool: &'static str, f: F) -> CallToolResult
     where
         T: Serialize + DeserializeOwned + Send + 'static,
         F: FnOnce(&KabanApi) -> Result<T, kaban_api::ApiError> + Send + 'static,
     {
-        self.tool_call_with(tool, OnRefusal::RejectedReceipt, f)
-            .await
+        let reply = self
+            .tool_call_with(tool, OnRefusal::RejectedReceipt, f)
+            .await;
+        if reply.is_error != Some(true) {
+            self.checkpoint_after_write();
+        }
+        reply
+    }
+
+    /// The bounded checkpoint after a write (KER-09), as the one-shot commands run it after
+    /// their acknowledgement: spawned on the blocking pool, so the response never waits for
+    /// it; it ticks only once its interval has elapsed, and an error is logged, never returned.
+    fn checkpoint_after_write(&self) {
+        let Some(catalog) = self.api.catalog().cloned() else {
+            return;
+        };
+        drop(tokio::task::spawn_blocking(move || {
+            match catalog.checkpoint_if_due() {
+                Ok(ran) => tracing::debug!(ran, "post-ack checkpoint"),
+                Err(e) => tracing::warn!(error = %e, "post-ack checkpoint failed"),
+            }
+        }));
     }
 
     async fn tool_call_with<T, F>(
@@ -802,4 +823,61 @@ fn spawn_rescan(api: KabanApi, cancel: CancellationToken) -> tokio::task::JoinHa
         }
         Err(e) => tracing::error!(error = %e, "rescan failed; it is retried at the next start"),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)] // test code: failures are the assertion
+
+    use super::*;
+    use kaban_api::{CatalogMaintenance, CatalogVerify, CompactReport};
+    use kaban_core::StoreError;
+    use kaban_store_sqlite::SqliteStore;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::{Duration, Instant};
+
+    /// A catalog port that only counts its checkpoint ticks.
+    #[derive(Default)]
+    struct Ticks(AtomicUsize);
+
+    impl CatalogMaintenance for Ticks {
+        fn compact(&self) -> Result<CompactReport, StoreError> {
+            Ok(CompactReport::default())
+        }
+        fn recover(&self) -> Result<String, StoreError> {
+            Ok(String::new())
+        }
+        fn verify(&self) -> Result<CatalogVerify, StoreError> {
+            Ok(CatalogVerify::default())
+        }
+        fn checkpoint_if_due(&self) -> Result<bool, StoreError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(true)
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_served_write_is_followed_by_the_bounded_checkpoint() {
+        // Arrange
+        let store = Arc::new(SqliteStore::open_memory().unwrap());
+        let ticks = Arc::new(Ticks::default());
+        let api = KabanApi::new(store.clone(), kaban_policy::Policy::empty(), store.signer())
+            .with_catalog(ticks.clone());
+        let server = KabanServer::new(api);
+        let request: RememberRequest =
+            serde_json::from_value(serde_json::json!({"kind": "Fact", "text": "the tide turns"}))
+                .unwrap();
+
+        // Act
+        let reply = server.remember(Parameters(request)).await;
+
+        // Assert: the write succeeded, and one tick ran after it (bounded wait: it runs
+        // beside the response)
+        assert_ne!(reply.is_error, Some(true), "{reply:?}");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while ticks.0.load(Ordering::SeqCst) == 0 && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(ticks.0.load(Ordering::SeqCst), 1);
+    }
 }
