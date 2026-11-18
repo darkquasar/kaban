@@ -241,7 +241,8 @@ impl Catalog {
     /// Publish one compaction's switch through the committer (`Catalog::commit`), as one new
     /// generation: the added extents join the chains the retired ones leave (the module's
     /// chain rule), the retired extents are dead since that generation, the consumed sediment
-    /// rows are marked dead in it, and the claim ends. Returns the generation.
+    /// rows are marked dead in it, and the claim ends. Returns the generation and how long the
+    /// switch held the write transaction.
     ///
     /// # Errors
     /// [`PublishFailed`] with the claim, still held, and the reason: [`SwitchRefused`] (behind
@@ -252,7 +253,7 @@ impl Catalog {
         &self,
         conn: &mut Connection,
         p: Publication,
-    ) -> std::result::Result<Generation, Box<PublishFailed>> {
+    ) -> std::result::Result<(Generation, Duration), Box<PublishFailed>> {
         let Publication {
             claim,
             added,
@@ -260,7 +261,7 @@ impl Catalog {
             retired,
             sediment_consumed,
         } = p;
-        let switched = self.commit(conn, Durability::Normal, |txn| {
+        let switched = self.commit_held(conn, Durability::Normal, |txn| {
             let generation = txn.generation()?;
             let g = sql_int(generation.0).sql()?;
             let held: u64 = txn
@@ -445,6 +446,8 @@ pub struct Compacted {
     pub extents: Vec<u64>,
     /// How many sediment rows it sealed.
     pub sediment_rows: usize,
+    /// How long its switch held the write transaction (KER-04's switch hold).
+    pub switch_hold: Duration,
 }
 
 /// Why a unit of work was skipped (it published nothing and holds no claim).
@@ -854,7 +857,7 @@ impl Catalog {
             },
         );
         match published {
-            Ok(generation) => Ok(Outcome::Published(generation)),
+            Ok((generation, hold)) => Ok(Outcome::Published(generation, hold)),
             Err(failed) => {
                 let PublishFailed { error, claim } = *failed;
                 self.release(conn, claim)?;
@@ -964,8 +967,8 @@ struct Planned {
 
 /// How one unit ended.
 enum Outcome {
-    /// Its switch published this generation.
-    Published(Generation),
+    /// Its switch published this generation, holding the write transaction this long.
+    Published(Generation, Duration),
     /// It published nothing, for this reason.
     Skipped(SkipReason),
     /// Its class had nothing to write.
@@ -983,12 +986,13 @@ impl Outcome {
         let extents = unit.extents.iter().map(|e| e.id.0).collect();
         let sediment_rows = unit.rows.len();
         match self {
-            Self::Published(generation) => published.push(Compacted {
+            Self::Published(generation, switch_hold) => published.push(Compacted {
                 class,
                 kind: unit.kind,
                 generation: generation.0,
                 extents,
                 sediment_rows,
+                switch_hold,
             }),
             Self::Skipped(reason) => skipped.push(Skipped {
                 class,

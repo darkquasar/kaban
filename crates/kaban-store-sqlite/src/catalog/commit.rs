@@ -21,6 +21,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use kaban_core::{BackendSource, Durability, Result, StoreError, ViewName};
 use rusqlite::{Connection, OptionalExtension, Params, Transaction, TransactionBehavior};
@@ -338,6 +339,20 @@ impl Catalog {
         durability: Durability,
         stage: impl FnOnce(&mut Txn<'_>) -> Result<T>,
     ) -> Result<T> {
+        self.commit_held(conn, durability, stage).map(|(out, _)| out)
+    }
+
+    /// [`Self::commit`], also returning how long it held the write transaction: from `BEGIN
+    /// IMMEDIATE` until `COMMIT` returned (the publish and switch holds KER-04 bounds).
+    ///
+    /// # Errors
+    /// As [`Self::commit`].
+    pub(crate) fn commit_held<T>(
+        &self,
+        conn: &mut Connection,
+        durability: Durability,
+        stage: impl FnOnce(&mut Txn<'_>) -> Result<T>,
+    ) -> Result<(T, Duration)> {
         // SQLite refuses a change of the safety level inside a transaction: set around it, and
         // restored however the commit ends (an unwound writer included)
         let mut level = SafetyLevel::raise(conn, durability)?;
@@ -353,7 +368,8 @@ impl Catalog {
         &self,
         conn: &mut Connection,
         stage: impl FnOnce(&mut Txn<'_>) -> Result<T>,
-    ) -> Result<T> {
+    ) -> Result<(T, Duration)> {
+        let began = Instant::now();
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .sql()?;
@@ -400,9 +416,10 @@ impl Catalog {
         // a failed sync of the commit is fatal (END-MED-01): never retried, the caller learns
         // only that the outcome on disk is unknown
         let committed = txn.tx.commit().sql_at(COMMIT);
+        let held = began.elapsed();
         drop(admitted);
         committed?;
-        Ok(out)
+        Ok((out, held))
     }
 
     /// Run `f`, a statement on the writer connection that commits on its own and cannot run

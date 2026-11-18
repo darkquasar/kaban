@@ -380,6 +380,7 @@ fn compaction_seals_due_sediment_into_one_extent_of_main() {
         (sealed.class, sealed.kind, sealed.sediment_rows),
         ("test", WorkKind::Seal, 2)
     );
+    assert!(sealed.switch_hold > Duration::ZERO, "{sealed:?}");
     let expected: Vec<u8> = rows
         .iter()
         .flat_map(|(_, p)| format!("{p}\n").into_bytes())
@@ -389,6 +390,19 @@ fn compaction_seals_due_sediment_into_one_extent_of_main() {
         catalog_testing::pin_sediment_rows(&store).unwrap(),
         Vec::new()
     );
+}
+
+#[test]
+fn a_publication_reports_how_long_it_held_the_write_transaction() {
+    // Arrange
+    let s = Scratch::new("kaban-t6-compact", "publish-hold");
+    let store = open(&s);
+
+    // Act
+    let (_, hold) = catalog_testing::append_and_publish_held(&store, &pattern(1, 64)).unwrap();
+
+    // Assert: some time inside the transaction, far less than the whole test
+    assert!(hold > Duration::ZERO && hold < STEP, "{hold:?}");
 }
 
 #[test]

@@ -152,6 +152,25 @@ pub fn append_and_publish(store: &SqliteStore, bytes: &[u8]) -> Result<u64> {
     Ok(id.0)
 }
 
+/// [`append_and_publish`], also returning how long the publication's commit held the write
+/// transaction (KER-04's publish hold).
+///
+/// # Errors
+/// The append's or the commit's errors.
+pub fn append_and_publish_held(
+    store: &SqliteStore,
+    bytes: &[u8],
+) -> Result<(u64, std::time::Duration)> {
+    let extent = store.catalog().append_extent(ExtentClass::Test, bytes)?;
+    let (id, hold) =
+        store
+            .catalog()
+            .commit_held(&mut store.lock(), Durability::Normal, |txn| {
+                txn.publish(extent, &[ViewName::Main])
+            })?;
+    Ok((id.0, hold))
+}
+
 /// Append every one of `extents` to `store`'s container with one write and one sync, and
 /// publish each as its own extent of the test class into `main` in one commit; returns their
 /// ids in order.
@@ -454,7 +473,7 @@ pub fn publish(
     store
         .catalog()
         .publish(&mut store.lock(), p)
-        .map(|g| g.0)
+        .map(|(g, _)| g.0)
         .map_err(|f| Box::new((f.error, TestClaim(f.claim))))
 }
 
