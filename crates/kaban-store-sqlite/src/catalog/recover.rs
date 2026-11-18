@@ -15,8 +15,10 @@
 //! with its process. So once recovery holds the lock exclusive, every claim and every range no
 //! row names was left by a process that is gone, and while it cannot take it, recovery clears
 //! nothing (live maintenance). An unpublished range is a container range no catalog row names
-//! that still holds a nonzero byte: a range a reclamation released reads as zeros (punched or
-//! zero-filled). Recovery changes no canonical row and no live extent: every row is present or
+//! that still holds data: where the container punches holes, an allocated whole block (a
+//! reclamation's punch frees every whole block of what it released, so an all-zero leak is
+//! found too) or a nonzero byte; where it only zero-fills, a nonzero byte (`hole_detection`
+//! says which). Recovery changes no canonical row and no live extent: every row is present or
 //! absent as the last commit left it.
 
 use std::fs::File;
@@ -49,6 +51,10 @@ pub struct RecoverReport {
     pub claims_cleared: u64,
     /// The unpublished container ranges (`(offset, len)`) it reclaimed.
     pub ranges_reclaimed: Vec<(u64, u64)>,
+    /// Unpublished ranges were found by the file system's allocation (`SEEK_DATA`), so an
+    /// all-zero one counts too; `false`: the container cannot punch holes, and only ranges that
+    /// hold a nonzero byte were found.
+    pub hole_detection: bool,
 }
 
 /// The extents of one class in the catalog.
@@ -106,6 +112,8 @@ pub struct VerifyReport {
     /// A maintenance hold was live: unreferenced ranges and claims may be work in flight and
     /// are not counted.
     pub maintenance_live: bool,
+    /// Unreferenced ranges were found by allocation, as [`RecoverReport::hole_detection`].
+    pub hole_detection: bool,
 }
 
 impl VerifyReport {
@@ -155,9 +163,10 @@ impl Catalog {
         })?;
         fail::point("recover.mid");
         let named = self.read(conn, |tx| named_ranges(tx))?;
-        let leaks = self.unreferenced(&named)?;
+        let (leaks, hole_detection) = self.unreferenced(&named)?;
         self.reclaim_ranges(&leaks)?;
         report.ranges_reclaimed = leaks;
+        report.hole_detection = hole_detection;
         Ok(report)
     }
 
@@ -213,7 +222,7 @@ impl Catalog {
                 },
             )?;
             let named = named_ranges(tx)?;
-            report.unreferenced_ranges = self.unreferenced(&named)?;
+            (report.unreferenced_ranges, report.hole_detection) = self.unreferenced(&named)?;
             Ok((report, extents))
         })?;
         drop(probe);
@@ -267,11 +276,24 @@ impl Catalog {
             .map_err(|e| failed("open", &self.kbx, e))
     }
 
-    /// The container ranges no row of `named` covers that still hold a nonzero byte (a
-    /// released range reads as zeros: punched or zero-filled), in offset order.
-    fn unreferenced(&self, named: &[(u64, u64)]) -> Result<Vec<(u64, u64)>> {
+    /// The container ranges no row of `named` covers that still hold data, in offset order,
+    /// and whether allocation found them. Where the container punches holes, a range holds
+    /// data when a whole file-system block inside it is allocated (`SEEK_DATA`: a punch frees
+    /// every whole block of a released range, so an all-zero leak is found too) or it holds a
+    /// nonzero byte; elsewhere (zero-fill reclamation) only a nonzero byte counts, since a
+    /// released range stays allocated as zeros.
+    fn unreferenced(&self, named: &[(u64, u64)]) -> Result<(Vec<(u64, u64)>, bool)> {
         let Some(file) = self.open_container()? else {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), false));
+        };
+        let holes = self.reclamation == Some(super::io::Reclamation::Punch)
+            && !self.degraded_reclamation();
+        let block = {
+            use std::os::unix::fs::MetadataExt;
+            file.metadata()
+                .map_err(|e| failed("measure", &self.kbx, e))?
+                .blksize()
+                .max(1)
         };
         let end = file
             .metadata()
@@ -290,9 +312,11 @@ impl Catalog {
         }
         let mut leaks = Vec::new();
         for (offset, len) in gaps {
-            let mut data = false;
+            let mut data = holes
+                && allocated_block(&file, offset, len, block)
+                    .map_err(|e| failed("seek the data of", &self.kbx, e))?;
             read_chunks(&file, offset, len, |chunk| {
-                data = chunk.iter().any(|b| *b != 0);
+                data = data || chunk.iter().any(|b| *b != 0);
                 !data
             })
             .map_err(|e| failed("read a range of", &self.kbx, e))?;
@@ -300,7 +324,22 @@ impl Catalog {
                 leaks.push((offset, len));
             }
         }
-        Ok(leaks)
+        Ok((leaks, holes))
+    }
+}
+
+/// Whether a whole `block` of `file` inside `len` bytes at `offset` is allocated
+/// (`SEEK_DATA` from the first whole block lands before the last one ends).
+fn allocated_block(file: &File, offset: u64, len: u64, block: u64) -> std::io::Result<bool> {
+    let start = offset.div_ceil(block).saturating_mul(block);
+    let end = offset.saturating_add(len) / block * block;
+    if start >= end {
+        return Ok(false);
+    }
+    match rustix::fs::seek(file, rustix::fs::SeekFrom::Data(start)) {
+        Ok(at) => Ok(at < end),
+        Err(rustix::io::Errno::NXIO) => Ok(false),
+        Err(e) => Err(e.into()),
     }
 }
 

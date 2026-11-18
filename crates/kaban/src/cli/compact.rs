@@ -84,9 +84,14 @@ impl CatalogMaintenance for StoreCatalog {
             "maintenance live: nothing cleared".to_owned()
         } else {
             format!(
-                "{} stale claim(s) cleared, {} unpublished range(s) reclaimed",
+                "{} stale claim(s) cleared, {} unpublished range(s) reclaimed{}",
                 r.claims_cleared,
-                r.ranges_reclaimed.len()
+                r.ranges_reclaimed.len(),
+                if r.hole_detection {
+                    ""
+                } else {
+                    " (hole_detection: false, only nonzero ranges found)"
+                }
             )
         })
     }

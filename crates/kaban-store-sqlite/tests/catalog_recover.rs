@@ -427,3 +427,22 @@ fn a_reclamation_while_verify_hashes_leaves_no_mismatch() {
     // Assert: what verify read stayed whole while it hashed
     assert_eq!(report.hash_mismatches, Vec::<u64>::new(), "{report:?}");
 }
+
+#[test]
+fn an_all_zero_unpublished_append_is_reported_and_reclaimed() {
+    // Arrange: one published extent, then 64 KiB of zeros appended and never published
+    let s = Scratch::new("kaban-t6-recover", "zero-leak");
+    let store = open_at(&s.db());
+    catalog_testing::append_and_publish(&store, &pattern(1, 64)).unwrap();
+    catalog_testing::append_unpublished(&store, &vec![0; 64 * 1024]).unwrap();
+
+    // Act
+    let found = store.verify_catalog().unwrap();
+    let recovered = store.recover_catalog().unwrap();
+    let after = store.verify_catalog().unwrap();
+
+    // Assert: the zeros are a leak like any other: reported, punched, then gone
+    assert_eq!(found.unreferenced_ranges.len(), 1, "{found:?}");
+    assert_eq!(recovered.ranges_reclaimed, found.unreferenced_ranges);
+    assert_eq!(after.unreferenced_ranges, Vec::new(), "{after:?}");
+}
