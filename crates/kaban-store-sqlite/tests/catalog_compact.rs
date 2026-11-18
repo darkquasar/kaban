@@ -515,6 +515,33 @@ fn a_smallest_unit_refused_is_reported_and_its_inputs_stay_claimable() {
     assert!(catalog_testing::claim(&store, &ids).unwrap().is_some());
 }
 
+#[test]
+fn inputs_beyond_the_maintenance_memory_skip_the_pass_instead_of_loading() {
+    // Arrange: twenty pending rows, whose copy outweighs a ceiling that one seal of them fits
+    let s = Scratch::new("kaban-t6-compact", "pass-ceiling");
+    let store = open(&s);
+    let hub = created(&store, "Fact", "the lighthouse");
+    for i in 0..20 {
+        let ship = created(&store, "Fact", &format!("ship number {i} passes"));
+        link(&store, &hub, &ship);
+    }
+
+    // Act: no error, whatever the ceiling refuses
+    let report = catalog_testing::compact(&store, unit(1200)).unwrap();
+
+    // Assert: the pass is reported skipped for its memory, nothing ran or published, and every
+    // pending row is still pending
+    assert!(
+        report
+            .pass_skipped
+            .is_some_and(|e| e.limit == Limit::Memory),
+        "{report:?}"
+    );
+    assert_eq!(report.published, Vec::new(), "{report:?}");
+    assert_eq!(report.skipped, Vec::new(), "{report:?}");
+    assert_eq!(catalog_testing::pin_sediment_rows(&store).unwrap().len(), 20);
+}
+
 /// The `rid`s of a sealed edge payload line (`<op> <src> <dst> <rel>`).
 fn rids_of(payload: &str) -> (i64, i64) {
     let mut fields = payload.split_whitespace().skip(1);

@@ -10,6 +10,7 @@ use kaban_api::{
     KabanApi,
 };
 use kaban_core::StoreError;
+use kaban_core::query_budget::Limit;
 use kaban_store_sqlite::{ClassExtents, SkipReason, SqliteStore, WorkKind};
 use serde_json::{Value, json};
 use std::process::ExitCode;
@@ -55,6 +56,13 @@ impl CatalogMaintenance for StoreCatalog {
             })
             .collect();
         Ok(CompactReport {
+            pass_skipped: r.pass_skipped.map(|e| {
+                match e.limit {
+                    Limit::Memory => "inputs_exceed_maintenance_memory",
+                    _ => "maintenance_deadline_exceeded",
+                }
+                .to_owned()
+            }),
             published,
             skipped,
             reclaimed: r.reclaim.reclaimed,

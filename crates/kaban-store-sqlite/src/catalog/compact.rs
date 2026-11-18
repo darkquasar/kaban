@@ -476,6 +476,11 @@ pub struct Skipped {
 /// What one compaction did ([`Catalog::compact`]).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CompactReport {
+    /// The whole pass was skipped before any unit ran: pinning its inputs (the chains and the
+    /// pending rows) ran out of the maintenance budget (`Limit::Memory`:
+    /// `inputs_exceed_maintenance_memory`; otherwise `maintenance_deadline_exceeded`). It
+    /// published nothing and holds nothing.
+    pub pass_skipped: Option<BudgetExceeded>,
     /// The units that published, in the order they ran.
     pub published: Vec<Compacted>,
     /// The units skipped, in the order they ran (a refused unit before its smaller retry).
@@ -534,12 +539,24 @@ impl Catalog {
     ) -> Result<CompactReport> {
         let mut report = CompactReport::default();
         if let Some(_hold) = self.maintenance_hold()? {
-            let pinned = self.pin_every_view(conn, budget)?;
-            for class in self.classes() {
-                self.seal_class(conn, &pinned, class.as_ref(), budget, &mut report)?;
-                for view in &pinned.views {
-                    self.fold_view(conn, &pinned, view, class.as_ref(), budget, &mut report)?;
+            match self.pin_every_view(conn, budget) {
+                Ok(pinned) => {
+                    for class in self.classes() {
+                        self.seal_class(conn, &pinned, class.as_ref(), budget, &mut report)?;
+                        for view in &pinned.views {
+                            self.fold_view(
+                                conn,
+                                &pinned,
+                                view,
+                                class.as_ref(),
+                                budget,
+                                &mut report,
+                            )?;
+                        }
+                    }
                 }
+                // the inputs did not load within the budget: the whole pass is a skip
+                Err(e) => report.pass_skipped = Some(budget_refusal(&e).ok_or(e)?),
             }
         }
         report.reclaim = self.reclaim(conn)?;
@@ -833,7 +850,7 @@ impl Catalog {
     }
 
     /// Pin the latest generation with every view that has a chain, and `main` (its sediment),
-    /// loaded under the maintenance budget.
+    /// loaded under the maintenance budget: its memory ceiling and its deadline.
     fn pin_every_view(&self, conn: &Connection, budget: CompactBudget) -> Result<Pinned> {
         let names: Vec<String> = self.read(conn, |tx| {
             let mut stmt = tx
@@ -851,13 +868,7 @@ impl Catalog {
                 views.push(view);
             }
         }
-        // the copy of the chains and pending rows has no ceiling of its own: the unit budgets
-        // bound the merge work
-        let pin = self.pin(
-            conn,
-            &QueryBudget::new(u64::MAX, Some(budget.deadline)),
-            &views,
-        )?;
+        let pin = self.pin(conn, &budget.unit(), &views)?;
         let loaded = views
             .iter()
             .map(|v| pin.load_view(conn, v))

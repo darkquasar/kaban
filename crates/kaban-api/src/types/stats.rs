@@ -140,6 +140,9 @@ pub struct CompactUnit {
     reason = "independent report flags, each a named outcome"
 )]
 pub struct CompactReport {
+    /// Why the whole pass was skipped before any unit ran (`inputs_exceed_maintenance_memory`,
+    /// `maintenance_deadline_exceeded`); `None`: it ran.
+    pub pass_skipped: Option<String>,
     /// Units that published, in the order they ran.
     pub published: Vec<CompactUnit>,
     /// Units skipped, in the order they ran.
