@@ -160,6 +160,7 @@ pub(crate) fn run(
                 schema_version,
                 keys_dir: keys_dir.to_path_buf(),
                 vacuum: args.vacuum,
+                allocator_adapter: kaban_vtab::bootstrap::installed_before_main(),
             };
             let mut report = if args.recover {
                 api.doctor_recover(&context)?

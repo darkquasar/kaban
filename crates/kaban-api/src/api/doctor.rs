@@ -17,7 +17,8 @@ use std::path::PathBuf;
 
 /// What the adapter observed around its diagnostic open and what the service cannot see
 /// itself: the file modes as found on disk, the schema version found against the newest one
-/// the binary knows, where the audit key lives, and whether to `VACUUM`.
+/// the binary knows, where the audit key lives, whether to `VACUUM`, and whether the binary's
+/// startup constructor installed the SQLite allocator adapter.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DoctorContext {
     /// Modes of the database file and its sidecars, `stat`ed before the open (never tightened).
@@ -28,13 +29,16 @@ pub struct DoctorContext {
     pub keys_dir: PathBuf,
     /// Run `VACUUM` after the checks (`--vacuum`; core-spec S5 residual).
     pub vacuum: bool,
+    /// Whether the startup constructor installed the allocator adapter before `main` (spec 11
+    /// QRY-07); `None` when the binary has no constructor on this target.
+    pub allocator_adapter: Option<bool>,
 }
 
 /// One line of the report: the check's fixed name, its verdict and a short detail (modes,
 /// counts, the engine's findings or the reason the check could not run).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DoctorCheck {
-    /// Fixed name: `db_modes`, `integrity`, `fts_integrity`, `claim_exhausted`,
+    /// Fixed name: `allocator_adapter`, `db_modes`, `integrity`, `fts_integrity`, `claim_exhausted`,
     /// `stale_artifacts`, `schema_version`, `text_index` (SS-21: `tantivy` followed by
     /// `text_index_watermark`, the payload watermark, and `text_index_lag`, the canonical
     /// head minus it), `ident_terms_version`, one `producer_<producer>` row per producer
@@ -154,6 +158,16 @@ impl KabanApi {
                 .map(BudgetRow::from)
                 .collect(),
         };
+        // spec 11 QRY-07: the constructor is proven on this binary and platform
+        match ctx.allocator_adapter {
+            Some(true) => report.push("allocator_adapter", true, "installed before main"),
+            Some(false) => report.push("allocator_adapter", false, "not installed before main"),
+            None => report.push(
+                "allocator_adapter",
+                true,
+                "no startup constructor on this target",
+            ),
+        }
         let files = &ctx.files;
         report.push(
             "db_modes",

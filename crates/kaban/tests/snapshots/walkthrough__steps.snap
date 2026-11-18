@@ -2176,6 +2176,11 @@ expression: a
       ],
       "checks": [
         {
+          "detail": "installed before main",
+          "name": "allocator_adapter",
+          "ok": true
+        },
+        {
           "detail": "db 0600, wal 0600, shm 0600",
           "name": "db_modes",
           "ok": true

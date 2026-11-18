@@ -33,6 +33,7 @@ fn context(s: &Scratch) -> DoctorContext {
         schema_version: LATEST_SCHEMA_VERSION,
         keys_dir: s.keys(),
         vacuum: false,
+        allocator_adapter: None,
     }
 }
 

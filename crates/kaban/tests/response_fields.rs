@@ -43,8 +43,9 @@ const ADDED_PREFIXES: [(&str, &str); 5] = [
     ("stats", "#CatalogIndexStatus/"),
 ];
 
-/// The `doctor` checks it may gain: the catalog's verification and budget (spec 11 T6).
-const ADDED_CHECKS: [&str; 2] = ["catalog_verify", "catalog_budget"];
+/// The `doctor` checks it may gain: the startup allocator adapter (spec 11 QRY-07) and the
+/// catalog's verification and budget (spec 11 T6).
+const ADDED_CHECKS: [&str; 3] = ["allocator_adapter", "catalog_verify", "catalog_budget"];
 
 /// The `stats` counters that go: projector lag and the conflict count.
 const REMOVED_STATS: [&str; 3] = ["changes_lag", "outbox_lag", "conflicts"];

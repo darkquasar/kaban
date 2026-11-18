@@ -313,9 +313,8 @@ safe API configures SQLite, and nothing installs the adapter lazily.
 - Linkage: one statically linked SQLite (rusqlite's bundled build) per process. A dynamically
   linked SQLite, or a second SQLite copy in the process, has its own allocator configuration that
   the wrapper never sees.
-- Platforms: the startup bootstrap is audited on the Linux build only; Mach-O ordering is untested;
-  `process-bootstrap` does not compile on targets without an ELF or Mach-O constructor section.
-  The embedding initializer has no platform-specific code.
+- Platforms: the startup constructor is compiled for Linux and macOS only (the shipped targets);
+  other targets build without it. The embedding initializer has no platform-specific code.
 
 **Tests.** Every case that needs the adapter installed runs in a fresh child process of its test
 binary (it re-executes itself with `--exact <case>` and an environment marker), because the
@@ -398,20 +397,22 @@ The standalone CLI enables the feature (`crates/kaban/Cargo.toml`); library user
 `initialize_for_embedding` themselves. `src/bootstrap.rs` places one function pointer in the
 platform's startup-constructor array; the loader calls it before `main`:
 
-- **ELF (Linux, Android, FreeBSD): `.init_array.00101`.** Linkers sort `.init_array.NNNNN`
+- **Linux (ELF): `.init_array.00101`.** Linkers sort `.init_array.NNNNN`
   entries by priority and place them before unprioritized `.init_array` entries; 0 to 100 are
   reserved for the implementation (the standard library's argument capture uses 00099), so 00101
   is the earliest priority a program may take. Shared-library constructors (libc, libm,
   libgcc_s, the loader) run before any executable constructor; SQLite is linked statically into
   the binary, so none of them can reach it.
-- **Mach-O (Apple targets): `__DATA,__mod_init_func`.** No priorities exist; dyld runs entries in
+- **macOS (Mach-O): `__DATA,__mod_init_func`.** No priorities exist; dyld runs entries in
   link order, so a dependency's constructor may run first. An earlier SQLite initialization is
-  detected below, but an earlier constructor that starts a thread using SQLite is not. Mach-O
-  ordering is untested: no Apple build has been run or audited.
-- **Every other target: `compile_error!`.** There is no constructor section to place the entry in,
-  and a silent no-install would leave every query unbudgeted. A compile error is explicit at build
-  time rather than at first query; such a build turns the feature off and calls
-  `initialize_for_embedding` from its own startup.
+  detected below, but an earlier constructor that starts a thread using SQLite is not.
+- **Every other target: no constructor.** The feature compiles there without one; Android,
+  FreeBSD and the rest are not shipped or audited.
+
+**Proof on the user's binary.** `kaban_vtab::bootstrap::installed_before_main()` reports whether
+the adapter is installed (`None` on a target without the constructor). `kaban doctor` shows it as
+the `allocator_adapter` row, which fails on Linux or macOS when the constructor never ran, and the
+Linux and macOS CI jobs and every Release package job run `kaban doctor` on the built binary.
 
 **What the constructor does.** It calls `initialize_for_embedding()` under `catch_unwind`. On
 success it returns (and writes `kaban-vtab: sqlite allocator adapter installed before main` to
