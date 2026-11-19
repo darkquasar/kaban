@@ -71,6 +71,87 @@ fn fixture_pairs() -> Vec<(usize, usize)> {
     pairs
 }
 
+/// The container bytes of `main`'s live graph extents.
+fn graph_kbx_bytes(db: &Path) -> u64 {
+    let conn = rusqlite::Connection::open(db).unwrap();
+    let bytes: i64 = conn
+        .query_row(
+            "SELECT sum(e.kbx_len) FROM cat_view_extent v JOIN cat_extent e ON e.id = v.extent_id
+             WHERE v.view = 'main' AND e.class IN ('graph_layer', 'graph_base')",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    u64::try_from(bytes).unwrap()
+}
+
+#[test]
+fn a_fold_whose_engine_estimate_exceeds_its_ceiling_is_refused_by_its_budget() {
+    // Arrange: a base of 2000 edges among 200 nodes and one sealed layer over it; a store of
+    // the same database that folds at depth 1
+    let s = Scratch::new("kaban-t11-rebuild", "fold-budget");
+    let store = open(&s);
+    let add = |n: u32| kaban_index_graph::NodeOp {
+        node: LocalId(n),
+        kind: kaban_index_graph::OpKind::Add,
+    };
+    let edge = |src: u32, dst: u32| kaban_index_graph::EdgeOp {
+        src: LocalId(src),
+        rel: kaban_index_graph::RelId(0),
+        dst: LocalId(dst),
+        kind: kaban_index_graph::OpKind::Add,
+        attr: kaban_index_graph::Attr::default(),
+    };
+    let base = Records {
+        nodes: (0..200).map(add).collect(),
+        edges: (0..2000).map(|i| edge(i % 200, (i / 200 + 1 + i % 200) % 200)).collect(),
+        ..Records::default()
+    };
+    catalog_testing::publish_graph_base(&store, &kaban_index_graph::build_base(&base, 0)).unwrap();
+    let layer = Records {
+        edges: vec![edge(0, 199)],
+        ..Records::default()
+    };
+    catalog_testing::stage_graph_sediment(&store, &layer.encode()).unwrap();
+    store.compact().unwrap();
+    let encoded = graph_kbx_bytes(&s.db());
+    let folding = SqliteStore::open(&s.db(), &s.keys())
+        .unwrap()
+        .with_catalog_config(CatalogCfg {
+            fold_depth: 1,
+            checkpoint_interval_ms: 60_000,
+            ..CatalogCfg::default()
+        })
+        .unwrap();
+    let fold = |memory_bytes: u64| {
+        catalog_testing::compact(
+            &folding,
+            kaban_store_sqlite::CompactBudget {
+                memory_bytes,
+                deadline: Duration::from_secs(30),
+            },
+        )
+        .unwrap()
+    };
+
+    // Act: fold under three times the encoded bytes (well under the engine's working set),
+    // then under no ceiling
+    let tight = fold(3 * encoded);
+    let open_ended = fold(u64::MAX);
+
+    // Assert: refused by its budget before the engine ran; it folds without the ceiling
+    let folds = |r: &kaban_store_sqlite::CompactReport| {
+        r.published.iter().filter(|c| c.kind == WorkKind::Fold).count()
+    };
+    assert!(
+        tight.skipped.iter().any(|k| k.kind == WorkKind::Fold
+            && matches!(k.reason, kaban_store_sqlite::SkipReason::Budget(_))),
+        "the fold is refused by its budget: {tight:?}"
+    );
+    assert_eq!(folds(&tight), 0);
+    assert_eq!(folds(&open_ended), 1, "the fold is due");
+}
+
 fn batch(store: &SqliteStore, ops: Vec<Op>) {
     store
         .apply_batch(WriteBatch::new(WorkspaceId::default(), ops), &ctx())

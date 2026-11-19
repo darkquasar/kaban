@@ -33,7 +33,7 @@ pub(crate) use read::{LoadedView, NodeOrder, load_view};
 use std::fs::File;
 use std::os::unix::fs::FileExt;
 
-use kaban_core::query_budget::{BudgetExceeded, Limit, QueryBudget};
+use kaban_core::query_budget::{BudgetExceeded, BudgetLease, Limit, QueryBudget};
 use kaban_core::{BackendSource, Durability, Result, StoreError, ViewName};
 use kaban_index_graph::{
     Attr, DecodedRecords, EdgeOp, GraphError, Layer, LocalId, NodeOp, OpKind, PreparedSediment,
@@ -45,7 +45,7 @@ use tantivy::directory::OwnedBytes;
 
 use super::Catalog;
 use super::capture::{BatchChanges, CaptureOp, NodeImage};
-use super::class::{ExtentClass, ExtentLocation, IndexClass};
+use super::class::{ExtentClass, IndexClass};
 use super::commit::Stage;
 use super::kbx;
 use super::pin::{Pin, budget_exceeded};
@@ -61,6 +61,20 @@ const SEDIMENT: ExtentClass = ExtentClass::GraphLayer;
 /// The lifecycle of a purged node's ghost row: absent from the graph.
 const PURGED: &str = "purged";
 
+/// What the graph engine holds in memory per record a fold, a purge or a base build handles
+/// (a node's presence, an edge, a fact): its maps, section vectors and output buffer. Wave 3
+/// amendment 3.2 measured about 300 B per edge for a fold; a node or a fact is charged the same,
+/// so the estimate errs high.
+const ENGINE_BYTES_PER_RECORD: u64 = 300;
+
+/// Reserve the engine's working set for `records` on `budget`, before the engine runs: a fold
+/// or build that does not fit is refused by the budget instead of outgrowing it.
+fn reserve_engine(budget: &QueryBudget, records: u64) -> Result<BudgetLease> {
+    budget
+        .reserve(records.saturating_mul(ENGINE_BYTES_PER_RECORD))
+        .map_err(budget_exceeded)
+}
+
 /// The memory graph's class.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct GraphClass;
@@ -74,19 +88,32 @@ impl GraphClass {
     /// Rebuild `main`'s graph from the rows (INV-4, KER-08), in one commit on the writer
     /// connection `conn`: a base built from node truth (every row not `purged`, isolated ones
     /// included) and every edge row of that snapshot replaces the graph's extents and pending
-    /// sediment. An old extent whose bytes are still intact in the container retires (and is
+    /// sediment. The build's working set is reserved on the maintenance budget before any row
+    /// is read ([`ENGINE_BYTES_PER_RECORD`] per node and edge). An old extent whose bytes are still intact in the container retires (and is
     /// reclaimed later); one whose bytes are gone (a deleted `kaban.kbx`) loses its rows, so no
     /// reclamation ever releases a range the new container reuses. A catalog without a
     /// container (in memory) holds only sediment: nothing to rebuild.
     ///
     /// # Errors
-    /// The mapping's refusals ([`GraphRefused`]); container and SQLite errors.
+    /// The mapping's refusals ([`GraphRefused`]); `StoreError::BudgetExceeded` when the build
+    /// does not fit the maintenance budget; container and SQLite errors.
     pub(crate) fn rebuild_main(catalog: &Catalog, conn: &mut Connection) -> Result<()> {
         if catalog.container.is_none() {
             return Ok(());
         }
+        let maintenance = catalog.maintenance_budget();
+        let budget = QueryBudget::new(maintenance.memory_bytes, Some(maintenance.deadline));
         catalog.commit(conn, Durability::Normal, |txn| {
             let rows = txn.conn();
+            let records: i64 = rows
+                .query_row(
+                    "SELECT (SELECT count(*) FROM node WHERE lifecycle <> ?1)
+                          + (SELECT count(*) FROM edge)",
+                    [PURGED],
+                    |r| r.get(0),
+                )
+                .sql()?;
+            let _engine = reserve_engine(&budget, u64::try_from(records).unwrap_or(0))?;
             let rels = read::Rels::read(rows)?;
             let mut records = Records::default();
             {
@@ -269,13 +296,15 @@ impl IndexClass for GraphClass {
         }
         // the first extent of a chain is its base
         let layer = [Layer::open(OwnedBytes::new(layer), budget).map_err(graph_error)?];
+        let _engine = reserve_engine(budget, layer.iter().map(Layer::records).sum())?;
         let view = View::new(None, &layer, &empty, budget).map_err(graph_error)?;
         Ok(Some(fold(&view, &[])))
     }
 
     /// The base of the graph chain run `extents` (oldest first) when it starts at the chain's
     /// first extent; `None` otherwise (a run that keeps an older graph extent below it cannot
-    /// become a base, and a layer is never rewritten alone).
+    /// become a base, and a layer is never rewritten alone). The fold's working set is reserved
+    /// on `budget` before it runs ([`ENGINE_BYTES_PER_RECORD`] per record of the extents).
     fn fold(
         &self,
         pin: &Pin,
@@ -286,10 +315,8 @@ impl IndexClass for GraphClass {
         if extents.len() < 2 || chain.get(..extents.len()) != Some(extents) {
             return Ok(None);
         }
-        // the base's bytes, about the size of the extents it flattens
-        let held: u64 = extents.iter().map(kbx_len).sum();
-        let _held = budget.reserve(held).map_err(budget_exceeded)?;
         let opened = read::Opened::open(pin, extents, budget)?;
+        let _engine = reserve_engine(budget, opened.records())?;
         let empty = PreparedSediment::empty();
         let view = opened.view(&empty, budget)?;
         Ok(Some(fold(&view, &[])))
@@ -318,9 +345,7 @@ impl IndexClass for GraphClass {
         }
         let empty = PreparedSediment::empty();
         if at == 0 {
-            // the base's bytes, about the size of the extents it flattens
-            let held: u64 = chain.iter().map(kbx_len).sum();
-            let _held = budget.reserve(held).map_err(budget_exceeded)?;
+            let _engine = reserve_engine(budget, opened.records())?;
             let view = opened.view(&empty, budget)?;
             return Ok(Some(fold(&view, &omit)));
         }
@@ -537,14 +562,6 @@ fn rfc3339_ms(s: &str) -> Option<i64> {
     let days = era * 146_097 + doe - 719_468;
     let secs = days * 86_400 + h * 3_600 + mi * 60 + sec - offset_min * 60;
     Some(secs * 1_000 + ms)
-}
-
-/// The length of `e`'s bytes in the container (0 for a cold file).
-fn kbx_len(e: &ExtentRef) -> u64 {
-    match e.location {
-        ExtentLocation::Kbx { len, .. } => len,
-        ExtentLocation::File { .. } => 0,
-    }
 }
 
 /// One graph extent row as the rebuild judges it: id, range, content hash and liveness.

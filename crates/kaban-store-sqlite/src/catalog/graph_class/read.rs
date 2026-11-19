@@ -174,6 +174,12 @@ impl Opened {
         self.base.as_ref()
     }
 
+    /// The records these extents hold (`Base::records`, `Layer::records`).
+    pub(super) fn records(&self) -> u64 {
+        self.base.as_ref().map_or(0, Base::records)
+            + self.layers.iter().map(Layer::records).sum::<u64>()
+    }
+
     /// Whether any of these extents names `n` (a removal included).
     pub(super) fn mentions(&self, n: LocalId) -> bool {
         self.base.as_ref().is_some_and(|b| b.mentions(n))

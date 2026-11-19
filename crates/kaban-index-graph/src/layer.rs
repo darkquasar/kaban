@@ -352,6 +352,11 @@ impl Extent {
                 .is_some_and(|(out, inc)| out.contains(n) || inc.contains(n))
     }
 
+    /// The records this extent holds: its presence entries, outgoing edge entries and facts.
+    pub(crate) fn records(&self) -> u64 {
+        (self.presence.len() + self.out.entries + self.facts.len()) as u64
+    }
+
     /// The edge section of one direction (`true` for outgoing).
     pub(crate) fn edges(&self, out: bool) -> &Edges {
         if out { &self.out } else { &self.inc }
@@ -541,6 +546,13 @@ impl Layer {
     #[must_use]
     pub fn mentions(&self, n: LocalId) -> bool {
         self.extent.mentions(n.0)
+    }
+
+    /// The records this layer holds (presence entries, outgoing edge entries and facts): what
+    /// a writer sizes the in-memory work of a fold over it by.
+    #[must_use]
+    pub fn records(&self) -> u64 {
+        self.extent.records()
     }
 }
 

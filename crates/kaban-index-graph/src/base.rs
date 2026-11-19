@@ -37,6 +37,12 @@ impl Base {
     pub fn mentions(&self, n: LocalId) -> bool {
         self.extent.mentions(n.0)
     }
+
+    /// The records this base holds (see [`crate::Layer::records`]).
+    #[must_use]
+    pub fn records(&self) -> u64 {
+        self.extent.records()
+    }
 }
 
 /// Build a base from `r` applied in order to an empty graph. The id domain is `n` widened to

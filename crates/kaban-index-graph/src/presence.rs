@@ -337,6 +337,11 @@ impl Presence {
         Ok(Self { index, kinds })
     }
 
+    /// The ids whose membership change this extent records.
+    pub(crate) fn len(&self) -> usize {
+        self.index.len()
+    }
+
     /// The membership change this extent records for `id`, if any.
     pub(crate) fn get(&self, id: u32) -> Option<OpKind> {
         let rank = self.index.rank(id)?;

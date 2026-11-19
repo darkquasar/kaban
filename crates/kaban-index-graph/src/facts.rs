@@ -25,6 +25,11 @@ pub(crate) struct Facts {
 }
 
 impl Facts {
+    /// The fact entries held.
+    pub(crate) fn len(&self) -> usize {
+        self.count
+    }
+
     /// Write `entries`, sorted by (node, key) and unique.
     pub(crate) fn write(out: &mut Vec<u8>, entries: &[FactEntry<'_>]) {
         put_len(out, entries.len());
