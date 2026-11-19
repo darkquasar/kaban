@@ -100,9 +100,11 @@ impl GraphClass {
         if catalog.container.is_none() {
             return Ok(());
         }
+        let maintenance = catalog.maintenance_budget();
+        let mut budget = QueryBudget::new(maintenance.memory_bytes, Some(maintenance.deadline));
         let hold = catalog.maintenance_hold()?.map(std::sync::Arc::new);
         catalog.commit(conn, Durability::Normal, |txn| {
-            Self::rebuild_in(catalog, txn, |class, bytes| {
+            Self::rebuild_in(catalog, txn, &mut budget, |class, bytes| {
                 kbx::append(&catalog.kbx, class, bytes, hold)
             })
         })
@@ -112,10 +114,9 @@ impl GraphClass {
     pub(super) fn rebuild_in(
         catalog: &Catalog,
         txn: &mut super::commit::Txn<'_>,
+        budget: &mut QueryBudget,
         append: impl FnOnce(ExtentClass, &[u8]) -> Result<kbx::Unpublished>,
     ) -> Result<()> {
-        let maintenance = catalog.maintenance_budget();
-        let mut budget = QueryBudget::new(maintenance.memory_bytes, Some(maintenance.deadline));
         let rows = txn.conn();
         let records: i64 = rows
             .query_row(
@@ -125,8 +126,8 @@ impl GraphClass {
                 |r| r.get(0),
             )
             .sql()?;
-        let _engine = reserve_engine(&budget, u64::try_from(records).unwrap_or(0))?;
-        let (rels, _rels) = read::Rels::read(rows, &budget)?;
+        let _engine = reserve_engine(budget, u64::try_from(records).unwrap_or(0))?;
+        let (rels, _rels) = read::Rels::read(rows, budget)?;
         let mut records = Records::default();
         {
             let mut stmt = rows
@@ -134,7 +135,7 @@ impl GraphClass {
                 .sql()?;
             let rids = stmt.query_map([PURGED], |r| r.get::<_, i64>(0)).sql()?;
             for rid in rids {
-                catalog.budget_window(BudgetWindow::GraphLoading, &mut budget);
+                catalog.budget_window(BudgetWindow::GraphLoading, budget);
                 budget.check()?;
                 records.nodes.push(NodeOp {
                     node: local_id(rid.sql()?)?,
@@ -162,8 +163,8 @@ impl GraphClass {
         let base = build_base(&records, 0);
         budget.check()?;
         let generation = sql_int(txn.generation()?.0).sql()?;
-        retire_graph_rows(catalog, txn.conn(), generation, &mut budget)?;
-        catalog.budget_window(BudgetWindow::BeforePublish, &mut budget);
+        retire_graph_rows(catalog, txn.conn(), generation, budget)?;
+        catalog.budget_window(BudgetWindow::BeforePublish, budget);
         budget.check()?;
         let extent = append(ExtentClass::GraphBase, &base)?;
         budget.check()?;

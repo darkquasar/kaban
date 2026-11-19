@@ -116,11 +116,16 @@ fn ordinary_reopen_restores_mixed_classes_without_a_rebuild_helper() {
             })
             .unwrap()
         {
-            Searched::Hits { hits, .. } => hits.len(),
-            Searched::Unavailable => 0,
+            Searched::Hits { hits, .. } => {
+                let mut identities: Vec<_> = hits.into_iter().map(|hit| hit.rid).collect();
+                identities.sort_unstable();
+                identities
+            }
+            Searched::Unavailable => Vec::new(),
         }
     };
-    assert_eq!(text(&store), 3);
+    let text_before = text(&store);
+    assert_eq!(text_before.len(), 3);
     let rows = rusqlite::Connection::open(s.db()).unwrap();
     let first: String = rows
         .query_row(
@@ -136,7 +141,7 @@ fn ordinary_reopen_restores_mixed_classes_without_a_rebuild_helper() {
     let store = SqliteStore::open(&s.db(), &s.keys()).unwrap();
     assert_eq!(
         text(&store),
-        3,
+        text_before,
         "ordinary reopen restores sealed and pending text"
     );
     assert_eq!(
@@ -146,7 +151,7 @@ fn ordinary_reopen_restores_mixed_classes_without_a_rebuild_helper() {
     );
     store.reindex_text().unwrap();
     store.reindex_graph().unwrap();
-    assert_eq!(text(&store), 3, "explicit combined rebuild");
+    assert_eq!(text(&store), text_before, "explicit combined rebuild");
     assert_eq!(record(&store, &probes), before);
     let verified = store.verify_catalog().unwrap();
     assert_eq!(verified.inconsistencies(), 0, "{verified:?}");

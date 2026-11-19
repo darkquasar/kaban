@@ -234,6 +234,7 @@ impl Catalog {
             catalog: self,
             _exclusive: exclusive,
         };
+        let mut budget = QueryBudget::new(maintenance.memory_bytes, Some(maintenance.deadline));
         self.commit(conn, Durability::Full, |txn| {
             if !rebuild_pending(txn.conn())? {
                 return Ok(());
@@ -250,12 +251,11 @@ impl Catalog {
             txn.conn().execute("DELETE FROM cat_extent WHERE kbx_offset IS NOT NULL", []).sql()?;
             // Cold references survive the loss, including their view membership. Compact
             // their remaining positions before new derived extents are appended.
-            let maintenance = self.maintenance_budget();
-            let budget = QueryBudget::new(maintenance.memory_bytes, Some(maintenance.deadline));
             super::tables::renumber_chains(txn.conn(), &budget)?;
-            super::text_class::rebuild_in(self, txn, |class, bytes| replacement.append(class, bytes))?;
-            super::graph_class::GraphClass::rebuild_in(self, txn, |class, bytes| replacement.append(class, bytes))?;
+            super::text_class::rebuild_in(self, txn, &budget, |class, bytes| replacement.append(class, bytes))?;
+            super::graph_class::GraphClass::rebuild_in(self, txn, &mut budget, |class, bytes| replacement.append(class, bytes))?;
             fail::point("replacement.before_commit");
+            budget.check()?;
             txn.conn().execute("DELETE FROM cat_meta WHERE key = ?1", [REBUILD_CONTAINER]).sql()?;
             Ok(())
         })

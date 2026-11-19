@@ -167,9 +167,11 @@ impl IndexClass for TextClass {
         if catalog.container.is_none() {
             return Ok(());
         }
+        let maintenance = catalog.maintenance_budget();
+        let budget = QueryBudget::new(maintenance.memory_bytes, Some(maintenance.deadline));
         let hold = catalog.maintenance_hold()?.map(Arc::new);
         catalog.commit(rows, Durability::Normal, |txn| {
-            rebuild_in(catalog, txn, |class, bytes| {
+            rebuild_in(catalog, txn, &budget, |class, bytes| {
                 kbx::append(&catalog.kbx, class, bytes, hold)
             })
         })
@@ -180,14 +182,13 @@ impl IndexClass for TextClass {
 pub(super) fn rebuild_in(
     catalog: &Catalog,
     txn: &mut super::commit::Txn<'_>,
+    budget: &QueryBudget,
     append: impl FnOnce(ExtentClass, &[u8]) -> Result<kbx::Unpublished>,
 ) -> Result<()> {
-    let maintenance = catalog.maintenance_budget();
-    let budget = QueryBudget::new(maintenance.memory_bytes, Some(maintenance.deadline));
-    let (active, _charged) = crate::index_rows::active_rows(txn.conn(), &budget)?;
-    let tier = rebuilt_tier(&active, REBUILD_BATCH_ROWS, &budget)?;
+    let (active, _charged) = crate::index_rows::active_rows(txn.conn(), budget)?;
+    let tier = rebuilt_tier(&active, REBUILD_BATCH_ROWS, budget)?;
     let generation = sql_int(txn.generation()?.0).sql()?;
-    retire_text(&catalog.kbx, txn.conn(), generation, &budget)?;
+    retire_text(&catalog.kbx, txn.conn(), generation, budget)?;
     let extent = append(ExtentClass::TextTier, &tier)?;
     // a deadline or cancellation since the last check publishes nothing
     budget.check()?;
