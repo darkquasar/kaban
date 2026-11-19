@@ -25,12 +25,6 @@ use crate::store::ChangeLogStore;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SinkId(pub &'static str);
 
-impl SinkId {
-    /// The text-index projector of an index with its own storage (spec 05 SS-09): its cursor
-    /// is retention only, the index's own commit payload is its resume point.
-    pub const TEXT_INDEX: Self = Self("text-index");
-}
-
 impl std::fmt::Display for SinkId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.0)

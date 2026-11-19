@@ -366,14 +366,8 @@ impl OpenError {
 
 /// Assemble the service for `serve` and `rescan`: the code-graph provider (its key read, never
 /// created; a loose key is a config error before the store is opened), the store with its key
-/// and the bound workspace. `serving` says this process is the server (SS-21): the mode-B
-/// projection loop runs beside the write barrier's drain; a one-shot command drives its own
-/// projection through the drain and exits.
-fn open_api(
-    cli: Cli,
-    policy: kaban_policy::Policy,
-    serving: bool,
-) -> Result<kaban_api::KabanApi, OpenError> {
+/// and the bound workspace.
+fn open_api(cli: Cli, policy: kaban_policy::Policy) -> Result<kaban_api::KabanApi, OpenError> {
     let home = kaban_home().map_err(OpenError::Other)?;
     // the code side of the join (stage1-plan CG5.2, G1-F8, G1-S7): the only place a provider
     // is built; hooks (`assemble_api` callers) never get one
@@ -390,17 +384,14 @@ fn open_api(
     // store's startup seam (E2.10 boundary review BR-7): an invalid section is a config error
     // (exit 4) naming the loader's category and the field path, never a value
     let engine = load_engine()?;
-    // the store owns its text index (spec 05 OWN-M): opened, admitted or rebuilt by the open,
-    // published by the store; a serving process runs the store's projector thread (SS-21; the
-    // caller says which, since `cli.cmd` was taken by the dispatch: fix11), every other
-    // command publishes its own commits inline and exits
+    // the store owns its text index (spec 11 T7): a class of its catalog, searchable at commit
     let store = kaban_store_sqlite::SqliteStore::open_as(&cli.db, &keys_dir, &cli.actor_id)
         .map_err(OpenError::Store)?
         .with_recall_config(engine.recall.clone())
         .map_err(OpenError::Store)?
         .with_catalog_config(engine.catalog.clone())
         .map_err(OpenError::Store)?;
-    let store = Arc::new(store.serving(serving).map_err(OpenError::Store)?);
+    let store = Arc::new(store);
     let catalog = Arc::new(cli::compact::StoreCatalog(Arc::clone(&store)));
     // the one registry of this process (engine-plan E1.5): the service reads every mixin
     // decision from it, and `kaban ontology load` loads through it

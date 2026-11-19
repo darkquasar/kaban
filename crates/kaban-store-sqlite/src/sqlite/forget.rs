@@ -17,10 +17,6 @@ use super::{SqliteStore, Tenant};
 /// What every purge's post-commit hygiene leaves behind (SS-03): the freed pages and their
 /// bytes, until a VACUUM (`kaban doctor --optimize --vacuum`) rebuilds the file.
 const FREE_PAGE_RESIDUE: &str = "free-page residue until VACUUM";
-/// The index scope of a purge on a retired database with no index attached (SS-12, SS-16):
-/// this process reaches no segment, so none is claimed released.
-const UNATTACHED_INDEX_SCOPE: &str =
-    "no text index attached in this process; its segments are outstanding or unknown";
 
 /// What a canonical purge's post-commit cleanup claims (SS-03, SS-12), as `ForgetOutcome`
 /// words it: physically cleaned only when every scope is, and the detail over the scopes.
@@ -227,7 +223,7 @@ impl SqliteStore {
         ctx: &WriteCtx,
     ) -> Result<ForgetOutcome> {
         let id = id.as_str();
-        let mut conn = self.write();
+        let mut conn = self.lock();
         let (rid, lifecycle, last_seq) =
             self.catalog().commit(&mut conn, ctx.durability, |txn| {
                 Self::forget_in(txn.conn(), id, mode)
@@ -244,9 +240,8 @@ impl SqliteStore {
         if !matches!(mode, ForgetMode::Purge) {
             return Ok(outcome);
         }
-        // committed: whatever the cleanup reports, the content is revoked (SS-03). The write's
-        // guard goes first, so the purge is projected (the row leaves the index) before the
-        // erasure merges it away and the checkpoint truncates the WAL (SS-12, OWN-M)
+        // committed: whatever the cleanup reports, the content is revoked (SS-03); the lock
+        // goes first, so the cleanup never runs the adapter under it
         drop(conn);
         let cleanup = self.purge_cleanup(rid);
         Ok(ForgetOutcome {
@@ -257,27 +252,17 @@ impl SqliteStore {
         })
     }
     /// The post-commit cleanup every canonical purge runs once its transaction committed
-    /// (`forget(Purge)` and an imported purge share it): the database hygiene (SS-03), then,
-    /// with an index of its own storage attached, its erasure under the writer lock (SS-12),
-    /// the scopes reported apart. A retired database (SS-16) keeps its index outside the
-    /// database; with nothing attached this process cannot reach it, so its scope is reported
-    /// outstanding or unknown, never omitted and never claimed (T6 review t6-4). Never an
-    /// error and never a rejection: the content is revoked whatever the cleanup reports.
-    /// The database side runs under the connection lock, released before the adapter is
-    /// called (OWN-M constraint 1; review t8a-5): the erasure's merge and collection never
-    /// run under the store's lock.
+    /// (`forget(Purge)` and an imported purge share it): the database hygiene (SS-03), then
+    /// the text index's own report (SS-12), the scopes reported apart. Never an error and
+    /// never a rejection: the content is revoked whatever the cleanup reports. The database
+    /// side runs under the connection lock, released before the adapter is called (OWN-M
+    /// constraint 1).
     pub(crate) fn purge_cleanup(&self, rid: i64) -> PurgeCleanup {
         let report = {
             let conn = self.lock();
             Self::hygiene_report(Self::CAPABILITIES, Self::purge_hygiene(&conn))
         };
-        let index = match self.seed_index() {
-            Some(index) => index.purge(&[rid]),
-            None => Ok(kaban_core::text_index::PurgeOutcome {
-                cleaned: false,
-                detail: Some(UNATTACHED_INDEX_SCOPE.to_owned()),
-            }),
-        };
+        let index = self.seed_index().purge(&[rid]);
         Self::scoped_purge_report(report, index)
     }
     /// The purge report over its scopes (SS-12): the database and its WAL (`report`'s own

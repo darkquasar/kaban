@@ -1,21 +1,78 @@
-//! The adapter at its seam (spec 05 SS-08): unavailable until built, filters before the top-k
-//! with no leak, a misspelling found by the fuzzy mode, the total order and its continuation,
-//! deterministic rebuilds, one generation per pin, the payload's compatibility and bound, and
-//! an unbuilt index's purge.
+//! The text index at its seam, through the store's catalog (spec 05 SS-08, spec 11 T7): filters
+//! before the top-k with no leak, a misspelling found by the fuzzy mode, and the total order
+//! and its continuation.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // test code: failures are the assertion
 
-#[path = "tantivy_common/mod.rs"]
 mod common;
 
-use common::{FakeRows, Scratch, hits, index_row, note, rids, row, seed};
-use kaban_core::config::Recall;
-use kaban_core::text_index::{MatchMode, Searched, TextIndex, Visibility};
-use kaban_core::{ForgetMode, MemoryStore, NodeId, RecallQuery};
-use kaban_index_tantivy::TantivyIndex;
+use common::Scratch;
+use kaban_core::text_index::{MatchMode, Searched, SeedFilter, TextHit, TextQuery};
+use kaban_core::{
+    Actor, ForgetMode, MemoryStore, NewNode, Node, NodeId, RecallQuery, RememberOutcome,
+    WorkspaceId, WriteCtx,
+};
+use kaban_store_sqlite::SqliteStore;
 
-/// One move of the database's side of a payload case.
-type Move = fn(&mut kaban_core::text_index::Canonical);
+fn ctx(ws: &str) -> WriteCtx {
+    WriteCtx::new(WorkspaceId::new(ws), Actor::Agent)
+}
+
+/// Remember a fresh `kind` note in workspace `ws` and return it.
+fn note(store: &SqliteStore, ws: &str, kind: &str, text: &str, tags: &[&str]) -> Node {
+    let outcome = store
+        .remember(
+            NewNode {
+                kind: kind.into(),
+                text: text.into(),
+                tags: tags.iter().map(|t| (*t).to_owned()).collect(),
+                workspace_id: Some(ws.into()),
+                ..Default::default()
+            },
+            &[],
+            &ctx(ws),
+        )
+        .unwrap();
+    match outcome {
+        RememberOutcome::Created(n) => n,
+        RememberOutcome::Existing { node, .. } => panic!("fresh store: {node:?}"),
+    }
+}
+
+/// The `rid` of `node`, read beside the store.
+fn row(db: &std::path::Path, node: &Node) -> i64 {
+    rusqlite::Connection::open(db)
+        .unwrap()
+        .query_row("SELECT rid FROM node WHERE id = ?1", [&node.id], |r| {
+            r.get(0)
+        })
+        .unwrap()
+}
+
+/// A seed query of recall's shape over `q`'s filters.
+fn seed(q: &RecallQuery, mode: MatchMode, limit: usize, skip: usize) -> TextQuery<'_> {
+    TextQuery {
+        text: &q.query,
+        mode,
+        filter: SeedFilter::of(q),
+        limit,
+        sufficient: limit,
+        skip,
+    }
+}
+
+/// The hits of `query` at the store's latest generation, with the `exhausted` flag.
+fn hits(store: &SqliteStore, query: &TextQuery<'_>) -> (Vec<TextHit>, bool) {
+    match store.search_text(query).unwrap() {
+        Searched::Hits { hits, exhausted } => (hits, exhausted),
+        Searched::Unavailable => panic!("the text index is unavailable"),
+    }
+}
+
+/// The rids of `query`'s hits.
+fn rids(store: &SqliteStore, query: &TextQuery<'_>) -> Vec<i64> {
+    hits(store, query).0.into_iter().map(|h| h.rid).collect()
+}
 
 fn query(text: &str) -> RecallQuery {
     RecallQuery {
@@ -31,50 +88,15 @@ fn in_workspace(text: &str, ws: &str) -> RecallQuery {
     }
 }
 
-/// Before a rebuild the index answers `Unavailable` in both modes (never an empty page) and
-/// claims nothing visible; after it, the hits carry the row's `rid`, `rev` and kind and the
-/// watermark is the canonical position the rebuild read.
-#[test]
-fn an_unbuilt_index_is_unavailable_and_a_rebuild_makes_it_serve() {
-    let s = Scratch::new("unbuilt");
-    let store = s.store();
-    let fact = note(&store, "default", "Fact", "quokka by the shore", &[]);
-    let index = s.adapter();
-    let q = query("quokka");
-    for mode in [MatchMode::Lexical, MatchMode::Fuzzy] {
-        assert_eq!(
-            index.search(&seed(&q, mode, 10, 0)).unwrap(),
-            Searched::Unavailable
-        );
-    }
-    assert_eq!(index.visible().unwrap(), Visibility::Unavailable);
-
-    index.rebuild().unwrap();
-
-    let (found, exhausted) = hits(&index, &seed(&q, MatchMode::Lexical, 10, 0));
-    let (rid, rev) = row(&s.db(), &fact);
-    assert_eq!(found.len(), 1);
-    assert_eq!(
-        (found[0].rid, found[0].revision, found[0].kind.as_str()),
-        (rid, rev, "Fact")
-    );
-    assert!(exhausted);
-    let conn = rusqlite::Connection::open(s.db()).unwrap();
-    let max_seq: i64 = conn
-        .query_row("SELECT max(seq) FROM changes", [], |r| r.get(0))
-        .unwrap();
-    assert_eq!(index.visible().unwrap(), Visibility::Through(max_seq));
-}
-
 /// The filter fields bound the match set before the top-k: with thirty `noise` notes ranked
 /// above it, the one `wanted` note is the page's only hit at `limit` 5; a tag matches exactly;
-/// another workspace's row and a tombstoned row (gone from the rebuilt index) are never
+/// another workspace's row and a tombstoned row are never
 /// returned; a kind narrows; and a query word equal to a workspace or kind name matches no
 /// text (the filter fields are not content).
 #[test]
 fn filters_apply_before_top_k_and_never_leak() {
-    let s = Scratch::new("filters");
-    let store = s.store();
+    let s = Scratch::new("t7-search", "filters");
+    let store = SqliteStore::open(&s.db(), &s.keys()).unwrap();
     for i in 0..30 {
         note(
             &store,
@@ -111,19 +133,18 @@ fn filters_apply_before_top_k_and_never_leak() {
         .forget(
             &NodeId::parse(&gone.id).unwrap(),
             ForgetMode::Tombstone,
-            &common::ctx("ws1"),
+            &ctx("ws1"),
         )
         .unwrap();
-    let index = s.adapter();
-    index.rebuild().unwrap();
-    let rid_of = |n| row(&s.db(), n).0;
+    let index = &store;
+    let rid_of = |n| row(&s.db(), n);
 
     let tagged = RecallQuery {
         tags: vec!["wanted".into()],
         ..in_workspace("quokka", "ws1")
     };
     assert_eq!(
-        rids(&index, &seed(&tagged, MatchMode::Lexical, 5, 0)),
+        rids(index, &seed(&tagged, MatchMode::Lexical, 5, 0)),
         [rid_of(&wanted)],
         "the tag filter runs before the top-k; ws2 and the tombstoned row never"
     );
@@ -132,17 +153,17 @@ fn filters_apply_before_top_k_and_never_leak() {
         ..in_workspace("quokka", "ws1")
     };
     assert_eq!(
-        rids(&index, &seed(&prefixes, MatchMode::Lexical, 5, 0)),
+        rids(index, &seed(&prefixes, MatchMode::Lexical, 5, 0)),
         [] as [i64; 0]
     );
     let everything = rids(
-        &index,
+        index,
         &seed(&in_workspace("quokka", "ws1"), MatchMode::Lexical, 100, 0),
     );
     assert_eq!(everything.len(), 32, "30 noise + wanted + idea");
     assert!(!everything.contains(&rid_of(&other_ws)));
     assert!(!everything.contains(&rid_of(&gone)));
-    let all_ws = rids(&index, &seed(&query("quokka"), MatchMode::Lexical, 100, 0));
+    let all_ws = rids(index, &seed(&query("quokka"), MatchMode::Lexical, 100, 0));
     assert!(
         all_ws.contains(&rid_of(&other_ws)),
         "no workspace filter: both"
@@ -153,13 +174,13 @@ fn filters_apply_before_top_k_and_never_leak() {
         ..in_workspace("quokka", "ws1")
     };
     assert_eq!(
-        rids(&index, &seed(&kinds, MatchMode::Lexical, 10, 0)),
+        rids(index, &seed(&kinds, MatchMode::Lexical, 10, 0)),
         [rid_of(&idea)]
     );
     for word in ["ws1", "Fact", "Idea", "active"] {
         for mode in [MatchMode::Lexical, MatchMode::Fuzzy] {
             assert!(
-                rids(&index, &seed(&in_workspace(word, "ws1"), mode, 10, 0)).is_empty(),
+                rids(index, &seed(&in_workspace(word, "ws1"), mode, 10, 0)).is_empty(),
                 "{word} {mode:?}: a filter value is not text"
             );
         }
@@ -171,8 +192,8 @@ fn filters_apply_before_top_k_and_never_leak() {
 /// `Unavailable`.
 #[test]
 fn fuzzy_finds_a_misspelling_under_the_same_filters() {
-    let s = Scratch::new("fuzzy");
-    let store = s.store();
+    let s = Scratch::new("t7-search", "fuzzy");
+    let store = SqliteStore::open(&s.db(), &s.keys()).unwrap();
     let target = note(
         &store,
         "ws1",
@@ -188,26 +209,25 @@ fn fuzzy_finds_a_misspelling_under_the_same_filters() {
         "TransactionCoordinator elsewhere",
         &[],
     );
-    let index = s.adapter();
-    index.rebuild().unwrap();
+    let index = &store;
     let q = in_workspace("TransactionCordinator", "ws1");
     assert_eq!(
-        rids(&index, &seed(&q, MatchMode::Lexical, 10, 0)),
+        rids(index, &seed(&q, MatchMode::Lexical, 10, 0)),
         [] as [i64; 0]
     );
     assert_eq!(
-        rids(&index, &seed(&q, MatchMode::Fuzzy, 10, 0)),
-        [row(&s.db(), &target).0]
+        rids(index, &seed(&q, MatchMode::Fuzzy, 10, 0)),
+        [row(&s.db(), &target)]
     );
     let both = rids(
-        &index,
+        index,
         &seed(&query("TransactionCordinator"), MatchMode::Fuzzy, 10, 0),
     );
     assert_eq!(both.len(), 2);
-    assert!(both.contains(&row(&s.db(), &elsewhere).0));
+    assert!(both.contains(&row(&s.db(), &elsewhere)));
     assert_eq!(
         index
-            .search(&seed(&query("ab"), MatchMode::Fuzzy, 10, 0))
+            .search_text(&seed(&query("ab"), MatchMode::Fuzzy, 10, 0))
             .unwrap(),
         Searched::Hits {
             hits: vec![],
@@ -218,12 +238,11 @@ fn fuzzy_finds_a_misspelling_under_the_same_filters() {
 
 /// The order is `(score desc, rid asc)`: identical texts come in `rid` order; a continuation
 /// pages through the same order without a repeat; the AND-then-OR widening is decided once
-/// per query (the FTS5 adapter's contract); and two rebuilds give identical hits, scores
-/// included.
+/// per query (the FTS5 adapter's contract).
 #[test]
-fn order_is_score_then_rid_pages_continue_and_rebuilds_are_deterministic() {
-    let s = Scratch::new("order");
-    let store = s.store();
+fn order_is_score_then_rid_and_pages_continue() {
+    let s = Scratch::new("t7-search", "order");
+    let store = SqliteStore::open(&s.db(), &s.keys()).unwrap();
     for text in [
         "quokka wombat crossing at dusk",
         "quokka wombat burrow by the track",
@@ -239,13 +258,8 @@ fn order_is_score_then_rid_pages_continue_and_rebuilds_are_deterministic() {
     for word in ["alpha", "bravo", "delta"] {
         note(&store, "default", "Fact", &format!("same text {word}"), &[]);
     }
-    let index = s.adapter();
-    index.rebuild().unwrap();
-    let same = hits(
-        &index,
-        &seed(&query("same text"), MatchMode::Lexical, 10, 0),
-    )
-    .0;
+    let index = &store;
+    let same = hits(index, &seed(&query("same text"), MatchMode::Lexical, 10, 0)).0;
     assert_eq!(same.len(), 3);
     assert!(
         same.windows(2)
@@ -256,7 +270,7 @@ fn order_is_score_then_rid_pages_continue_and_rebuilds_are_deterministic() {
     let page = |limit: usize, sufficient: usize, skip: usize| -> Vec<i64> {
         let mut query = seed(&q, MatchMode::Lexical, limit, skip);
         query.sufficient = sufficient;
-        rids(&index, &query)
+        rids(index, &query)
     };
     let by_two = |sufficient: usize| -> Vec<Vec<i64>> {
         let mut pages = Vec::new();
@@ -279,182 +293,8 @@ fn order_is_score_then_rid_pages_continue_and_rebuilds_are_deterministic() {
     let pages = by_two(5);
     assert_eq!(pages.iter().map(Vec::len).collect::<Vec<_>>(), [2, 2, 2, 1]);
     assert_eq!(pages.concat(), widened, "every page from the OR expression");
-    let (_, exhausted) = hits(&index, &seed(&q, MatchMode::Lexical, 7, 0));
+    let (_, exhausted) = hits(index, &seed(&q, MatchMode::Lexical, 7, 0));
     assert!(exhausted);
-    let (_, exhausted) = hits(&index, &seed(&q, MatchMode::Lexical, 6, 0));
+    let (_, exhausted) = hits(index, &seed(&q, MatchMode::Lexical, 6, 0));
     assert!(!exhausted);
-
-    let first = hits(&index, &seed(&q, MatchMode::Lexical, 10, 0));
-    index.rebuild().unwrap();
-    assert_eq!(hits(&index, &seed(&q, MatchMode::Lexical, 10, 0)), first);
-    let again = s.adapter();
-    again.rebuild().unwrap();
-    assert_eq!(hits(&again, &seed(&q, MatchMode::Lexical, 10, 0)), first);
-}
-
-/// A pinned view serves the generation it was taken at: a row added and rebuilt meanwhile
-/// is in a fresh search and not in the pinned one, whose watermark is the old one; the pin of
-/// an unbuilt index is unavailable.
-#[test]
-fn a_pin_serves_one_generation_across_a_rebuild() {
-    let s = Scratch::new("pin");
-    let store = s.store();
-    note(&store, "default", "Fact", "quokka one", &[]);
-    let index = s.adapter();
-    let unbuilt = index.pin().unwrap();
-    assert_eq!(
-        unbuilt
-            .search(&seed(&query("quokka"), MatchMode::Lexical, 10, 0))
-            .unwrap(),
-        Searched::Unavailable
-    );
-    index.rebuild().unwrap();
-    let pinned = index.pin().unwrap();
-    let before = index.visible().unwrap();
-    let q = query("quokka");
-    assert_eq!(
-        rids(pinned.as_ref(), &seed(&q, MatchMode::Lexical, 10, 0)).len(),
-        1
-    );
-
-    let two = note(&store, "default", "Fact", "quokka two", &[]);
-    index.rebuild().unwrap();
-
-    let fresh = rids(&index, &seed(&q, MatchMode::Lexical, 10, 0));
-    assert_eq!(fresh.len(), 2);
-    assert!(fresh.contains(&row(&s.db(), &two).0));
-    assert_eq!(
-        rids(pinned.as_ref(), &seed(&q, MatchMode::Lexical, 10, 0)).len(),
-        1
-    );
-    assert_eq!(pinned.visible().unwrap(), before);
-    assert_ne!(index.visible().unwrap(), before);
-    assert_eq!(
-        rids(
-            pinned.pin().unwrap().as_ref(),
-            &seed(&q, MatchMode::Lexical, 10, 0)
-        )
-        .len(),
-        1
-    );
-}
-
-/// Serving enforces the payload's compatibility and the canonical bound: another lineage or
-/// projection makes the built index unavailable (another instance of the lineage, a fork, does
-/// not, and neither does the database's committed identifier label: the index derives its
-/// terms with the build's rule, checked in `payload.rs`), a payload ahead of the surviving
-/// history is unavailable, and the same index serves again once the position fits.
-/// T6 review t6-5: an index never committed with a payload serves nothing and says so; one
-/// rebuilt over an empty history at sequence 0 serves that payload, a watermark like any
-/// other, and the two are told apart at the seam.
-#[test]
-fn no_payload_is_unavailable_while_an_empty_rebuild_is_a_watermark_at_zero() {
-    let (rows, _canonical) = FakeRows::new(Vec::new(), 0);
-    let index = TantivyIndex::in_ram(
-        &kaban_core::shipped::resolved().unwrap(),
-        &Recall::default(),
-        Box::new(rows),
-    )
-    .unwrap();
-    assert_eq!(index.visible().unwrap(), Visibility::Unavailable);
-    assert_eq!(
-        index
-            .search(&seed(&query("quokka"), MatchMode::Lexical, 10, 0))
-            .unwrap(),
-        Searched::Unavailable
-    );
-    index.rebuild().unwrap();
-    assert_eq!(index.visible().unwrap(), Visibility::Through(0));
-    assert!(matches!(
-        index.search(&seed(&query("quokka"), MatchMode::Lexical, 10, 0)).unwrap(),
-        Searched::Hits { ref hits, exhausted: true } if hits.is_empty()
-    ));
-}
-
-#[test]
-fn an_incompatible_or_ahead_payload_is_unavailable_until_the_position_fits() {
-    let (rows, canonical) = FakeRows::new(
-        vec![
-            index_row(1, "default", "Fact", "quokka one"),
-            index_row(2, "default", "Fact", "quokka two"),
-        ],
-        5,
-    );
-    let index = TantivyIndex::in_ram(
-        &kaban_core::shipped::resolved().unwrap(),
-        &Recall::default(),
-        Box::new(rows),
-    )
-    .unwrap();
-    index.rebuild().unwrap();
-    let q = query("quokka");
-    let serves = |index: &TantivyIndex| {
-        let served = matches!(
-            index.search(&seed(&q, MatchMode::Lexical, 10, 0)).unwrap(),
-            Searched::Hits { ref hits, .. } if hits.len() == 2
-        );
-        let pinned = matches!(
-            index.pin().unwrap().search(&seed(&q, MatchMode::Lexical, 10, 0)).unwrap(),
-            Searched::Hits { ref hits, .. } if hits.len() == 2
-        );
-        assert_eq!(served, pinned, "pin and search agree");
-        served
-    };
-    assert!(serves(&index));
-    assert_eq!(index.visible().unwrap(), Visibility::Through(5));
-    let built = canonical.lock().unwrap().clone();
-    let cases: [(&str, bool, Move); 6] = [
-        ("another instance of the lineage (a fork)", true, |c| {
-            c.identity.instance_id = "db-2".into();
-        }),
-        ("a later position", true, |c| c.seq = 9),
-        ("another lineage", false, |c| {
-            c.identity.pack_lineage_id = "lineage-2".into();
-        }),
-        ("another projection", false, |c| {
-            c.identity.projection_signature = "sig-2".into();
-        }),
-        ("the database's identifier label alone", true, |c| {
-            c.identity.ident_terms_version = "3".into();
-        }),
-        ("a payload ahead of the history", false, |c| c.seq = 4),
-    ];
-    for (name, available, change) in cases {
-        {
-            let mut at = canonical.lock().unwrap();
-            *at = built.clone();
-            change(&mut at);
-        }
-        assert_eq!(serves(&index), available, "{name}");
-        let visible = index.visible().unwrap();
-        assert_eq!(
-            visible == Visibility::Through(5),
-            available,
-            "{name}: {visible:?}"
-        );
-    }
-    *canonical.lock().unwrap() = built;
-    assert!(serves(&index), "serves again once the position fits");
-}
-
-/// An index directory never written (no payload and no segment file) holds nothing of any
-/// record: its purge takes the lock and is cleaned with nothing to say. (Segment files
-/// without a payload are an interrupted build's and are never claimed cleaned: the adapter's
-/// own staged-artefacts case.)
-#[test]
-fn a_purge_of_an_unbuilt_index_has_nothing_to_erase() {
-    let (rows, _canonical) = FakeRows::new(vec![index_row(1, "default", "Fact", "quokka")], 1);
-    let index = TantivyIndex::in_ram(
-        &kaban_core::shipped::resolved().unwrap(),
-        &Recall::default(),
-        Box::new(rows),
-    )
-    .unwrap();
-    assert_eq!(
-        index.purge(&[1]).unwrap(),
-        kaban_core::text_index::PurgeOutcome {
-            cleaned: true,
-            detail: None
-        }
-    );
 }

@@ -60,7 +60,7 @@ impl SqliteStore {
         batch: usize,
         judge: &mut dyn RescanJudge,
     ) -> Result<RescanReport> {
-        let mut conn = self.write();
+        let mut conn = self.lock();
         self.catalog.commit(&mut conn, kaban_core::Durability::Normal, |txn| {
             let tx = txn.conn();
             let limit = i64::try_from(batch.max(1)).unwrap_or(i64::MAX);

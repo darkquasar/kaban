@@ -357,21 +357,6 @@ fn hold_then_open(fixture: &str, files: &[(&str, &str)]) {
     project.assert_unchanged();
 }
 
-/// The public index reader (`IndexRows::open`) without a store: refused like an open, before
-/// SQLite reads the file (a read-only connection to a WAL-mode file would still create
-/// `-shm` and could replay the log).
-fn index_reader(fixture: &str, files: &[(&str, &str)]) {
-    let project = Project::copy(fixture, files, "index-rows");
-    match kaban_store_sqlite::index_rows::IndexRows::open(&project.db()) {
-        Ok(rows) => {
-            drop(rows);
-            panic!("expected error: IndexRows::open read the older-format project");
-        }
-        Err(err) => assert_schema_unsupported("IndexRows::open", &err),
-    }
-    project.assert_unchanged();
-}
-
 /// `kaban --db <name> stats` run from inside the project directory, so `name` is relative.
 fn run_relative(project: &Project, name: &str) -> Output {
     Command::new(env!("CARGO_BIN_EXE_kaban"))
@@ -515,16 +500,6 @@ fn exclusive_hold_and_the_opens_under_it_refuse_a_clean_v3_project() {
 #[test]
 fn exclusive_hold_and_the_opens_under_it_refuse_a_killed_writer_v3_project() {
     hold_then_open("v3.0.0-wal", WAL);
-}
-
-#[test]
-fn the_index_reader_refuses_a_clean_v3_project() {
-    index_reader("v3.0.0", CLEAN);
-}
-
-#[test]
-fn the_index_reader_refuses_a_killed_writer_v3_project() {
-    index_reader("v3.0.0-wal", WAL);
 }
 
 #[test]

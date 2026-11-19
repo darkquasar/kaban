@@ -32,7 +32,7 @@ use crate::rows::{NODE_COLS, bad_enum, row_edge, row_node};
 use crate::schema::{MigrationReport, Migrator, configure_connection};
 use crate::session;
 use crate::sql_error::SqlResultExt;
-use crate::tantivy::{self, Attach, Attached, SharedConnection};
+use crate::tantivy::{Attached, SharedConnection};
 use crate::traverse;
 use kaban_core::query_budget::QueryBudget;
 use kaban_core::text_index::{Searched, TextQuery, TextSnapshot};
@@ -126,27 +126,14 @@ impl LinkEffect {
 
 /// SQLite graph store. One connection guarded by a mutex (single writer per process). Each
 /// write commits its rows and their change-log entries in one transaction; `signer` holds the
-/// database's HMAC key (keyed identities and `input_hmac` stubs). Recall's seeds
-/// come from the store's own text index (the Tantivy adapter it opens, admits or rebuilds at
-/// its open and projects its commits into, spec 05 OWN-M; `crate::tantivy`) or, for an open
-/// that attaches none and a database below the FTS5 retirement (spec 05 SS-16), from the
-/// in-database FTS5 index the write path still maintains there.
+/// database's HMAC key (keyed identities and `input_hmac` stubs). Recall's seeds come from the
+/// store's own text index over the catalog (spec 11 T7; `crate::tantivy`).
 #[derive(Debug)]
 pub struct SqliteStore {
-    /// The projector thread of a serving store (`crate::projector_thread`; [`Self::serving`]),
-    /// `None` for every other store. Declared first: it stops and joins, releasing lease and
-    /// lock, before the index and the connection it works over close.
-    pub(crate) projector: Option<crate::projector_thread::ProjectorThread>,
     /// The seed index ordinary recall searches (spec 05 SS-07): the store's own adapter
-    /// (`crate::tantivy`, set by every open that found or built one), or an injected one
-    /// ([`Self::with_text_index`]); `None` only for an open that attaches nothing (a
-    /// diagnosis of a database without an index, a pack, a fixture below the change log),
-    /// where the in-database FTS5 index serves below the retirement (SS-16) and nothing above.
-    /// Declared first: a file store's adapter closes its read-only connection before `conn`
-    /// closes, so the last connection out checkpoints and removes the WAL as it always did.
-    pub(crate) text_index: Option<Attached>,
-    /// Shared with the in-memory adapter's `Rows` (`crate::tantivy`), never lent across an
-    /// adapter call: the lock order is this lock, then the adapter.
+    /// (`crate::tantivy`), or an injected one ([`Self::with_text_index`]).
+    pub(crate) text_index: Attached,
+    /// Never lent across an adapter call: the lock order is this lock, then the adapter.
     conn: SharedConnection,
     /// The catalog of the database (spec 11 KER-07): every writer transaction of the store
     /// opens in its commit entry, whose capture triggers live on `conn`.
@@ -166,15 +153,6 @@ pub struct SqliteStore {
     /// SO-4; E2.6): opened lazily by the first `attach_snapshot`, closed by `detach_snapshot`
     /// and at drop (declared before `_live`, so it closes before the registration goes).
     cg_read: Mutex<Option<CgRead>>,
-    /// The lease owner of this store's projections (`crate::tantivy::owner`).
-    pub(crate) owner: String,
-    /// How long a projection on the store's own account may run (`crate::tantivy::PUBLISH_BUDGET`;
-    /// a hook's share for a hook open).
-    pub(crate) publish_budget: std::time::Duration,
-    /// This store's session position (`crate::tantivy`; astra, projection research): the
-    /// change-log head after its last commit, 0 while it wrote nothing. A read of this store
-    /// drains only while the index does not cover it; a close publishes toward it.
-    pub(crate) receipt: std::sync::atomic::AtomicU64,
     /// The database file, `None` for an in-memory store (which has no second connection to
     /// open and refuses an attach).
     path: Option<std::path::PathBuf>,
@@ -183,29 +161,18 @@ pub struct SqliteStore {
     _live: Option<LiveGuard>,
 }
 
-/// A store with pending work closes after one bounded projection (spec 05 OWN-M (d): a
-/// one-shot command's exit publishes what it wrote); an in-memory index dies with its store.
-impl Drop for SqliteStore {
-    fn drop(&mut self) {
-        if self.path.is_some() {
-            self.publish_pending();
-        }
-    }
-}
-
 #[cfg(feature = "text-index-override")]
 impl SqliteStore {
     /// Route ordinary recall's lexical and fuzzy seed searches through `index` in place of the
     /// store's own adapter (spec 05 SS-07): the graph expansion, the fusion, the
     /// materialization and the final order stay this store's. The feature exists for the
-    /// adapter goldens, a scripted fake and the bench; the store projects nothing into an
-    /// injected index (its publication is the injector's).
+    /// adapter goldens, a scripted fake and the bench.
     #[must_use]
     pub fn with_text_index(
         mut self,
         index: Box<dyn kaban_core::text_index::TextIndex + Send + Sync>,
     ) -> Self {
-        self.text_index = Some(Attached::Override(index));
+        self.text_index = Attached::Override(index);
         self
     }
 }
@@ -214,7 +181,7 @@ impl SqliteStore {
     /// This adapter's capabilities (spec 05 SS-23): a VACUUM reclaims a purge's freed pages
     /// (`kaban doctor --optimize --vacuum`; the post-commit hygiene does not, so a purge still
     /// reports the residue, SS-03), and SQLite serializes the writers of several processes on
-    /// one file itself (shared mode B, SS-21: no daemon, no projector for FTS5). Read by the
+    /// one file itself (shared mode B, SS-21: no daemon). Read by the
     /// purge report (`purge_cleanup`) and by the shared-open admission of `connection.rs`
     /// (`admit_open`, reached by every writable open: ordinary, hook, diagnostic and pack
     /// source), nowhere else.
@@ -230,7 +197,7 @@ impl SqliteStore {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    /// The connection as the in-memory adapter shares it (`crate::tantivy`).
+    /// The store's shared connection.
     pub(crate) fn connection(&self) -> &SharedConnection {
         &self.conn
     }
@@ -254,29 +221,15 @@ impl SqliteStore {
     /// any revalidation against the rows (spec 11 T7, TXT-06): what a recall seeds from.
     ///
     /// # Errors
-    /// [`StoreError::TextIndexUnavailable`] when no index is attached; the pin's, the budget's
-    /// or the index's error.
+    /// The pin's, the budget's or the index's error.
     pub fn search_text(&self, query: &TextQuery<'_>) -> Result<Searched> {
-        let index = self.seed_index().ok_or(StoreError::TextIndexUnavailable)?;
-        self.with_text_snapshot(|at, budget| index.search_at(at, query, budget))
+        let index = self.seed_index();
+        self.with_text_snapshot(|at, budget| index.search(at, query, budget))
     }
 
-    /// The seed index behind the text-search seam, when one is attached.
-    pub(crate) fn seed_index(
-        &self,
-    ) -> Option<&(dyn kaban_core::text_index::TextIndex + Send + Sync)> {
-        self.text_index.as_ref().map(Attached::text_index)
-    }
-
-    /// The store's own Tantivy adapter (spec 05 OWN-M), `None` for an open that attached
-    /// nothing, a pack's captured index or an injected index: the seam the adapter suites of
-    /// this crate's tests read the composed index through.
-    #[must_use]
-    pub fn text_index_adapter(&self) -> Option<Arc<kaban_index_tantivy::TantivyIndex>> {
-        self.text_index
-            .as_ref()
-            .and_then(Attached::tantivy)
-            .cloned()
+    /// The seed index behind the text-search seam.
+    pub(crate) fn seed_index(&self) -> &(dyn kaban_core::text_index::TextIndex + Send + Sync) {
+        self.text_index.text_index()
     }
 
     /// The ontology this store ranks and projects under.
@@ -291,41 +244,9 @@ impl SqliteStore {
 
     /// Rank the store's own adapter with the ontology and recall configuration bound now.
     fn configure_index(&self) {
-        if let Some(index) = self.text_index.as_ref().and_then(Attached::tantivy) {
+        if let Some(index) = self.text_index.tantivy() {
             index.configure(self.ontology(), self.recall_config());
         }
-    }
-
-    /// The same store serving (spec 05 SS-21; `serving` is what the binary knows: this
-    /// process is the server): one persistent projector thread competes for the `text-index`
-    /// lease and, as the elected publisher, publishes every process's commits as they land,
-    /// this store's within their window or at its barrier. A store that does not serve, an
-    /// in-memory store (its publication runs inline, synchronously) and a pack (immutable)
-    /// start no thread. Call after the configuration seams: the thread ranks with what the
-    /// index is configured with when it starts.
-    ///
-    /// # Errors
-    /// The thread's observation connection or the thread itself could not be started.
-    pub fn serving(mut self, serving: bool) -> Result<Self> {
-        if !serving {
-            return Ok(self);
-        }
-        let (Some(db), Some(index)) = (
-            self.path.clone(),
-            self.text_index
-                .as_ref()
-                .and_then(Attached::tantivy)
-                .cloned(),
-        ) else {
-            return Ok(self);
-        };
-        self.projector = Some(crate::projector_thread::ProjectorThread::start(
-            index,
-            Arc::clone(&self.conn),
-            self.catalog.outside_commits(),
-            &db,
-        )?);
-        Ok(self)
     }
 
     pub(crate) fn cg_read(&self) -> std::sync::MutexGuard<'_, Option<CgRead>> {
@@ -414,14 +335,11 @@ impl SqliteStore {
         self.rules = RwLock::new(Arc::new(RuleSet::from_ontology(&ontology)));
         self.ontology = ontology;
         {
-            let mut conn = self.write();
+            let mut conn = self.lock();
             self.catalog.commit(&mut conn, Durability::Normal, |txn| {
                 crate::ident::deploy(txn.conn(), &self.ontology, false)
             })?;
         }
-        // a redeployed projection is another binding (SS-09): the index is rebuilt under it
-        // here (the write's own publication never rebuilds), then ranks with the new weights
-        self.catch_up()?;
         self.configure_index();
         Ok(self)
     }
@@ -533,7 +451,7 @@ impl SqliteStore {
         let mut catalog = Catalog::open_as_is(path, &mut conn)?;
         let signer = Self::project_key(&catalog, &mut conn, keys_dir, &db_id)?;
         catalog.create_artefacts()?;
-        Self::assemble(
+        Ok(Self::assemble(
             conn,
             catalog,
             db_id,
@@ -541,8 +459,7 @@ impl SqliteStore {
             report,
             Some(live),
             Some(path),
-        )
-        .with_index_attached(Attach::Own)
+        ))
     }
     /// The database's HMAC key: created with the project, required ever after. A project
     /// that has recorded its key (`index_meta` `KEY_RECORDED`) must never get a fresh one:
@@ -612,7 +529,7 @@ impl SqliteStore {
             .map_err(|e| StoreError::Audit(Box::new(e)))?;
         let report = MigrationReport::unchanged(version);
         let catalog = Catalog::open_as_is(path, &mut conn)?;
-        Self::assemble(
+        Ok(Self::assemble(
             conn,
             catalog,
             db_id,
@@ -620,8 +537,7 @@ impl SqliteStore {
             report,
             Some(live),
             Some(path),
-        )
-        .with_index_attached(Attach::Existing)
+        ))
     }
     /// Open for `kaban doctor` (core-spec §7; M4-19): the database is read as it is, so the
     /// report describes what is on disk. Nothing is created (a missing file is an error, not a
@@ -685,8 +601,7 @@ impl SqliteStore {
             report,
             Some(live),
             Some(path),
-        )
-        .with_index_attached(Attach::Existing)?;
+        );
         Ok((store, modes))
     }
     /// Open for a host hook (core-plan C4.3 as amended by M4-6; review R4-2): a hook fired in a
@@ -746,7 +661,7 @@ impl SqliteStore {
             .map_err(|e| StoreError::Audit(Box::new(e)))?;
         let report = MigrationReport::unchanged(version);
         let catalog = Catalog::open_as_is(path, &mut conn)?;
-        let mut store = Self::assemble(
+        Ok(Self::assemble(
             conn,
             catalog,
             db_id,
@@ -754,11 +669,7 @@ impl SqliteStore {
             report,
             Some(live),
             Some(path),
-        );
-        // a hook's write publishes its own page within its watchdog's share, or leaves the
-        // receipt pending (spec 05 SS-10)
-        store.publish_budget = tantivy::HOOK_PUBLISH_BUDGET;
-        store.with_index_attached(Attach::Existing)
+        ))
     }
     /// Open the database at `path` with an explicit signer (the key is managed by the caller).
     ///
@@ -768,8 +679,15 @@ impl SqliteStore {
         let (mut conn, db_id, report, live) =
             Self::open_file(path, &ActorId::default(), Self::CAPABILITIES)?;
         let catalog = Catalog::open(path, &mut conn)?;
-        Self::assemble(conn, catalog, db_id, signer, report, Some(live), Some(path))
-            .with_index_attached(Attach::Own)
+        Ok(Self::assemble(
+            conn,
+            catalog,
+            db_id,
+            signer,
+            report,
+            Some(live),
+            Some(path),
+        ))
     }
     /// An in-memory store with an ephemeral random HMAC key (tests); the writer is `local`.
     ///
@@ -787,8 +705,15 @@ impl SqliteStore {
         let (db_id, report) = Self::init_schema(&mut conn, actor)?;
         let signer = KeySigner::ephemeral().map_err(|e| StoreError::Audit(Box::new(e)))?;
         let catalog = Catalog::in_memory(&mut conn)?;
-        Self::assemble(conn, catalog, db_id, Arc::new(signer), report, None, None)
-            .with_index_attached(Attach::Own)
+        Ok(Self::assemble(
+            conn,
+            catalog,
+            db_id,
+            Arc::new(signer),
+            report,
+            None,
+            None,
+        ))
     }
     /// Open the database file with owner-only permissions (core-spec S5; see
     /// [`prepare_database_files`] for the file rules), then create or check its schema and
@@ -822,40 +747,25 @@ impl SqliteStore {
         live: Option<LiveGuard>,
         path: Option<&Path>,
     ) -> Self {
+        let ontology = shipped_ontology();
+        let recall = kaban_core::config::Recall::default();
+        let text_index = Attached::Tantivy(Arc::new(kaban_index_tantivy::TantivyIndex::new(
+            &ontology, &recall,
+        )));
         Self {
+            text_index,
             conn: Arc::new(Mutex::new(conn)),
             catalog,
             db_id,
             signer,
             migration,
-            ontology: shipped_ontology(),
+            ontology,
             rules: RwLock::new(RuleSet::shipped()),
-            recall: kaban_core::config::Recall::default(),
+            recall,
             cg_read: Mutex::new(None),
-            projector: None,
-            text_index: None,
-            owner: tantivy::owner(),
-            publish_budget: tantivy::PUBLISH_BUDGET,
-            receipt: std::sync::atomic::AtomicU64::new(0),
             path: path.map(Path::to_path_buf),
             _live: live,
         }
-    }
-    /// The assembled store with its text index (spec 05 OWN-M; `crate::tantivy`): a file
-    /// store's index beside the database, admitted or rebuilt as `attach` says, then caught
-    /// up to the head; an in-memory store's RAM index, built. A database below the change
-    /// log (schema 0004; an older fixture opened at its version) has nothing to project from
-    /// and keeps its in-database index.
-    fn with_index_attached(mut self, attach: Attach) -> Result<Self> {
-        let index = match self.path.clone() {
-            Some(db) => self.open_file_index(&db, attach)?,
-            None => Some(self.open_memory_index()?),
-        };
-        self.text_index = index.map(Attached::Tantivy);
-        if attach == Attach::Own {
-            self.catch_up()?;
-        }
-        Ok(self)
     }
     /// Configure the connection, bind its writer (SS-26), create the schema on a fresh
     /// database or refuse one at another version (spec 05 OWN-P, [`Migrator`]), seed builtin
@@ -1154,7 +1064,7 @@ impl MemoryStore for SqliteStore {
         props: Option<Value>,
         ctx: &WriteCtx,
     ) -> Result<Edge> {
-        let mut conn = self.write();
+        let mut conn = self.lock();
         self.catalog.commit(&mut conn, ctx.durability, |txn| {
             let (e, _) = Self::link_in(
                 txn.conn(),
@@ -1180,13 +1090,8 @@ impl MemoryStore for SqliteStore {
         q: &RecallQuery,
         eligible: &dyn Fn(&Node) -> bool,
     ) -> Result<Vec<Hit>> {
-        // this store's own commits are read back (spec 05 OWN-M): its receipt position is
-        // published first when the index does not cover it, bounded, with no lock held
-        self.publish_before_read();
-        // the attached adapter may read the store back (an in-memory adapter shares this
-        // connection): recall takes the lock per statement and never across an adapter call
-        // a store with no index attached has nothing to seed from: refused, never empty
-        let index = self.seed_index().ok_or(StoreError::TextIndexUnavailable)?;
+        // recall takes the lock per statement and never across an adapter call
+        let index = self.seed_index();
         self.with_text_snapshot(|at, budget| {
             recall::recall_with(
                 &recall::Access(&self.conn),
@@ -1199,19 +1104,6 @@ impl MemoryStore for SqliteStore {
                 eligible,
             )
         })
-    }
-    /// The attached index's watermark (spec 05 SS-10). A store with nothing attached has no
-    /// watermark to read: the barrier then acknowledges `not_yet_searchable` and doctor
-    /// reports the index as not checked, rather than either claiming currency.
-    fn text_visible(&self) -> Result<kaban_core::text_index::Visibility> {
-        self.seed_index()
-            .ok_or(StoreError::TextIndexUnavailable)?
-            .visible()
-    }
-    /// The barrier's drain (spec 05 SS-10, OWN-M): this store's pending commits toward
-    /// `target` within the caller's deadline (`crate::tantivy`).
-    fn text_publish(&self, target: u64, deadline: std::time::Instant) -> Result<()> {
-        self.publish_until(target, deadline)
     }
     fn traverse(&self, q: &TraverseQuery) -> Result<TraverseResult> {
         traverse::traverse(&self.lock(), q)
@@ -1306,8 +1198,6 @@ impl MemoryStore for SqliteStore {
         anchors::snapshot_symbols(cg, commit, page)
     }
     fn stats(&self, workspace_id: Option<&str>) -> Result<Value> {
-        // the cursors (`changes_lag`) follow this process's own publication (spec 05 OWN-M)
-        self.publish_before_read();
         let conn = self.lock();
         // node counts inside the workspace; an edge counts when both endpoints are inside
         // (review R1-5); the file size is global and labelled as such
@@ -1465,7 +1355,7 @@ impl SessionStore for SqliteStore {
         patch: &FailurePatch,
         ctx: &WriteCtx,
     ) -> Result<Node> {
-        let mut conn = self.write();
+        let mut conn = self.lock();
         self.catalog.commit(&mut conn, ctx.durability, |txn| {
             let node = session::update_failure_props(
                 txn.conn(),
@@ -1489,14 +1379,14 @@ impl ChangeLogStore for SqliteStore {
         changelog::head(&self.lock())
     }
     fn changes_ack(&self, consumer: &str, upto: u64, fence: u64) -> Result<()> {
-        let mut conn = self.write();
+        let mut conn = self.lock();
         // a write path: BEGIN IMMEDIATE like every other (N4, prep brief risk 7)
         self.catalog.commit(&mut conn, Durability::Normal, |txn| {
             changelog::ack(txn.conn(), consumer, upto, fence)
         })
     }
     fn changes_register(&self, consumer: &str, fence: u64) -> Result<u64> {
-        let mut conn = self.write();
+        let mut conn = self.lock();
         self.catalog.commit(&mut conn, Durability::Normal, |txn| {
             changelog::register(txn.conn(), consumer, fence)
         })
@@ -1505,9 +1395,7 @@ impl ChangeLogStore for SqliteStore {
         changelog::lag_by_consumer(&self.lock())
     }
     fn changes_prune(&self, tail: u64) -> Result<u64> {
-        // the prune floor is the slowest cursor: this process's own publication first
-        self.publish_before_read();
-        let mut conn = self.write();
+        let mut conn = self.lock();
         self.catalog.commit(&mut conn, Durability::Normal, |txn| {
             changelog::prune(txn.conn(), tail)
         })
@@ -1516,7 +1404,7 @@ impl ChangeLogStore for SqliteStore {
 
 impl LeaseStore for SqliteStore {
     fn lease_acquire(&self, name: &str, owner: &str, ttl_s: u32) -> Result<Option<Lease>> {
-        let mut conn = self.write();
+        let mut conn = self.lock();
         // one BEGIN IMMEDIATE per acquisition (core-spec F15): the fence increment and the
         // read-back are atomic against every other process
         self.catalog.commit(&mut conn, Durability::Normal, |txn| {
@@ -1524,13 +1412,13 @@ impl LeaseStore for SqliteStore {
         })
     }
     fn lease_renew(&self, lease: &Lease, ttl_s: u32) -> Result<()> {
-        let mut conn = self.write();
+        let mut conn = self.lock();
         self.catalog.commit(&mut conn, Durability::Normal, |txn| {
             leases::renew(txn.conn(), lease, ttl_s)
         })
     }
     fn lease_release(&self, lease: &Lease) -> Result<()> {
-        let mut conn = self.write();
+        let mut conn = self.lock();
         self.catalog.commit(&mut conn, Durability::Normal, |txn| {
             leases::release(txn.conn(), lease)
         })
@@ -1559,7 +1447,7 @@ impl IngestStore for SqliteStore {
         crate::jobs::pending(&self.lock(), workspace, dialect, prefix, limit)
     }
     fn job_claim(&self, request: kaban_core::JobClaimRequest) -> Result<Option<kaban_core::Lease>> {
-        let mut conn = self.write();
+        let mut conn = self.lock();
         self.catalog.commit(&mut conn, Durability::Normal, |txn| {
             crate::jobs::claim(txn.conn(), request)
         })
@@ -1571,7 +1459,7 @@ impl IngestStore for SqliteStore {
         fence: Option<u64>,
         renew: bool,
     ) -> Result<()> {
-        let mut conn = self.write();
+        let mut conn = self.lock();
         self.catalog.commit(&mut conn, Durability::Normal, |txn| {
             let row = crate::jobs::get(txn.conn(), job, workspace)?
                 .ok_or_else(|| StoreError::NotFound("job_revoked".into()))?;
@@ -1600,7 +1488,7 @@ impl IngestStore for SqliteStore {
         self.job_submit_impl(request, ctx, accumulate)
     }
     fn job_open(&self, job: &kaban_core::IngestJob) -> Result<kaban_core::IngestJob> {
-        let mut conn = self.write();
+        let mut conn = self.lock();
         self.catalog.commit(&mut conn, Durability::Normal, |txn| {
             crate::jobs::open(txn.conn(), job)
         })
@@ -1609,7 +1497,7 @@ impl IngestStore for SqliteStore {
         &self,
         request: kaban_core::JobOpenRequest,
     ) -> Result<kaban_core::IngestJob> {
-        let mut conn = self.write();
+        let mut conn = self.lock();
         self.catalog.commit(&mut conn, Durability::Normal, |txn| {
             crate::jobs::open_checked(txn.conn(), &request)
         })
@@ -1646,12 +1534,9 @@ impl IngestStore for SqliteStore {
     fn gazetteer_set_fresh(&self, document: &NodeId, workspace: &WorkspaceId) -> Result<bool> {
         artifacts::set_fresh(&self.lock(), document, workspace)
     }
-    /// The rebuild of the store's text index from the canonical rows; a store with nothing
-    /// attached is refused.
+    /// The rebuild of the store's text index from the canonical rows (spec 11 T7: through the
+    /// catalog's text class).
     fn reindex_text(&self) -> Result<u64> {
-        self.seed_index()
-            .ok_or(StoreError::TextIndexUnavailable)?
-            .rebuild()?;
         self.lock()
             .query_row(
                 "SELECT count(*) FROM node WHERE lifecycle = 'active'",
@@ -1800,19 +1685,10 @@ impl IngestStore for SqliteStore {
         let conn = self.lock();
         doctor::integrity_check(&conn)
     }
-    /// The text index's check: the attached adapter is sound when it serves a payload (a
-    /// watermark at 0, an index built over an empty history, is one; an adapter serving none
-    /// is a finding, T6 review t6-5); a store with nothing attached is refused.
+    /// The text index's check: its tiers and packs are catalog extents and sediment, which
+    /// the catalog's verification checks (`catalog_verify`), so nothing is left to check here.
     fn fts_integrity_check(&self) -> Result<MaintenanceOutcome> {
-        use kaban_core::text_index::Visibility;
-        let index = self.seed_index().ok_or(StoreError::TextIndexUnavailable)?;
-        Ok(match index.visible()? {
-            Visibility::Unavailable => MaintenanceOutcome::Failed(vec![
-                "the attached text index serves no payload: not built, or not of this database"
-                    .into(),
-            ]),
-            Visibility::Current | Visibility::Through(_) => MaintenanceOutcome::Ok,
-        })
+        Ok(MaintenanceOutcome::Ok)
     }
     fn vacuum(&self) -> Result<MaintenanceOutcome> {
         let conn = self.lock();
@@ -1820,12 +1696,8 @@ impl IngestStore for SqliteStore {
         self.catalog.outside_commit(|| doctor::vacuum(&conn))
     }
     /// The explicit maintenance pass (spec 05 SS-03): the database hygiene (the TRUNCATE
-    /// checkpoint). The store's own adapter merges its segments as it commits, so it has
-    /// nothing to run; a store with nothing attached is refused.
+    /// checkpoint). The text index's packs are sealed by compaction, so it has nothing to run.
     fn optimize_fts(&self) -> Result<MaintenanceOutcome> {
-        if self.text_index.is_none() {
-            return Err(StoreError::TextIndexUnavailable);
-        }
         doctor::optimize_fts(&self.lock())
     }
 }

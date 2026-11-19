@@ -97,35 +97,46 @@ impl Predicates {
 
 /// The seeds of one mode (spec 05 SS-11): pages of `page` hits from `view` (one pinned
 /// generation for the whole recall), every hit re-read from SQLite in one statement per page
-/// and kept only when its row exists at the revision the index saw and still passes the
-/// lifecycle, kind, workspace, tag, code-ref and candidate predicates. [`Seeds::fill`]
+/// and kept, with the revision and kind its row has then (TXT-05: a hit carries identity and
+/// score only), when its row still passes the lifecycle, kind, workspace, tag, code-ref and
+/// candidate predicates. [`Seeds::fill`]
 /// continues retrieval where the last fill stopped, until its target of eligible seeds is
 /// kept or the candidates are exhausted (no skip cap: a fixed oversample is insufficient), so
 /// the recall asks for more when a later rejection stage (canonical resolution, the read
 /// gate) leaves the deliverable page short. An index that cannot answer the mode seeds
 /// nothing.
 ///
-/// A revision mismatch is dropped, not re-ranked: the projector re-indexes the row within one
-/// page. Excerpts are never taken from here: the caller materializes every returned `rid`
-/// from the current row.
+/// Excerpts are never taken from here: the caller materializes every returned `rid` from the
+/// current row.
 struct Seeds {
-    /// The revalidation statement: `(rid, rev)` of the page's rows that pass the predicates.
+    /// The revalidation statement: `(rid, rev, kind)` of the page's rows that pass the
+    /// predicates.
     sql: String,
     predicates: Predicates,
     mode: MatchMode,
     page: usize,
-    kept: Vec<TextHit>,
+    kept: Vec<Seed>,
     skip: usize,
     /// No further candidate: the index said so, cannot answer the mode, or the mode is not
     /// in play for this recall.
     exhausted: bool,
 }
 
+/// One kept seed: the hit's record with the revision and kind its row had when it was
+/// revalidated (the fusion drops it when the row changed since, and seeds the per-kind
+/// expansion hints from the kind).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Seed {
+    rid: i64,
+    revision: i64,
+    kind: String,
+}
+
 impl Seeds {
     fn new(q: &RecallQuery, mode: MatchMode, page: usize, in_play: bool) -> Self {
         let predicates = Predicates::of(&SeedFilter::of(q));
         let sql = format!(
-            "SELECT n.rid, n.rev FROM node n WHERE n.rid IN (SELECT value FROM json_each(?1)) AND {}",
+            "SELECT n.rid, n.rev, n.kind FROM node n WHERE n.rid IN (SELECT value FROM json_each(?1)) AND {}",
             predicates.sql
         );
         Self {
@@ -140,7 +151,9 @@ impl Seeds {
     }
 
     /// Retrieve until `target` eligible seeds are kept or the candidates are exhausted. Each
-    /// page is searched with no connection held and revalidated under one statement's lock.
+    /// page is reserved on `budget` before it is searched (the search hands it over
+    /// uncharged), searched with no connection held and revalidated under one statement's
+    /// lock.
     #[allow(clippy::too_many_arguments)] // the snapshot and its budget travel with every page
     fn fill(
         &mut self,
@@ -154,7 +167,10 @@ impl Seeds {
     ) -> Result<()> {
         let filter = SeedFilter::of(q);
         while self.kept.len() < target && !self.exhausted {
-            let page = view.search_at(
+            let _page = budget.reserve(
+                u64::try_from(self.page.saturating_mul(size_of::<TextHit>())).unwrap_or(u64::MAX),
+            )?;
+            let page = view.search(
                 at,
                 &TextQuery {
                     text: &q.query,
@@ -185,27 +201,31 @@ impl Seeds {
                     .map(|b| b.as_ref() as &dyn rusqlite::ToSql),
             );
             let conn = access.conn();
-            let current: HashMap<i64, i64> = conn
+            let mut current: HashMap<i64, (i64, String)> = conn
                 .prepare_cached(&self.sql)
                 .sql()?
                 .query_map(binds.as_slice(), |r| {
-                    Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
+                    Ok((r.get::<_, i64>(0)?, (r.get(1)?, r.get(2)?)))
                 })
                 .sql()?
                 .collect::<rusqlite::Result<_>>()
                 .sql()?;
             drop(conn);
-            self.kept.extend(
-                hits.into_iter()
-                    .filter(|hit| current.get(&hit.rid) == Some(&hit.revision)),
-            );
+            self.kept.extend(hits.into_iter().filter_map(|hit| {
+                let (revision, kind) = current.remove(&hit.rid)?;
+                Some(Seed {
+                    rid: hit.rid,
+                    revision,
+                    kind,
+                })
+            }));
             self.exhausted = exhausted;
         }
         Ok(())
     }
 
     /// The first `target` eligible seeds kept so far.
-    fn first(&self, target: usize) -> &[TextHit] {
+    fn first(&self, target: usize) -> &[Seed] {
         &self.kept[..self.kept.len().min(target)]
     }
 }
@@ -329,8 +349,8 @@ fn fuse(
     ontology: &kaban_core::Ontology,
     k: f64,
     q: &RecallQuery,
-    lexical: &[TextHit],
-    fuzzy: Option<&[TextHit]>,
+    lexical: &[Seed],
+    fuzzy: Option<&[Seed]>,
     limit: usize,
     eligible: &dyn Fn(&Node) -> bool,
 ) -> Result<Vec<Hit>> {
@@ -370,7 +390,7 @@ fn fuse(
         // the frontier is built: a neighbour outside the workspace, tombstoned or purged,
         // or archived without `include_archived` (M3-12), is never scored and never expanded
         // from
-        let graph_sql: Vec<[String; 2]> = lexical.iter().take(20).map(|TextHit { kind, .. }| {
+        let graph_sql: Vec<[String; 2]> = lexical.iter().take(20).map(|Seed { kind, .. }| {
             std::array::from_fn(|index| {
                 let rels = match rank_hints(ontology, kind) {
                     Some(hints) => hints.expand_rels.iter().map(String::as_str).collect::<Vec<_>>(),
@@ -565,39 +585,32 @@ mod tests {
         }
     }
 
-    /// `(rid, rev)` of `node`.
-    fn row(store: &crate::SqliteStore, node: &Node) -> (i64, i64) {
+    /// The `rid` of `node`.
+    fn row(store: &crate::SqliteStore, node: &Node) -> i64 {
         store
             .lock()
-            .query_row("SELECT rid, rev FROM node WHERE id = ?1", [&node.id], |r| {
-                Ok((r.get(0)?, r.get(1)?))
+            .query_row("SELECT rid FROM node WHERE id = ?1", [&node.id], |r| {
+                r.get(0)
             })
             .unwrap()
     }
 
-    fn hit(rid: i64, revision: i64) -> TextHit {
-        TextHit {
-            rid,
-            revision,
-            score: 1.0,
-            kind: "Fact".into(),
-        }
+    fn hit(rid: i64) -> TextHit {
+        TextHit { rid, score: 1.0 }
     }
 
-    /// SS-11: every hit is re-read from SQLite. A hit whose revision the index saw is not the
-    /// current one (stale), a tombstoned record (revoked) and a record of another workspace
-    /// are excluded; the current, active, in-workspace one is returned.
+    /// SS-11: every hit is re-read from SQLite. A tombstoned record (revoked), a record of
+    /// another workspace and a row that does not exist are excluded; the current, active,
+    /// in-workspace one is returned.
     #[test]
-    fn stale_revoked_and_cross_workspace_hits_are_excluded() {
+    fn revoked_missing_and_cross_workspace_hits_are_excluded() {
         let store = crate::SqliteStore::open_memory().unwrap();
         let valid = created(&store, "ws1", "quokka valid");
-        let stale = created(&store, "ws1", "quokka stale");
         let revoked = created(&store, "ws1", "quokka revoked");
         let elsewhere = created(&store, "ws2", "quokka elsewhere");
-        let (valid_rid, valid_rev) = row(&store, &valid);
-        let (stale_rid, stale_rev) = row(&store, &stale);
-        let (revoked_rid, revoked_rev) = row(&store, &revoked);
-        let (elsewhere_rid, elsewhere_rev) = row(&store, &elsewhere);
+        let valid_rid = row(&store, &valid);
+        let revoked_rid = row(&store, &revoked);
+        let elsewhere_rid = row(&store, &elsewhere);
         store
             .forget(
                 &NodeId::parse(&revoked.id).unwrap(),
@@ -607,10 +620,10 @@ mod tests {
             .unwrap();
         let index = FakeIndex {
             lexical: Some(vec![
-                hit(stale_rid, stale_rev - 1),
-                hit(revoked_rid, revoked_rev),
-                hit(elsewhere_rid, elsewhere_rev),
-                hit(valid_rid, valid_rev),
+                hit(1_000_000),
+                hit(revoked_rid),
+                hit(elsewhere_rid),
+                hit(valid_rid),
             ]),
             ..Default::default()
         };
@@ -647,10 +660,9 @@ mod tests {
         let valid: Vec<Node> = (0..3)
             .map(|i| created(&store, "default", &format!("quokka valid {i}")))
             .collect();
-        let mut scripted: Vec<TextHit> = (0..2_500).map(|i| hit(1_000_000 + i, 1)).collect();
+        let mut scripted: Vec<TextHit> = (0..2_500).map(|i| hit(1_000_000 + i)).collect();
         for node in &valid {
-            let (rid, rev) = row(&store, node);
-            scripted.push(hit(rid, rev));
+            scripted.push(hit(row(&store, node)));
         }
         let index = FakeIndex {
             lexical: Some(scripted),
@@ -695,10 +707,7 @@ mod tests {
         let scripted: Vec<TextHit> = hidden
             .iter()
             .chain(std::iter::once(&shown))
-            .map(|node| {
-                let (rid, rev) = row(&store, node);
-                hit(rid, rev)
-            })
+            .map(|node| hit(row(&store, node)))
             .collect();
         let index = FakeIndex {
             lexical: Some(scripted),

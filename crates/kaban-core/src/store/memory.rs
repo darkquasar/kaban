@@ -8,7 +8,6 @@ use crate::model::{
     Edge, ForgetMode, ForgetOutcome, Hit, LinkReq, NewNode, Node, RecallQuery, RememberOutcome,
     TraverseQuery, TraverseResult,
 };
-use crate::text_index::Visibility;
 use serde_json::Value;
 
 /// The memory graph itself: notes and typed edges, reads by id, hybrid recall, bounded
@@ -91,28 +90,6 @@ pub trait MemoryStore: Send + Sync {
             .into_iter()
             .filter(|hit| eligible(&hit.node))
             .collect())
-    }
-    /// How far committed writes are visible to [`Self::recall`]'s seed searches (spec 05
-    /// SS-10, SS-11): [`Visibility::Current`] for a store whose index is written in the
-    /// record's transaction (the default); an index with its own storage reports the
-    /// watermark its serving reader covers.
-    ///
-    /// # Errors
-    /// Backend errors reading the watermark.
-    fn text_visible(&self) -> Result<Visibility> {
-        Ok(Visibility::Current)
-    }
-    /// Publish what this process committed and has not yet projected into an index with its
-    /// own storage, toward `target` (a receipt's position; `u64::MAX` for everything) until
-    /// `deadline` (spec 05 SS-10: the caller's one deadline per public call, passed down),
-    /// never rebuilding and never waiting for another process's publisher. Nothing to do for
-    /// a store whose index is written in the record's transaction (the default).
-    ///
-    /// # Errors
-    /// A store or index failure; the caller's receipt stays committed whatever happens here.
-    fn text_publish(&self, target: u64, deadline: std::time::Instant) -> Result<()> {
-        let _ = (target, deadline);
-        Ok(())
     }
     /// Bounded traversal over active nodes only (core-spec §4, F6): a start id that is not
     /// active in the queried workspace is `NotFound`, and every frontier expands through

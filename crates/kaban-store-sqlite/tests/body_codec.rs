@@ -13,12 +13,10 @@
 mod common;
 
 use common::{Scratch, created, ctx, nid};
-use kaban_core::text_index::{Canonical, Rows};
 use kaban_core::{
-    ChangeLogStore, ForgetMode, IngestStore, MemoryStore, NewNode, NodeId, Op, RedactedStrings,
-    RememberOutcome, RescanAction, WorkspaceId, WriteBatch,
+    ForgetMode, IngestStore, MemoryStore, NewNode, NodeId, Op, RedactedStrings, RememberOutcome,
+    RescanAction, WorkspaceId, WriteBatch,
 };
-use kaban_store_sqlite::index_rows::IndexRows;
 use kaban_store_sqlite::{LATEST_SCHEMA_VERSION, SqliteStore};
 use rusqlite::Connection;
 use rusqlite::types::Value;
@@ -117,18 +115,6 @@ fn occurrences(path: &Path, needle: &[u8]) -> usize {
     })
 }
 
-fn index_texts(s: &Scratch) -> (Vec<(String, String)>, Canonical) {
-    let rows = IndexRows::open(&s.db()).unwrap();
-    let mut seen = Vec::new();
-    let at = rows
-        .active(&mut |row| {
-            seen.push((row.id.clone(), row.text.clone()));
-            Ok(())
-        })
-        .unwrap();
-    (seen, at)
-}
-
 /// Rejection first: a body whose payload no longer decodes, and one whose tag names a
 /// dictionary this binary does not ship, fail every read by name. No read returns bytes.
 #[test]
@@ -153,19 +139,6 @@ fn a_corrupt_or_foreign_encoded_body_fails_the_read_explicitly_never_as_garbage(
         )
         .unwrap();
     let err = store.get(&nid(&victim.id), false).unwrap_err();
-    assert!(
-        chain(&err).contains("corrupt body payload"),
-        "{}",
-        chain(&err)
-    );
-    let rows = IndexRows::open(&s.db()).unwrap();
-    let err = rows.active(&mut |_| Ok(())).unwrap_err();
-    assert!(
-        chain(&err).contains("corrupt body payload"),
-        "{}",
-        chain(&err)
-    );
-    let err = rows.current(std::slice::from_ref(&victim.id)).unwrap_err();
     assert!(
         chain(&err).contains("corrupt body payload"),
         "{}",
@@ -229,14 +202,6 @@ fn a_blob_without_a_whole_tag_fails_the_read_explicitly_never_as_an_empty_body()
             blob.len(),
             chain(&err)
         );
-        let rows = IndexRows::open(&s.db()).unwrap();
-        let err = rows.current(std::slice::from_ref(&victim.id)).unwrap_err();
-        assert!(
-            chain(&err).contains("corrupt body payload"),
-            "{} bytes through the index rows: {}",
-            blob.len(),
-            chain(&err)
-        );
     }
     assert_eq!(
         store.get(&nid(&neighbour.id), false).unwrap().unwrap().text,
@@ -276,13 +241,6 @@ fn a_truncated_or_altered_plain_body_fails_the_read_explicitly_never_as_another_
         assert!(
             chain(&err).contains("corrupt body payload"),
             "{case} through get: {}",
-            chain(&err)
-        );
-        let rows = IndexRows::open(&s.db()).unwrap();
-        let err = rows.current(std::slice::from_ref(&victim.id)).unwrap_err();
-        assert!(
-            chain(&err).contains("corrupt body payload"),
-            "{case} through the index rows: {}",
             chain(&err)
         );
     }
@@ -362,15 +320,18 @@ fn bodies_are_encoded_on_write_and_read_back_exactly_on_every_surface() {
             text
         );
     }
-    let (rows, at) = index_texts(&s);
+    // the text index was built from the decoded body
+    let found = store
+        .recall(&kaban_core::RecallQuery {
+            query: "quokka".into(),
+            hops: 0,
+            ..Default::default()
+        })
+        .unwrap();
     assert_eq!(
-        rows,
-        notes
-            .iter()
-            .map(|n| (n.id.clone(), n.text.clone()))
-            .collect::<Vec<_>>()
+        found.iter().map(|h| h.node.id.as_str()).collect::<Vec<_>>(),
+        [notes[0].id.as_str()]
     );
-    assert_eq!(at.seq, store.changes_head().unwrap());
     for text in &texts {
         let again = store
             .remember(
@@ -428,7 +389,6 @@ fn an_unknown_dictionary_hash_refuses_the_open_with_guidance() {
             "open_existing_key",
             SqliteStore::open_existing_key(&s.db(), &s.keys(), &actor).map(drop),
         ),
-        ("IndexRows::open", IndexRows::open(&s.db()).map(drop)),
     ];
     for (constructor, outcome) in refusals {
         let err = outcome.expect_err(constructor);

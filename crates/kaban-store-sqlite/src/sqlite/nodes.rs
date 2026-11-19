@@ -35,7 +35,7 @@ impl SqliteStore {
         refs: &[NewNode],
         ctx: &WriteCtx,
     ) -> Result<RememberOutcome> {
-        let mut conn = self.write();
+        let mut conn = self.lock();
         self.catalog.commit(&mut conn, ctx.durability, |txn| {
             let tx = txn.conn();
             let workspace_id = n

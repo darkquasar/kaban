@@ -108,16 +108,12 @@ fn load_policy(path: Option<&std::path::Path>) -> Result<kaban_policy::Policy, E
     }
 }
 
-/// Open the service for a subcommand (`serving`: the server's open, see [`crate::open_api`]),
-/// reporting a failure with its outer message (RM-1) and choosing its exit code: a refused
-/// configuration or environment is 4, a store or key failure 5.
-fn open_or_exit(
-    cli: Cli,
-    policy: kaban_policy::Policy,
-    serving: bool,
-) -> Result<kaban_api::KabanApi, ExitCode> {
+/// Open the service for a subcommand ([`crate::open_api`]), reporting a failure with its
+/// outer message (RM-1) and choosing its exit code: a refused configuration or environment is
+/// 4, a store or key failure 5.
+fn open_or_exit(cli: Cli, policy: kaban_policy::Policy) -> Result<kaban_api::KabanApi, ExitCode> {
     let db = cli.db.clone();
-    crate::open_api(cli, policy, serving).map_err(|e| {
+    crate::open_api(cli, policy).map_err(|e| {
         e.report(&db);
         ExitCode::from(match e {
             OpenError::Config(_) | OpenError::Other(_) => EXIT_INVALID,
@@ -138,18 +134,10 @@ fn keys_dir() -> Result<std::path::PathBuf, ExitCode> {
         })
 }
 
-/// Load the policy, then open the service for a one-shot command (the order the messages are
-/// most useful in).
+/// Load the policy, then open the service (the order the messages are most useful in).
 fn open_service(cli: Cli) -> Result<kaban_api::KabanApi, ExitCode> {
     let policy = load_policy(cli.policy.as_deref())?;
-    open_or_exit(cli, policy, false)
-}
-
-/// [`open_service`] for the serving process (`kaban serve`, or `kaban` alone): the mode-B
-/// projection loop runs beside the write barrier's drain (SS-21).
-fn open_server(cli: Cli) -> Result<kaban_api::KabanApi, ExitCode> {
-    let policy = load_policy(cli.policy.as_deref())?;
-    open_or_exit(cli, policy, true)
+    open_or_exit(cli, policy)
 }
 
 /// Run the parsed command line to completion and return the process exit code. Nothing here
@@ -266,7 +254,7 @@ pub(crate) fn run(mut cli: Cli) -> ExitCode {
         Cmd::Stats(flags) => run_tool_command(cli, format, flags, stats::run),
         Cmd::Forget(flags) => run_tool_command(cli, format, flags, forget::run),
         Cmd::Serve { http: true } => stubs::not_available("serve --http", "M7"),
-        Cmd::Serve { http: false } => match open_server(cli) {
+        Cmd::Serve { http: false } => match open_service(cli) {
             Ok(api) => {
                 tracing::info!(
                     startup_ms = t0.elapsed().as_millis(),

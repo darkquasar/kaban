@@ -126,8 +126,6 @@ fn text_index_tantivy_measures_the_production_adapter() {
     assert!(took < TANTIVY_RUN, "the run took {took:?}");
     let result: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(result["recall_evaluation"]["text_index"], "tantivy");
-    let index_dir = scratch.db().with_extension("index").join("tantivy");
-    assert!(index_dir.join("meta.json").is_file(), "{index_dir:?}");
     let with_hits = result["recall_evaluation"]["mode_sets"][0]["queries"]
         .as_array()
         .unwrap()

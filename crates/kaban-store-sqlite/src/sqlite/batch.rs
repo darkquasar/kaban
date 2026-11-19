@@ -25,7 +25,7 @@ impl SqliteStore {
             &kaban_core::JobFinishOutcome,
         ) -> Result<kaban_core::JobFinishStateUpdate>,
     ) -> Result<String> {
-        let mut conn = self.write();
+        let mut conn = self.lock();
         self.catalog.commit(&mut conn, ctx.durability, |txn| {
             let tx = txn.conn();
             let current = crate::jobs::get(tx, &request.job, &ctx.workspace_id)?
@@ -133,7 +133,7 @@ impl SqliteStore {
         {
             return Err(StoreError::InvalidName("submit".into(), "invalid_batch"));
         }
-        let mut conn = self.write();
+        let mut conn = self.lock();
         self.catalog.commit(&mut conn, ctx.durability, |txn| {
             let tx = txn.conn();
             let current = crate::jobs::get(tx, &request.job, &ctx.workspace_id)?
@@ -194,7 +194,7 @@ impl SqliteStore {
                 batch: batch.workspace_id.to_string(),
             });
         }
-        let mut conn = self.write();
+        let mut conn = self.lock();
         self.catalog.commit(&mut conn, ctx.durability, |txn| {
             let tx = txn.conn();
             let report = self.apply_batch_body(tx, batch)?;

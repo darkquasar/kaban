@@ -15,7 +15,7 @@
 //! it once. A prefix is never a ranking difference in membership: it expands to every term of
 //! the dictionary under it, like FTS5's `token*` ([`expansions`]).
 
-use crate::schema::{ACTIVE, CONTENT, Fields, KIND, REVISION, RID};
+use crate::schema::{ACTIVE, CONTENT, Fields, RID};
 use crate::{Error, Result};
 use kaban_core::config::Recall;
 use kaban_core::ident::{QueryClass, classify};
@@ -462,13 +462,13 @@ fn top(
     let collected: Vec<Collected> =
         searcher.search_with_statistics_provider(query, &order, &statistics)?;
     budget.check()?;
-    for ((score, Reverse(rid)), address) in collected
+    for ((score, Reverse(rid)), _) in collected
         .into_iter()
         .filter(|(_, address)| hidden.binary_search(address).is_err())
         .skip(skip)
         .take(want)
     {
-        page.push(hit(searcher, address, rid, score)?);
+        page.push(hit(rid, score)?);
     }
     Ok(page)
 }
@@ -476,59 +476,21 @@ fn top(
 /// One collected document: its sort key and its address.
 type Collected = ((Score, Reverse<Option<i64>>), DocAddress);
 
-/// A hit from the fast columns of its segment: no document store is read, and a document
-/// without one of its keys is [`Error::Corrupt`].
-fn hit(
-    searcher: &Searcher,
-    address: DocAddress,
-    rid: Option<i64>,
-    score: Score,
-) -> Result<TextHit> {
-    let rid = rid.ok_or(Error::Corrupt("rid"))?;
-    let fast = searcher.segment_reader(address.segment_ord).fast_fields();
-    let revision = fast
-        .i64(REVISION)?
-        .first(address.doc_id)
-        .ok_or(Error::Corrupt("revision"))?;
-    let kinds = fast.str(KIND)?.ok_or(Error::Corrupt("kind"))?;
-    let ord = kinds
-        .term_ords(address.doc_id)
-        .next()
-        .ok_or(Error::Corrupt("kind"))?;
-    let mut kind = String::new();
-    if !kinds.ord_to_str(ord, &mut kind)? {
-        return Err(Error::Corrupt("kind"));
-    }
+/// A hit: the `rid` from its segment's fast column (a document without one is
+/// [`Error::Corrupt`]) and its score (TXT-05: nothing else).
+fn hit(rid: Option<i64>, score: Score) -> Result<TextHit> {
     Ok(TextHit {
-        rid,
-        revision,
+        rid: rid.ok_or(Error::Corrupt("rid"))?,
         score: f64::from(score),
-        kind,
     })
 }
 
-/// Run `q` against `searcher`. Lexical: the AND expression first, widened to OR when it holds
-/// fewer than `sufficient` hits in all; the decision is made on the unpaged result (the strict
-/// collection reaches at least `sufficient` hits from the start when they exist), so every page
-/// of one query comes from one expression and a continuation never repeats a hit.
-pub(crate) fn run(
-    fields: &Fields,
-    weights: &Weights,
-    searcher: &Searcher,
-    q: &TextQuery<'_>,
-) -> Result<Searched> {
-    run_hiding(
-        fields,
-        weights,
-        searcher,
-        q,
-        &[],
-        &QueryBudget::new(u64::MAX, None),
-    )
-}
-
-/// [`run`] without the documents of `hidden` (sorted: a catalog snapshot's documents that a
-/// newer tombstone hides, spec 11 T7): they never take a place in the order or a page. The
+/// Run `q` against `searcher` without the documents of `hidden` (sorted: a catalog snapshot's
+/// documents that a newer tombstone hides, spec 11 T7): they never take a place in the order
+/// or a page. Lexical: the AND expression first, widened to OR when it holds fewer than
+/// `sufficient` hits in all; the decision is made on the unpaged result (the strict collection
+/// reaches at least `sufficient` hits from the start when they exist), so every page of one
+/// query comes from one expression and a continuation never repeats a hit. The
 /// collector and the page are charged on `budget` while they are built; the page returned is
 /// the caller's to charge.
 pub(crate) fn run_hiding(
@@ -627,9 +589,10 @@ pub(crate) fn run_hiding(
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // test code: failures are the assertion
 mod tests {
-    use super::{Operand, Weights, operands, run};
+    use super::{Operand, Weights, operands, run_hiding};
     use crate::analyzers::register;
     use crate::schema::{ACTIVE, Fields, schema};
+    use kaban_core::query_budget::QueryBudget;
     use kaban_core::text_index::{MatchMode, Searched, SeedFilter, TextQuery};
     use kaban_core::{RecallQuery, config::Recall};
     use tantivy::{Index, TantivyDocument};
@@ -669,7 +632,7 @@ mod tests {
         limit: usize,
     ) -> (Vec<(i64, f64)>, bool) {
         let searcher = index.reader().unwrap().searcher();
-        match run(
+        match run_hiding(
             fields,
             weights,
             &searcher,
@@ -681,6 +644,8 @@ mod tests {
                 sufficient,
                 skip,
             },
+            &[],
+            &QueryBudget::new(u64::MAX, None),
         )
         .unwrap()
         {

@@ -14,10 +14,6 @@ use tantivy::tokenizer::{
     TextAnalyzer, Token, TokenStream, Tokenizer,
 };
 
-/// Bumped when an analyzer changes (the identifier rule is versioned separately through
-/// `IDENT_TERMS_VERSION`, which the payload carries as well).
-pub(crate) const ANALYZER_VERSION: u32 = 1;
-
 pub(crate) const STEMMED: &str = "kaban_stemmed";
 pub(crate) const FOLDED: &str = "kaban_folded";
 pub(crate) const IDENT: &str = "kaban_ident";

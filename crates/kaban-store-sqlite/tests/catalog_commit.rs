@@ -303,7 +303,7 @@ const OPENERS: [&str; 5] = [
 
 /// The sites that may open a transaction outside the catalog, by file (relative to `src/`)
 /// and enclosing function, each with its reason. Every entry must still match a site.
-const OPENER_ALLOWLIST: [(&str, &str, &str); 5] = [
+const OPENER_ALLOWLIST: [(&str, &str, &str); 4] = [
     ("catalog/commit.rs", "commit_in", "the one writer entry"),
     ("catalog/commit.rs", "read", "the one read entry"),
     (
@@ -316,13 +316,6 @@ const OPENER_ALLOWLIST: [(&str, &str, &str); 5] = [
         "init_schema",
         "open-time seed and identity rows, before admission and version publication: the \
          catalog opens only after publication (CMP-01) and the seed writes no node or edge row",
-    ),
-    (
-        "projector_thread.rs",
-        "immediate",
-        "the projector's cursor and lease transactions on the shared writer connection (it \
-         holds the writer mutex; admitted by OutsideCommit, it writes no node or edge row); \
-         removed by T7",
     ),
 ];
 

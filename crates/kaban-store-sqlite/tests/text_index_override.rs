@@ -13,10 +13,10 @@ use kaban_core::text_index::fake::FakeIndex;
 use kaban_core::{MemoryStore, Node, RecallQuery};
 use kaban_store_sqlite::SqliteStore;
 
-/// `(rid, rev)` of `node`, read beside the store.
-fn row(conn: &rusqlite::Connection, node: &Node) -> (i64, i64) {
-    conn.query_row("SELECT rid, rev FROM node WHERE id = ?1", [&node.id], |r| {
-        Ok((r.get(0)?, r.get(1)?))
+/// The `rid` of `node`, read beside the store.
+fn row(conn: &rusqlite::Connection, node: &Node) -> i64 {
+    conn.query_row("SELECT rid FROM node WHERE id = ?1", [&node.id], |r| {
+        r.get(0)
     })
     .unwrap()
 }
@@ -34,14 +34,9 @@ fn recall_returns_the_injected_index_hits_in_its_order() {
     ]
     .map(|text| created(&store, "Fact", text));
     let conn = rusqlite::Connection::open(s.db()).unwrap();
-    let scripted = [2, 0, 1].map(|i| {
-        let (rid, revision) = row(&conn, &notes[i]);
-        TextHit {
-            rid,
-            revision,
-            score: 1.0,
-            kind: "Fact".into(),
-        }
+    let scripted = [2, 0, 1].map(|i| TextHit {
+        rid: row(&conn, &notes[i]),
+        score: 1.0,
     });
     let store = store.with_text_index(Box::new(FakeIndex {
         lexical: Some(scripted.to_vec()),

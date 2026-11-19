@@ -428,9 +428,7 @@ impl Catalog {
         self.outside_commits().run(f)
     }
 
-    /// The admission of [`Self::outside_commit`] as a handle for a thread that commits on the
-    /// writer connection without the catalog: the serving projector's cursor and lease
-    /// transactions (`crate::projector_thread`), removed by T7.
+    /// The admission of [`Self::outside_commit`] as a handle.
     pub(crate) fn outside_commits(&self) -> OutsideCommit {
         OutsideCommit(Arc::clone(&self.committing))
     }
@@ -529,8 +527,7 @@ impl Drop for SafetyLevel<'_> {
 /// (rolls back) every commit outside [`Catalog::commit`] and [`Catalog::outside_commit`], so an
 /// autocommit row write or a transaction the catalog did not open fails where it runs. It
 /// sees this connection only: another connection's writes (a test's raw connection) and the
-/// open-time writes before the catalog attaches are not its. The serving projector commits on
-/// this connection, admitted through [`Catalog::outside_commits`] until T7 removes it.
+/// open-time writes before the catalog attaches are not its.
 ///
 /// # Errors
 /// SQLite errors registering the hook.

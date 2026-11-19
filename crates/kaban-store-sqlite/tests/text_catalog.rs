@@ -13,12 +13,11 @@ use common::{Scratch, created, ctx, nid};
 use kaban_core::config::{CatalogCfg, Recall, SealOps};
 use kaban_core::query_budget::QueryBudget;
 use kaban_core::text_index::{
-    MatchMode, PurgeOutcome, Searched, SeedFilter, TextIndex, TextQuery, TextSnapshot, Visibility,
+    MatchMode, PurgeOutcome, Searched, SeedFilter, TextIndex, TextQuery, TextSnapshot,
 };
-use kaban_core::{Change, ForgetMode, MemoryStore, Node, RecallQuery};
+use kaban_core::{ForgetMode, MemoryStore, Node, RecallQuery};
 use kaban_index_tantivy::TantivyIndex;
 use kaban_store_sqlite::catalog_testing::{self, Window};
-use kaban_store_sqlite::index_rows::IndexRows;
 use kaban_store_sqlite::{CompactBudget, SqliteStore};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -184,17 +183,14 @@ impl CommitBetweenPages {
 }
 
 impl TextIndex for CommitBetweenPages {
-    fn search(&self, query: &TextQuery<'_>) -> kaban_core::Result<Searched> {
-        self.index.search(query)
-    }
-    fn search_at(
+    fn search(
         &self,
         at: &TextSnapshot<'_>,
         query: &TextQuery<'_>,
         budget: &QueryBudget,
     ) -> kaban_core::Result<Searched> {
         let first = self.pages.lock().unwrap().is_empty();
-        let page = self.index.search_at(at, query, budget)?;
+        let page = self.index.search(at, query, budget)?;
         if let Searched::Hits { hits, .. } = &page {
             self.pages
                 .lock()
@@ -206,20 +202,8 @@ impl TextIndex for CommitBetweenPages {
         }
         Ok(page)
     }
-    fn visible(&self) -> kaban_core::Result<Visibility> {
-        self.index.visible()
-    }
-    fn project(&self, changes: &[Change]) -> kaban_core::Result<()> {
-        self.index.project(changes)
-    }
-    fn rebuild(&self) -> kaban_core::Result<()> {
-        self.index.rebuild()
-    }
     fn purge(&self, rids: &[i64]) -> kaban_core::Result<PurgeOutcome> {
         self.index.purge(rids)
-    }
-    fn pin(&self) -> kaban_core::Result<Box<dyn TextIndex + '_>> {
-        Ok(Box::new(self))
     }
 }
 
@@ -238,12 +222,10 @@ fn a_commit_and_a_seal_between_two_pages_of_one_recall_neither_duplicate_nor_ski
         .map(|i| created(&store, "Fact", &format!("quokka number {i} by the shore")))
         .collect();
     let hook = Arc::new(CommitBetweenPages {
-        index: TantivyIndex::in_ram(
+        index: TantivyIndex::new(
             &kaban_core::shipped::resolved().unwrap(),
             &Recall::default(),
-            Box::new(IndexRows::open(&s.db()).unwrap()),
-        )
-        .unwrap(),
+        ),
         db: s.db(),
         keys: s.keys(),
         doomed: notes[..20].to_vec(),
