@@ -43,7 +43,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use kaban_core::config::SealOps;
-use kaban_core::query_budget::{BudgetExceeded, QueryBudget};
+use kaban_core::query_budget::{BudgetExceeded, Limit, QueryBudget};
 use kaban_core::{BackendSource, Durability, Result, StoreError, ViewName};
 use rusqlite::{Connection, OptionalExtension};
 
@@ -635,10 +635,17 @@ impl Catalog {
     /// class), retire the old ones, then reclaim. A class whose claim or switch is refused, or
     /// whose rewrite its budget refuses, is reported skipped: the caller purges again.
     ///
+    /// The purge first waits for every compaction pass in flight, in any process
+    /// ([`Self::await_compaction`]): a seal that pinned its rows before the purge committed
+    /// publishes the purged documents into a new tier, and the purge's pin, taken after that
+    /// pass ended, sees that tier and rewrites it too.
+    ///
     /// # Errors
-    /// SQLite, container and storage errors.
+    /// SQLite, container and storage errors; `BudgetExceeded` (`Limit::Time`) when a pass
+    /// outlives the maintenance deadline.
     pub(crate) fn purge(&self, conn: &Mutex<Connection>, rids: &[i64]) -> Result<PurgeReport> {
         let mut report = PurgeReport::default();
+        self.await_compaction()?;
         if let Some(_hold) = self.maintenance_hold()? {
             let budget = self.maintenance_budget();
             let pinned = self.pin_every_view(&step(conn), budget)?;
@@ -689,6 +696,27 @@ impl Catalog {
         }
         report.reclaim = self.reclaim(&mut step(conn))?;
         Ok(report)
+    }
+
+    /// Wait until no compaction pass is in flight (amendment 2.2.10: every pass holds the
+    /// maintenance lock shared for its whole run, in every process): the lock taken exclusive
+    /// for an instant, within the maintenance deadline, then released. A catalog without a
+    /// container compacts nothing.
+    ///
+    /// # Errors
+    /// The lock's errors; `BudgetExceeded` (`Limit::Time`) when a hold outlives the deadline.
+    fn await_compaction(&self) -> Result<()> {
+        let (Some(pins), Some(_)) = (&self.pins, self.container) else {
+            return Ok(());
+        };
+        let wait = self.maintenance_budget().deadline;
+        match super::pins::exclusive_maintenance(pins, wait)? {
+            Some(_lock) => Ok(()),
+            None => Err(StoreError::BudgetExceeded(BudgetExceeded {
+                limit: Limit::Time,
+                value: u64::try_from(wait.as_millis()).unwrap_or(u64::MAX),
+            })),
+        }
     }
 
     /// Seal `class`'s pending rows of `main` once the class says they are due, halving the

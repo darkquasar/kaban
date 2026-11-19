@@ -82,17 +82,20 @@ impl IndexClass for TextClass {
         Ok(())
     }
 
-    /// Due when more than `ops` pending packs carry a segment (`seal_ops.text`, default 32): a
-    /// pack of tombstones only adds no segment to a search.
+    /// Due when more than `ops` pending packs carry a segment (`seal_ops.text`, default 32),
+    /// or once a pack of tombstones only is pending (a delete or a purge): its seal leaves out
+    /// the documents it hides in the older packs, so a purged record's text never waits for
+    /// later writes to leave the pending packs (KER-05).
     fn seal_due(&self, rows: &[&SedimentRow], ops: u32) -> Result<bool> {
         let segments = rows
             .iter()
             .filter(|r| kaban_index_tantivy::has_segment(&r.payload))
             .count();
-        Ok(segments > ops as usize)
+        Ok(segments > ops as usize || segments < rows.len())
     }
 
-    /// The pending packs `rows` merged into one tier.
+    /// The pending packs `rows` merged into one tier (one pack that hides nothing in itself
+    /// is the tier as it is).
     fn seal(
         &self,
         _pin: &Pin,
@@ -109,7 +112,11 @@ impl IndexClass for TextClass {
             .iter()
             .map(|r| OwnedBytes::new(r.payload.clone()))
             .collect();
-        kaban_index_tantivy::merge(&packs, &[], None, budget)
+        let merged = kaban_index_tantivy::merge(&packs, &[], None, budget)?;
+        Ok(merged.or_else(|| match rows {
+            [one] => Some(one.payload.clone()),
+            _ => None,
+        }))
     }
 
     /// The consecutive tiers `extents` of `main` merged into one: a document a newer tier's
