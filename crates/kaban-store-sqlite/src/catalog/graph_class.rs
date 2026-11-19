@@ -507,7 +507,8 @@ fn attr(confidence: Option<f64>, created_at: &str) -> Result<Attr> {
 }
 
 /// `s` as epoch milliseconds when it is an RFC 3339 date-time (`YYYY-MM-DDTHH:MM:SS`, an
-/// optional fraction, then `Z` or `±HH:MM`); `None` otherwise. Digits below a millisecond are
+/// optional fraction, then `Z` or `±HH:MM` with hours 0-23 and minutes 0-59); `None`
+/// otherwise. Digits below a millisecond are
 /// truncated.
 #[expect(
     clippy::many_single_char_names,
@@ -543,7 +544,11 @@ fn rfc3339_ms(s: &str) -> Option<i64> {
     let offset_min = match b.get(i..)? {
         [b'Z' | b'z'] => 0,
         [sign @ (b'+' | b'-'), _, _, b':', _, _] => {
-            let m = num(i + 1..i + 3)? * 60 + num(i + 4..i + 6)?;
+            let (oh, om) = (num(i + 1..i + 3)?, num(i + 4..i + 6)?);
+            if oh > 23 || om > 59 {
+                return None;
+            }
+            let m = oh * 60 + om;
             if *sign == b'+' { m } else { -m }
         }
         _ => return None,

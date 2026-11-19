@@ -269,6 +269,37 @@ fn a_chain_of_code_class_extents_loads_when_the_code_classes_are_asked_for() {
     assert_eq!(reached, vec![LocalId(2)], "the code base's edge 1 -> 2");
 }
 
+#[test]
+fn a_time_whose_offset_hours_or_minutes_are_out_of_range_refuses_the_write() {
+    // Arrange
+    let s = Scratch::new("kaban-t11-main", "offset");
+    let store = SqliteStore::open(&s.db(), &s.keys()).unwrap();
+    let a = nid(&created(&store, "Fact", "a").id);
+    let b = nid(&created(&store, "Fact", "b").id);
+    store
+        .link(&a, &b, "RELATES_TO", None, None, &ctx())
+        .unwrap();
+
+    // Act: offsets past 23 hours or 59 minutes, then the largest valid one
+    let refused = ["+99:99", "+24:00", "-23:60"].map(|offset| {
+        catalog_testing::corrupt(
+            &store,
+            &format!("UPDATE edge SET created_at = '2024-01-01T00:00:00{offset}'"),
+        )
+    });
+    let largest = catalog_testing::corrupt(
+        &store,
+        "UPDATE edge SET created_at = '2024-01-01T00:00:00+23:59'",
+    );
+
+    // Assert: each out-of-range offset is refused by name; +23:59 is a time
+    for r in refused {
+        let text = driver_text(&r.expect_err("an out-of-range offset was admitted"));
+        assert!(text.contains("graph_timestamp_refused"), "{text}");
+    }
+    largest.unwrap();
+}
+
 /// Declare `n` more relations `{prefix}{i}` in one commit of `store`.
 fn declare(store: &SqliteStore, prefix: &str, n: u32) {
     catalog_testing::corrupt(
