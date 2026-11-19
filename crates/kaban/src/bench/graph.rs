@@ -485,6 +485,11 @@ mod imp {
         let edges = corpus.edges;
         drop(corpus);
         let _ = std::fs::remove_dir_all(&dir);
+        let inserted = edges_after - edges;
+        anyhow::ensure!(
+            inserted == i64::try_from(ROUNDS)?,
+            "tie-order expected {ROUNDS} new edges, inserted {inserted}"
+        );
         Ok(json!({
             "case": "tie-order", "corpus": "synthetic", "edge_attempts": args.edges,
             "edges": edges, "nodes": nodes, "queries": args.queries, "rounds": ROUNDS,

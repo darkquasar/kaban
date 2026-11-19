@@ -135,8 +135,7 @@ pub(crate) fn populate(store: &SqliteStore, seed: u64, nodes: u32, edges: u64) -
     )
 }
 
-/// Append edge-only batches. Re-upserting source nodes would reconcile away their
-/// existing outgoing edges.
+/// Append edge-only batches between nodes already written during setup.
 pub(crate) fn append_edges(
     store: &SqliteStore,
     seed: u64,

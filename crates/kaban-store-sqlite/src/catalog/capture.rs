@@ -7,9 +7,8 @@
 //!
 //! The triggers and the queue are TEMP objects of the writer connection: created at open,
 //! never stored in the database file, they see exactly the writes of that connection. An update
-//! trigger fires on the canonical columns only: the writer stamp (`actor_id`, `instance_id`,
-//! `pack_lineage_id`, which `changes_stamp` sets after every change-log row) is not a change of
-//! its own.
+//! trigger fires on the canonical columns only. After a change-log insert, `changes_stamp`
+//! copies the `writer_id` reference to the canonical row without queuing another change.
 //!
 //! Writes the AFTER triggers cannot see are refused or captured, never lost: SQLite fires no
 //! delete trigger for a row a REPLACE conflict removes (recursive triggers stay off: the stamp
@@ -353,7 +352,7 @@ mod tests {
                dst INTEGER NOT NULL REFERENCES node(rid) ON DELETE CASCADE,
                rel TEXT NOT NULL, confidence REAL, created_at TEXT, props TEXT,
                workspace_id TEXT, producer TEXT, method TEXT, score REAL, source_id TEXT,
-               offset INTEGER, len INTEGER, writer_id INTEGER, UNIQUE(src, dst, rel));",
+               offset INTEGER, len INTEGER, writer_id INTEGER, UNIQUE(src, rel, dst));",
         )
         .unwrap();
         install(&conn).unwrap();
