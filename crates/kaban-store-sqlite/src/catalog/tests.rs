@@ -83,6 +83,16 @@ fn link(store: &SqliteStore, from: &str, to: &str) -> Result<()> {
         .map(drop)
 }
 
+/// Every class, as a pin loads the sediment of all of them.
+const EVERY: &[ExtentClass] = &[
+    ExtentClass::TextTier,
+    ExtentClass::GraphBase,
+    ExtentClass::GraphLayer,
+    ExtentClass::CodeLayer,
+    ExtentClass::CodeBase,
+    ExtentClass::Test,
+];
+
 /// What a scripted class does in `stage`.
 type Script = Box<dyn Fn(&mut Stage<'_>, &BatchChanges) -> Result<()> + Send + Sync>;
 
@@ -829,14 +839,15 @@ fn a_pin_cancelled_while_copying_returns_the_budget_error_and_releases_everythin
     // Act
     let out = store
         .catalog()
-        .pin(&store.lock(), &budget, &[ViewName::Main]);
+        .pin(&store.lock(), &budget, &[(ViewName::Main, EVERY)]);
 
     // Assert
     let err = out.expect_err("a cancelled copy produced a pin");
     assert_eq!(budget_limit(&err), Some(Limit::Cancelled), "{err:?}");
     // the refusal names the budget, not the redacted backend text
     assert!(
-        err.to_string().starts_with("query budget exceeded: Cancelled"),
+        err.to_string()
+            .starts_with("query budget exceeded: Cancelled"),
         "{err}"
     );
     assert_eq!(budget.live_bytes(), 0, "the copy's reservation outlived it");
@@ -1060,9 +1071,9 @@ fn pin_main(store: &SqliteStore) -> (Pin, Arc<PinnedView>) {
     let conn = store.lock();
     let pin = store
         .catalog()
-        .pin(&conn, &budget, &[ViewName::Main])
+        .pin(&conn, &budget, &[(ViewName::Main, EVERY)])
         .unwrap();
-    let main = pin.load_view(&conn, &ViewName::Main).unwrap();
+    let main = pin.load_view(&conn, &ViewName::Main, EVERY).unwrap();
     (pin, main)
 }
 
@@ -1116,7 +1127,7 @@ fn a_pin_reserves_every_allocation_it_retains_before_it_copies() {
         let open = QueryBudget::new(u64::MAX, None);
         let pin = store
             .catalog()
-            .pin(&store.lock(), &open, &[ViewName::Main])
+            .pin(&store.lock(), &open, &[(ViewName::Main, EVERY)])
             .unwrap();
         let charge = open.live_bytes();
 
@@ -1131,7 +1142,9 @@ fn a_pin_reserves_every_allocation_it_retains_before_it_copies() {
 
         // Act: exactly the charge admits, one byte less refuses before any row is copied
         let at = QueryBudget::new(charge, None);
-        let pinned = store.catalog().pin(&store.lock(), &at, &[ViewName::Main]);
+        let pinned = store
+            .catalog()
+            .pin(&store.lock(), &at, &[(ViewName::Main, EVERY)]);
         assert!(pinned.is_ok(), "{name}: refused at its own charge {charge}");
         drop(pinned);
         assert_eq!(at.live_bytes(), 0);
@@ -1140,7 +1153,7 @@ fn a_pin_reserves_every_allocation_it_retains_before_it_copies() {
             let below = QueryBudget::new(charge - 1, None);
             let err = store
                 .catalog()
-                .pin(&store.lock(), &below, &[ViewName::Main])
+                .pin(&store.lock(), &below, &[(ViewName::Main, EVERY)])
                 .unwrap_err();
             assert_eq!(budget_limit(&err), Some(Limit::Memory), "{name}: {err:?}");
             assert_eq!(
@@ -1154,6 +1167,60 @@ fn a_pin_reserves_every_allocation_it_retains_before_it_copies() {
         }
         assert!(store.lock().is_autocommit());
     }
+}
+
+/// One snapshot of `store` that loads `main` for the graph classes, then for the text class,
+/// then for the graph classes again (reordered, one repeated): what the graph load charged,
+/// the classes of the rows each of the first two loads holds, and whether the third returned
+/// the first's cached view.
+fn graph_then_text(store: &SqliteStore) -> (u64, Vec<ExtentClass>, Vec<ExtentClass>, bool) {
+    const GRAPH: &[ExtentClass] = &[ExtentClass::GraphBase, ExtentClass::GraphLayer];
+    let classes = |v: &PinnedView| v.sediment().iter().map(|r| r.class).collect();
+    let budget = QueryBudget::new(u64::MAX, None);
+    store
+        .catalog()
+        .with_snapshot(&store.lock(), &budget, |tx, pin| {
+            let pinned = budget.live_bytes();
+            let graph = pin.load_view(tx, &ViewName::Main, GRAPH)?;
+            let charged = budget.live_bytes() - pinned;
+            let text = pin.load_view(tx, &ViewName::Main, &[ExtentClass::TextTier])?;
+            let again = pin.load_view(
+                tx,
+                &ViewName::Main,
+                &[
+                    ExtentClass::GraphLayer,
+                    ExtentClass::GraphBase,
+                    ExtentClass::GraphLayer,
+                ],
+            )?;
+            Ok((
+                charged,
+                classes(&graph),
+                classes(&text),
+                Arc::ptr_eq(&graph, &again),
+            ))
+        })
+        .unwrap()
+}
+
+#[test]
+fn a_view_loads_and_charges_only_the_sediment_of_the_classes_asked_for() {
+    // Arrange: text and graph sediment in one catalog; the same graph sediment alone in another
+    let mixed = FileStore::new("classes-mixed");
+    catalog_rows(&mixed.store, &["text_tier", "graph_base"], 3, 5, 0);
+    let graph_only = FileStore::new("classes-graph");
+    catalog_rows(&graph_only.store, &["graph_base"], 3, 5, 0);
+
+    // Act
+    let (charged, graph, text, reused) = graph_then_text(&mixed.store);
+    let (charged_alone, ..) = graph_then_text(&graph_only.store);
+
+    // Assert: the graph load copies and charges the graph rows alone; the text load in the
+    // same pin is its own view with the text rows; the same class set hits the cache
+    assert_eq!(graph, vec![ExtentClass::GraphBase; 3]);
+    assert_eq!(charged, charged_alone, "the graph load charged other rows");
+    assert_eq!(text, vec![ExtentClass::TextTier; 3]);
+    assert!(reused, "the same class set loaded main again");
 }
 
 #[test]
@@ -1373,7 +1440,7 @@ fn a_view_does_not_load_through_another_database_at_the_same_generation() {
         .catalog()
         .with_snapshot(&ours.lock(), &budget, |_, pin| {
             theirs.catalog().read(&other, |tx| {
-                Ok(pin.load_view(tx, &ViewName::Main).map(|_| ()))
+                Ok(pin.load_view(tx, &ViewName::Main, EVERY).map(|_| ()))
             })
         })
         .unwrap();
@@ -1750,11 +1817,11 @@ fn view_charges(store: &SqliteStore, code: &ViewName) -> ([u64; 4], [usize; 2], 
         .catalog()
         .with_snapshot(&store.lock(), &budget, |tx, pin| {
             let pinned = budget.live_bytes();
-            let main = pin.load_view(tx, &ViewName::Main)?;
+            let main = pin.load_view(tx, &ViewName::Main, EVERY)?;
             let with_main = budget.live_bytes();
-            let again = pin.load_view(tx, &ViewName::Main)?;
+            let again = pin.load_view(tx, &ViewName::Main, EVERY)?;
             let cached = budget.live_bytes();
-            let code = pin.load_view(tx, code)?;
+            let code = pin.load_view(tx, code, EVERY)?;
             let with_code = budget.live_bytes();
             Ok((
                 [pinned, with_main, cached, with_code],

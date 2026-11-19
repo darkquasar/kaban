@@ -898,10 +898,18 @@ impl Catalog {
                 views.push(view);
             }
         }
+        // one snapshot for the whole pass: every registered class's sediment, loaded once
+        let classes: Vec<ExtentClass> = self
+            .classes()
+            .iter()
+            .flat_map(|class| class.classes().iter().copied())
+            .collect();
+        let views: Vec<(ViewName, &[ExtentClass])> =
+            views.into_iter().map(|v| (v, classes.as_slice())).collect();
         let pin = self.pin_untouched(conn, &budget.unit(), &views)?;
         let loaded = views
             .iter()
-            .map(|v| pin.load_view(conn, v))
+            .map(|(v, classes)| pin.load_view(conn, v, classes))
             .collect::<Result<Vec<_>>>()?;
         Ok(Pinned { pin, views: loaded })
     }

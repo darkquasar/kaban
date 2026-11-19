@@ -29,6 +29,9 @@ use super::pin::{Pin, PinnedView, budget_exceeded};
 use super::tables::{ExtentId, ExtentRef, SedimentRow, SedimentSeq};
 use crate::SqliteStore;
 
+/// The classes the test helpers load sediment for: the test class's alone.
+const TEST: &[ExtentClass] = &[ExtentClass::Test];
+
 /// The environment variable that arms one named crash point in a child process
 /// (`catalog::fail`): the child kills itself with `SIGKILL` there.
 pub const FAILPOINT_ARM: &str = super::fail::ARM;
@@ -127,9 +130,11 @@ pub fn install_edge_sediment_class(store: &SqliteStore) -> Observed {
 pub fn pin_sediment(store: &SqliteStore) -> Result<Vec<String>> {
     let budget = QueryBudget::new(u64::MAX, None);
     let conn = store.lock();
-    let pin = store.catalog().pin(&conn, &budget, &[ViewName::Main])?;
+    let pin = store
+        .catalog()
+        .pin(&conn, &budget, &[(ViewName::Main, TEST)])?;
     Ok(pin
-        .load_view(&conn, &ViewName::Main)?
+        .load_view(&conn, &ViewName::Main, TEST)?
         .sediment()
         .iter()
         .filter(|row| row.class == ExtentClass::Test)
@@ -281,8 +286,10 @@ impl PinView<'_> {
 /// The pin's errors.
 pub fn pin(store: &SqliteStore, budget: &QueryBudget) -> Result<TestPin> {
     let conn = store.lock();
-    let pin = store.catalog().pin(&conn, budget, &[ViewName::Main])?;
-    let main = pin.load_view(&conn, &ViewName::Main)?;
+    let pin = store
+        .catalog()
+        .pin(&conn, budget, &[(ViewName::Main, TEST)])?;
+    let main = pin.load_view(&conn, &ViewName::Main, TEST)?;
     Ok(TestPin { pin, main })
 }
 
@@ -299,7 +306,7 @@ pub fn with_snapshot<T>(
     store
         .catalog()
         .with_snapshot(&store.lock(), budget, |tx, pin| {
-            let main = pin.load_view(tx, &ViewName::Main)?;
+            let main = pin.load_view(tx, &ViewName::Main, TEST)?;
             f(PinView { pin, main: &main })
         })
 }
@@ -519,9 +526,9 @@ pub fn chain(store: &SqliteStore, view: &str) -> Result<Vec<u64>> {
     let conn = store.lock();
     let pin = store
         .catalog()
-        .pin(&conn, &budget, std::slice::from_ref(&view))?;
+        .pin(&conn, &budget, &[(view.clone(), TEST)])?;
     Ok(pin
-        .load_view(&conn, &view)?
+        .load_view(&conn, &view, TEST)?
         .chain()
         .iter()
         .filter(|e| e.class == ExtentClass::Test)
@@ -537,9 +544,11 @@ pub fn chain(store: &SqliteStore, view: &str) -> Result<Vec<u64>> {
 pub fn pin_sediment_rows(store: &SqliteStore) -> Result<Vec<(u64, String)>> {
     let budget = QueryBudget::new(u64::MAX, None);
     let conn = store.lock();
-    let pin = store.catalog().pin(&conn, &budget, &[ViewName::Main])?;
+    let pin = store
+        .catalog()
+        .pin(&conn, &budget, &[(ViewName::Main, TEST)])?;
     Ok(pin
-        .load_view(&conn, &ViewName::Main)?
+        .load_view(&conn, &ViewName::Main, TEST)?
         .sediment()
         .iter()
         .filter(|row| row.class == ExtentClass::Test)

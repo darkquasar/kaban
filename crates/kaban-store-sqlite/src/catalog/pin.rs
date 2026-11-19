@@ -3,8 +3,9 @@
 //! [`Catalog::pin`] loads the views it is asked for and returns a detached pin.
 //!
 //! A pin copies no index input when it is taken. A view's inputs (its extent chain and, for
-//! `main`, the pending sediment) load on first touch ([`Pin::load_view`]) inside the pin's read
-//! transaction and stay cached in the pin for its lifetime. Each load is charged to the pin's
+//! `main`, the pending sediment of the classes the caller names) load on first touch
+//! ([`Pin::load_view`]) inside the pin's read transaction and stay cached in the pin for its
+//! lifetime, keyed by the view and that class set. Each load is charged to the pin's
 //! budget before it is made (PC-17): the rows are counted first, every allocation the view
 //! keeps (the view itself, its name, one vector per kind of row, each payload and cold path) is
 //! reserved at its exact capacity, and only then copied into that capacity, never past it. The
@@ -88,10 +89,13 @@ struct Views {
 }
 
 /// One view's inputs as a pin loaded them: its extent chain, oldest first, and its pending
-/// sediment rows (those no compaction switch consumed: `dead` unset), in sequence order. Its charge is released when the last holder drops it.
+/// sediment rows of the classes it was loaded for (those no compaction switch consumed: `dead`
+/// unset), in sequence order. Its charge is released when the last holder drops it.
 #[derive(Debug)]
 pub(crate) struct PinnedView {
     name: Box<str>,
+    /// The classes it was loaded for ([`class_set`]): with the name, its key in the cache.
+    classes: u32,
     chain: Vec<ExtentRef>,
     sediment: Vec<SedimentRow>,
     _copy: BudgetLease,
@@ -106,8 +110,8 @@ impl PinnedView {
     pub(crate) fn chain(&self) -> &[ExtentRef] {
         &self.chain
     }
-    /// The view's pending sediment rows, in sequence order (only `main` has any: the commit
-    /// path stages into the memory view).
+    /// The view's pending sediment rows of the classes it was loaded for, in sequence order
+    /// (only `main` has any: the commit path stages into the memory view).
     pub(crate) fn sediment(&self) -> &[SedimentRow] {
         &self.sediment
     }
@@ -123,23 +127,40 @@ impl Pin {
         self.generation
     }
 
-    /// The inputs of `view` at this pin's generation (spec 11 7.5): on first touch they are
-    /// read through `conn`, which must be inside the pin's own read transaction (the one
-    /// [`Catalog::with_snapshot`] hands its closure), charged to the pin's budget and cached
-    /// in the pin for its lifetime; a later call returns the cached view and reads nothing.
+    /// The inputs of `view` at this pin's generation (spec 11 7.5): its whole extent chain and
+    /// the pending sediment of `classes` alone (in any order, repeats ignored). On first touch
+    /// of the view with that class set they are read through `conn`, which must be inside the
+    /// pin's own read transaction (the one [`Catalog::with_snapshot`] hands its closure),
+    /// charged to the pin's budget and cached in the pin for its lifetime; a later call for the
+    /// same view and class set returns the cached view and reads nothing.
     ///
     /// # Errors
     /// [`OutsidePin`] when `conn` is not inside a transaction at this pin's generation; the
     /// budget's or SQLite's error.
-    pub(crate) fn load_view(&self, conn: &Connection, view: &ViewName) -> Result<Arc<PinnedView>> {
+    pub(crate) fn load_view(
+        &self,
+        conn: &Connection,
+        view: &ViewName,
+        classes: &[ExtentClass],
+    ) -> Result<Arc<PinnedView>> {
         let name = view.to_string();
+        let set = class_set(classes);
         let mut views = self.views.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(loaded) = views.loaded.iter().find(|v| *v.name == *name) {
+        if let Some(loaded) = views
+            .loaded
+            .iter()
+            .find(|v| *v.name == *name && v.classes == set)
+        {
             return Ok(Arc::clone(loaded));
         }
         self.inside(conn)?;
         self.budget.check().map_err(budget_exceeded)?;
-        let plan = ViewPlan::count(conn, &name, *view == ViewName::Main)?;
+        let sediment_of = if *view == ViewName::Main {
+            sediment_classes(classes)
+        } else {
+            Vec::new()
+        };
+        let plan = ViewPlan::count(conn, &name, &sediment_of)?;
         // the cache's buffer grows before the view joins it: its new capacity is charged too
         let grown = (views.loaded.len() == views.loaded.capacity())
             .then(|| (views.loaded.capacity() * 2).max(FIRST_VIEWS));
@@ -156,13 +177,14 @@ impl Pin {
         let copy = self.budget.reserve(plan.charge).map_err(budget_exceeded)?;
         let chain = self.copy_chain(conn, &name, plan.chain)?;
         let sediment = if plan.sediment > 0 {
-            self.copy_sediment(conn, plan.sediment)?
+            self.copy_sediment(conn, &sediment_of, plan.sediment)?
         } else {
             Vec::new()
         };
         self.budget.check().map_err(budget_exceeded)?;
         let loaded = Arc::new(PinnedView {
             name: name.into_boxed_str(),
+            classes: set,
             chain,
             sediment,
             _copy: copy,
@@ -243,12 +265,23 @@ impl Pin {
         Ok(())
     }
 
-    fn copy_sediment(&self, conn: &Connection, counted: usize) -> Result<Vec<SedimentRow>> {
+    /// Copy the `counted` pending sediment rows of the classes named `classes`, in sequence
+    /// order.
+    fn copy_sediment(
+        &self,
+        conn: &Connection,
+        classes: &[&str],
+        counted: usize,
+    ) -> Result<Vec<SedimentRow>> {
         let mut out = Vec::with_capacity(counted);
-        let mut stmt = conn
-            .prepare("SELECT seq, class, payload FROM cat_sediment WHERE dead IS NULL ORDER BY seq")
+        let sql = format!(
+            "{} ORDER BY seq",
+            sediment_sql("seq, class, payload", classes.len())
+        );
+        let mut stmt = conn.prepare(&sql).sql()?;
+        let mut rows = stmt
+            .query(rusqlite::params_from_iter(classes.iter()))
             .sql()?;
-        let mut rows = stmt.query([]).sql()?;
         while let Some(r) = rows.next().sql()? {
             self.copying(out.len())?;
             let row = SedimentRow {
@@ -417,10 +450,11 @@ impl Catalog {
         &self,
         conn: &Connection,
         budget: &QueryBudget,
-        views: &[ViewName],
+        views: &[(ViewName, &[ExtentClass])],
     ) -> Result<Pin> {
         let pin = self.pin_untouched(conn, budget, views)?;
-        self.touch_views(conn, views);
+        let names: Vec<ViewName> = views.iter().map(|(view, _)| view.clone()).collect();
+        self.touch_views(conn, &names);
         Ok(pin)
     }
 
@@ -433,11 +467,11 @@ impl Catalog {
         &self,
         conn: &Connection,
         budget: &QueryBudget,
-        views: &[ViewName],
+        views: &[(ViewName, &[ExtentClass])],
     ) -> Result<Pin> {
         let out = self.acquire(conn, budget, |tx, pin| {
-            for view in views {
-                pin.load_view(tx, view)?;
+            for (view, classes) in views {
+                pin.load_view(tx, view, classes)?;
             }
             Ok(pin)
         });
@@ -559,12 +593,12 @@ struct ViewPlan {
 }
 
 impl ViewPlan {
-    /// Count what `conn` holds of the view `name` (its pending sediment too when
-    /// `with_sediment`) and charge every allocation of its copy by the budget's rule for one
+    /// Count what `conn` holds of the view `name` (and the pending sediment of the classes
+    /// named `sediment_of`) and charge every allocation of its copy by the budget's rule for one
     /// allocation ([`QueryBudget::allocation_charge`]): the view itself, its name, one vector
     /// per kind of row at its exact capacity, and each payload and cold path. Every copied
     /// string and blob is allocated at exactly its length.
-    fn count(conn: &Connection, name: &str, with_sediment: bool) -> Result<Self> {
+    fn count(conn: &Connection, name: &str, sediment_of: &[&str]) -> Result<Self> {
         let (chain, chain_charge) = count_rows(
             conn,
             "SELECT count(*), COALESCE(sum(length(CAST(e.relpath AS BLOB))), 0),
@@ -574,17 +608,19 @@ impl ViewPlan {
             [name],
             (size_of::<ExtentRef>(), align_of::<ExtentRef>()),
         )?;
-        let (sediment, sediment_charge) = if with_sediment {
+        let (sediment, sediment_charge) = if sediment_of.is_empty() {
+            (0, 0)
+        } else {
             count_rows(
                 conn,
-                "SELECT count(*), COALESCE(sum(length(payload)), 0),
-                        COALESCE(sum(length(payload) > 0), 0)
-                 FROM cat_sediment WHERE dead IS NULL",
-                [],
+                &sediment_sql(
+                    "count(*), COALESCE(sum(length(payload)), 0),
+                     COALESCE(sum(length(payload) > 0), 0)",
+                    sediment_of.len(),
+                ),
+                rusqlite::params_from_iter(sediment_of.iter()),
                 (size_of::<SedimentRow>(), align_of::<SedimentRow>()),
             )?
-        } else {
-            (0, 0)
         };
         let charge = [
             allocation(VIEW.0, VIEW.1)?,
@@ -644,6 +680,28 @@ fn overflow() -> StoreError {
 
 fn too_large(_: std::num::TryFromIntError) -> StoreError {
     overflow()
+}
+
+/// `classes` as a set, one bit per class: the canonical class set a loaded view is cached by,
+/// whatever order or repeats the caller named it with.
+fn class_set(classes: &[ExtentClass]) -> u32 {
+    classes.iter().fold(0, |set, c| set | 1 << *c as u32)
+}
+
+/// The catalog names of `classes`, sorted and deduplicated: the bound values of
+/// [`sediment_sql`].
+fn sediment_classes(classes: &[ExtentClass]) -> Vec<&'static str> {
+    let mut names: Vec<&'static str> = classes.iter().map(|c| c.as_str()).collect();
+    names.sort_unstable();
+    names.dedup();
+    names
+}
+
+/// `SELECT columns` over the pending sediment rows (no switch consumed them) of `classes`
+/// classes, bound as `?1..?classes`.
+fn sediment_sql(columns: &str, classes: usize) -> String {
+    let marks = vec!["?"; classes].join(", ");
+    format!("SELECT {columns} FROM cat_sediment WHERE dead IS NULL AND class IN ({marks})")
 }
 
 /// The class column `idx` of `row` names, read in place (no transient string).
