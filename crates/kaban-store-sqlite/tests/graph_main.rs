@@ -221,6 +221,54 @@ fn an_idle_cached_graph_is_dropped_by_the_next_write_without_another_load() {
     );
 }
 
+#[test]
+fn a_chain_of_code_class_extents_loads_when_the_code_classes_are_asked_for() {
+    // Arrange: main's chain holds one code graph base (nodes 1 and 2, edge 1 -> 2) and no
+    // memory graph extent
+    use kaban_index_graph::{Attr, EdgeOp, LocalId, NodeOp, OpKind, Records, RelId, build_base};
+    let s = Scratch::new("kaban-t11-main", "code-chain");
+    let store = SqliteStore::open(&s.db(), &s.keys()).unwrap();
+    let code = Records {
+        nodes: [1, 2]
+            .map(|n| NodeOp {
+                node: LocalId(n),
+                kind: OpKind::Add,
+            })
+            .to_vec(),
+        edges: vec![EdgeOp {
+            src: LocalId(1),
+            rel: RelId(0),
+            dst: LocalId(2),
+            kind: OpKind::Add,
+            attr: Attr::default(),
+        }],
+        ..Records::default()
+    };
+    catalog_testing::publish_code_base(&store, &build_base(&code, 0)).unwrap();
+
+    // Act: load main's graph for the code classes
+    let (present, reached) = catalog_testing::with_main_code_graph(&store, &budget(), |g| {
+        let r = expand(
+            g.view(),
+            &[LocalId(1)],
+            &RelSelection::All,
+            Direction::Out,
+            CAPS,
+            &budget(),
+        )
+        .unwrap();
+        Ok((
+            g.view().contains(LocalId(1)),
+            r.nodes.iter().map(|&(n, _)| n).collect::<Vec<_>>(),
+        ))
+    })
+    .unwrap();
+
+    // Assert: the code extents are the loaded graph
+    assert!(present, "the code base's node 1 is present");
+    assert_eq!(reached, vec![LocalId(2)], "the code base's edge 1 -> 2");
+}
+
 /// Declare `n` more relations `{prefix}{i}` in one commit of `store`.
 fn declare(store: &SqliteStore, prefix: &str, n: u32) {
     catalog_testing::corrupt(

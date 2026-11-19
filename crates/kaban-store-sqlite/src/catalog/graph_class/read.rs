@@ -212,11 +212,11 @@ impl Opened {
     }
 }
 
-/// The graph extents of `view`'s chain, oldest first.
-fn graph_chain(view: &PinnedView) -> Vec<ExtentRef> {
+/// The extents of `classes` in `view`'s chain, oldest first.
+fn graph_chain(view: &PinnedView, classes: &[ExtentClass]) -> Vec<ExtentRef> {
     view.chain()
         .iter()
-        .filter(|e| CLASSES.contains(&e.class))
+        .filter(|e| classes.contains(&e.class))
         .cloned()
         .collect()
 }
@@ -232,7 +232,7 @@ pub(super) fn main_chain(pin: &Pin) -> Result<Vec<ExtentRef>> {
         .ok_or_else(|| StoreError::Backend {
             source: BackendSource::new(OutsidePin),
         })?;
-    Ok(graph_chain(&main))
+    Ok(graph_chain(&main, CLASSES))
 }
 
 /// One incarnation of a container file: its device, inode and birth time, read when a load
@@ -285,6 +285,8 @@ struct Key {
     kbx: PathBuf,
     incarnation: Incarnation,
     view: String,
+    /// The sediment class of the graph it holds (`None`: one without sediment).
+    layer: Option<ExtentClass>,
     chain: Vec<ExtentId>,
     /// The pending rows `sediment` holds, oldest first.
     seqs: Vec<SedimentSeq>,
@@ -358,15 +360,20 @@ fn incarnation(pin: &Pin) -> Option<Incarnation> {
     Incarnation::of(pin.kbx_path())
 }
 
-/// The cache entry of `pin`'s container (at `incarnation`) and `view` (a clone of its
-/// handles). Entries idle past [`IDLE`], and an entry of another incarnation of the container,
-/// are dropped first.
-fn cached(pin: &Pin, incarnation: Incarnation, view: &str) -> Option<Entry> {
+/// The cache entry of `pin`'s container (at `incarnation`), `view` and the graph of sediment
+/// class `layer` (a clone of its handles). Entries idle past [`IDLE`], and an entry of another
+/// incarnation of the container, are dropped first.
+fn cached(
+    pin: &Pin,
+    incarnation: Incarnation,
+    view: &str,
+    layer: Option<ExtentClass>,
+) -> Option<Entry> {
     let mut cache = CACHE.lock().unwrap_or_else(PoisonError::into_inner);
     cache.retain(|e| !idle(e) && (e.key.kbx != pin.kbx_path() || e.key.incarnation == incarnation));
     cache
         .iter()
-        .find(|e| e.key.kbx == pin.kbx_path() && e.key.view == view)
+        .find(|e| e.key.kbx == pin.kbx_path() && e.key.view == view && e.key.layer == layer)
         .cloned()
 }
 
@@ -374,10 +381,9 @@ fn cached(pin: &Pin, incarnation: Incarnation, view: &str) -> Option<Entry> {
 /// generation of the same incarnation of them.
 fn keep(entry: Entry) {
     let mut cache = CACHE.lock().unwrap_or_else(PoisonError::into_inner);
-    match cache
-        .iter_mut()
-        .find(|e| e.key.kbx == entry.key.kbx && e.key.view == entry.key.view)
-    {
+    match cache.iter_mut().find(|e| {
+        e.key.kbx == entry.key.kbx && e.key.view == entry.key.view && e.key.layer == entry.key.layer
+    }) {
         Some(e)
             if e.key.incarnation == entry.key.incarnation && e.generation > entry.generation => {}
         Some(e) => *e = entry,
@@ -416,7 +422,8 @@ pub(super) fn seal_cached(
     let main = ViewName::Main.to_string();
     let ids: Vec<ExtentId> = chain.iter().map(|e| e.id).collect();
     let seqs: Vec<SedimentSeq> = rows.iter().map(|r| r.seq).collect();
-    let Some(mut entry) = incarnation(pin).and_then(|i| cached(pin, i, &main)) else {
+    let Some(mut entry) = incarnation(pin).and_then(|i| cached(pin, i, &main, Some(SEDIMENT)))
+    else {
         return Ok(None);
     };
     if entry.generation != pin.generation()
@@ -449,9 +456,11 @@ pub(super) fn seal_cached(
     Ok(Some(sealed.layer))
 }
 
-/// Load `view`'s graph at `pin` through its own transaction `rows` (spec 11 7.5; consumed by
-/// T14 and T16): its chain opened, its pending graph rows prepared once per snapshot and
-/// reused across queries (see the module documentation), and the relation dictionary, all
+/// Load `view`'s graph of the extent `classes` at `pin` through its own transaction `rows`
+/// (spec 11 7.5; consumed by T14 and T16): the owning class's `IndexClass::classes`, its layer
+/// (sediment) class first, so the memory graph passes `GraphLayer, GraphBase` and the code
+/// graph `CodeLayer, CodeBase`. Its chain opened, its pending rows prepared once per snapshot
+/// and reused across queries (see the module documentation), and the relation dictionary, all
 /// charged to `budget` (PC-17).
 ///
 /// # Errors
@@ -460,17 +469,20 @@ pub(crate) fn load_view<'t>(
     rows: &'t Transaction<'_>,
     pin: &Pin,
     view: &ViewName,
+    classes: &[ExtentClass],
     budget: &QueryBudget,
 ) -> Result<LoadedView<'t>> {
-    // the chain alone: the base class stages no sediment, so the pin copies no payload; the
-    // pending graph rows are read here, and only those the cache has not prepared yet
-    let pinned = pin.load_view(rows, view, &[ExtentClass::GraphBase])?;
-    let chain = graph_chain(&pinned);
+    // the chain alone: the base classes stage no sediment, so the pin copies no payload; the
+    // pending rows of the layer class are read here, and only those the cache has not
+    // prepared yet
+    let layer = classes.first().copied();
+    let pinned = pin.load_view(rows, view, classes.get(1..).unwrap_or_default())?;
+    let chain = graph_chain(&pinned, classes);
     let ids: Vec<ExtentId> = chain.iter().map(|e| e.id).collect();
-    let (seqs, seqs_charge) = pending_seqs(rows, view, budget)?;
+    let (seqs, seqs_charge) = pending_seqs(rows, view, layer, budget)?;
     let name = view.to_string();
     let incarnation = incarnation(pin);
-    let prior = incarnation.and_then(|i| cached(pin, i, &name));
+    let prior = incarnation.and_then(|i| cached(pin, i, &name, layer));
     let same = prior
         .as_ref()
         .filter(|e| e.generation == pin.generation() && e.key.chain == ids);
@@ -491,12 +503,12 @@ pub(crate) fn load_view<'t>(
     });
     let (prepared, first_batch, held) =
         carried.unwrap_or_else(|| (Arc::new(PreparedSediment::empty()), 0, 0));
-    let sediment = match seqs.get(held) {
-        None => prepared,
-        Some(&from) => {
-            let (payloads, _charge) = payloads_from(rows, from, budget)?;
+    let sediment = match (layer, seqs.get(held)) {
+        (Some(layer), Some(&from)) => {
+            let (payloads, _charge) = payloads_from(rows, layer, from, budget)?;
             Arc::new(extend(&prepared, &payloads, budget)?)
         }
+        _ => prepared,
     };
     let (rels, rels_charge) = Rels::read(rows, budget)?;
     if let Some(incarnation) = incarnation {
@@ -512,6 +524,7 @@ pub(crate) fn load_view<'t>(
                 kbx: pin.kbx_path().to_path_buf(),
                 incarnation,
                 view: name,
+                layer,
                 chain: ids,
                 seqs,
                 _seqs: seqs_charge,
@@ -534,24 +547,25 @@ pub(crate) fn load_view<'t>(
     })
 }
 
-/// The pending graph sediment rows of `view` in the snapshot `rows` (only `main` has any), in
-/// sequence order, with their charge to `budget`. Read from the indexes alone
-/// ([`PENDING_SQL`]): no row's payload is touched.
+/// The pending sediment rows of the class `layer` of `view` in the snapshot `rows` (only
+/// `main` has any), in sequence order, with their charge to `budget`. Read from the indexes
+/// alone ([`PENDING_SQL`]): no row's payload is touched.
 ///
 /// # Errors
 /// The budget's and SQLite's errors.
 fn pending_seqs(
     rows: &Connection,
     view: &ViewName,
+    layer: Option<ExtentClass>,
     budget: &QueryBudget,
 ) -> Result<(Vec<SedimentSeq>, Option<BudgetLease>)> {
-    if *view != ViewName::Main {
+    let Some(layer) = layer.filter(|_| *view == ViewName::Main) else {
         return Ok((Vec::new(), None));
-    }
+    };
     let n: i64 = rows
         .query_row(
             &format!("SELECT count(*) {PENDING_SQL}"),
-            [SEDIMENT.as_str()],
+            [layer.as_str()],
             |r| r.get(0),
         )
         .sql()?;
@@ -563,7 +577,7 @@ fn pending_seqs(
     let mut stmt = rows
         .prepare(&format!("SELECT seq {PENDING_SQL} ORDER BY seq"))
         .sql()?;
-    let mut found = stmt.query([SEDIMENT.as_str()]).sql()?;
+    let mut found = stmt.query([layer.as_str()]).sql()?;
     while let Some(r) = found.next().sql()? {
         if seqs.len() == n {
             break;
@@ -573,13 +587,14 @@ fn pending_seqs(
     Ok((seqs, Some(charge)))
 }
 
-/// The payloads of the pending graph rows from `from` on in the snapshot `rows`, oldest
-/// first, with their charge to `budget`.
+/// The payloads of the pending rows of the class `layer` from `from` on in the snapshot
+/// `rows`, oldest first, with their charge to `budget`.
 ///
 /// # Errors
 /// The budget's and SQLite's errors.
 fn payloads_from(
     rows: &Connection,
+    layer: ExtentClass,
     from: SedimentSeq,
     budget: &QueryBudget,
 ) -> Result<(Vec<Vec<u8>>, BudgetLease)> {
@@ -588,7 +603,7 @@ fn payloads_from(
         .query_row(
             "SELECT count(*), COALESCE(sum(length(payload)), 0) FROM cat_sediment
              WHERE dead IS NULL AND class = ?1 AND seq >= ?2",
-            rusqlite::params![SEDIMENT.as_str(), from],
+            rusqlite::params![layer.as_str(), from],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .sql()?;
@@ -602,9 +617,7 @@ fn payloads_from(
              ORDER BY seq",
         )
         .sql()?;
-    let mut found = stmt
-        .query(rusqlite::params![SEDIMENT.as_str(), from])
-        .sql()?;
+    let mut found = stmt.query(rusqlite::params![layer.as_str(), from]).sql()?;
     while let Some(r) = found.next().sql()? {
         if out.len() == n {
             break;

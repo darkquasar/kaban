@@ -935,10 +935,35 @@ pub fn with_main_graph<T>(
     budget: &QueryBudget,
     f: impl FnOnce(&MainGraph<'_>) -> Result<T>,
 ) -> Result<T> {
+    with_main_graph_of(store, GRAPH, budget, f)
+}
+
+/// [`with_main_graph`] over `main`'s code graph (the code class's extents, as T16 loads them).
+///
+/// # Errors
+/// As [`with_main_graph`].
+pub fn with_main_code_graph<T>(
+    store: &SqliteStore,
+    budget: &QueryBudget,
+    f: impl FnOnce(&MainGraph<'_>) -> Result<T>,
+) -> Result<T> {
+    with_main_graph_of(store, CODE, budget, f)
+}
+
+/// The memory graph's classes and the code graph's, layer first (`IndexClass::classes`).
+const GRAPH: &[ExtentClass] = &[ExtentClass::GraphLayer, ExtentClass::GraphBase];
+const CODE: &[ExtentClass] = &[ExtentClass::CodeLayer, ExtentClass::CodeBase];
+
+fn with_main_graph_of<T>(
+    store: &SqliteStore,
+    classes: &[ExtentClass],
+    budget: &QueryBudget,
+    f: impl FnOnce(&MainGraph<'_>) -> Result<T>,
+) -> Result<T> {
     store
         .catalog()
         .with_snapshot(&store.lock(), budget, |tx, pin| {
-            let loaded = load_view(tx, pin, &ViewName::Main, budget)?;
+            let loaded = load_view(tx, pin, &ViewName::Main, classes, budget)?;
             let graph = MainGraph {
                 loaded: &loaded,
                 view: loaded.view(budget)?,
@@ -1017,9 +1042,19 @@ pub fn graph_contents(store: &SqliteStore) -> Result<GraphContents> {
 /// # Errors
 /// The append's or the commit's errors.
 pub fn publish_graph_base(store: &SqliteStore, bytes: &[u8]) -> Result<u64> {
-    let extent = store
-        .catalog()
-        .append_extent(ExtentClass::GraphBase, bytes)?;
+    publish_base(store, ExtentClass::GraphBase, bytes)
+}
+
+/// [`publish_graph_base`] for a code graph base (`bytes` in the graph format).
+///
+/// # Errors
+/// As [`publish_graph_base`].
+pub fn publish_code_base(store: &SqliteStore, bytes: &[u8]) -> Result<u64> {
+    publish_base(store, ExtentClass::CodeBase, bytes)
+}
+
+fn publish_base(store: &SqliteStore, class: ExtentClass, bytes: &[u8]) -> Result<u64> {
+    let extent = store.catalog().append_extent(class, bytes)?;
     let id = store
         .catalog()
         .commit(&mut store.lock(), Durability::Normal, |txn| {
