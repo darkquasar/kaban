@@ -42,6 +42,14 @@ const MAX_OPERANDS: usize = 64;
 const MAX_FUZZY_TERMS: usize = 32;
 /// Tokens shorter than this are not fuzzy-matched (a trigram needs three characters).
 const MIN_FUZZY_CHARS: usize = 3;
+/// The dictionary terms [`expansions`] visits between two budget checks (PC-17).
+const TERM_BATCH: u32 = 1024;
+
+#[cfg(test)]
+thread_local! {
+    /// The dictionary terms [`expansions`] visited: the tests count them.
+    pub(crate) static TERMS_VISITED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
 
 /// Effective `[text, summary, tags, ident_terms]` weights.
 type Columns = [f32; 4];
@@ -209,8 +217,14 @@ fn prefix_end(prefix: &[u8]) -> Option<Vec<u8>> {
 /// of them, at least one. `PhrasePrefixQuery` cuts its expansion per segment at
 /// `max_expansions` (50 by default, which silently drops lexemes and lets a filtered-out
 /// workspace's terms consume the budget); set from the dictionary, the cut is never reached,
-/// so a prefix matches every term under it whatever the segment layout.
-fn expansions(searcher: &Searcher, field: Field, prefix: &[u8]) -> Result<u32> {
+/// so a prefix matches every term under it whatever the segment layout. The scan checks
+/// `budget` every [`TERM_BATCH`] terms (PC-17).
+fn expansions(
+    searcher: &Searcher,
+    field: Field,
+    prefix: &[u8],
+    budget: &QueryBudget,
+) -> Result<u32> {
     let end = prefix_end(prefix);
     let mut most: u32 = 1;
     for segment in searcher.segment_readers() {
@@ -222,6 +236,11 @@ fn expansions(searcher: &Searcher, field: Field, prefix: &[u8]) -> Result<u32> {
         let mut stream = range.into_stream()?;
         let mut count: u32 = 0;
         while stream.advance() {
+            if count.is_multiple_of(TERM_BATCH) {
+                budget.check()?;
+            }
+            #[cfg(test)]
+            TERMS_VISITED.set(TERMS_VISITED.get() + 1);
             count = count.saturating_add(1);
         }
         most = most.max(count);
@@ -236,6 +255,7 @@ fn operand_on(
     field: Field,
     tokens: &[String],
     prefix: bool,
+    budget: &QueryBudget,
 ) -> Result<Box<dyn Query>> {
     let terms: Vec<Term> = tokens
         .iter()
@@ -248,7 +268,7 @@ fn operand_on(
         (1, false) => Box::new(TermQuery::new(last, IndexRecordOption::WithFreqs)),
         (_, false) => Box::new(PhraseQuery::new(terms)),
         (_, true) => {
-            let under = expansions(searcher, field, last.serialized_value_bytes())?;
+            let under = expansions(searcher, field, last.serialized_value_bytes(), budget)?;
             let mut query = PhrasePrefixQuery::new(terms);
             query.set_max_expansions(under);
             Box::new(query)
@@ -265,6 +285,7 @@ fn content(
     ops: &[Operand],
     occur: Occur,
     weights: Columns,
+    budget: &QueryBudget,
 ) -> Result<Option<Box<dyn Query>>> {
     let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
     for op in ops {
@@ -277,7 +298,7 @@ fn content(
             per_field.push((
                 Occur::Should,
                 Box::new(BoostQuery::new(
-                    operand_on(searcher, *field, &tokens, op.prefix)?,
+                    operand_on(searcher, *field, &tokens, op.prefix, budget)?,
                     weight,
                 )),
             ));
@@ -290,6 +311,7 @@ fn content(
 /// The lexical query: the per-kind weight profiles as disjoint branches (a kind term at
 /// constant score selects the branch), the default profile for every other kind, then the
 /// filters. An identifier query doubles the `ident_terms` weight, as `recall.rs` does.
+#[allow(clippy::too_many_arguments)] // the query's parts and the budget its prefix scans check
 fn lexical(
     searcher: &Searcher,
     fields: &Fields,
@@ -298,6 +320,7 @@ fn lexical(
     occur: Occur,
     identifier: bool,
     filter: &SeedFilter<'_>,
+    budget: &QueryBudget,
 ) -> Result<Option<Box<dyn Query>>> {
     let boost = |mut w: Columns| {
         if identifier {
@@ -305,7 +328,15 @@ fn lexical(
         }
         w
     };
-    let Some(default) = content(searcher, fields, ops, occur, boost(weights.defaults))? else {
+    let Some(default) = content(
+        searcher,
+        fields,
+        ops,
+        occur,
+        boost(weights.defaults),
+        budget,
+    )?
+    else {
         return Ok(None);
     };
     let text: Box<dyn Query> = if weights.profiles.is_empty() {
@@ -314,7 +345,7 @@ fn lexical(
         let mut branches: Vec<(Occur, Box<dyn Query>)> = Vec::new();
         let mut others: Vec<(Occur, Box<dyn Query>)> = vec![(Occur::Must, default)];
         for (kind, profile) in &weights.profiles {
-            if let Some(q) = content(searcher, fields, ops, occur, boost(*profile))? {
+            if let Some(q) = content(searcher, fields, ops, occur, boost(*profile), budget)? {
                 branches.push((
                     Occur::Should,
                     Box::new(BooleanQuery::new(vec![
@@ -523,6 +554,7 @@ pub(crate) fn run_hiding(
                 Occur::Must,
                 identifier,
                 &q.filter,
+                budget,
             )?
             else {
                 return Ok(empty);
@@ -550,6 +582,7 @@ pub(crate) fn run_hiding(
                     Occur::Should,
                     identifier,
                     &q.filter,
+                    budget,
                 )? {
                     Some(widened) => top(
                         searcher,
@@ -592,7 +625,7 @@ mod tests {
     use super::{Operand, Weights, operands, run_hiding};
     use crate::analyzers::register;
     use crate::schema::{ACTIVE, Fields, schema};
-    use kaban_core::query_budget::QueryBudget;
+    use kaban_core::query_budget::{BudgetExceeded, Limit, QueryBudget};
     use kaban_core::text_index::{MatchMode, Searched, SeedFilter, TextQuery};
     use kaban_core::{RecallQuery, config::Recall};
     use tantivy::{Index, TantivyDocument};
@@ -788,5 +821,63 @@ mod tests {
         assert_eq!(index.searchable_segment_ids().unwrap().len(), 1);
         assert_eq!(both(), before, "the same page after the merge");
         assert_eq!(rids(&in_ws("quok*", "other"), 100).len(), 50);
+    }
+
+    /// PC-17 (T7 end review M2): a prefix's dictionary scan checks the budget every batch of
+    /// terms, so a search cancelled before it runs returns the cancellation having visited at
+    /// most one batch of the dictionary.
+    #[test]
+    fn a_cancelled_prefix_search_visits_at_most_one_batch_of_dictionary_terms() {
+        // Arrange: 5,000 terms under one prefix; the budget is cancelled before the search
+        let (index, fields, weights) = raw_index();
+        let mut writer = index.writer_with_num_threads(1, 32 << 20).unwrap();
+        for n in 0..5_000 {
+            writer
+                .add_document(doc(&fields, n, "default", &format!("quok{n:05}")))
+                .unwrap();
+        }
+        writer.commit().unwrap();
+        let searcher = index.reader().unwrap().searcher();
+        let budget = QueryBudget::new(u64::MAX, None);
+        budget.cancel();
+        let q = RecallQuery {
+            query: "quok*".into(),
+            ..Default::default()
+        };
+        super::TERMS_VISITED.set(0);
+
+        // Act
+        let outcome = run_hiding(
+            &fields,
+            &weights,
+            &searcher,
+            &TextQuery {
+                text: &q.query,
+                mode: MatchMode::Lexical,
+                filter: SeedFilter::of(&q),
+                limit: 10,
+                sufficient: 10,
+                skip: 0,
+            },
+            &[],
+            &budget,
+        );
+
+        // Assert
+        assert!(
+            matches!(
+                outcome,
+                Err(crate::Error::Budget(BudgetExceeded {
+                    limit: Limit::Cancelled,
+                    ..
+                }))
+            ),
+            "expected the budget's cancellation, got {outcome:?}"
+        );
+        let visited = super::TERMS_VISITED.get();
+        assert!(
+            visited <= u64::from(super::TERM_BATCH),
+            "dictionary terms visited after the cancellation: {visited}"
+        );
     }
 }

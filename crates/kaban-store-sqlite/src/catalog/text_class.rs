@@ -163,8 +163,10 @@ impl IndexClass for TextClass {
             let (active, _charged) = crate::index_rows::active_rows(txn.conn(), &budget)?;
             let tier = kaban_index_tantivy::segment(&active, &[], &budget)?;
             let generation = sql_int(txn.generation()?.0).sql()?;
-            retire_text(&catalog.kbx, txn.conn(), generation)?;
+            retire_text(&catalog.kbx, txn.conn(), generation, &budget)?;
             let extent = catalog.append_extent(ExtentClass::TextTier, &tier)?;
+            // a deadline or cancellation since the last check publishes nothing
+            budget.check()?;
             txn.publish(extent, &[ViewName::Main])?;
             Ok(())
         })
@@ -203,8 +205,8 @@ type TierRow = (u64, Option<(u64, u64)>, Option<Vec<u8>>, bool);
 /// whose bytes are intact in the container `kbx` (its content hash matches) retires (and is
 /// reclaimed once no pin reaches it), one whose bytes are gone (a lost `kaban.kbx`) loses its
 /// row, so no reclamation ever releases a range the new container reuses; the pending packs
-/// are consumed.
-fn retire_text(kbx: &Path, conn: &Connection, generation: i64) -> Result<()> {
+/// are consumed. The hashing checks `budget` per tier and per chunk (PC-17).
+fn retire_text(kbx: &Path, conn: &Connection, generation: i64, budget: &QueryBudget) -> Result<()> {
     let class = ExtentClass::TextTier.as_str();
     let tiers: Vec<TierRow> = {
         let mut stmt = conn
@@ -226,8 +228,14 @@ fn retire_text(kbx: &Path, conn: &Connection, generation: i64) -> Result<()> {
     };
     let file = kbx::open_existing(kbx).ok();
     for (id, range, sha, live) in tiers {
+        #[cfg(test)]
+        ON_TIER.with_borrow_mut(|hook| {
+            if let Some(hook) = hook {
+                hook(budget);
+            }
+        });
         let intact = match (&file, range, sha) {
-            (Some(file), Some((offset, len)), Some(sha)) => holds(file, offset, len, &sha),
+            (Some(file), Some((offset, len)), Some(sha)) => holds(file, offset, len, &sha, budget)?,
             _ => false,
         };
         let id = sql_int(id).sql()?;
@@ -254,24 +262,39 @@ fn retire_text(kbx: &Path, conn: &Connection, generation: i64) -> Result<()> {
     Ok(())
 }
 
-/// Whether `file` holds `len` bytes at `offset` whose SHA-256 is `sha`.
-fn holds(file: &File, offset: u64, len: u64, sha: &[u8]) -> bool {
+/// A test's hook on every old tier a rebuild judges, given the rebuild's budget.
+#[cfg(test)]
+type TierHook = Box<dyn FnMut(&QueryBudget)>;
+
+#[cfg(test)]
+thread_local! {
+    /// Called with the rebuild's budget on every old tier it judges: the tests cancel there.
+    static ON_TIER: std::cell::RefCell<Option<TierHook>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Whether `file` holds `len` bytes at `offset` whose SHA-256 is `sha`, `budget` checked per
+/// chunk.
+///
+/// # Errors
+/// The budget's deadline or cancellation.
+fn holds(file: &File, offset: u64, len: u64, sha: &[u8], budget: &QueryBudget) -> Result<bool> {
     const CHUNK: u64 = 1 << 16;
     let mut hasher = Sha256::new();
     let mut buf = vec![0_u8; 1 << 16];
     let mut done = 0_u64;
     while done < len {
+        budget.check()?;
         let n = (len - done).min(CHUNK);
         let Some(chunk) = usize::try_from(n).ok().and_then(|n| buf.get_mut(..n)) else {
-            return false;
+            return Ok(false);
         };
         if file.read_exact_at(chunk, offset + done).is_err() {
-            return false;
+            return Ok(false);
         }
         hasher.update(&*chunk);
         done += n;
     }
-    hasher.finalize().as_slice() == sha
+    Ok(hasher.finalize().as_slice() == sha)
 }
 
 impl Catalog {
@@ -352,5 +375,84 @@ impl TextInputs {
             tiers: &self.tiers,
             sediment,
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // test code: failures are the assertion
+mod tests {
+    use kaban_core::config::{CatalogCfg, SealOps};
+    use kaban_core::query_budget::{BudgetExceeded, Limit, QueryBudget};
+    use kaban_core::{Actor, MemoryStore, NewNode, StoreError, WorkspaceId, WriteCtx};
+
+    use super::{IndexClass, ON_TIER, TextClass};
+    use crate::SqliteStore;
+
+    /// The live text tiers of `store`, by id.
+    fn tiers(store: &SqliteStore) -> Vec<i64> {
+        let conn = store.lock();
+        let mut stmt = conn
+            .prepare(
+                "SELECT id FROM cat_extent WHERE class = 'text_tier' AND dead_since IS NULL \
+                 ORDER BY id",
+            )
+            .unwrap();
+        stmt.query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    }
+
+    /// PC-17 (T7 end review M2): a rebuild cancelled while it judges the old tiers publishes
+    /// nothing: the old tier stays the live one and the rebuild returns the cancellation.
+    #[test]
+    fn a_rebuild_cancelled_while_it_hashes_the_old_tiers_publishes_nothing() {
+        // Arrange: a file store whose text sealed into one tier
+        let dir = std::env::temp_dir().join(format!("kaban-t7e-rebuild-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = SqliteStore::open(&dir.join("kaban.db"), &dir.join("keys"))
+            .unwrap()
+            .with_catalog_config(CatalogCfg {
+                seal_ops: SealOps {
+                    text: 1,
+                    ..SealOps::default()
+                },
+                ..CatalogCfg::default()
+            })
+            .unwrap();
+        let ctx = WriteCtx::new(WorkspaceId::default(), Actor::Agent);
+        for text in ["quokka by the shore", "wombat in the dunes"] {
+            let node = NewNode {
+                kind: "Fact".into(),
+                text: text.into(),
+                ..Default::default()
+            };
+            store.remember(node, &[], &ctx).unwrap();
+        }
+        store.compact().unwrap();
+        let before = tiers(&store);
+        assert_eq!(before.len(), 1, "the fixture seals one tier");
+        ON_TIER.set(Some(Box::new(QueryBudget::cancel)));
+
+        // Act
+        let rebuilt = TextClass::new().rebuild(store.catalog(), &mut store.lock());
+
+        // Assert
+        ON_TIER.set(None);
+        let after = tiers(&store);
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            matches!(
+                rebuilt,
+                Err(StoreError::BudgetExceeded(BudgetExceeded {
+                    limit: Limit::Cancelled,
+                    ..
+                }))
+            ),
+            "expected the budget's cancellation, got {rebuilt:?}"
+        );
+        assert_eq!(after, before, "the cancelled rebuild published nothing");
     }
 }

@@ -22,10 +22,11 @@
 //! [`QueryBudget`] before it is allocated, and the charge lives as long as the value.
 //!
 //! Deadline and cancellation (PC-17): every loop this crate owns over the packs checks the
-//! budget per pack and per [`TOMBSTONE_BATCH`] tombstones, and every Tantivy call a text
-//! search, seal or staging makes (an index open, a search, a merge, a segment's finalize) is
-//! checked before and after. A single library call is not interruptible: it is bounded by the
-//! inputs reserved before it.
+//! budget per pack and per [`TOMBSTONE_BATCH`] tombstones, a prefix's dictionary scan per
+//! batch of terms (`crate::query`), and every Tantivy call a text search, seal or staging
+//! makes (an index open, a search, a merge, a segment's finalize) is checked before and
+//! after. A single library call is not interruptible (a fuzzy term's dictionary walk runs
+//! inside the search): it is bounded by the inputs reserved before it.
 
 use crate::schema::Fields;
 use crate::{Error, Result};
