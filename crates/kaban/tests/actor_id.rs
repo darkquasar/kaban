@@ -98,12 +98,12 @@ fn serve_remember(s: &Scratch, global: &[&str], env: Option<&str>, text: &str) -
 fn stamped(s: &Scratch, id: &str) -> (String, Vec<String>) {
     let conn = rusqlite::Connection::open(s.db()).unwrap();
     let node: String = conn
-        .query_row("SELECT actor_id FROM node WHERE id = ?1", [id], |r| {
+        .query_row("SELECT w.actor_id FROM node n LEFT JOIN writer w ON w.id = n.writer_id WHERE n.id = ?1", [id], |r| {
             r.get(0)
         })
         .unwrap();
     let mut st = conn
-        .prepare("SELECT actor_id FROM changes WHERE id = ?1 ORDER BY seq")
+        .prepare("SELECT w.actor_id FROM changes c LEFT JOIN writer w ON w.id = c.writer_id WHERE c.id = ?1 ORDER BY c.seq")
         .unwrap();
     let changes = st
         .query_map([id], |r| r.get(0))

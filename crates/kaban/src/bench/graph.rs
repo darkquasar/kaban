@@ -2,20 +2,13 @@
 //! memory graph's read and write cost on a store, written as JSONL to `--out`.
 //!
 //! ```text
-//!   setup    => fresh store; one node row per corpus node (rid = local id, so ids resolve);
-//!               main's graph base = build_base(synthetic corpus of --edges)
-//!               + --sediment pending graph ops as sediment rows of 100 ops each
-//!               (--sealed: those ops sealed into a layer by one compaction first)
-//!   expand2  => per query: snapshot + cached load_view + expand(depth 2, 50 rows) + every
-//!               row's public id (no tie order: expand consumes none); query_ms (the whole
-//!               read) and expand_ms (the expand alone), p50/p99/max
-//!   hub-cap1500 => the same from node 0 (the generator's largest hub), 1500 rows
-//!   tie-order => a tie-consuming query (tie order + weighted shortest path, depth 2, 50
-//!               rows): the process's first (cold), --queries more at that generation (warm),
-//!               then rounds of one commit (one pending edge row) and two queries, the first
-//!               at the new generation (it prepares the order) and the second; whole query and
-//!               order_ms (asking for the order alone); first the store's footprint on
-//!               disk (kaban.db after a checkpoint, by table and index, and kaban.kbx)
+//!   setup    => commit canonical node batches, then edge batches, and rebuild the graph.
+//!               Append the requested sediment through edge-only commits; optionally seal it.
+//!   expand2  => seeded present nodes, depth 2, 50 rows; graph-only and whole read times.
+//!   hub-cap1500 => the public ordinal-zero hub, depth 2 and a 1500-row cap.
+//!   tie-order => order preparation and whole weighted query, cold, warm, first/second
+//!               after single-edge and single-node commits, then after cache expiry.
+//!               Includes expand2 and hub-cap1500 reads on the same base and its footprint.
 //!   link-wal => one single-link commit after another: kaban.db-wal growth per commit
 //!   oneshot  => C6: a fresh child process opens the store, loads (validates) main's graph
 //!               and runs one small expand; each phase timed
@@ -67,6 +60,9 @@ pub(crate) struct Args {
     /// Edges of the synthetic corpus
     #[arg(long, default_value_t = 1_000_000)]
     edges: u64,
+    /// Synthetic node count (defaults to one tenth of edge attempts)
+    #[arg(long)]
+    nodes: Option<u32>,
     /// Pending graph ops kept in main's sediment, comma separated (one run each)
     #[arg(long, default_value = "0")]
     sediment: String,
@@ -103,6 +99,7 @@ pub(crate) fn run(args: &Args) -> ExitCode {
         args.case,
         args.corpus,
         args.edges,
+        args.nodes,
         &args.sediment,
         args.sealed,
         args.queries,
@@ -126,8 +123,7 @@ mod imp {
         WorkspaceId, WriteBatch, WriteCtx,
     };
     use kaban_index_graph::{
-        Caps, Direction, GraphError, LocalId, Records, RelSelection, build_base, expand,
-        weighted_shortest_path,
+        Caps, Direction, GraphError, LocalId, RelSelection, expand, weighted_shortest_path,
     };
     use kaban_store_sqlite::{SqliteStore, catalog_testing};
     use serde_json::{Value, json};
@@ -155,6 +151,7 @@ mod imp {
         if let Some(dir) = &args.oneshot_child {
             return oneshot_child(dir);
         }
+        anyhow::ensure!(args.queries > 0, "--queries must be positive");
         let lines = match (args.corpus, args.case) {
             (Corpus::Real, Case::Expand2) => vec![real(args)?],
             (Corpus::Real, _) => bail!("corpus real measures expand2 only"),
@@ -162,15 +159,15 @@ mod imp {
                 let mut lines = Vec::new();
                 for ops in args.sediment.split(',') {
                     let ops: usize = ops.trim().parse().context("--sediment")?;
-                    lines.push(reads("expand2", args, ops, EXPAND, None)?);
+                    lines.push(reads("expand2", args, ops, EXPAND, false)?);
                 }
                 lines
             }
             (Corpus::Synthetic, Case::HubCap1500) => {
-                vec![reads("hub-cap1500", args, 0, HUB, Some(LocalId(0)))?]
+                vec![reads("hub-cap1500", args, 0, HUB, true)?]
             }
             (Corpus::Synthetic, Case::LinkWal) => vec![link_wal(args.queries)?],
-            (Corpus::Synthetic, Case::Oneshot) => vec![oneshot(args.edges)?],
+            (Corpus::Synthetic, Case::Oneshot) => vec![oneshot(args)?],
             (Corpus::Synthetic, Case::TieOrder) => vec![tie_order(args)?],
         };
         let mut out = std::fs::File::create(&args.out)
@@ -208,48 +205,58 @@ mod imp {
         )
     }
 
-    /// One committed node row per corpus node, `rid` = its local id and a `NodeId` that sorts
-    /// as the rid, so public ids resolve and the stable order is the corpus's; the graph ops
-    /// that commit stages are consumed at once (the corpus base already holds the nodes).
-    fn node_rows(store: &SqliteStore, nodes: u32) -> Result<()> {
-        catalog_testing::seed_nodes(store, nodes)?;
-        catalog_testing::consume_graph_sediment(store)?;
-        Ok(())
+    const HUB_UUID: &str = "00000000-0000-7000-8000-000000000000";
+
+    struct CorpusStore {
+        store: SqliteStore,
+        starts: Vec<LocalId>,
+        edges: i64,
+        staged_rows: u64,
+        staged_ops: u64,
     }
 
-    /// A store in `dir` whose main graph is the synthetic corpus of `edges` edges as its base,
-    /// with a node row per corpus node, plus `ops` pending graph ops (sealed into one layer
-    /// when `sealed`); the corpus's node count.
-    fn setup(dir: &Path, edges: u64, ops: usize, sealed: bool) -> Result<(SqliteStore, u32)> {
+    fn setup(dir: &Path, args: &Args, ops: usize, sealed: bool) -> Result<CorpusStore> {
+        let min = if args.edges > 0 || ops > 0 { 2 } else { 1 };
+        let nodes = args
+            .nodes
+            .unwrap_or((args.edges / 10).clamp(min, u64::from(u32::MAX)) as u32);
+        anyhow::ensure!(nodes > 0, "--nodes must be positive");
         let store = open(dir)?;
-        let corpus = synthetic::generate(SEED, edges);
-        let nodes = u32::try_from(corpus.nodes.len())?;
-        node_rows(&store, nodes)?;
-        let base = build_base(&corpus, nodes);
-        drop(corpus);
-        catalog_testing::publish_graph_base(&store, &base)?;
-        drop(base);
-        let pending = synthetic::generate(SEDIMENT_SEED, ops as u64).edges;
-        for chunk in pending.chunks(ROW_OPS) {
-            let row = Records {
-                edges: chunk.to_vec(),
-                ..Records::default()
-            };
-            catalog_testing::stage_graph_sediment(&store, &row.encode())?;
-        }
-        if sealed && ops > 0 {
+        synthetic::populate(&store, SEED, nodes, args.edges)?;
+        catalog_testing::rebuild_graph(&store)?;
+        synthetic::append_edges(&store, SEDIMENT_SEED, nodes, ops as u64, ROW_OPS)?;
+        let (edges, staged_rows, staged_ops) = catalog_testing::graph_write_counts(&store)?;
+        if sealed && staged_rows > 0 {
             let report = store.compact()?;
-            let rows: usize = report
+            let sealed_rows: usize = report
                 .published
                 .iter()
                 .filter(|c| c.class == "graph_layer")
                 .map(|c| c.sediment_rows)
                 .sum();
-            if rows != ops.div_ceil(ROW_OPS) {
-                bail!("--sealed: the compaction sealed {rows} graph rows: {report:?}");
-            }
+            anyhow::ensure!(
+                sealed_rows as u64 == staged_rows,
+                "compaction sealed {sealed_rows} of {staged_rows} graph rows: {report:?}"
+            );
         }
-        Ok((store, nodes))
+        let starts = catalog_testing::present_local_ids(&store)?;
+        anyhow::ensure!(
+            starts.len() == nodes as usize,
+            "incomplete canonical node corpus"
+        );
+        Ok(CorpusStore {
+            store,
+            starts,
+            edges,
+            staged_rows,
+            staged_ops,
+        })
+    }
+
+    fn hub(store: &SqliteStore) -> Result<LocalId> {
+        let id = NodeId::parse(HUB_UUID)?;
+        catalog_testing::with_main_graph(store, &budget(), |g| g.local(&id))?
+            .context("canonical hub is missing")
     }
 
     fn budget() -> QueryBudget {
@@ -301,26 +308,27 @@ mod imp {
 
     /// `args.queries` reads (after one untimed first load) from seeded start nodes, or all
     /// from `from`, over a store with `ops` pending graph ops.
-    fn reads(
-        case: &str,
-        args: &Args,
-        ops: usize,
-        caps: Caps,
-        from: Option<LocalId>,
-    ) -> Result<Value> {
+    fn reads(case: &str, args: &Args, ops: usize, caps: Caps, use_hub: bool) -> Result<Value> {
         let dir = scratch(case)?;
         let built = Instant::now();
-        let (store, nodes) = setup(&dir, args.edges, ops, args.sealed)?;
+        let corpus = setup(&dir, args, ops, args.sealed)?;
         let setup_ms = ms(built.elapsed());
-        let starts: Vec<LocalId> = (0..nodes).map(LocalId).collect();
-        let mut line = timed(&store, &starts, from, args.queries, caps)?;
-        drop(store);
-        let _ = std::fs::remove_dir_all(&dir);
+        let from = if use_hub {
+            Some(hub(&corpus.store)?)
+        } else {
+            None
+        };
+        let mut line = timed(&corpus.store, &corpus.starts, from, args.queries, caps)?;
         line["case"] = json!(case);
         line["corpus"] = json!("synthetic");
-        line["edges"] = json!(args.edges);
-        line["nodes"] = json!(nodes);
-        line["sediment_ops"] = json!(ops);
+        line["edge_attempts"] = json!(args.edges);
+        line["edges"] = json!(corpus.edges);
+        line["nodes"] = json!(corpus.starts.len());
+        line["sediment_attempts"] = json!(ops);
+        line["sediment_ops"] = json!(corpus.staged_ops);
+        line["sediment_rows_before_seal"] = json!(corpus.staged_rows);
+        drop(corpus);
+        let _ = std::fs::remove_dir_all(&dir);
         line["sealed"] = json!(args.sealed && ops > 0);
         line["setup_ms"] = json!(setup_ms);
         Ok(line)
@@ -391,69 +399,105 @@ mod imp {
     /// The store on disk: `kaban.db`'s bytes after a checkpoint, each table's and index's
     /// bytes (`dbstat`, or why it is not there) and the container's bytes.
     fn footprint(store: &SqliteStore, dir: &Path) -> Result<Value> {
-        let catalog_testing::DbFootprint { bytes: db, objects } =
-            catalog_testing::db_footprint(store)?;
+        let catalog_testing::DbFootprint {
+            bytes: db,
+            pages: (pages, page_size, freelist),
+            objects,
+        } = catalog_testing::db_footprint(store)?;
         let objects =
             objects.map_or_else(|e| json!(format!("dbstat unavailable: {e}")), |o| json!(o));
         let kbx = std::fs::metadata(dir.join("kaban.kbx")).map_or(0, |m| m.len());
-        Ok(json!({ "db_bytes": db, "objects": objects, "kbx_bytes": kbx }))
+        Ok(
+            json!({ "db_bytes": db, "page_count": pages, "page_size": page_size, "freelist_count": freelist, "objects": objects, "kbx_bytes": kbx }),
+        )
     }
 
-    /// The tie-order case (see the module documentation) on the synthetic corpus.
-    fn tie_order(args: &Args) -> Result<Value> {
-        let dir = scratch("tie-order")?;
-        let built = Instant::now();
-        let (store, nodes) = setup(&dir, args.edges, 0, false)?;
-        let setup_ms = ms(built.elapsed());
-        let footprint = footprint(&store, &dir)?;
-        let mut seed = SEED;
-        let mut pick = move || {
-            seed = seed
-                .wrapping_mul(6_364_136_223_846_793_005)
-                .wrapping_add(1_442_695_040_888_963_407);
-            LocalId(u32::try_from((seed >> 33) % u64::from(nodes)).unwrap_or(0))
-        };
-        let (cold_ms, cold_order_ms) = tie_read(&store, pick(), pick())?;
-        let (mut warm, mut warm_order) = (Vec::new(), Vec::new());
-        for _ in 0..args.queries {
-            let (q, o) = tie_read(&store, pick(), pick())?;
-            warm.push(q);
-            warm_order.push(o);
-        }
+    /// Query twice just after each canonical commit.
+    fn after_commits(
+        mut commit: impl FnMut(usize) -> Result<()>,
+        query: &mut impl FnMut() -> Result<(f64, f64)>,
+    ) -> Result<Value> {
         let (mut first, mut first_order, mut second, mut second_order) =
             (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-        for edge in synthetic::generate(SEDIMENT_SEED, ROUNDS as u64).edges {
-            let row = Records {
-                edges: vec![edge],
-                ..Records::default()
-            };
-            catalog_testing::stage_graph_sediment(&store, &row.encode())?;
-            let (q, o) = tie_read(&store, pick(), pick())?;
+        for round in 0..ROUNDS {
+            commit(round)?;
+            let (q, o) = query()?;
             first.push(q);
             first_order.push(o);
-            let (q, o) = tie_read(&store, pick(), pick())?;
+            let (q, o) = query()?;
             second.push(q);
             second_order.push(o);
         }
-        drop(store);
+        Ok(
+            json!({ "first_ms": quantiles(first), "first_order_ms": quantiles(first_order),
+            "second_ms": quantiles(second), "second_order_ms": quantiles(second_order) }),
+        )
+    }
+
+    fn tie_order(args: &Args) -> Result<Value> {
+        let dir = scratch("tie-order")?;
+        let built = Instant::now();
+        let corpus = setup(&dir, args, 0, false)?;
+        let setup_ms = ms(built.elapsed());
+        let store = &corpus.store;
+        let nodes = u32::try_from(corpus.starts.len())?;
+        let footprint = footprint(store, &dir)?;
+        let mut seed = SEED;
+        let mut pick = || {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            corpus.starts[((seed >> 33) % u64::from(nodes)) as usize]
+        };
+        let mut query = || tie_read(store, pick(), pick());
+        let (cold_ms, cold_order_ms) = query()?;
+        let (mut warm, mut warm_order) = (Vec::new(), Vec::new());
+        for _ in 0..args.queries {
+            let (q, o) = query()?;
+            warm.push(q);
+            warm_order.push(o);
+        }
+        let expand2 = timed(store, &corpus.starts, None, args.queries, EXPAND)?;
+        let hub_cap1500 = timed(store, &corpus.starts, Some(hub(store)?), args.queries, HUB)?;
+        let edge_commits = after_commits(
+            |round| synthetic::append_edges(store, SEDIMENT_SEED + round as u64, nodes, 1, 1),
+            &mut query,
+        )?;
+        let (edges_after, edge_rows, edge_ops) = catalog_testing::graph_write_counts(store)?;
+        let ctx = WriteCtx::new(WorkspaceId::default(), Actor::Agent);
+        let node_commits = after_commits(
+            |round| {
+                let op = Op::UpsertNode {
+                    id: NodeId::new(),
+                    node: NewNode {
+                        kind: "Fact".into(),
+                        text: format!("added {round}"),
+                        ..Default::default()
+                    },
+                };
+                store.apply_batch(WriteBatch::new(WorkspaceId::default(), vec![op]), &ctx)?;
+                Ok(())
+            },
+            &mut query,
+        )?;
+        let (_, final_rows, final_ops) = catalog_testing::graph_write_counts(store)?;
+        catalog_testing::advance_graph_cache_clock(Duration::from_secs(61));
+        let (expiry_first_ms, expiry_first_order_ms) = query()?;
+        let (expiry_second_ms, expiry_second_order_ms) = query()?;
+        let edges = corpus.edges;
+        drop(corpus);
         let _ = std::fs::remove_dir_all(&dir);
         Ok(json!({
-            "case": "tie-order",
-            "corpus": "synthetic",
-            "edges": args.edges,
-            "nodes": nodes,
-            "queries": args.queries,
-            "rounds": ROUNDS,
-            "setup_ms": setup_ms,
-            "footprint": footprint,
-            "cold_ms": cold_ms,
-            "cold_order_ms": cold_order_ms,
-            "warm_ms": quantiles(warm),
-            "warm_order_ms": quantiles(warm_order),
-            "after_commit_first_ms": quantiles(first),
-            "after_commit_first_order_ms": quantiles(first_order),
-            "after_commit_second_ms": quantiles(second),
-            "after_commit_second_order_ms": quantiles(second_order),
+            "case": "tie-order", "corpus": "synthetic", "edge_attempts": args.edges,
+            "edges": edges, "nodes": nodes, "queries": args.queries, "rounds": ROUNDS,
+            "setup_ms": setup_ms, "footprint": footprint, "expand2": expand2, "hub_cap1500": hub_cap1500,
+            "cold_ms": cold_ms, "cold_order_ms": cold_order_ms,
+            "warm_ms": quantiles(warm), "warm_order_ms": quantiles(warm_order),
+            "edge_commits": edge_commits, "node_commits": node_commits, "edges_after": edges_after,
+            "edge_sediment_rows": edge_rows, "edge_sediment_ops": edge_ops,
+            "node_sediment_rows": final_rows - edge_rows, "node_sediment_ops": final_ops - edge_ops,
+            "expiry_first_ms": expiry_first_ms, "expiry_first_order_ms": expiry_first_order_ms,
+            "expiry_second_ms": expiry_second_ms, "expiry_second_order_ms": expiry_second_order_ms,
         }))
     }
 
@@ -535,12 +579,15 @@ mod imp {
 
     /// C6 (wave 2 item 7.3): build the store here, then time a fresh child process's open,
     /// validating load and one small expand.
-    fn oneshot(edges: u64) -> Result<Value> {
+    fn oneshot(args: &Args) -> Result<Value> {
         let dir = scratch("oneshot")?;
         let built = Instant::now();
-        let (store, nodes) = setup(&dir, edges, 0, false)?;
+        let corpus = setup(&dir, args, 0, false)?;
+        let nodes = corpus.starts.len();
+        let edges = corpus.edges;
+        let attempts = args.edges;
         let setup_ms = ms(built.elapsed());
-        drop(store);
+        drop(corpus);
         let kbx = std::fs::metadata(dir.join("kaban.kbx")).map_or(0, |m| m.len());
         let dir_arg = dir.as_os_str().to_owned();
         let args = [
@@ -558,6 +605,7 @@ mod imp {
             bail!("the one-shot child failed");
         }
         let mut line: Value = serde_json::from_slice(&child.stdout).context("the child's line")?;
+        line["edge_attempts"] = json!(attempts);
         line["edges"] = json!(edges);
         line["nodes"] = json!(nodes);
         line["kbx_bytes"] = json!(kbx);
@@ -571,13 +619,17 @@ mod imp {
         let store = open(dir)?;
         let open_ms = ms(began.elapsed());
         let b = budget();
+        let id = NodeId::parse(HUB_UUID)?;
         let loading = Instant::now();
         let (load_ms, expand_ms, rows) = catalog_testing::with_main_graph(&store, &b, |g| {
+            let start = g
+                .local(&id)?
+                .ok_or_else(|| StoreError::NotFound(id.to_string()))?;
             let load_ms = ms(loading.elapsed());
             let t = Instant::now();
             let r = expand(
                 g.view(),
-                &[LocalId(1)],
+                &[start],
                 &RelSelection::All,
                 Direction::Out,
                 EXPAND,

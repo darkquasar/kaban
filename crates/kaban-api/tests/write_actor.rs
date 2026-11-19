@@ -31,7 +31,7 @@ fn the_service_stamps_the_actor_its_store_was_opened_as() {
     let conn = rusqlite::Connection::open(s.db()).unwrap();
     let actor: Option<String> = conn
         .query_row(
-            "SELECT actor_id FROM node WHERE id = ?1",
+            "SELECT w.actor_id FROM node n LEFT JOIN writer w ON w.id = n.writer_id WHERE n.id = ?1",
             [&written.id],
             |r| r.get(0),
         )
@@ -39,7 +39,7 @@ fn the_service_stamps_the_actor_its_store_was_opened_as() {
     assert_eq!(actor.as_deref(), Some("alice"));
     // every change row of the write (the insert and the service's own follow-up update)
     let change_actors: BTreeSet<Option<String>> = conn
-        .prepare("SELECT actor_id FROM changes")
+        .prepare("SELECT w.actor_id FROM changes c LEFT JOIN writer w ON w.id = c.writer_id")
         .unwrap()
         .query_map([], |r| r.get(0))
         .unwrap()

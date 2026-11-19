@@ -1071,11 +1071,36 @@ pub fn present_local_ids(store: &SqliteStore) -> Result<Vec<kaban_index_graph::L
     .collect()
 }
 
+/// Canonical edges, pending graph rows, and operations in those rows after a bench write.
+///
+/// # Errors
+/// SQLite errors or malformed sediment records.
+pub fn graph_write_counts(store: &SqliteStore) -> Result<(i64, u64, u64)> {
+    let conn = store.lock();
+    let edges = conn
+        .query_row("SELECT count(*) FROM edge", [], |r| r.get(0))
+        .sql()?;
+    let mut stmt = conn
+        .prepare("SELECT payload FROM cat_sediment WHERE class = 'graph_layer' AND dead IS NULL")
+        .sql()?;
+    let mut rows = stmt.query([]).sql()?;
+    let (mut count, mut ops) = (0, 0);
+    while let Some(row) = rows.next().sql()? {
+        let payload: Vec<u8> = row.get(0).sql()?;
+        ops += kaban_index_graph::Records::count_ops(&payload)
+            .map_err(super::graph_class::graph_error)?;
+        count += 1;
+    }
+    Ok((edges, count, ops))
+}
+
 /// A database's size on disk ([`db_footprint`]).
 #[derive(Debug)]
 pub struct DbFootprint {
     /// `page_count * page_size`.
     pub bytes: i64,
+    /// Database pages, page size in bytes and free pages.
+    pub pages: (i64, i64, i64),
     /// Each table's and index's bytes from `dbstat`, largest first (`Err` with SQLite's text
     /// when `dbstat` is not compiled in).
     pub objects: std::result::Result<Vec<(String, i64)>, String>,
@@ -1089,11 +1114,12 @@ pub fn db_footprint(store: &SqliteStore) -> Result<DbFootprint> {
     let conn = store.lock();
     conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
         .sql()?;
-    let bytes: i64 = conn
+    let pages: (i64, i64, i64) = conn
         .query_row(
-            "SELECT c.page_count * s.page_size FROM pragma_page_count() c, pragma_page_size() s",
+            "SELECT page_count, page_size, freelist_count
+             FROM pragma_page_count(), pragma_page_size(), pragma_freelist_count()",
             [],
-            |r| r.get(0),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .sql()?;
     let objects = conn
@@ -1103,7 +1129,11 @@ pub fn db_footprint(store: &SqliteStore) -> Result<DbFootprint> {
                 .collect::<rusqlite::Result<Vec<_>>>()
         })
         .map_err(|e| e.to_string());
-    Ok(DbFootprint { bytes, objects })
+    Ok(DbFootprint {
+        bytes: pages.0 * pages.1,
+        pages,
+        objects,
+    })
 }
 
 /// Rebuild `store`'s memory graph from its rows ([`GraphClass::rebuild_main`]).
