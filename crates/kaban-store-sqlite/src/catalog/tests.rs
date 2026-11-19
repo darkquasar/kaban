@@ -70,6 +70,15 @@ fn count(conn: &Connection, sql: &str) -> i64 {
     conn.query_row(sql, [], |r| r.get(0)).unwrap()
 }
 
+/// The latest generation (0 before the first): what a test compares against, since the
+/// registered classes' own commits publish generations too.
+const GENERATION: &str = "SELECT COALESCE(max(generation), 0) FROM cat_generation";
+
+/// [`GENERATION`] of `store`.
+fn latest_generation(store: &SqliteStore) -> i64 {
+    count(&store.lock(), GENERATION)
+}
+
 fn link(store: &SqliteStore, from: &str, to: &str) -> Result<()> {
     store
         .link(
@@ -239,7 +248,13 @@ fn a_class_that_writes_a_canonical_row_while_staging_is_refused_and_rolled_back(
             0,
             "the link committed"
         );
-        assert_eq!(count(&conn, "SELECT count(*) FROM cat_sediment"), 0);
+        assert_eq!(
+            count(
+                &conn,
+                "SELECT count(*) FROM cat_sediment WHERE class = 'test'"
+            ),
+            0
+        );
         assert_eq!(count(&conn, "SELECT count(*) FROM temp.cat_capture"), 0);
     }
 }
@@ -361,6 +376,8 @@ fn staging_cannot_outlive_its_generation_through_a_savepoint() {
             }),
         );
 
+        let before = latest_generation(&store);
+
         // Act
         let out = link(&store, &a, &b);
 
@@ -373,13 +390,21 @@ fn staging_cannot_outlive_its_generation_through_a_savepoint() {
         );
         if let Err(e) = out {
             assert_refused(&e, end);
-            assert_eq!(count(&conn, "SELECT count(*) FROM cat_sediment"), 0);
-            assert_eq!(count(&conn, "SELECT count(*) FROM cat_generation"), 0);
+            assert_eq!(
+                count(
+                    &conn,
+                    "SELECT count(*) FROM cat_sediment WHERE class = 'test'"
+                ),
+                0
+            );
+            assert_eq!(count(&conn, GENERATION), before);
         } else {
-            let latest = count(&conn, "SELECT max(generation) FROM cat_generation");
+            let latest = count(&conn, GENERATION);
             let off = count(
                 &conn,
-                &format!("SELECT count(*) FROM cat_sediment WHERE generation <> {latest}"),
+                &format!(
+                    "SELECT count(*) FROM cat_sediment WHERE class = 'test' AND generation <> {latest}"
+                ),
             );
             assert_eq!(off, 0, "{end}: sediment beside the pinned generation");
         }
@@ -406,26 +431,34 @@ fn a_later_failing_class_rolls_back_an_earlier_class_s_staging_and_its_generatio
         }),
     );
 
+    let before = latest_generation(&store);
+
     // Act: the failing commit, then a successful one
     assert!(link(&store, &a, &b).is_err());
     {
         let conn = store.lock();
-        assert_eq!(count(&conn, "SELECT count(*) FROM cat_sediment"), 0);
-        assert_eq!(count(&conn, "SELECT count(*) FROM cat_generation"), 0);
+        assert_eq!(
+            count(
+                &conn,
+                "SELECT count(*) FROM cat_sediment WHERE class = 'test'"
+            ),
+            0
+        );
+        assert_eq!(count(&conn, GENERATION), before);
     }
     fail.store(false, Ordering::SeqCst);
     link(&store, &a, &b).unwrap();
 
-    // Assert: the successful commit publishes generation 1 with its one row
+    // Assert: the successful commit publishes the next generation with its one row
     let conn = store.lock();
-    assert_eq!(
-        count(&conn, "SELECT max(generation) FROM cat_generation"),
-        1
-    );
+    assert_eq!(count(&conn, GENERATION), before + 1);
     assert_eq!(
         count(
             &conn,
-            "SELECT count(*) FROM cat_sediment WHERE generation = 1"
+            &format!(
+                "SELECT count(*) FROM cat_sediment WHERE class = 'test' AND generation = {}",
+                before + 1
+            )
         ),
         1
     );
@@ -679,7 +712,10 @@ fn assert_rolled_back(store: &SqliteStore, rid: i64, extent: u64, what: &str) {
         "{what}: the link committed"
     );
     assert_eq!(
-        count(&conn, "SELECT count(*) FROM cat_sediment"),
+        count(
+            &conn,
+            "SELECT count(*) FROM cat_sediment WHERE class = 'test'"
+        ),
         0,
         "{what}: sediment committed"
     );

@@ -372,10 +372,16 @@ fn compaction_seals_due_sediment_into_one_extent_of_main() {
     // Act
     let report = catalog_testing::compact(&store, unit(u64::MAX)).unwrap();
 
-    // Assert: one seal of both rows; main now holds their payloads and no pending row
+    // Assert: one seal of both rows; main now holds their payloads and no pending row (the
+    // test class's units only: the registered classes seal their own rows beside them)
     assert_eq!(report.skipped, Vec::new(), "{report:?}");
-    assert_eq!(report.published.len(), 1, "{report:?}");
-    let sealed = &report.published[0];
+    let published: Vec<_> = report
+        .published
+        .iter()
+        .filter(|c| c.class == "test")
+        .collect();
+    assert_eq!(published.len(), 1, "{report:?}");
+    let sealed = published[0];
     assert_eq!(
         (sealed.class, sealed.kind, sealed.sediment_rows),
         ("test", WorkKind::Seal, 2)
