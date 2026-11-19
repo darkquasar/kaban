@@ -45,16 +45,16 @@ fn open(s: &Scratch) -> SqliteStore {
         .unwrap()
 }
 
-/// The kinds of graph units a compaction published, and the extents it reclaimed.
-fn compact(store: &SqliteStore) -> (Vec<WorkKind>, Vec<u64>) {
-    let report = store.compact().unwrap();
-    let kinds = report
+/// The kinds of graph units a compaction published.
+fn compact(store: &SqliteStore) -> Vec<WorkKind> {
+    store
+        .compact()
+        .unwrap()
         .published
         .iter()
         .filter(|c| c.class == "graph_layer")
         .map(|c| c.kind)
-        .collect();
-    (kinds, report.reclaim.reclaimed)
+        .collect()
 }
 
 fn link(store: &SqliteStore, a: &NodeId, b: &NodeId) {
@@ -71,6 +71,17 @@ fn graph_chain(db: &Path) -> Vec<u64> {
              ORDER BY v.position",
         )
         .unwrap();
+    stmt.query_map([], |r| r.get::<_, i64>(0))
+        .unwrap()
+        .map(|id| u64::try_from(id.unwrap()).unwrap())
+        .collect()
+}
+
+/// Every extent id the catalog still records, live or retired: reclamation releases a
+/// retired extent's ranges and then drops its row.
+fn recorded_extents(db: &Path) -> BTreeSet<u64> {
+    let conn = rusqlite::Connection::open(db).unwrap();
+    let mut stmt = conn.prepare("SELECT id FROM cat_extent").unwrap();
     stmt.query_map([], |r| r.get::<_, i64>(0))
         .unwrap()
         .map(|id| u64::try_from(id.unwrap()).unwrap())
@@ -175,10 +186,10 @@ fn a_purged_node_leaves_no_entry_in_any_graph_extent_and_its_old_extents_are_rec
     link(&store, &n, &a);
     link(&store, &d, &n);
     link(&store, &a, &d);
-    assert_eq!(compact(&store).0, [WorkKind::Seal], "the base");
+    assert_eq!(compact(&store), [WorkKind::Seal], "the base");
     link(&store, &n, &b);
     link(&store, &a, &b);
-    assert_eq!(compact(&store).0, [WorkKind::Seal], "a sealed layer");
+    assert_eq!(compact(&store), [WorkKind::Seal], "a sealed layer");
     link(&store, &n, &c);
     link(&store, &c, &d);
     let rid_n = LocalId(rid(&db, &n));
@@ -192,14 +203,16 @@ fn a_purged_node_leaves_no_entry_in_any_graph_extent_and_its_old_extents_are_rec
     );
     assert!(!before.sediment.is_empty(), "n's last edge is pending");
 
-    // Act: delete n's rows in a real commit, purge its rid, compact
+    // Act: delete n's rows in a real commit (its cleanup purges every class), purge its rid
+    // again, compact
     store.forget(&n, ForgetMode::Purge, &ctx()).unwrap();
     let purged = catalog_testing::purge(&store, &[i64::from(rid_n.0)]).unwrap();
-    let (sealed, compact_reclaimed) = compact(&store);
+    let sealed = compact(&store);
     catalog_testing::checkpoint_tick(&store).unwrap();
-    let late = catalog_testing::reclaim_retired(&store).unwrap();
+    catalog_testing::reclaim_retired(&store).unwrap();
 
-    // Assert: no live graph extent names n; the rest survives; the old extents are gone
+    // Assert: no live graph extent names n; the rest survives; the old extents are gone,
+    // whichever pass reclaimed them
     assert!(purged.skipped.is_empty(), "{:?}", purged.skipped);
     assert_eq!(sealed, [WorkKind::Seal], "the pending rows seal");
     let after = catalog_testing::graph_contents(&store).unwrap();
@@ -232,16 +245,9 @@ fn a_purged_node_leaves_no_entry_in_any_graph_extent_and_its_old_extents_are_rec
         BTreeSet::from([b, d]),
         "a -> b, a -> d, c -> d survive"
     );
-    let reclaimed: BTreeSet<u64> = purged
-        .reclaim
-        .reclaimed
-        .iter()
-        .chain(&compact_reclaimed)
-        .chain(&late.reclaimed)
-        .copied()
-        .collect();
+    let recorded = recorded_extents(&db);
     assert!(
-        old.iter().all(|e| reclaimed.contains(e)),
-        "the retired extents {old:?} are reclaimed ({reclaimed:?})"
+        old.iter().all(|e| !recorded.contains(e)),
+        "the retired extents {old:?} are reclaimed (recorded: {recorded:?})"
     );
 }
