@@ -13,24 +13,30 @@
 //!   commit ==> stage: changed rids => active rows => RAM segment + tombstones => cat_sediment
 //!   read   ==> pin(main) => tiers (kbx spans) + text sediment => TextSnapshot => search_at
 //!   seal   ==> due pending packs => merge (hidden documents dropped) => one tier in main
+//!   fold   ==> consecutive tiers => one tier; a tombstone kept while an older tier needs it
+//!   purge  ==> each tier holding a purged rid => rewritten without its documents/tombstones
 //!   rebuild==> every active row => one tier in main; old tiers and packs retire (one commit)
 //! ```
 
-use std::path::PathBuf;
+use std::fs::File;
+use std::os::unix::fs::FileExt as _;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use kaban_core::query_budget::QueryBudget;
+use kaban_core::query_budget::{BudgetLease, QueryBudget};
 use kaban_core::text_index::{ExtentSpan, TextSnapshot};
-use kaban_core::{Durability, Result, ViewName};
+use kaban_core::{Durability, Result, StoreError, ViewName};
 use rusqlite::Connection;
+use sha2::{Digest as _, Sha256};
 use tantivy::directory::OwnedBytes;
 
 use super::Catalog;
 use super::capture::BatchChanges;
 use super::class::{ExtentClass, ExtentLocation, IndexClass};
 use super::commit::Stage;
+use super::kbx;
 use super::pin::{Pin, PinnedView};
-use super::tables::{ExtentRef, SedimentRow, sql_int};
+use super::tables::{ExtentRef, SedimentRow, sql_int, uint};
 use crate::sql_error::SqlResultExt;
 
 /// The classes a text read loads: the text tiers and their pending packs.
@@ -97,44 +103,67 @@ impl IndexClass for TextClass {
             .iter()
             .map(|r| OwnedBytes::new(r.payload.clone()))
             .collect();
-        kaban_index_tantivy::merge(&packs, &[], budget)
+        kaban_index_tantivy::merge(&packs, &[], None, budget)
     }
 
-    /// Folds nothing yet: the tiers stay as sealed.
+    /// The consecutive tiers `extents` of `main` merged into one: a document a newer tier's
+    /// tombstone hides is left out, and a tombstone is kept only while some tier older than
+    /// `extents` in the chain holds a document of its rid.
     fn fold(
         &self,
-        _pin: &Pin,
-        _extents: &[ExtentRef],
-        _budget: &QueryBudget,
+        pin: &Pin,
+        extents: &[ExtentRef],
+        budget: &QueryBudget,
     ) -> Result<Option<Vec<u8>>> {
-        Ok(None)
+        let main = pin
+            .loaded(&ViewName::Main, TEXT)
+            .ok_or_else(|| StoreError::NotFound("the pinned text of main".into()))?;
+        let tiers: Vec<&ExtentRef> = main
+            .chain()
+            .iter()
+            .filter(|e| e.class == ExtentClass::TextTier)
+            .collect();
+        let at = extents
+            .first()
+            .and_then(|first| tiers.iter().position(|e| *e == first))
+            .ok_or_else(|| StoreError::NotFound("a folded text tier in main".into()))?;
+        let (older, _older) = read_tiers(pin, &tiers[..at], budget)?;
+        let run: Vec<&ExtentRef> = extents.iter().collect();
+        let (run, _run) = read_tiers(pin, &run, budget)?;
+        kaban_index_tantivy::merge(&run, &[], Some(&older), budget)
     }
 
-    /// Rewrites nothing yet: a purged record's tombstones hide it from every read.
+    /// The tier `extent` without the documents of `rids` and their tombstones (the purge
+    /// rewrites every tier that holds them in one switch, so no older tier needs them);
+    /// `None` when it holds no document of them. The pending packs that name them are left
+    /// to their seal (amendment 4.2): the purge commit's own pack hides them from every read,
+    /// and a seal that takes that pack with them leaves them out.
     fn purge(
         &self,
-        _pin: &Pin,
-        _extent: &ExtentRef,
-        _rids: &[i64],
-        _budget: &QueryBudget,
+        pin: &Pin,
+        extent: &ExtentRef,
+        rids: &[i64],
+        budget: &QueryBudget,
     ) -> Result<Option<Vec<u8>>> {
-        Ok(None)
+        let (tier, _tier) = read_tiers(pin, &[extent], budget)?;
+        kaban_index_tantivy::merge(&tier, rids, None, budget)
     }
 
     /// Rebuild `main`'s text from the rows (spec 11 7.2.7), in one commit on the writer
-    /// connection `rows`: one tier of every active row replaces every text tier and pending
-    /// text pack, which retire (and are reclaimed once no pin reaches them). A catalog without
-    /// a container (in memory) holds only sediment: nothing to rebuild.
+    /// connection `rows`, under the maintenance budget (7.6): one tier of every active row
+    /// replaces every text tier and pending text pack ([`retire_text`]). A catalog without a
+    /// container (in memory) holds only sediment: nothing to rebuild.
     fn rebuild(&self, catalog: &Catalog, rows: &mut Connection) -> Result<()> {
         if catalog.container.is_none() {
             return Ok(());
         }
+        let maintenance = catalog.maintenance_budget();
+        let budget = QueryBudget::new(maintenance.memory_bytes, Some(maintenance.deadline));
         catalog.commit(rows, Durability::Normal, |txn| {
-            let budget = QueryBudget::new(STAGE_MEMORY_BYTES, None);
             let (active, _charged) = crate::index_rows::active_rows(txn.conn(), &budget)?;
             let tier = kaban_index_tantivy::segment(&active, &[], &budget)?;
             let generation = sql_int(txn.generation()?.0).sql()?;
-            retire_text(txn.conn(), generation)?;
+            retire_text(&catalog.kbx, txn.conn(), generation)?;
             let extent = catalog.append_extent(ExtentClass::TextTier, &tier)?;
             txn.publish(extent, &[ViewName::Main])?;
             Ok(())
@@ -142,32 +171,107 @@ impl IndexClass for TextClass {
     }
 }
 
-/// Retire every text tier (out of every chain, its claim cleared, dead since `generation`) and
-/// every pending text pack (dead at `generation`).
-fn retire_text(conn: &Connection, generation: i64) -> Result<()> {
+/// The bytes of the tiers `extents` from `pin`, their length reserved on `budget` before
+/// they are read (amendment 4.2: a consumer charges the spans it retains), with the lease
+/// that pays for them.
+fn read_tiers(
+    pin: &Pin,
+    extents: &[&ExtentRef],
+    budget: &QueryBudget,
+) -> Result<(Vec<OwnedBytes>, BudgetLease)> {
+    let bytes = extents
+        .iter()
+        .map(|e| match e.location {
+            ExtentLocation::Kbx { len, .. } => len,
+            ExtentLocation::File { .. } => 0,
+        })
+        .sum::<u64>()
+        .saturating_add(u64::try_from(extents.len() * size_of::<OwnedBytes>()).unwrap_or(u64::MAX));
+    let lease = budget.reserve(bytes)?;
+    let tiers = extents
+        .iter()
+        .map(|e| pin.bytes(e))
+        .collect::<Result<Vec<_>>>()?;
+    Ok((tiers, lease))
+}
+
+/// One text tier row as the rebuild judges it: id, range, content hash and liveness.
+type TierRow = (u64, Option<(u64, u64)>, Option<Vec<u8>>, bool);
+
+/// Take every text tier and pending text pack out of the catalog in the open writer
+/// transaction on `conn` (generation `generation`): chains and claims lose the tiers, a tier
+/// whose bytes are intact in the container `kbx` (its content hash matches) retires (and is
+/// reclaimed once no pin reaches it), one whose bytes are gone (a lost `kaban.kbx`) loses its
+/// row, so no reclamation ever releases a range the new container reuses; the pending packs
+/// are consumed.
+fn retire_text(kbx: &Path, conn: &Connection, generation: i64) -> Result<()> {
     let class = ExtentClass::TextTier.as_str();
-    let extents = "SELECT id FROM cat_extent WHERE class = ?1";
-    conn.execute(
-        &format!("DELETE FROM cat_view_extent WHERE extent_id IN ({extents})"),
-        [class],
-    )
-    .sql()?;
-    conn.execute(
-        &format!("DELETE FROM cat_claim WHERE extent IN ({extents})"),
-        [class],
-    )
-    .sql()?;
-    conn.execute(
-        "UPDATE cat_extent SET dead_since = ?1 WHERE class = ?2 AND dead_since IS NULL",
-        rusqlite::params![generation, class],
-    )
-    .sql()?;
+    let tiers: Vec<TierRow> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, kbx_offset, kbx_len, content_sha256, dead_since IS NULL
+                 FROM cat_extent WHERE class = ?1",
+            )
+            .sql()?;
+        let found = stmt
+            .query_map([class], |r| {
+                let range = match r.get::<_, Option<i64>>(1)? {
+                    Some(_) => Some((uint(r, 1)?, uint(r, 2)?)),
+                    None => None,
+                };
+                Ok((uint(r, 0)?, range, r.get(3)?, r.get(4)?))
+            })
+            .sql()?;
+        found.collect::<rusqlite::Result<_>>().sql()?
+    };
+    let file = kbx::open_existing(kbx).ok();
+    for (id, range, sha, live) in tiers {
+        let intact = match (&file, range, sha) {
+            (Some(file), Some((offset, len)), Some(sha)) => holds(file, offset, len, &sha),
+            _ => false,
+        };
+        let id = sql_int(id).sql()?;
+        conn.execute("DELETE FROM cat_view_extent WHERE extent_id = ?1", [id])
+            .sql()?;
+        conn.execute("DELETE FROM cat_claim WHERE extent = ?1", [id])
+            .sql()?;
+        if !intact {
+            conn.execute("DELETE FROM cat_extent WHERE id = ?1", [id])
+                .sql()?;
+        } else if live {
+            conn.execute(
+                "UPDATE cat_extent SET dead_since = ?1 WHERE id = ?2",
+                rusqlite::params![generation, id],
+            )
+            .sql()?;
+        }
+    }
     conn.execute(
         "UPDATE cat_sediment SET dead = ?1 WHERE class = ?2 AND dead IS NULL",
         rusqlite::params![generation, class],
     )
     .sql()?;
     Ok(())
+}
+
+/// Whether `file` holds `len` bytes at `offset` whose SHA-256 is `sha`.
+fn holds(file: &File, offset: u64, len: u64, sha: &[u8]) -> bool {
+    const CHUNK: u64 = 1 << 16;
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0_u8; 1 << 16];
+    let mut done = 0_u64;
+    while done < len {
+        let n = (len - done).min(CHUNK);
+        let Some(chunk) = usize::try_from(n).ok().and_then(|n| buf.get_mut(..n)) else {
+            return false;
+        };
+        if file.read_exact_at(chunk, offset + done).is_err() {
+            return false;
+        }
+        hasher.update(&*chunk);
+        done += n;
+    }
+    hasher.finalize().as_slice() == sha
 }
 
 impl Catalog {

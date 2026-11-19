@@ -259,6 +259,7 @@ mod tests {
         ExtentSpan, IndexRow, MatchMode, SeedFilter, TextIndex, TextQuery, TextSnapshot,
     };
     use kaban_core::{RecallQuery, StoreError};
+    use tantivy::directory::OwnedBytes;
 
     /// One active row of the default workspace.
     fn row(rid: i64, text: &str) -> IndexRow {
@@ -342,6 +343,100 @@ mod tests {
             "expected the budget's memory refusal, got {searched:?}"
         );
         assert_eq!(budget.live_bytes(), 0, "every charge was given back");
+    }
+
+    /// The rids of the hits for "quokka" over `sediment` (oldest first), sorted, repeats kept.
+    fn rids(sediment: &[&[u8]]) -> Vec<i64> {
+        let at = TextSnapshot {
+            generation: 1,
+            kbx: std::path::Path::new("unused.kbx"),
+            tiers: &[],
+            sediment,
+        };
+        let q = RecallQuery::default();
+        let budget = QueryBudget::new(u64::MAX, None);
+        let searched = adapter()
+            .search(&at, &lexical("quokka", &q), &budget)
+            .unwrap();
+        let kaban_core::text_index::Searched::Hits { hits, .. } = searched else {
+            panic!("unavailable");
+        };
+        let mut rids: Vec<i64> = hits.iter().map(|h| h.rid).collect();
+        rids.sort_unstable();
+        rids
+    }
+
+    /// The tombstones `pack` carries.
+    fn tombstones(pack: &[u8]) -> Vec<i64> {
+        let budget = QueryBudget::new(u64::MAX, None);
+        let opened = crate::kbx_dir::open(&[OwnedBytes::new(pack.to_vec())], &budget).unwrap();
+        opened
+            .all_tombstones(&mut budget.reserve(0).unwrap())
+            .unwrap()
+    }
+
+    /// A fold (spec 11 T7): a merged run of tiers keeps a tombstone only while an older tier
+    /// of the chain holds a document of its rid, so an update folded above its old version
+    /// never brings the old one back, and a fold of the whole chain keeps no tombstone.
+    #[test]
+    fn a_fold_keeps_only_the_tombstones_an_older_tier_still_needs() {
+        // Arrange: rid 1's first version, its update (a tombstone and the new version), rid 2
+        let unlimited = QueryBudget::new(u64::MAX, None);
+        let old = crate::segment(&[row(1, "quokka first version")], &[], &unlimited).unwrap();
+        let update = crate::segment(&[row(1, "quokka second version")], &[1], &unlimited).unwrap();
+        let other = crate::segment(&[row(2, "quokka neighbour")], &[], &unlimited).unwrap();
+        let bytes = |p: &[u8]| OwnedBytes::new(p.to_vec());
+
+        // Act: the newest two folded above the old tier, and the whole chain folded
+        let run = crate::merge(
+            &[bytes(&update), bytes(&other)],
+            &[],
+            Some(&[bytes(&old)]),
+            &unlimited,
+        )
+        .unwrap()
+        .unwrap();
+        let whole = crate::merge(
+            &[bytes(&old), bytes(&update), bytes(&other)],
+            &[],
+            Some(&[]),
+            &unlimited,
+        )
+        .unwrap()
+        .unwrap();
+
+        // Assert
+        assert_eq!(
+            rids(&[&old, &run]),
+            vec![1, 2],
+            "the old version stays hidden"
+        );
+        assert_eq!(tombstones(&run), vec![1]);
+        assert_eq!(rids(&[&whole]), vec![1, 2]);
+        assert_eq!(tombstones(&whole), Vec::<i64>::new());
+    }
+
+    /// A purge (spec 11 T7): the rewritten tier holds neither the purged rid's documents nor
+    /// its tombstones, and a tier without a document of it is left as it is.
+    #[test]
+    fn a_purged_tier_loses_the_rids_documents_and_tombstones() {
+        let unlimited = QueryBudget::new(u64::MAX, None);
+        let tier = crate::segment(
+            &[row(1, "quokka doomed"), row(2, "quokka kept")],
+            &[1, 2],
+            &unlimited,
+        )
+        .unwrap();
+        let tier = OwnedBytes::new(tier);
+
+        let purged = crate::merge(std::slice::from_ref(&tier), &[1], None, &unlimited)
+            .unwrap()
+            .unwrap();
+        let untouched = crate::merge(&[tier], &[3], None, &unlimited).unwrap();
+
+        assert_eq!(rids(&[&purged]), vec![2]);
+        assert_eq!(tombstones(&purged), vec![2]);
+        assert_eq!(untouched, None);
     }
 
     /// PC-17 (T7 midpoint review, cancellation): a search over many packs checks the budget

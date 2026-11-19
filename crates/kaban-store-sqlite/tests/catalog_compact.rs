@@ -19,7 +19,7 @@ use kaban_core::config::{CatalogCfg, SealOps};
 use kaban_core::query_budget::{Limit, QueryBudget};
 use kaban_core::{MemoryStore, StoreError};
 use kaban_store_sqlite::catalog_testing::{self, Window};
-use kaban_store_sqlite::{CompactBudget, SkipReason, Skipped, SqliteStore, WorkKind};
+use kaban_store_sqlite::{CompactBudget, Compacted, SkipReason, Skipped, SqliteStore, WorkKind};
 use std::sync::{Arc, Barrier, Mutex};
 use std::time::Duration;
 
@@ -777,12 +777,24 @@ fn a_purge_rewrites_the_extents_that_hold_a_rid_and_retires_them() {
     let purged = catalog_testing::purge(&store, &[rid_a]).unwrap();
 
     // Assert: nothing rewritten for the unknown rid; a's line is gone, b -> c is kept, and the
-    // old extent is retired
-    assert_eq!(untouched.published, Vec::new(), "{untouched:?}");
+    // old extent is retired (the test class's units only: the production classes purge too)
+    let test_units = |units: &[Compacted]| -> Vec<Compacted> {
+        units
+            .iter()
+            .filter(|u| u.class == "test")
+            .cloned()
+            .collect()
+    };
+    assert_eq!(
+        test_units(&untouched.published),
+        Vec::new(),
+        "{untouched:?}"
+    );
     assert_eq!(untouched.skipped, Vec::new(), "{untouched:?}");
-    assert_eq!(purged.published.len(), 1, "{purged:?}");
-    assert_eq!(purged.published[0].kind, WorkKind::Purge);
-    assert_eq!(purged.published[0].extents, sealed);
+    let purged_units = test_units(&purged.published);
+    assert_eq!(purged_units.len(), 1, "{purged:?}");
+    assert_eq!(purged_units[0].kind, WorkKind::Purge);
+    assert_eq!(purged_units[0].extents, sealed);
     assert_eq!(
         chain_bytes(&store),
         vec![format!("{}\n", rows[1].1).into_bytes()]

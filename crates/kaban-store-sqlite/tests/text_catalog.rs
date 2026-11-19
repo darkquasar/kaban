@@ -19,6 +19,7 @@ use kaban_core::{ForgetMode, MemoryStore, Node, RecallQuery};
 use kaban_index_tantivy::TantivyIndex;
 use kaban_store_sqlite::catalog_testing::{self, Window};
 use kaban_store_sqlite::{CompactBudget, SqliteStore};
+use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -307,4 +308,127 @@ fn a_reindex_rebuilds_the_text_from_the_rows_past_a_damaged_pack() {
         "{:?}",
         seeds(&store, "quokka")
     );
+}
+
+/// `kaban reindex text` after `kaban.kbx` is lost: the old tiers' rows name ranges of a
+/// container that is gone, so the rebuild drops those rows instead of retiring them, and no
+/// reclamation punches a range of the new container. The rebuilt tier answers after a
+/// compaction and the catalog verifies clean.
+#[test]
+fn a_reindex_after_the_container_is_lost_leaves_nothing_that_reclaims_the_new_tier() {
+    // Arrange: four records sealed into a tier, then the container deleted while closed
+    let s = Scratch::new("kaban-t7-text", "reindex-lost-kbx");
+    let open = || {
+        SqliteStore::open(&s.db(), &s.keys())
+            .unwrap()
+            .with_catalog_config(CatalogCfg {
+                seal_ops: SealOps {
+                    text: 1,
+                    ..SealOps::default()
+                },
+                ..CatalogCfg::default()
+            })
+            .unwrap()
+    };
+    let store = open();
+    for i in 0..4 {
+        created(&store, "Fact", &format!("quokka sealed record {i}"));
+    }
+    let sealed = store.compact().unwrap();
+    assert!(
+        sealed.published.iter().any(|p| p.class == "text_tier"),
+        "{sealed:?}"
+    );
+    drop(store);
+    std::fs::remove_file(s.db().with_file_name("kaban.kbx")).unwrap();
+    let store = open();
+
+    // Act
+    kaban_core::IngestStore::reindex_text(&store).unwrap();
+    let compacted = store.compact().unwrap();
+
+    // Assert
+    assert_eq!(
+        seed_count(&store, "quokka"),
+        4,
+        "{:?} after {compacted:?}",
+        seeds(&store, "quokka")
+    );
+    let verify = store.verify_catalog().unwrap();
+    assert_eq!(verify.inconsistencies(), 0, "{verify:?}");
+}
+
+/// A phrase only the bodies below hold, in a form no analyzer emits as a term (mixed case,
+/// punctuation inside, spaces): a text extent holds it only if it stores the body.
+const BODY_SENTINEL: &str = "Body-Only#Sentinel@Lantern Xq7 9931, kept verbatim";
+
+/// REC-05, hot half (spec 11 T7 Step 5): bodies written and read hot are byte-equal, and the
+/// text extents store none of them: no tier in the container and no pending text pack holds
+/// the body-only sentinel, while the index still finds both records.
+#[test]
+fn hot_bodies_read_back_byte_equal_and_no_text_extent_holds_their_text() {
+    // Arrange: one body sealed into a tier, one left in a pending pack; long enough, and
+    // non-ASCII, for the body codec to encode it
+    let s = Scratch::new("kaban-t7-text", "body-bytes");
+    let store = SqliteStore::open(&s.db(), &s.keys())
+        .unwrap()
+        .with_catalog_config(CatalogCfg {
+            seal_ops: SealOps {
+                text: 1,
+                ..SealOps::default()
+            },
+            ..CatalogCfg::default()
+        })
+        .unwrap();
+    let body = |tier: &str| {
+        let mut out = format!("{BODY_SENTINEL} ({tier}): ");
+        for i in 0..400 {
+            write!(out, "ligne {i} é ü 漢字 lantern; ").unwrap();
+        }
+        out
+    };
+    let sealed = created(&store, "Fact", &body("sealed"));
+    created(&store, "Fact", "a second pack so the first one seals");
+    let compacted = store.compact().unwrap();
+    assert!(
+        compacted.published.iter().any(|p| p.class == "text_tier"),
+        "{compacted:?}"
+    );
+    let pending = created(&store, "Fact", &body("pending"));
+
+    // Act: read the bodies back hot; scan the text extents
+    let read = |node: &Node| {
+        store
+            .get(&nid(&node.id), false)
+            .unwrap()
+            .expect("the record")
+            .text
+    };
+    let kbx = std::fs::read(s.db().with_file_name("kaban.kbx")).unwrap();
+    let packs: Vec<Vec<u8>> = {
+        let conn = rusqlite::Connection::open(s.db()).unwrap();
+        let mut stmt = conn
+            .prepare("SELECT payload FROM cat_sediment WHERE class = 'text_tier'")
+            .unwrap();
+        stmt.query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    };
+    let holds = |bytes: &[u8]| {
+        bytes
+            .windows(BODY_SENTINEL.len())
+            .any(|w| w == BODY_SENTINEL.as_bytes())
+    };
+
+    // Assert
+    assert_eq!(read(&sealed).as_bytes(), body("sealed").as_bytes());
+    assert_eq!(read(&pending).as_bytes(), body("pending").as_bytes());
+    assert!(!packs.is_empty(), "a pending text pack exists");
+    assert!(!holds(&kbx), "a text tier holds the body");
+    assert!(
+        !packs.iter().any(|p| holds(p)),
+        "a pending text pack holds the body"
+    );
+    assert_eq!(seed_count(&store, "lantern"), 2, "the bodies are indexed");
 }

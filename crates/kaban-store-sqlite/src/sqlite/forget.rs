@@ -253,36 +253,41 @@ impl SqliteStore {
     }
     /// The post-commit cleanup every canonical purge runs once its transaction committed
     /// (`forget(Purge)` and an imported purge share it): the database hygiene (SS-03), then
-    /// the text index's own report (SS-12), the scopes reported apart. Never an error and
-    /// never a rejection: the content is revoked whatever the cleanup reports. The database
-    /// side runs under the connection lock, released before the adapter is called (OWN-M
-    /// constraint 1).
+    /// the catalog's purge of every index class (spec 11 T7, KER-05: the extents that hold
+    /// the record are rewritten without it and the old ones reclaimed once no pin reaches
+    /// them), the scopes reported apart. Never an error and never a rejection: the content is
+    /// revoked whatever the cleanup reports. The database side runs under the connection lock,
+    /// released before the catalog's purge, which locks it per step.
     pub(crate) fn purge_cleanup(&self, rid: i64) -> PurgeCleanup {
         let report = {
             let conn = self.lock();
             Self::hygiene_report(Self::CAPABILITIES, Self::purge_hygiene(&conn))
         };
-        let index = self.seed_index().purge(&[rid]);
+        let index = self.catalog().purge(&self.conn, &[rid]);
         Self::scoped_purge_report(report, index)
     }
     /// The purge report over its scopes (SS-12): the database and its WAL (`report`'s own
-    /// detail), the index artefacts (`index`'s outcome; a failure is not cleaned, with its
-    /// class) and the temporary outputs (none are held by a purge). Physically cleaned only
-    /// when every scope is.
+    /// detail), the index extents (the catalog purge's counts; a failure with its class) and
+    /// the temporary outputs (none are held by a purge). The index scope is never claimed
+    /// cleaned: pending packs keep the record until their seal, and other readers' pins keep
+    /// the old extents until they release them.
     fn scoped_purge_report(
         report: PurgeCleanup,
-        index: Result<kaban_core::text_index::PurgeOutcome>,
+        index: Result<crate::PurgeReport>,
     ) -> PurgeCleanup {
-        let (index_cleaned, index_detail) = match index {
-            Ok(outcome) => (
-                outcome.cleaned,
-                outcome.detail.unwrap_or_else(|| "cleaned".to_owned()),
+        let index_detail = match index {
+            Ok(purged) => format!(
+                "{} class(es) rewritten, {} skipped (purge again), {} retired extent(s) pending \
+                 reclamation",
+                purged.published.len(),
+                purged.skipped.len(),
+                purged.reclaim.pending.len()
             ),
-            Err(e) => (false, format!("erasure failed: {e}")),
+            Err(e) => format!("purge failed: {e}"),
         };
         let database = report.cleanup.unwrap_or_else(|| "cleaned".to_owned());
         PurgeCleanup {
-            physically_cleaned: report.physically_cleaned && index_cleaned,
+            physically_cleaned: false,
             cleanup: Some(format!(
                 "database/WAL: {database}; index: {index_detail}; temporary outputs: none held"
             )),

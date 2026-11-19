@@ -64,7 +64,13 @@ fn a_purge_lists_the_node_and_all_three_of_its_edges() {
         )
         .unwrap();
     assert_eq!(left, 0, "the purge removes the hub's edges");
-    let purge = observed.change_sets().last().cloned().unwrap_or_default();
+    // the purge's own commit: the catalog purge after it commits again, changing no row
+    let purge = observed
+        .change_sets()
+        .into_iter()
+        .rev()
+        .find(|set| !set.is_empty())
+        .unwrap_or_default();
     let node = ObservedChange::Node {
         rid: h,
         op: ObservedOp::Update,
