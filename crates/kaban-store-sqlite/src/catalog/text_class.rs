@@ -17,6 +17,13 @@ use super::tables::{ExtentRef, SedimentRow};
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct TextClass;
 
+impl TextClass {
+    /// The class every writer catalog registers (`super::classes`).
+    pub(crate) fn new() -> Self {
+        Self
+    }
+}
+
 impl IndexClass for TextClass {
     fn classes(&self) -> &[ExtentClass] {
         &[ExtentClass::TextTier]

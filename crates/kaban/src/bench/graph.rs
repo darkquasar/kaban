@@ -2,7 +2,11 @@
 
 use std::process::ExitCode;
 
+/// The graph bench's arguments (empty until its owning task fills them).
+#[derive(clap::Args)]
+pub(crate) struct Args {}
+
 /// Not delivered yet: refused with exit 4.
-pub(crate) fn run() -> ExitCode {
+pub(crate) fn run(_args: &Args) -> ExitCode {
     super::not_delivered("graph")
 }

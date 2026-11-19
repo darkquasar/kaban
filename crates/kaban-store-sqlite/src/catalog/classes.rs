@@ -10,7 +10,7 @@ use super::text_class::TextClass;
 
 /// Register the text, graph and code classes on `catalog`, in that order.
 pub(crate) fn register_all(catalog: &Catalog) {
-    catalog.register(Arc::new(TextClass));
-    catalog.register(Arc::new(GraphClass));
-    catalog.register(Arc::new(CodeClass));
+    catalog.register(Arc::new(TextClass::new()));
+    catalog.register(Arc::new(GraphClass::new()));
+    catalog.register(Arc::new(CodeClass::new()));
 }

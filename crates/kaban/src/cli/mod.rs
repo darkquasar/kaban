@@ -209,7 +209,7 @@ pub(crate) fn run(mut cli: Cli) -> ExitCode {
                 Some(crate::BenchCg::Catalog(args)) => return crate::bench::catalog::run(args),
                 Some(crate::BenchCg::Crash(args)) => return crate::bench::crash::run(args),
                 Some(crate::BenchCg::Text) => return crate::bench::text::run(),
-                Some(crate::BenchCg::Graph) => return crate::bench::graph::run(),
+                Some(crate::BenchCg::Graph(args)) => return crate::bench::graph::run(args),
                 Some(crate::BenchCg::Rollup) => return crate::bench::rollup::run(),
                 Some(crate::BenchCg::Query) => return crate::bench::query::run(),
                 Some(crate::BenchCg::Code) => return crate::bench::code::run(),

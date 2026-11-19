@@ -17,6 +17,13 @@ use super::tables::{ExtentRef, SedimentRow};
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct GraphClass;
 
+impl GraphClass {
+    /// The class every writer catalog registers (`super::classes`).
+    pub(crate) fn new() -> Self {
+        Self
+    }
+}
+
 impl IndexClass for GraphClass {
     fn classes(&self) -> &[ExtentClass] {
         &[ExtentClass::GraphLayer, ExtentClass::GraphBase]

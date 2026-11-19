@@ -159,7 +159,7 @@ enum BenchCg {
     /// The text index bench
     Text,
     /// The memory graph bench
-    Graph,
+    Graph(bench::graph::Args),
     /// The rollup bench
     Rollup,
     /// The query bench
