@@ -91,7 +91,7 @@ pub(crate) struct Args {
 #[cfg(feature = "bench")]
 pub(crate) fn run(args: &Args) -> ExitCode {
     imp::run(args).unwrap_or_else(|e| {
-        crate::cli::output::print_failure(&e);
+        crate::cli::output::print_failure(&format!("{e:#}"));
         ExitCode::FAILURE
     })
 }
@@ -126,7 +126,8 @@ mod imp {
         WorkspaceId, WriteBatch, WriteCtx,
     };
     use kaban_index_graph::{
-        Caps, Direction, LocalId, Records, RelSelection, build_base, expand, weighted_shortest_path,
+        Caps, Direction, GraphError, LocalId, Records, RelSelection, build_base, expand,
+        weighted_shortest_path,
     };
     use kaban_store_sqlite::{SqliteStore, catalog_testing};
     use serde_json::{Value, json};
@@ -270,7 +271,7 @@ mod imp {
         QueryBudget::new(u64::MAX, Some(Duration::from_secs(60)))
     }
 
-    fn graph_error(e: kaban_index_graph::GraphError) -> StoreError {
+    fn graph_error(e: GraphError) -> StoreError {
         StoreError::Backend {
             source: BackendSource::new(e),
         }
@@ -382,7 +383,8 @@ mod imp {
     }
 
     /// One tie-consuming query: a snapshot, main's graph loaded, its tie order, one weighted
-    /// shortest path from `src` to `dst`. Returns (whole query ms, order ms).
+    /// shortest path from `src` to `dst` (or its refusal at the caps). Returns (whole query ms,
+    /// order ms).
     fn tie_read(store: &SqliteStore, src: LocalId, dst: LocalId) -> Result<(f64, f64)> {
         let b = budget();
         let began = Instant::now();
@@ -390,9 +392,13 @@ mod imp {
             let t = Instant::now();
             let order = g.order()?;
             let order_ms = ms(t.elapsed());
-            weighted_shortest_path(g.view(), src, dst, &RelSelection::All, EXPAND, &*order, &b)
-                .map_err(graph_error)?;
-            Ok(order_ms)
+            // a search refused at its caps has still consumed the order
+            let path =
+                weighted_shortest_path(g.view(), src, dst, &RelSelection::All, EXPAND, &*order, &b);
+            match path {
+                Ok(_) | Err(GraphError::CapExceeded { .. }) => Ok(order_ms),
+                Err(e) => Err(graph_error(e)),
+            }
         })?;
         Ok((ms(began.elapsed()), order_ms))
     }
