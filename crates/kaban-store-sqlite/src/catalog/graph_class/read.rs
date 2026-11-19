@@ -13,7 +13,9 @@
 //! ```
 //!
 //! The cache (one entry per container and view, in this process) keeps what the newest
-//! generation seen opened: validated extents are reused only at that generation (their bytes
+//! generation seen opened, for one incarnation of the container ([`Incarnation`]: a database
+//! recreated at the same path restarts its generations, extent ids and sediment seqs, so an
+//! entry of the old one is dropped, never served): validated extents are reused only at that generation (their bytes
 //! hold that pin's lock, so an entry is replaced as soon as a newer generation loads, and an
 //! entry idle for [`IDLE`] is dropped at the next load), while the prepared sediment, which holds
 //! no bytes of the container, is carried forward and extended with the newer rows only
@@ -27,9 +29,10 @@
 )]
 
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::os::unix::fs::MetadataExt;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use kaban_core::ontology::{Ns, Qualified, stored_name};
 use kaban_core::query_budget::{BudgetLease, QueryBudget};
@@ -213,10 +216,38 @@ pub(super) fn main_chain(pin: &Pin) -> Result<Vec<ExtentRef>> {
     Ok(graph_chain(&main))
 }
 
+/// One incarnation of a container file: its device, inode and birth time, read when a load
+/// keeps an entry and again on every reuse. A database recreated at the same path (its
+/// container with it, as every open creates the container beside a new database) has a new
+/// container file whose birth time differs even where the file system reuses the inode. Where
+/// the file system records no birth time, device and inode alone identify it. A database
+/// recreated beside a container kept from the old one is not told apart (the container is
+/// then foreign to it: verification reports its old ranges as leaks).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Incarnation {
+    dev: u64,
+    ino: u64,
+    born: Option<SystemTime>,
+}
+
+impl Incarnation {
+    /// The incarnation of the container at `kbx`, `None` when it cannot be read (nothing is
+    /// cached then).
+    fn of(kbx: &Path) -> Option<Self> {
+        let meta = std::fs::symlink_metadata(kbx).ok()?;
+        Some(Self {
+            dev: meta.dev(),
+            ino: meta.ino(),
+            born: meta.created().ok(),
+        })
+    }
+}
+
 /// One view's opened state as the newest generation that loaded it left it.
 #[derive(Debug, Clone)]
 struct Entry {
     kbx: PathBuf,
+    incarnation: Incarnation,
     view: String,
     generation: Generation,
     chain: Vec<ExtentId>,
@@ -242,14 +273,23 @@ struct Rest {
 /// The process's cache of opened views (see the module documentation).
 static CACHE: Mutex<Vec<Entry>> = Mutex::new(Vec::new());
 
-/// The cache entry of `pin`'s container and `view` (a clone of its handles), `None` for a pin
-/// without a container. Entries idle past [`IDLE`] are dropped first.
-fn cached(pin: &Pin, view: &str) -> Option<Entry> {
+/// The incarnation of `pin`'s container, `None` for a pin without one (or one that cannot be
+/// read): such a pin's loads are not cached.
+fn incarnation(pin: &Pin) -> Option<Incarnation> {
     if pin.kbx_path().as_os_str().is_empty() {
         return None;
     }
+    Incarnation::of(pin.kbx_path())
+}
+
+/// The cache entry of `pin`'s container (at `incarnation`) and `view` (a clone of its
+/// handles). Entries idle past [`IDLE`], and an entry of another incarnation of the container,
+/// are dropped first.
+fn cached(pin: &Pin, incarnation: Incarnation, view: &str) -> Option<Entry> {
     let mut cache = CACHE.lock().unwrap_or_else(PoisonError::into_inner);
-    cache.retain(|e| e.used.elapsed() < IDLE);
+    cache.retain(|e| {
+        e.used.elapsed() < IDLE && (e.kbx != pin.kbx_path() || e.incarnation == incarnation)
+    });
     cache
         .iter()
         .find(|e| e.kbx == pin.kbx_path() && e.view == view)
@@ -257,14 +297,14 @@ fn cached(pin: &Pin, view: &str) -> Option<Entry> {
 }
 
 /// Keep `entry` as its container's and view's entry, unless the cache already holds a newer
-/// generation of them.
+/// generation of the same incarnation of them.
 fn keep(entry: Entry) {
     let mut cache = CACHE.lock().unwrap_or_else(PoisonError::into_inner);
     match cache
         .iter_mut()
         .find(|e| e.kbx == entry.kbx && e.view == entry.view)
     {
-        Some(e) if e.generation > entry.generation => {}
+        Some(e) if e.incarnation == entry.incarnation && e.generation > entry.generation => {}
         Some(e) => *e = entry,
         None => cache.push(entry),
     }
@@ -301,7 +341,7 @@ pub(super) fn seal_cached(
     let main = ViewName::Main.to_string();
     let ids: Vec<ExtentId> = chain.iter().map(|e| e.id).collect();
     let seqs: Vec<SedimentSeq> = rows.iter().map(|r| r.seq).collect();
-    let Some(mut entry) = cached(pin, &main) else {
+    let Some(mut entry) = incarnation(pin).and_then(|i| cached(pin, i, &main)) else {
         return Ok(None);
     };
     if entry.generation != pin.generation() || entry.chain != ids || !entry.seqs.starts_with(&seqs)
@@ -346,7 +386,8 @@ pub(crate) fn load_view<'t>(
     let ids: Vec<ExtentId> = chain.iter().map(|e| e.id).collect();
     let (seqs, _seqs_charge) = pending_seqs(rows, view, budget)?;
     let name = view.to_string();
-    let prior = cached(pin, &name);
+    let incarnation = incarnation(pin);
+    let prior = incarnation.and_then(|i| cached(pin, i, &name));
     let same = prior
         .as_ref()
         .filter(|e| e.generation == pin.generation() && e.chain == ids);
@@ -376,9 +417,10 @@ pub(crate) fn load_view<'t>(
     };
     let rels = Rels::read(rows)?;
     let rels_charge = budget.reserve(rels.bytes()).map_err(budget_exceeded)?;
-    if !pin.kbx_path().as_os_str().is_empty() {
+    if let Some(incarnation) = incarnation {
         keep(Entry {
             kbx: pin.kbx_path().to_path_buf(),
+            incarnation,
             view: name,
             generation: pin.generation(),
             chain: ids,

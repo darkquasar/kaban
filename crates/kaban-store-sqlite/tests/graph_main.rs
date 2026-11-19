@@ -126,6 +126,40 @@ fn an_edge_carries_its_rows_weight_and_time_and_unmappable_values_refuse_the_wri
     );
 }
 
+/// The `NodeId`s one hop out of `src` in `store`'s main graph.
+fn out_of(store: &SqliteStore, src: &NodeId) -> Vec<NodeId> {
+    selected(store, src, &[RelSelection::All]).remove(0)
+}
+
+#[test]
+fn a_database_recreated_at_the_same_path_loads_its_own_graph_not_the_cached_one() {
+    // Arrange: a store links a -> b and loads its graph (the process caches it); its database
+    // and container are deleted
+    let s = Scratch::new("kaban-t11-main", "recreated");
+    {
+        let store = SqliteStore::open(&s.db(), &s.keys()).unwrap();
+        let [a, b, _c] = ["a", "b", "c"].map(|t| nid(&created(&store, "Fact", t).id));
+        store
+            .link(&a, &b, "RELATES_TO", None, None, &ctx())
+            .unwrap();
+        assert_eq!(out_of(&store, &a), vec![b]);
+    }
+    std::fs::remove_dir_all(&s.0).unwrap();
+    std::fs::create_dir_all(&s.0).unwrap();
+
+    // Act: a new database at the same path, the same steps (so the same generations, rids
+    // and sediment seqs), but a -> c
+    let store = SqliteStore::open(&s.db(), &s.keys()).unwrap();
+    let [a, _b, c] = ["a", "b", "c"].map(|t| nid(&created(&store, "Fact", t).id));
+    store
+        .link(&a, &c, "RELATES_TO", None, None, &ctx())
+        .unwrap();
+    let reached = out_of(&store, &a);
+
+    // Assert: the new database's graph, not the cached one of the old
+    assert_eq!(reached, vec![c], "the recreated database's own edge a -> c");
+}
+
 /// Declare `n` more relations `{prefix}{i}` in one commit of `store`.
 fn declare(store: &SqliteStore, prefix: &str, n: u32) {
     catalog_testing::corrupt(
