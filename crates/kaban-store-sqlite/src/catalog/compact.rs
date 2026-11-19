@@ -670,10 +670,16 @@ impl Catalog {
                     let mut added = Vec::new();
                     let mut views = Vec::new();
                     let mut retired = Vec::new();
+                    // each output stays charged while the pass holds it
+                    let mut held = Vec::new();
                     for e in &unit.extents {
                         let Some(bytes) = class.purge(&pinned.pin, e, rids, &work)? else {
                             continue;
                         };
+                        held.push(
+                            work.reserve(bytes.len() as u64)
+                                .map_err(StoreError::BudgetExceeded)?,
+                        );
                         for view in pinned.views.iter().filter(|v| v.chain().contains(e)) {
                             views.push(ViewSwitch {
                                 view: view_name(view)?,

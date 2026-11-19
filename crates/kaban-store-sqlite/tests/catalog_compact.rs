@@ -803,6 +803,43 @@ fn a_purge_rewrites_the_extents_that_hold_a_rid_and_retires_them() {
 }
 
 #[test]
+fn a_purge_whose_outputs_outweigh_the_maintenance_memory_is_skipped_for_its_budget() {
+    // Arrange: two test-class extents of 10 MiB, each naming rid 7 once; each fits the 16 MiB
+    // ceiling alone, their purged outputs together do not
+    let s = Scratch::new("kaban-t6-compact", "purge-ceiling");
+    let store = SqliteStore::open(&s.db(), &s.keys())
+        .unwrap()
+        .with_catalog_config(CatalogCfg {
+            maintenance_memory_mib: 16,
+            ..policy()
+        })
+        .unwrap();
+    let _observed = catalog_testing::install_edge_sediment_class(&store);
+    let extent = [b"+ 7 8 R\n".to_vec(), b"+ 1 2 R\n".repeat(10 << 17)].concat();
+    let ids =
+        catalog_testing::append_and_publish_all(&store, &[extent.clone(), extent.clone()]).unwrap();
+
+    // Act
+    let report = catalog_testing::purge(&store, &[7]).unwrap();
+
+    // Assert: the test class's purge is skipped for its memory, nothing of it published, and
+    // the chain is as it was
+    let skipped: Vec<&Skipped> = report
+        .skipped
+        .iter()
+        .filter(|k| k.class == "test")
+        .collect();
+    assert_eq!(skipped.len(), 1, "{report:?}");
+    assert_eq!(skipped[0].extents, ids);
+    assert!(memory_refused(&skipped[0].reason), "{report:?}");
+    assert!(
+        report.published.iter().all(|u| u.class != "test"),
+        "{report:?}"
+    );
+    assert_eq!(chain_bytes(&store), vec![extent.clone(), extent]);
+}
+
+#[test]
 fn compaction_ticks_the_checkpoint_only_once_its_interval_elapsed() {
     // Arrange: an interval of a minute
     let s = Scratch::new("kaban-t6-compact", "tick");
