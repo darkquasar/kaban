@@ -582,7 +582,7 @@ fn graph_rows_seal_once_the_node_and_edge_operations_they_hold_reach_seal_ops() 
 }
 
 /// A scored query over `store`'s main graph under `b`: its tie order (the `Arc` it was handed,
-/// and the bytes asking for it reserved on `b`), then a PageRank over it.
+/// and the bytes asking for it reserved on `b`), then a `PageRank` over it.
 fn ranked(store: &SqliteStore, b: &QueryBudget) -> kaban_core::Result<(Arc<dyn StableOrder>, u64)> {
     catalog_testing::with_main_graph(store, b, |g| {
         let before = b.live_bytes();
