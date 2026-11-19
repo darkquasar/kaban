@@ -1017,6 +1017,41 @@ pub fn present_local_ids(store: &SqliteStore) -> Result<Vec<kaban_index_graph::L
     .collect()
 }
 
+/// A database's size on disk ([`db_footprint`]).
+#[derive(Debug)]
+pub struct DbFootprint {
+    /// `page_count * page_size`.
+    pub bytes: i64,
+    /// Each table's and index's bytes from `dbstat`, largest first (`Err` with SQLite's text
+    /// when `dbstat` is not compiled in).
+    pub objects: std::result::Result<Vec<(String, i64)>, String>,
+}
+
+/// `store`'s database on disk after a checkpoint (a bench's footprint).
+///
+/// # Errors
+/// SQLite errors of the checkpoint or the page count.
+pub fn db_footprint(store: &SqliteStore) -> Result<DbFootprint> {
+    let conn = store.lock();
+    conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
+        .sql()?;
+    let bytes: i64 = conn
+        .query_row(
+            "SELECT c.page_count * s.page_size FROM pragma_page_count() c, pragma_page_size() s",
+            [],
+            |r| r.get(0),
+        )
+        .sql()?;
+    let objects = conn
+        .prepare("SELECT name, sum(pgsize) FROM dbstat GROUP BY name ORDER BY 2 DESC")
+        .and_then(|mut stmt| {
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()
+        })
+        .map_err(|e| e.to_string());
+    Ok(DbFootprint { bytes, objects })
+}
+
 /// Rebuild `store`'s memory graph from its rows ([`GraphClass::rebuild_main`]).
 ///
 /// # Errors

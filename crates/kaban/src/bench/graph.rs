@@ -14,7 +14,8 @@
 //!               rows): the process's first (cold), --queries more at that generation (warm),
 //!               then rounds of one commit (one pending edge row) and two queries, the first
 //!               at the new generation (it prepares the order) and the second; whole query and
-//!               order_ms (asking for the order alone)
+//!               order_ms (asking for the order alone); first the store's footprint on
+//!               disk (kaban.db after a checkpoint, by table and index, and kaban.kbx)
 //!   link-wal => one single-link commit after another: kaban.db-wal growth per commit
 //!   oneshot  => C6: a fresh child process opens the store, loads (validates) main's graph
 //!               and runs one small expand; each phase timed
@@ -396,12 +397,24 @@ mod imp {
         Ok((ms(began.elapsed()), order_ms))
     }
 
+    /// The store on disk: `kaban.db`'s bytes after a checkpoint, each table's and index's
+    /// bytes (`dbstat`, or why it is not there) and the container's bytes.
+    fn footprint(store: &SqliteStore, dir: &Path) -> Result<Value> {
+        let catalog_testing::DbFootprint { bytes: db, objects } =
+            catalog_testing::db_footprint(store)?;
+        let objects =
+            objects.map_or_else(|e| json!(format!("dbstat unavailable: {e}")), |o| json!(o));
+        let kbx = std::fs::metadata(dir.join("kaban.kbx")).map_or(0, |m| m.len());
+        Ok(json!({ "db_bytes": db, "objects": objects, "kbx_bytes": kbx }))
+    }
+
     /// The tie-order case (see the module documentation) on the synthetic corpus.
     fn tie_order(args: &Args) -> Result<Value> {
         let dir = scratch("tie-order")?;
         let built = Instant::now();
         let (store, nodes) = setup(&dir, args.edges, 0, false)?;
         let setup_ms = ms(built.elapsed());
+        let footprint = footprint(&store, &dir)?;
         let mut seed = SEED;
         let mut pick = move || {
             seed = seed
@@ -441,6 +454,7 @@ mod imp {
             "queries": args.queries,
             "rounds": ROUNDS,
             "setup_ms": setup_ms,
+            "footprint": footprint,
             "cold_ms": cold_ms,
             "cold_order_ms": cold_order_ms,
             "warm_ms": quantiles(warm),
