@@ -38,7 +38,7 @@ use kaban_index_graph::{
 use rusqlite::{Connection, OptionalExtension, Transaction};
 
 use super::{CLASSES, GraphRefused, PURGED, SEDIMENT, graph_error};
-use crate::catalog::pin::{Pin, PinnedView, budget_exceeded};
+use crate::catalog::pin::{OutsidePin, Pin, PinnedView, budget_exceeded};
 use crate::catalog::tables::{ExtentId, ExtentRef, Generation, SedimentRow, SedimentSeq};
 use crate::sql_error::SqlResultExt;
 
@@ -181,12 +181,13 @@ fn graph_chain(view: &PinnedView) -> Vec<ExtentRef> {
 /// compaction's pins do).
 ///
 /// # Errors
-/// `OutsidePin` when the pin has not loaded `main`; SQLite errors.
+/// `OutsidePin` when the pin has not loaded `main` for the graph's classes.
 pub(super) fn main_chain(pin: &Pin) -> Result<Vec<ExtentRef>> {
-    // a loaded view is returned from the pin's cache without touching the connection; this
-    // one, outside every pin, refuses a load that is not cached
-    let none = Connection::open_in_memory().sql()?;
-    let main = pin.load_view(&none, &ViewName::Main)?;
+    let main = pin
+        .loaded(&ViewName::Main, CLASSES)
+        .ok_or_else(|| StoreError::Backend {
+            source: BackendSource::new(OutsidePin),
+        })?;
     Ok(graph_chain(&main))
 }
 
@@ -316,7 +317,7 @@ pub(crate) fn load_view<'t>(
     view: &ViewName,
     budget: &QueryBudget,
 ) -> Result<LoadedView<'t>> {
-    let pinned = pin.load_view(rows, view)?;
+    let pinned = pin.load_view(rows, view, CLASSES)?;
     let chain = graph_chain(&pinned);
     let pending: Vec<&SedimentRow> = pinned
         .sediment()

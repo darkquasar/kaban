@@ -10,11 +10,14 @@
 mod common;
 
 use common::{Scratch, created, ctx, nid};
+use kaban_core::config::{CatalogCfg, SealOps};
 use kaban_core::query_budget::QueryBudget;
-use kaban_core::{MemoryStore, NodeId, StoreError};
+use kaban_core::{
+    IngestStore, MemoryStore, NewNode, NodeId, Op, StoreError, WorkspaceId, WriteBatch,
+};
 use kaban_index_graph::{Caps, Direction, RelSelection, expand};
-use kaban_store_sqlite::SqliteStore;
 use kaban_store_sqlite::catalog_testing;
+use kaban_store_sqlite::{SqliteStore, WorkKind};
 use std::time::Duration;
 
 fn budget() -> QueryBudget {
@@ -248,4 +251,54 @@ fn relation_ids_cover_every_u16_without_aliasing_survive_a_rebuild_and_refuse_wh
     after[0].push(last.clone());
     after[5] = vec![last.clone()];
     assert_eq!(selected(&store, &hub, &selections), after);
+}
+
+#[test]
+fn graph_rows_seal_once_the_node_and_edge_operations_they_hold_reach_seal_ops() {
+    // Arrange: a graph seal is due at 3 operations; one commit stages 2 node adds
+    let s = Scratch::new("kaban-t11-main", "seal-due");
+    let store = SqliteStore::open(&s.db(), &s.keys())
+        .unwrap()
+        .with_catalog_config(CatalogCfg {
+            seal_ops: SealOps {
+                graph: 3,
+                ..SealOps::default()
+            },
+            checkpoint_interval_ms: 60_000,
+            ..CatalogCfg::default()
+        })
+        .unwrap();
+    let nodes = |n: usize| {
+        let ops = (0..n)
+            .map(|i| Op::UpsertNode {
+                id: NodeId::new(),
+                node: NewNode {
+                    kind: "Fact".into(),
+                    text: format!("node {i}"),
+                    ..Default::default()
+                },
+            })
+            .collect();
+        store
+            .apply_batch(WriteBatch::new(WorkspaceId::default(), ops), &ctx())
+            .unwrap();
+    };
+    let graph_seals = || {
+        let report = store.compact().unwrap();
+        report
+            .published
+            .iter()
+            .filter(|c| c.class == "graph_layer" && c.kind == WorkKind::Seal)
+            .count()
+    };
+    nodes(2);
+
+    // Act: compact below the threshold, then after one more single-node commit
+    let below = graph_seals();
+    nodes(1);
+    let reached = graph_seals();
+
+    // Assert: two operations in one row are not due; three in two rows are
+    assert_eq!(below, 0, "2 operations do not reach seal_ops 3");
+    assert_eq!(reached, 1, "3 operations reach seal_ops 3");
 }

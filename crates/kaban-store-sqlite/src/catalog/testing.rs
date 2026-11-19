@@ -972,8 +972,11 @@ pub struct GraphContents {
 pub fn graph_contents(store: &SqliteStore) -> Result<GraphContents> {
     let budget = QueryBudget::new(u64::MAX, None);
     let conn = store.lock();
-    let pin = store.catalog().pin(&conn, &budget, &[ViewName::Main])?;
-    let main = pin.load_view(&conn, &ViewName::Main)?;
+    let classes = &[ExtentClass::GraphLayer, ExtentClass::GraphBase];
+    let pin = store
+        .catalog()
+        .pin(&conn, &budget, &[(ViewName::Main, classes)])?;
+    let main = pin.load_view(&conn, &ViewName::Main, classes)?;
     let graph = |c: ExtentClass| matches!(c, ExtentClass::GraphBase | ExtentClass::GraphLayer);
     let extents = main
         .chain()

@@ -135,6 +135,25 @@ impl Records {
         out
     }
 
+    /// The number of node and edge records in a sediment blob, read from its header and stream
+    /// counts alone (no record is decoded, nothing is allocated).
+    ///
+    /// # Errors
+    /// [`GraphError::Corrupt`] on a bad header or a stream count that overruns the blob.
+    pub fn count_ops(bytes: &[u8]) -> Result<u64, GraphError> {
+        let mut r = Reader::new(bytes);
+        if r.take(RECORDS_MAGIC.len(), "records magic")? != RECORDS_MAGIC {
+            return Err(corrupt("records magic"));
+        }
+        if r.u8("records version")? != RECORDS_VERSION {
+            return Err(corrupt("records version"));
+        }
+        let edges = r.count(EDGE_BYTES, "edge records")?;
+        r.take(edges * EDGE_BYTES, "edge records")?;
+        let nodes = r.count(NODE_BYTES, "node records")?;
+        Ok(edges as u64 + nodes as u64)
+    }
+
     /// Decode a sediment blob into query-owned records. Every vector and fact payload is
     /// reserved against `budget` (its capacity plus allocation metadata) before it is
     /// allocated; the charge stays live as long as the returned [`DecodedRecords`] and is

@@ -186,10 +186,17 @@ impl IndexClass for GraphClass {
         txn.put_sediment(SEDIMENT, &records.encode())?;
         Ok(())
     }
-    /// One row counts one operation until T11 and T16 count the operations inside the rows
-    /// (one commit is one row).
+    /// Due once the node and edge operations the rows hold (read from each row's header, not
+    /// decoded) reach `ops`.
     fn seal_due(&self, rows: &[&SedimentRow], ops: u32) -> Result<bool> {
-        Ok(rows.len() >= ops as usize)
+        let mut held = 0_u64;
+        for r in rows.iter().filter(|r| r.class == SEDIMENT) {
+            held += Records::count_ops(&r.payload).map_err(graph_error)?;
+            if held >= u64::from(ops) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// The layer of `rows` (main's pending graph rows, oldest first) over main's graph chain at
@@ -274,14 +281,9 @@ impl IndexClass for GraphClass {
         Ok(None)
     }
 
-    /// The graph's rebuild commits on the writer connection ([`GraphClass::rebuild_main`]):
-    /// this shared borrow cannot open a writer transaction, so it refuses by name.
-    fn rebuild(&self, _catalog: &Catalog, _rows: &mut Connection) -> Result<()> {
-        Err(StoreError::Backend {
-            source: BackendSource::new(std::io::Error::other(
-                "graph_rebuild_needs_writer: the graph rebuild commits on the writer connection",
-            )),
-        })
+    /// [`GraphClass::rebuild_main`].
+    fn rebuild(&self, catalog: &Catalog, rows: &mut Connection) -> Result<()> {
+        Self::rebuild_main(catalog, rows)
     }
 }
 
@@ -340,8 +342,8 @@ impl From<GraphRefused> for StoreError {
     }
 }
 
-/// `e` as the store's error; a budget refusal stays the budget's own error, so compaction
-/// treats it as a skip and retries smaller.
+/// `e` as the store's error; a budget refusal is the store's own
+/// [`StoreError::BudgetExceeded`], so compaction treats it as a skip and retries smaller.
 pub(crate) fn graph_error(e: GraphError) -> StoreError {
     match e {
         GraphError::BudgetExceeded { limit, value } => {
@@ -350,7 +352,7 @@ pub(crate) fn graph_error(e: GraphError) -> StoreError {
                 "cancelled" => Limit::Cancelled,
                 _ => Limit::Memory,
             };
-            budget_exceeded(BudgetExceeded { limit, value })
+            StoreError::BudgetExceeded(BudgetExceeded { limit, value })
         }
         other => StoreError::Backend {
             source: BackendSource::new(other),
