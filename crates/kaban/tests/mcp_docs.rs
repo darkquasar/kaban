@@ -115,12 +115,11 @@ fn index_docs_over_the_fixtures_then_status_resource_and_a_chunk_card() {
     assert_eq!(report["skipped_forgotten"], 0, "{report}");
     assert_eq!(report["sections_tombstoned"], 0, "{report}");
     assert_eq!(again["skipped_forgotten"], 0, "{again}");
-    // the status golden (the stamp and lag vary); DI2.5: the Markdown fixtures flag no
+    // the status golden (the stamp varies); DI2.5: the Markdown fixtures flag no
     // `table_unknown` chunk, so the zero total is omitted from the wire
     assert!(status["last_run"].is_string(), "{status}");
     assert!(status.get("table_unknown_chunks").is_none(), "{status}");
     status["last_run"] = json!("[last_run]");
-    status["outbox_lag"] = json!("[outbox_lag]");
     // This suite also qualifies the full download profile; assert the actual optional
     // extractor before comparing the feature-independent status shape.
     let extractors = status["extractors"].as_array_mut().unwrap();
@@ -185,7 +184,6 @@ fn two_concurrent_index_docs_calls_over_one_workspace_serialise() {
         let mut body = read_resource(srv, "kaban://documents?limit=500");
         assert!(body["status"]["last_run"].is_string(), "{body}");
         body["status"]["last_run"] = json!("[last_run]");
-        body["status"]["outbox_lag"] = json!("[outbox_lag]");
         body
     };
 

@@ -23,7 +23,6 @@ use kaban_policy::Policy;
 use kaban_store_sqlite::SqliteStore;
 use serde_json::{Value, json};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
 /// Hits the builtin credential rule `aws-access-key-id` (always reject); assembled at run time
 /// so no key-shaped literal sits in the source.
@@ -91,40 +90,33 @@ fn a_rejected_remember_never_yields_committed_and_moves_no_sequence() {
     assert_identities(&store, &ok.receipt);
 }
 
-/// Spec 05 OWN-M (constraint 2): the store projects its own commit after the transaction,
-/// and a projection that cannot publish (another holder owns the `text-index` lease, as a
-/// serving process would) never turns the committed write into a rejection. The receipt is
-/// `committed_not_yet_searchable` with its position, the record is stored, and once the lease
-/// is back the next write publishes and reports `committed`.
+/// Spec 11 T7 (KER-01, Step 1): text is searchable at commit, so a write is `committed` and a
+/// recall finds it as soon as the write returns, whatever another process holds (here the
+/// `text-index` lease a serving process once held): there is no lag outcome and no wait.
 #[test]
-fn a_write_whose_projection_cannot_publish_reports_committed_not_yet_searchable() {
+fn a_write_is_committed_and_recalled_at_return_whoever_holds_the_text_index_lease() {
     let s = Scratch::new("ss10-receipt", "lease-held");
     let (store, api) = file_store_api(&s);
-    let lease = store
+    let _held = store
         .lease_acquire("text-index", "another:holder", 60)
         .unwrap()
         .unwrap();
 
-    let pending = api
-        .remember(fact("quokka committed, not yet searchable"))
-        .unwrap();
+    let written = api.remember(fact("quokka committed at return")).unwrap();
 
+    assert_eq!(written.receipt.outcome, WriteOutcome::Committed);
+    assert_eq!(written.receipt.seq, Some(store.changes_head().unwrap()));
+    assert_identities(&store, &written.receipt);
+    let found = store
+        .recall(&kaban_core::RecallQuery {
+            query: "quokka".into(),
+            ..Default::default()
+        })
+        .unwrap();
     assert_eq!(
-        pending.receipt.outcome,
-        WriteOutcome::CommittedNotYetSearchable
+        found.iter().map(|h| h.node.id.as_str()).collect::<Vec<_>>(),
+        [written.id.as_str()]
     );
-    assert_eq!(pending.receipt.seq, Some(store.changes_head().unwrap()));
-    assert_identities(&store, &pending.receipt);
-    assert!(
-        store
-            .get(&NodeId::parse(&pending.id).unwrap(), false)
-            .unwrap()
-            .is_some(),
-        "the write stands"
-    );
-    store.lease_release(&lease).unwrap();
-    let published = api.remember(fact("quokka searchable")).unwrap();
-    assert_eq!(published.receipt.outcome, WriteOutcome::Committed);
 }
 
 /// D3 review d3-10: the rollback happens inside the mutation transaction after partial work.
@@ -190,9 +182,6 @@ fn a_committed_forget_carries_its_transaction_sequence_and_the_store_identities(
 /// D3 review d3-2: the identities are per database and read once when the service is built,
 /// so a committed write never fails on reading them afterwards; the rows gone from
 /// `index_meta` after construction change nothing in the receipt's identities or position.
-/// The store's lineage-bound index (spec 05 OWN-M, amendment 2) cannot serve a database whose
-/// lineage key is gone, so the barrier reports the committed write as not yet searchable,
-/// never as a failure.
 #[test]
 fn a_committed_write_keeps_its_receipt_when_the_identities_cannot_be_read_after_the_commit() {
     let s = Scratch::new("kaban-receipt", "identities");
@@ -213,11 +202,9 @@ fn a_committed_write_keeps_its_receipt_when_the_identities_cannot_be_read_after_
     let r = api
         .remember(fact("durable whatever the receipt read"))
         .expect("a write that committed is never an error");
-    assert!(
-        matches!(
-            r.receipt.outcome,
-            WriteOutcome::Committed | WriteOutcome::CommittedNotYetSearchable
-        ),
+    assert_eq!(
+        r.receipt.outcome,
+        WriteOutcome::Committed,
         "{:?}",
         r.receipt
     );
@@ -516,32 +503,6 @@ fn a_post_tool_use_that_records_evidence_reports_committed() {
     assert_eq!(nothing.receipt, None, "{nothing:?}");
 }
 
-/// A hook's committed write is `committed`, or `committed_not_yet_searchable` when the text
-/// projector missed the hook's quarter-second barrier (a loaded machine): never a rejection.
-/// A pending one must become searchable at its position within a generous bound, each try one
-/// full write barrier that drives the store's own drain and polls the watermark.
-fn assert_committed_and_searchable(api: &KabanApi, receipt: &WriteReceipt) {
-    if receipt.outcome == WriteOutcome::Committed {
-        return;
-    }
-    assert_eq!(
-        receipt.outcome,
-        WriteOutcome::CommittedNotYetSearchable,
-        "{receipt:?}"
-    );
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while api
-        .await_searchable(api.committed_receipt(receipt.seq))
-        .outcome
-        != WriteOutcome::Committed
-    {
-        assert!(
-            Instant::now() < deadline,
-            "the committed write never became searchable: {receipt:?}"
-        );
-    }
-}
-
 /// D3 review d3-1 (SS-10 "post-commit failure never becomes rejection"): `hook fix` commits
 /// the Improvement with its `FIXED_BY` edge through `remember`, then patches the Failure in a
 /// second transaction. A failure of that patch (injected: a trigger aborts the props update)
@@ -574,7 +535,7 @@ fn a_fix_whose_failure_patch_fails_after_the_improvement_committed_reports_commi
         .receipt
         .clone()
         .expect("the Improvement committed: {out:?}");
-    assert_committed_and_searchable(&api, &receipt);
+    assert_eq!(receipt.outcome, WriteOutcome::Committed, "{receipt:?}");
     assert!(
         receipt.seq.unwrap() > head,
         "the Improvement and its edge are in the log: {out:?}"
@@ -621,7 +582,7 @@ fn a_failure_whose_session_pairing_fails_after_the_record_committed_reports_comm
         &failure_envelope("make test"),
     );
     let receipt = out.receipt.clone().expect("the Failure committed: {out:?}");
-    assert_committed_and_searchable(&api, &receipt);
+    assert_eq!(receipt.outcome, WriteOutcome::Committed, "{receipt:?}");
     assert!(receipt.seq.unwrap() > head, "{out:?}");
     assert_eq!(receipt.seq, Some(store.changes_head().unwrap()));
     assert_identities(&store, &receipt);

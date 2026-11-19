@@ -12,11 +12,8 @@ use kaban_core::{GraphStore, IndexMeta};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-/// What became of the requested mutation (SS-10). On FTS5 the index is written in the
-/// mutation's own transaction, so a commit is searchable at once. An index with its own
-/// storage (Tantivy, SS-09) publishes behind the commit: the service waits one bounded
-/// barrier for the serving reader to cover the receipt's position and otherwise reports the
-/// third outcome, which is never a rejection and is never replayed. The enum is
+/// What became of the requested mutation (SS-10). Text is searchable at commit (spec 11 T7),
+/// so a committed mutation is visible to every search once the write returns. The enum is
 /// `non_exhaustive` so a further outcome lands without touching a caller.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -27,10 +24,6 @@ pub enum WriteOutcome {
     Rejected,
     /// Committed: the state is incorporated through the receipt's `seq`. CLI status 0.
     Committed,
-    /// Committed, and the search index had not incorporated the receipt's position when the
-    /// visibility barrier expired or failed: the write stands, a later search will show it,
-    /// do not replay the mutation. CLI status 6.
-    CommittedNotYetSearchable,
 }
 
 /// The receipt of one public write (SS-10), independent of transport.
@@ -42,7 +35,7 @@ pub enum WriteOutcome {
 /// (`rid`, `rowid`) may appear in a receipt or beside it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct WriteReceipt {
-    /// `rejected`, `committed` or `committed_not_yet_searchable` (see [`WriteOutcome`]).
+    /// `rejected` or `committed` (see [`WriteOutcome`]).
     pub outcome: WriteOutcome,
     /// The database copy that answered: its `db_id` (SS-26 `instance_id`).
     pub instance_id: String,
@@ -111,12 +104,6 @@ impl WriteReceipt {
     /// no position.
     pub(crate) fn rejected(identities: &ReceiptIdentities) -> Self {
         Self::at(identities, WriteOutcome::Rejected, None)
-    }
-
-    /// The same receipt once the barrier gave up on visibility (SS-10): the write stands.
-    pub(crate) fn not_yet_searchable(mut self) -> Self {
-        self.outcome = WriteOutcome::CommittedNotYetSearchable;
-        self
     }
 
     fn at(identities: &ReceiptIdentities, outcome: WriteOutcome, seq: Option<u64>) -> Self {

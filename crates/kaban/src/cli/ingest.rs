@@ -274,10 +274,9 @@ pub(crate) fn index_docs(
     let mut response = IndexDocsResponse::from(report);
     response.workspace = api.workspace().to_string();
     response.dry_run = req.dry_run;
-    // one barrier per ingest run (SS-10), after the run's transactions and locks: the receipt
-    // holds at the log head the run left (a dry run or a run that skipped everything waits
-    // for the state it saw like any other write)
-    response.receipt = Some(api.await_searchable(api.committed_receipt(None)));
+    // the receipt holds at the log head the run left (a dry run or a run that skipped
+    // everything names the state it saw like any other write)
+    response.receipt = Some(api.committed_receipt(None));
     Ok(response)
 }
 

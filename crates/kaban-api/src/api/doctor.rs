@@ -9,7 +9,6 @@ use super::KabanApi;
 use crate::producers::{BudgetRow, ProducerOutcome, ProducerRegistry, RunFlags, budgets};
 use crate::snapshot::{self, SnapshotOutcome};
 use kaban_codegraph::{CodeGraphReader, ReadError};
-use kaban_core::text_index::Visibility;
 use kaban_core::{DatabaseFileModes, MaintenanceOutcome, StoreError};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -39,9 +38,8 @@ pub struct DoctorContext {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DoctorCheck {
     /// Fixed name: `allocator_adapter`, `db_modes`, `integrity`, `fts_integrity`, `claim_exhausted`,
-    /// `stale_artifacts`, `schema_version`, `text_index` (SS-21: `tantivy` followed by
-    /// `text_index_watermark`, the payload watermark, and `text_index_lag`, the canonical
-    /// head minus it), `ident_terms_version`, one `producer_<producer>` row per producer
+    /// `stale_artifacts`, `schema_version`, `text_index` (`catalog`: searchable at commit, no lag),
+    /// `ident_terms_version`, one `producer_<producer>` row per producer
     /// (PC-16), `stale_anchors` (E3.11: `CodeRef`s whose symbol the current snapshot lacks),
     /// `catalog_verify` and `catalog_budget` (spec 11 T6, when a catalog is wired), `vacuum`, `optimize` and
     /// `catalog_recover` when asked.
@@ -144,11 +142,10 @@ impl KabanApi {
     }
     /// Run every doctor check and report (core-spec §7): the pre-open file modes, the engine's
     /// structural check, the FTS index check, exhausted ingest claims, stale derived artifacts,
-    /// the schema version against the binary's, the text index and its lag, the producer rows,
-    /// stale code anchors, and `VACUUM` when asked. Infallible by design: a failing check is a
-    /// line of the report. A check is not ok on damage or a security finding (loose modes, a
-    /// broken index, a check that could not run); the schema version and lag are reported as
-    /// facts.
+    /// the schema version against the binary's, the text index, the producer rows, stale code
+    /// anchors, and `VACUUM` when asked. Infallible by design: a failing check is a line of the
+    /// report. A check is not ok on damage or a security finding (loose modes, a broken index,
+    /// a check that could not run); the schema version is reported as a fact.
     pub fn doctor(&self, ctx: &DoctorContext) -> DoctorReport {
         let mut report = DoctorReport {
             ok: true,
@@ -260,36 +257,9 @@ impl KabanApi {
         // other version was refused at the open, with the way out, before this report)
         report.push("schema_version", true, ctx.schema_version.to_string());
         let metadata = self.store.index_meta();
-        // spec 05 SS-21: the text index's own position, apart from the consumers' retention
-        // lag above. The index publishes before it acknowledges, so its payload watermark and
-        // the canonical head minus it (the search lag) are facts of their own. Doctor attaches
-        // the index only as it exists, never creating one (T4 review t4-9): a database with no
-        // index beside it has no watermark to read and is reported not checked; an attached
-        // adapter serving no payload (never built, or not of this database) is missing, while
-        // a payload at sequence 0 (built over an empty history) is a watermark like any other
-        // (T6 review t6-5)
-        match self.store.text_visible() {
-            Ok(Visibility::Current) => report.push("text_index", true, "current"),
-            Ok(Visibility::Unavailable) => report.push(
-                "text_index",
-                false,
-                "tantivy (no payload served: not built, or not of this database)",
-            ),
-            Ok(Visibility::Through(watermark)) => {
-                report.push("text_index", true, "tantivy");
-                report.push("text_index_watermark", true, watermark.to_string());
-                match self.store.changes_head() {
-                    Ok(head) => {
-                        let lag = i64::try_from(head)
-                            .unwrap_or(i64::MAX)
-                            .saturating_sub(watermark);
-                        report.push("text_index_lag", true, lag.to_string());
-                    }
-                    Err(e) => report.push("text_index_lag", false, format!("not checked: {e}")),
-                }
-            }
-            Err(e) => report.push("text_index", false, format!("not checked: {e}")),
-        }
+        // the text index is a class of the catalog (spec 11 T7): searchable at commit, so it
+        // has no position of its own to report; `catalog_verify` checks its extents
+        report.push("text_index", true, "catalog");
         match &metadata {
             Ok(meta) => {
                 let current =

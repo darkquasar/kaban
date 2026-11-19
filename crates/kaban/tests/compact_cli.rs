@@ -173,6 +173,9 @@ fn a_write_over_a_10000_row_sediment_acknowledges_before_its_post_ack_checkpoint
         }
         tx.commit().unwrap();
     }
+    let before = document(&kaban(&s, &["stats"]))["indexes"][0]["sediment_rows"]
+        .as_u64()
+        .unwrap();
     let log = s.0.join("remember.log");
     let file = std::fs::File::create(&log).unwrap();
 
@@ -201,8 +204,10 @@ fn a_write_over_a_10000_row_sediment_acknowledges_before_its_post_ack_checkpoint
         .unwrap_or_else(|| panic!("no post-ack checkpoint: {text}"));
     assert!(ack < tick, "{text}");
     assert!(text[tick..].contains("ran=true"), "{text}");
+    // the write staged its own text pack (spec 11 T7) and sealed nothing
     let after = document(&kaban(&s, &["stats"]));
-    assert_eq!(after["indexes"][0]["sediment_rows"], 10_000, "{after}");
+    assert!(before >= 10_000, "{before}");
+    assert_eq!(after["indexes"][0]["sediment_rows"], before + 1, "{after}");
 }
 
 #[test]

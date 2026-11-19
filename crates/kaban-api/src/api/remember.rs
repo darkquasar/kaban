@@ -46,18 +46,6 @@ impl KabanApi {
     /// errors otherwise; nothing is stored on error.
     #[allow(clippy::needless_pass_by_value)] // core-plan §6 interface: requests are taken by value
     pub fn remember(&self, p: RememberRequest) -> Result<RememberResponse, ApiError> {
-        let mut response = self.remember_unsettled(p)?;
-        response.receipt = self.await_searchable(response.receipt);
-        Ok(response)
-    }
-
-    /// [`Self::remember`] before its write barrier (SS-10): the body of the public call, for a
-    /// public call that embeds a `remember` (a hook) and runs the one barrier itself.
-    #[allow(clippy::needless_pass_by_value)] // the public call's body: the request is taken by value
-    pub(crate) fn remember_unsettled(
-        &self,
-        p: RememberRequest,
-    ) -> Result<RememberResponse, ApiError> {
         if p.tags.len() > MAX_TAGS || p.links.len() > MAX_LINKS {
             return Err(ApiError::Invalid("too many tags or links".into()));
         }

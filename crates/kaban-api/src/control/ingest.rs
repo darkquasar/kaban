@@ -255,7 +255,7 @@ pub(super) const ROWS: &[ControlEntry] = &[
         "receipt.pack_lineage_id",
         Shape::NodeId,
     ),
-    // spec 05 SS-10: the run's receipt (one barrier per ingest run; identities are UUIDs)
+    // spec 05 SS-10: the run's receipt (identities are UUIDs)
     entry(
         "index_docs",
         Direction::Response,

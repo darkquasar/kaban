@@ -19,8 +19,7 @@ const TRAVERSE_DIRECTIONS: &[&str] = &["out", "in", "both"];
 /// `remember.scope` wire values (`kaban_core::StoreScope`, `rename_all = "lowercase"`).
 const STORE_SCOPES: &[&str] = &["project", "personal"];
 /// The write outcomes of a receipt (spec 05 SS-10 `WriteOutcome`, `rename_all = "snake_case"`).
-pub(super) const WRITE_OUTCOMES: &[&str] =
-    &["rejected", "committed", "committed_not_yet_searchable"];
+pub(super) const WRITE_OUTCOMES: &[&str] = &["rejected", "committed"];
 
 /// `traverse.edge_filter.producers[]` wire values: the stored spellings of
 /// `kaban_core::Producer`, `Producer::ALL` in order (PC-16). Spelled out on purpose:

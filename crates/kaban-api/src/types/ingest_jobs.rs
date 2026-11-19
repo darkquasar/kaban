@@ -141,16 +141,6 @@ pub struct IngestEvidenceDropped {
     pub reason: IngestEvidenceReason,
 }
 
-/// Actual graph `ChangeLog` sequence range of publication.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct IngestChanges {
-    /// First sequence, absent for a graph no-op.
-    pub first_seq: Option<u64>,
-    /// Last sequence, absent for a graph no-op.
-    pub last_seq: Option<u64>,
-}
-
 /// Workspace-scoped finalization request. A handle alone confers no authority.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -200,10 +190,8 @@ pub struct IngestFinishReport {
     pub reconcile: IngestReconcileOutcome,
     /// Omitted owned graph edges deleted.
     pub deleted_edges: u64,
-    /// Actual first/last graph sequence across successful submits and reconciliation.
-    pub changes: IngestChanges,
-    /// The finish's receipt (spec 05 SS-10), with `changes.last_seq` as its position; absent
-    /// only on a report retained before receipts existed.
+    /// The finish's receipt (spec 05 SS-10); absent only on a report retained before receipts
+    /// existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub receipt: Option<super::WriteReceipt>,
 }
@@ -234,8 +222,6 @@ pub struct IngestSubmitReport {
     pub unchanged: u32,
     /// Successfully named edge triples.
     pub edges: u64,
-    /// Actual graph sequence range.
-    pub changes: IngestChanges,
 }
 
 /// Extractor dialect: instructions only, never model execution.

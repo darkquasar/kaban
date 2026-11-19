@@ -1,9 +1,7 @@
 //! Checked-source atomic finalization with exact retained UTF-8 report retries.
 use super::submit::SubmitState;
 use super::types::{JobEnvelope, JobError};
-use kaban_api::ingest_jobs::{
-    IngestChanges, IngestFinishReport, IngestReconcileOutcome, IngestReportStatus,
-};
+use kaban_api::ingest_jobs::{IngestFinishReport, IngestReconcileOutcome, IngestReportStatus};
 use kaban_api::{ApiError, KabanApi};
 use kaban_core::{JobFinishRequest, JobId, JobStatus, JobSubmitContract, SourceRev, StoreError};
 use std::path::Path;
@@ -77,10 +75,6 @@ pub async fn finish_fenced(
                     IngestReconcileOutcome::Complete
                 },
                 deleted_edges: outcome.deleted_edges,
-                changes: IngestChanges {
-                    first_seq: state.first_seq.or(outcome.first_seq),
-                    last_seq: outcome.last_seq.or(state.last_seq),
-                },
                 // built inside the store's callback: the receipt reads nothing, and its
                 // position is the head the finish transaction saw (SS-10: a run that
                 // emitted no change row still names the state it references, never 0)
@@ -89,27 +83,12 @@ pub async fn finish_fenced(
             .map_err(StoreError::from)
         })
         .map_err(map_error)?;
-    let bytes = settle_report(api, bytes);
     // Keep a present expired target distinguishable: pruning happens only after success.
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));
     api.store().jobs_prune(api.workspace(), now, 64)?;
     Ok(bytes)
-}
-
-/// The finish report's receipt after the write barrier (spec 05 SS-10, once per run): the
-/// report is serialized inside the store's callback, so the barrier runs on the way out, after
-/// the finish transaction closed. A report that does not parse is returned as it was.
-fn settle_report(api: &KabanApi, bytes: String) -> String {
-    let Ok(mut report) = serde_json::from_str::<IngestFinishReport>(&bytes) else {
-        return bytes;
-    };
-    let Some(receipt) = report.receipt.take() else {
-        return bytes;
-    };
-    report.receipt = Some(api.await_searchable(receipt));
-    serde_json::to_string(&report).unwrap_or(bytes)
 }
 
 fn map_error(error: ApiError) -> JobError {

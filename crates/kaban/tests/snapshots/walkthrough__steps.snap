@@ -1234,10 +1234,6 @@ expression: a
       ]
     },
     "finish": {
-      "changes": {
-        "first_seq": 35,
-        "last_seq": 37
-      },
       "created": 1,
       "deleted_edges": 0,
       "edges": 6,
@@ -1260,10 +1256,6 @@ expression: a
       "updated": 0
     },
     "forbidden": {
-      "changes": {
-        "first_seq": null,
-        "last_seq": null
-      },
       "chunk": null,
       "created": 0,
       "edges": 2,
@@ -1352,10 +1344,6 @@ expression: a
       }
     },
     "replay": {
-      "changes": {
-        "first_seq": null,
-        "last_seq": null
-      },
       "chunk": null,
       "created": 0,
       "edges": 2,
@@ -1375,10 +1363,6 @@ expression: a
       "updated": 0
     },
     "submit": {
-      "changes": {
-        "first_seq": 35,
-        "last_seq": 37
-      },
       "chunk": null,
       "created": 1,
       "edges": 2,
@@ -1918,10 +1902,6 @@ expression: a
       "next": null
     },
     "submit": {
-      "changes": {
-        "first_seq": 41,
-        "last_seq": 42
-      },
       "chunk": null,
       "created": 1,
       "edges": 1,
@@ -2221,18 +2201,8 @@ expression: a
           "ok": true
         },
         {
-          "detail": "tantivy",
+          "detail": "catalog",
           "name": "text_index",
-          "ok": true
-        },
-        {
-          "detail": "42",
-          "name": "text_index_watermark",
-          "ok": true
-        },
-        {
-          "detail": "0",
-          "name": "text_index_lag",
           "ok": true
         },
         {
@@ -2332,10 +2302,6 @@ expression: a
       "tests": []
     },
     "revision_finish": {
-      "changes": {
-        "first_seq": 48,
-        "last_seq": 49
-      },
       "created": 0,
       "deleted_edges": 0,
       "edges": 2,
@@ -2356,10 +2322,6 @@ expression: a
       "updated": 1
     },
     "revision_submit": {
-      "changes": {
-        "first_seq": 48,
-        "last_seq": 49
-      },
       "chunk": null,
       "created": 0,
       "edges": 2,

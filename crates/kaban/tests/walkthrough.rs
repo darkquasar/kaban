@@ -24,7 +24,6 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
 
 const ADR: &str = "docs/adr/0007-discounts.md";
 const ARCH: &str = "docs/ARCHITECTURE.md";
@@ -51,30 +50,6 @@ fn git(root: &Path, date: &str, args: &[&str]) -> String {
         .unwrap();
     assert!(out.status.success(), "git {args:?}: {out:?}");
     String::from_utf8(out.stdout).unwrap().trim().to_owned()
-}
-
-/// `kaban doctor` once the serving process's text index has caught up with the head: a
-/// doctor run straight after a write can see the consumer still draining (a slower runner
-/// loses that race), so the report is read only when `text_index_lag` is 0 (10 s bound).
-fn settled_doctor(s: &Scratch, root: &Path) -> Value {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        let doctor = cli(s, root, &["doctor"]);
-        let lag = doctor["checks"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|c| c["name"] == "text_index_lag")
-            .map(|c| c["detail"].clone());
-        if lag.is_none_or(|d| d == "0") {
-            return doctor;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "the text index did not catch up: {doctor}"
-        );
-        std::thread::sleep(Duration::from_millis(50));
-    }
 }
 
 fn cli(s: &Scratch, root: &Path, args: &[&str]) -> Value {
@@ -344,7 +319,7 @@ fn step6(s: &Scratch, root: &Path, mcp: &mut McpClient, dir: &Path, decision: &s
         .into_iter()
         .find(|n| n.props["symbol"] == shop_rows::DISCOUNT)
         .unwrap();
-    let doctor = settled_doctor(s, root);
+    let doctor = cli(s, root, &["doctor"]);
     // Doctor names the renamed anchor in its stale_anchors check (not stale_artifacts).
     let stale = doctor["checks"]
         .as_array()

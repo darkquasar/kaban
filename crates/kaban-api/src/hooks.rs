@@ -29,7 +29,7 @@
 
 use crate::api::KabanApi;
 use crate::error::ApiError;
-use crate::types::{RememberRequest, RememberResponse, WriteOutcome, WriteReceipt};
+use crate::types::{RememberRequest, RememberResponse, WriteReceipt};
 use kaban_core::{
     EvidenceRun, FailurePatch, PendingFailuresQuery, PendingScope, SessionEdit, SessionEditKind,
 };
@@ -215,8 +215,6 @@ const NOTE_EVENT: &str = "hook_event_name is absent or not the event this handle
 const NOTE_NOT_FOUND: &str = "failure_id names no Failure of this workspace";
 const NOTE_FIX_FIELDS: &str = "fix needs {\"failure_id\", \"fix\"}";
 const NOTE_WITHHELD: &str = "output withheld by the denylist policy";
-/// SS-10: the write committed and is not searchable yet; the host must not replay it.
-const NOTE_PENDING_SEARCH: &str = "stored; not yet searchable, do not replay";
 /// The session pairing failed after the Failure committed (SS-10: the record stands, the
 /// receipt says `committed`; the pairing is best effort, M4-14).
 const NOTE_PAIRING_FAILED: &str = "failure stored; its session pairing failed";
@@ -525,7 +523,7 @@ impl KabanApi {
             HookEvent::Fix => self.hook_fix(&selected),
         };
         match outcome {
-            Ok(outcome) => self.gate_outcome(&prefix, self.settle_hook(&prefix, outcome)),
+            Ok(outcome) => self.gate_outcome(&prefix, outcome),
             Err(e) => {
                 let mut refused = HookOutcome::silent(format!("{prefix} {}", note_for(&e)));
                 // a write-bearing event that failed did not commit its mutation (SS-10
@@ -536,24 +534,6 @@ impl KabanApi {
                 refused
             }
         }
-    }
-
-    /// One write barrier per hook call (SS-10), inside the hook's budget: a committed write
-    /// whose position the search reader does not cover yet is said so on stderr
-    /// ([`NOTE_PENDING_SEARCH`]), never claimed searchable and never replayed; the exit
-    /// status stays 0 (M4-8). An event that wrote nothing has no receipt and waits for nothing.
-    fn settle_hook(&self, prefix: &str, mut outcome: HookOutcome) -> HookOutcome {
-        if let Some(receipt) = outcome.receipt.take() {
-            let settled = self.await_searchable_in_hook(receipt);
-            if settled.outcome == WriteOutcome::CommittedNotYetSearchable {
-                outcome.note = Some(match outcome.note.take() {
-                    Some(note) => format!("{note}; {NOTE_PENDING_SEARCH}"),
-                    None => format!("{prefix} {NOTE_PENDING_SEARCH}"),
-                });
-            }
-            outcome.receipt = Some(settled);
-        }
-        outcome
     }
 
     /// The last gate before the document reaches stdout (M4-3: the `hook` scope has no
@@ -779,7 +759,7 @@ impl KabanApi {
         // 3. the typed write re-gates every field inside its transaction (S1)
         let stored: RememberResponse =
             self.hook_tool("remember", raw, |api, req: RememberRequest| {
-                api.remember_unsettled(req)
+                api.remember(req)
             })?;
         // 4. pair the occurrence (created or existing, M4-14) with the session: a second
         // write after the Failure committed, so its failure is said, never a rejection (SS-10)
@@ -925,7 +905,7 @@ impl KabanApi {
         });
         let stored: RememberResponse =
             self.hook_tool("remember", raw, |api, req: RememberRequest| {
-                api.remember_unsettled(req)
+                api.remember(req)
             })?;
         Ok(HookOutcome::committed(stored.receipt))
     }
@@ -1018,7 +998,7 @@ impl KabanApi {
         });
         let stored: RememberResponse =
             self.hook_tool("remember", raw, |api, req: RememberRequest| {
-                api.remember_unsettled(req)
+                api.remember(req)
             })?;
         // the fix text stored in props is the gated form (the write above gated the same
         // string as the Improvement's text; a redaction is reported there). The patch is a

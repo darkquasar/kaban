@@ -21,8 +21,7 @@
 //! [`read_stdin_json`] is the bounded reader behind `--stdin-json` (1 MiB, M4-4).
 
 use crate::cli::output::{
-    self, EXIT_INVALID, EXIT_PENDING_SEARCH, EXIT_REJECTED, EXIT_STORE_ERROR, Format,
-    SERIALIZATION_FAILED,
+    self, EXIT_INVALID, EXIT_REJECTED, EXIT_STORE_ERROR, Format, SERIALIZATION_FAILED,
 };
 use crate::scrub::{OnRefusal, rejected_receipt_document, typed_argument_failure};
 use kaban_api::{ApiError, KabanApi};
@@ -123,11 +122,6 @@ where
             }
             if output::print_json(&clean, format).is_err() {
                 return serialization_failure();
-            }
-            // the typed receipt is printed whole; status 6 says the write stands but is not
-            // searchable yet (SS-10), so a script never replays it
-            if output::pending_search(&clean) {
-                return ExitCode::from(EXIT_PENDING_SEARCH);
             }
             ExitCode::SUCCESS
         }

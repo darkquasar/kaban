@@ -632,7 +632,7 @@ impl KabanServer {
     }
 
     #[tool(
-        description = "Status of the document index of the bound workspace: documents by status, chunks, blocked chunks and denylist rule ids (counts only), failed documents with their error, last run, outbox lag, pipeline version and the compiled extractors. Also available as resource kaban://documents with the document list.",
+        description = "Status of the document index of the bound workspace: documents by status, chunks, blocked chunks and denylist rule ids (counts only), failed documents with their error, last run, pipeline version and the compiled extractors. Also available as resource kaban://documents with the document list.",
         output_schema = output_schema::<IndexStatus>(),
         annotations(
             title = "Index status",

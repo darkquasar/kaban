@@ -50,10 +50,11 @@ const ADDED_CHECKS: [&str; 3] = ["allocator_adapter", "catalog_verify", "catalog
 /// The `stats` counters that go: projector lag and the conflict count.
 const REMOVED_STATS: [&str; 3] = ["changes_lag", "outbox_lag", "conflicts"];
 
-/// The `doctor` checks that go: governance, audit and projector lag, the four `layer_*`
+/// The `doctor` checks that go: governance, audit and projector lag (the text index's
+/// watermark and lag too: text is searchable at commit, spec 11 T7), the four `layer_*`
 /// rows PC-16 replaced by one row per producer, and `retired_producers`, whose clearing
 /// command went with layer retirement (OD-P1).
-const REMOVED_CHECKS: [&str; 16] = [
+const REMOVED_CHECKS: [&str; 18] = [
     "layer_fts",
     "layer_gazetteer",
     "layer_embed",
@@ -69,6 +70,8 @@ const REMOVED_CHECKS: [&str; 16] = [
     "outbox_lag",
     "consumer_lag",
     "reconcile_cursor_lag",
+    "text_index_watermark",
+    "text_index_lag",
     "retired_producers",
 ];
 

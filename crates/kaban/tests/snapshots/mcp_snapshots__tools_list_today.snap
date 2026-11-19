@@ -117,7 +117,7 @@ expression: today
           ]
         },
         "WriteOutcome": {
-          "description": "What became of the requested mutation (SS-10). On FTS5 the index is written in the\nmutation's own transaction, so a commit is searchable at once. An index with its own\nstorage (Tantivy, SS-09) publishes behind the commit: the service waits one bounded\nbarrier for the serving reader to cover the receipt's position and otherwise reports the\nthird outcome, which is never a rejection and is never replayed. The enum is\n`non_exhaustive` so a further outcome lands without touching a caller.",
+          "description": "What became of the requested mutation (SS-10). Text is searchable at commit (spec 11 T7),\nso a committed mutation is visible to every search once the write returns. The enum is\n`non_exhaustive` so a further outcome lands without touching a caller.",
           "oneOf": [
             {
               "const": "rejected",
@@ -127,11 +127,6 @@ expression: today
             {
               "const": "committed",
               "description": "Committed: the state is incorporated through the receipt's `seq`. CLI status 0.",
-              "type": "string"
-            },
-            {
-              "const": "committed_not_yet_searchable",
-              "description": "Committed, and the search index had not incorporated the receipt's position when the\nvisibility barrier expired or failed: the write stands, a later search will show it,\ndo not replay the mutation. CLI status 6.",
               "type": "string"
             }
           ]
@@ -145,7 +140,7 @@ expression: today
             },
             "outcome": {
               "$ref": "#/$defs/WriteOutcome",
-              "description": "`rejected`, `committed` or `committed_not_yet_searchable` (see [`WriteOutcome`])."
+              "description": "`rejected` or `committed` (see [`WriteOutcome`])."
             },
             "pack_lineage_id": {
               "description": "The pack lineage the database belongs to (SS-26; kept across forks and copies).",
@@ -262,7 +257,7 @@ expression: today
     "outputSchema": {
       "$defs": {
         "WriteOutcome": {
-          "description": "What became of the requested mutation (SS-10). On FTS5 the index is written in the\nmutation's own transaction, so a commit is searchable at once. An index with its own\nstorage (Tantivy, SS-09) publishes behind the commit: the service waits one bounded\nbarrier for the serving reader to cover the receipt's position and otherwise reports the\nthird outcome, which is never a rejection and is never replayed. The enum is\n`non_exhaustive` so a further outcome lands without touching a caller.",
+          "description": "What became of the requested mutation (SS-10). Text is searchable at commit (spec 11 T7),\nso a committed mutation is visible to every search once the write returns. The enum is\n`non_exhaustive` so a further outcome lands without touching a caller.",
           "oneOf": [
             {
               "const": "rejected",
@@ -272,11 +267,6 @@ expression: today
             {
               "const": "committed",
               "description": "Committed: the state is incorporated through the receipt's `seq`. CLI status 0.",
-              "type": "string"
-            },
-            {
-              "const": "committed_not_yet_searchable",
-              "description": "Committed, and the search index had not incorporated the receipt's position when the\nvisibility barrier expired or failed: the write stands, a later search will show it,\ndo not replay the mutation. CLI status 6.",
               "type": "string"
             }
           ]
@@ -290,7 +280,7 @@ expression: today
             },
             "outcome": {
               "$ref": "#/$defs/WriteOutcome",
-              "description": "`rejected`, `committed` or `committed_not_yet_searchable` (see [`WriteOutcome`])."
+              "description": "`rejected` or `committed` (see [`WriteOutcome`])."
             },
             "pack_lineage_id": {
               "description": "The pack lineage the database belongs to (SS-26; kept across forks and copies).",
@@ -1463,7 +1453,7 @@ expression: today
           ]
         },
         "WriteOutcome": {
-          "description": "What became of the requested mutation (SS-10). On FTS5 the index is written in the\nmutation's own transaction, so a commit is searchable at once. An index with its own\nstorage (Tantivy, SS-09) publishes behind the commit: the service waits one bounded\nbarrier for the serving reader to cover the receipt's position and otherwise reports the\nthird outcome, which is never a rejection and is never replayed. The enum is\n`non_exhaustive` so a further outcome lands without touching a caller.",
+          "description": "What became of the requested mutation (SS-10). Text is searchable at commit (spec 11 T7),\nso a committed mutation is visible to every search once the write returns. The enum is\n`non_exhaustive` so a further outcome lands without touching a caller.",
           "oneOf": [
             {
               "const": "rejected",
@@ -1473,11 +1463,6 @@ expression: today
             {
               "const": "committed",
               "description": "Committed: the state is incorporated through the receipt's `seq`. CLI status 0.",
-              "type": "string"
-            },
-            {
-              "const": "committed_not_yet_searchable",
-              "description": "Committed, and the search index had not incorporated the receipt's position when the\nvisibility barrier expired or failed: the write stands, a later search will show it,\ndo not replay the mutation. CLI status 6.",
               "type": "string"
             }
           ]
@@ -1491,7 +1476,7 @@ expression: today
             },
             "outcome": {
               "$ref": "#/$defs/WriteOutcome",
-              "description": "`rejected`, `committed` or `committed_not_yet_searchable` (see [`WriteOutcome`])."
+              "description": "`rejected` or `committed` (see [`WriteOutcome`])."
             },
             "pack_lineage_id": {
               "description": "The pack lineage the database belongs to (SS-26; kept across forks and copies).",

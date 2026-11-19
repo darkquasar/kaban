@@ -54,7 +54,7 @@ impl KabanApi {
         let e = self
             .store
             .link(&from, &to, &rel, p.confidence, props, &ctx)?;
-        let receipt = self.await_searchable(self.committed_receipt(ctx.terminal_seq()));
+        let receipt = self.committed_receipt(ctx.terminal_seq());
         Ok(LinkResponse {
             id: e.id,
             from: e.src,
@@ -88,7 +88,7 @@ impl KabanApi {
         let node_id = Self::node_id(&id)?;
         let outcome = self.store.forget(&node_id, mode, &ctx)?;
         // the store read the terminal `seq` inside the transaction (SS-10)
-        let receipt = self.await_searchable(self.committed_receipt(Some(outcome.outbox_seq)));
+        let receipt = self.committed_receipt(Some(outcome.outbox_seq));
         Ok(ForgetResponse {
             id,
             mode,

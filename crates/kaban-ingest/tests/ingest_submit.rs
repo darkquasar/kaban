@@ -71,8 +71,6 @@ async fn public_submit_places_repeats_without_changes_and_accumulates_actual_out
     let mut snapshot = first;
     snapshot["job"] = json!("<JOB>");
     snapshot["records"][0]["id"] = json!("<RECORD>");
-    snapshot["changes"]["first_seq"] = json!("<FIRST_SEQ>");
-    snapshot["changes"]["last_seq"] = json!("<LAST_SEQ>");
     insta::assert_json_snapshot!("report", snapshot);
 }
 

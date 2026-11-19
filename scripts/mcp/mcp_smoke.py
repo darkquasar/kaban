@@ -343,19 +343,18 @@ else:
     r = cli("doctor")
     v = one_json(r) or {}
     names = [c["name"] for c in v.get("checks", [])]
-    # SS-21 replaces the retired trigram diagnostic with the store's text index,
-    # payload watermark and index lag; PC-16 reports one row per producer; spec 11 QRY-07
+    # SS-21 replaces the retired trigram diagnostic with the store's text index (a catalog
+    # class since spec 11 T7: no watermark or lag rows); PC-16 reports one row per producer; spec 11 QRY-07
     # proves the startup allocator adapter on this binary and spec 11 T6 adds the catalog's
     # verification and budget rows (cli_doctor.rs).
     expected_checks = [
         "allocator_adapter", "db_modes", "integrity", "fts_integrity", "catalog_verify",
         "catalog_budget", "claim_exhausted", "stale_artifacts",
-        "schema_version", "text_index", "text_index_watermark", "text_index_lag",
-        "ident_terms_version", "producer_authored", "producer_hook_events",
+        "schema_version", "text_index", "ident_terms_version", "producer_authored", "producer_hook_events",
         "producer_document_ingest", "producer_gazetteer", "producer_extractor",
         "producer_scip_import", "producer_git_history", "stale_anchors",
     ]
-    check(r.returncode == 0 and v.get("ok") is True and names == expected_checks and all(c["ok"] for c in v["checks"]), f"cli doctor ok with the twenty-one checks: {names}")
+    check(r.returncode == 0 and v.get("ok") is True and names == expected_checks and all(c["ok"] for c in v["checks"]), f"cli doctor ok with the nineteen checks: {names}")
     r = cli("bogus-subcommand", CANARY)
     check(r.returncode == 4 and r.stdout == "" and CANARY not in r.stderr and "Sup3r" not in r.stderr and r.stderr.startswith("error: "), f"clap error exits 4 with a fixed text, the argument never echoed (exit {r.returncode})")
     # hook section: the Claude Code variant over minimal envelopes (hooks/README.md contract)

@@ -11,11 +11,7 @@ mod mutate;
 mod query;
 mod remember;
 mod schema;
-mod write_barrier;
 
-use crate::api::write_barrier::{
-    Clock, HOOK_SEARCH_BARRIER, SEARCH_BARRIER, StoreDrain, SystemClock,
-};
 use crate::enrich::Enricher;
 use crate::error::ApiError;
 use crate::ontology::OntologyRegistry;
@@ -118,8 +114,6 @@ pub struct KabanApi {
     /// The store's receipt identities (spec 05 SS-10, SS-26), read once here: a write path
     /// never reads them again, so a committed write cannot fail on its receipt.
     pub(crate) receipt_identities: Arc<ReceiptIdentities>,
-    /// The barrier's clock (the process clock; a fake in the barrier's tests).
-    pub(crate) clock: Arc<dyn Clock>,
     /// The store's catalog maintenance (`None`: compact, verify and recover are refused and
     /// `stats.indexes` is empty).
     pub(crate) catalog: Option<Arc<dyn CatalogMaintenance>>,
@@ -177,7 +171,6 @@ impl KabanApi {
             codegraph_dir: None,
             snapshot_provider: None,
             head: Arc::new(crate::code::HeadSource::default()),
-            clock: Arc::new(SystemClock),
             catalog: None,
             durability: Durability::Normal,
         }
@@ -312,36 +305,6 @@ impl KabanApi {
             }
         });
         WriteReceipt::committed(&self.receipt_identities, position)
-    }
-
-    /// The receipt after the write barrier (SS-10): a `committed` receipt waits at most
-    /// [`SEARCH_BARRIER`] for the serving search reader to cover its position, driving the
-    /// local drain when one is wired, and becomes `committed_not_yet_searchable` when it does
-    /// not; any other receipt is returned as it is. Called once per public write, after the
-    /// call's transactions and locks are released; a no-op write waits for the position it
-    /// returned like any other. Never an error: a post-commit failure is a pending outcome.
-    #[must_use]
-    pub fn await_searchable(&self, receipt: WriteReceipt) -> WriteReceipt {
-        self.settle(receipt, SEARCH_BARRIER)
-    }
-
-    /// [`Self::await_searchable`] inside a hook's budget ([`HOOK_SEARCH_BARRIER`]): the hook
-    /// answers within its watchdog and still never claims readiness it did not verify.
-    pub(crate) fn await_searchable_in_hook(&self, receipt: WriteReceipt) -> WriteReceipt {
-        self.settle(receipt, HOOK_SEARCH_BARRIER)
-    }
-
-    fn settle(&self, receipt: WriteReceipt, budget: std::time::Duration) -> WriteReceipt {
-        // the store publishes its own pending commits within the barrier's deadline (spec 05
-        // OWN-M; `GraphStore::text_publish`): nothing else drains
-        let store = StoreDrain(self.store.as_ref());
-        write_barrier::settle(
-            receipt,
-            budget,
-            &|| self.store.text_visible(),
-            Some(&store),
-            self.clock.as_ref(),
-        )
     }
 
     /// The receipt of a write this service refused before anything committed (SS-10

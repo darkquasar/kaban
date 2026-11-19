@@ -35,9 +35,8 @@ pub struct PolicyStats {
 /// `stats` output: the store's counters plus the policy summary (core-spec F6; M3-26 superset).
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct StatsResponse {
-    /// Store counters (`nodes`, `edges`, `by_kind`, `by_rel`, `db_bytes`, `changes_lag`: how far
-    /// the slowest `ChangeLog` sink trails the newest change, F11, with `outbox_lag` as its
-    /// deprecated alias until 3.2 (EN-E10b); `engine`, `schema_version`, `conflicts`).
+    /// Store counters (`nodes`, `edges`, `by_kind`, `by_rel`, `db_bytes`, `engine`,
+    /// `schema_version`).
     #[serde(flatten)]
     pub store: serde_json::Map<String, Value>,
     /// Stores this server reads (`project`; `personal` arrives in M6, F18).

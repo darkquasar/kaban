@@ -435,8 +435,7 @@ pub async fn submit(api: &KabanApi, root: &Path, raw: Value) -> Result<Value, Jo
         "skipped":skipped,"evidence_dropped":evidence_dropped,
         "redactions":receipt.job.redactions.checked_sub(previous_redactions).ok_or_else(invalid)?,
         "created":batch.inserted,"updated":batch.updated,"unchanged":batch.unchanged,
-        "edges":named_edges.len(),
-        "changes":{"first_seq":batch.outbox_first_seq,"last_seq":batch.outbox_last_seq}});
+        "edges":named_edges.len()});
     let _: kaban_api::IngestSubmitReport =
         serde_json::from_value(output.clone()).map_err(|_| invalid())?;
     let clean = api.gate_response("ingest_submit", &output)?;

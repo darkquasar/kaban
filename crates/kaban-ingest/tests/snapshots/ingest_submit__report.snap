@@ -3,10 +3,6 @@ source: crates/kaban-ingest/tests/ingest_submit.rs
 expression: snapshot
 ---
 {
-  "changes": {
-    "first_seq": "<FIRST_SEQ>",
-    "last_seq": "<LAST_SEQ>"
-  },
   "chunk": 0,
   "created": 1,
   "edges": 2,
