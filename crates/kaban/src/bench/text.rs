@@ -248,6 +248,7 @@ mod imp {
             .map(|r| (&r.path, r.line))
             .collect();
         let reference = candidates.first().map(|r| &r.reference);
+        let rids: Vec<_> = candidates.iter().map(|r| r.rid).collect();
         let passed = match oracle["status"].as_str() {
             Some("ok") => candidates.len() == 1 && json!(reference) == oracle["ref"],
             Some("error") => {
@@ -261,7 +262,7 @@ mod imp {
         };
         Ok((
             passed,
-            json!({"count":candidates.len(),"first_candidates":first,"first_ref":reference}),
+            json!({"count":candidates.len(),"first_candidates":first,"first_ref":reference,"candidate_rids":rids}),
         ))
     }
 
@@ -270,7 +271,7 @@ mod imp {
             .iter()
             .map(|h| {
                 let r = lookup(rows, h.rid)?;
-                Ok(json!([r.label, r.name, r.path]))
+                Ok(json!({"label":r.label,"name":r.name,"path":r.path,"rid":r.rid}))
             })
             .collect()
     }
@@ -302,9 +303,10 @@ mod imp {
                         &query(name, MatchMode::Lexical, &kinds, None, 5),
                     )?;
                     let fixed = match i {
-                        40 => Some(ranked.iter().any(|r| r[1] == "configure_connection")),
+                        40 => Some(ranked.iter().any(|r| r["name"] == "configure_connection")),
                         43 => Some(
-                            !ranked.is_empty() && ranked.iter().all(|r| r[1] == "snapshot_symbols"),
+                            !ranked.is_empty()
+                                && ranked.iter().all(|r| r["name"] == "snapshot_symbols"),
                         ),
                         _ => None,
                     };
