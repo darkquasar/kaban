@@ -152,7 +152,7 @@ impl IndexClass for Scripted {
     ) -> Result<Option<Vec<u8>>> {
         Ok(None)
     }
-    fn rebuild(&self, _catalog: &Catalog, _rows: &Connection) -> Result<()> {
+    fn rebuild(&self, _catalog: &Catalog, _rows: &mut Connection) -> Result<()> {
         Ok(())
     }
 }

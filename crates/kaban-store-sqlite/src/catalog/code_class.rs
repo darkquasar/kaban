@@ -66,7 +66,7 @@ impl IndexClass for CodeClass {
         Ok(None)
     }
     /// Rebuilds nothing until T16.
-    fn rebuild(&self, _catalog: &Catalog, _rows: &Connection) -> Result<()> {
+    fn rebuild(&self, _catalog: &Catalog, _rows: &mut Connection) -> Result<()> {
         Ok(())
     }
 }

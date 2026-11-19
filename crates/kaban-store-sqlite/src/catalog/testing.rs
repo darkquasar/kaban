@@ -826,7 +826,7 @@ impl IndexClass for EdgeSediment {
                 .collect(),
         ))
     }
-    fn rebuild(&self, _catalog: &Catalog, _rows: &Connection) -> Result<()> {
+    fn rebuild(&self, _catalog: &Catalog, _rows: &mut Connection) -> Result<()> {
         Ok(())
     }
 }

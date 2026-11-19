@@ -134,9 +134,10 @@ pub(crate) trait IndexClass: Send + Sync {
         rids: &[i64],
         budget: &QueryBudget,
     ) -> Result<Option<Vec<u8>>>;
-    /// Rebuild this index from the canonical rows.
+    /// Rebuild this index from the canonical rows of `rows`, the writer connection: the
+    /// rebuild publishes through [`Catalog::commit`], which needs it mutably.
     ///
     /// # Errors
-    /// Read or encode failures.
-    fn rebuild(&self, catalog: &Catalog, rows: &Connection) -> Result<()>;
+    /// Read, encode or commit failures.
+    fn rebuild(&self, catalog: &Catalog, rows: &mut Connection) -> Result<()>;
 }
