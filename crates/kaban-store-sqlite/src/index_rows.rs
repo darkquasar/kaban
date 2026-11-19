@@ -15,9 +15,12 @@ use crate::catalog::phase::Reader;
 use crate::ident::{FIELDS, FTS_FIELDS, Fields, committed_fields, summary_projection_over};
 use crate::sql_error::SqlResultExt;
 use kaban_core::Result;
+use kaban_core::query_budget::{BudgetLease, GrowError, QueryBudget};
 use kaban_core::text_index::{Canonical, IndexIdentity, IndexRow, Replay, Rows};
+use rusqlite::types::ValueRef;
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde_json::Value;
+use std::convert::Infallible;
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
@@ -209,7 +212,11 @@ fn rows(
 ///
 /// # Errors
 /// SQLite's; a stored value that does not decode.
-pub(crate) fn staged_rows(reader: &Reader<'_>, rids: &[i64]) -> Result<Vec<IndexRow>> {
+pub(crate) fn staged_rows(
+    reader: &Reader<'_>,
+    rids: &[i64],
+    budget: &QueryBudget,
+) -> Result<(Vec<IndexRow>, BudgetLease)> {
     let mut meta = reader.prepare("SELECT value FROM index_meta WHERE key = ?1")?;
     let mut map = |key: &str| -> Result<Option<Fields>> {
         meta.query_row([key], |r| r.get::<_, String>(0))?
@@ -224,9 +231,44 @@ pub(crate) fn staged_rows(reader: &Reader<'_>, rids: &[i64]) -> Result<Vec<Index
     );
     let ident_fields = committed.map(|(ident, _)| ident).unwrap_or_default();
     let selected = serde_json::to_string(rids)?;
-    reader
-        .prepare(&sql)?
-        .query_map([selected], |r| decode(r, &ident_fields))
+    // the collected rows: at most one per rid, in a vector that grows by doubling
+    let rows = rids
+        .len()
+        .saturating_mul(2 * size_of::<IndexRow>())
+        .try_into()
+        .unwrap_or(u64::MAX);
+    let mut lease = budget.reserve(rows)?;
+    let mut refused = None;
+    let decoded = reader.prepare(&sql)?.query_map([selected], |r| {
+        // each row is charged before it is decoded: its values and what is derived from them
+        let refusal = match lease.grow_with(row_charge(r)?, || Ok::<_, Infallible>(())) {
+            Ok(()) => return decode(r, &ident_fields),
+            Err(GrowError::Budget(refusal)) => refusal,
+            Err(GrowError::Alloc(never)) => match never {},
+        };
+        refused = Some(refusal);
+        Err(rusqlite::Error::InvalidQuery)
+    });
+    match (refused, decoded) {
+        (Some(refusal), _) => Err(refusal.into()),
+        (None, decoded) => Ok((decoded?, lease)),
+    }
+}
+
+/// What one row of [`select`] costs decoded, read from the values SQLite holds before any is
+/// copied: every value twice (the decoded value and the identifier values and parsed tags
+/// derived from it), the body at its decoded length.
+fn row_charge(r: &rusqlite::Row<'_>) -> rusqlite::Result<u64> {
+    let mut bytes = u64::try_from(size_of::<IndexRow>()).unwrap_or(u64::MAX);
+    for idx in 0..11 {
+        let len = match r.get_ref(idx)? {
+            ValueRef::Blob(b) if idx == 6 => crate::body_codec::decoded_len(b).unwrap_or(0),
+            ValueRef::Text(b) | ValueRef::Blob(b) => b.len() as u64,
+            ValueRef::Null | ValueRef::Integer(_) | ValueRef::Real(_) => 0,
+        };
+        bytes = bytes.saturating_add(len.saturating_mul(2));
+    }
+    Ok(bytes)
 }
 
 /// The statement of the active rows under the committed maps (`None`: a store without the

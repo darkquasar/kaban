@@ -157,12 +157,13 @@ impl Drop for Writer {
     }
 }
 
-/// The RAM arena of one staged segment (spec 11 T7).
+/// The RAM arena the writer of one staged segment is given (spec 11 T7).
 const SEGMENT_ARENA_BYTES: usize = 4 << 20;
 
 /// One commit's text as one pack (`crate::kbx_dir`): the identity `tombstones` of every rid
 /// the commit changed and one segment of `rows`, their current active rows, built in RAM.
-/// The arena and the inputs are charged to `budget` while it builds.
+/// The writer's arena (only when there are rows to index) and the encoded pack are charged
+/// to `budget` before they are allocated; the rows are the caller's, charged by it.
 ///
 /// # Errors
 /// The budget's refusal; Tantivy failures.
@@ -171,18 +172,15 @@ pub fn segment(
     tombstones: &[i64],
     budget: &QueryBudget,
 ) -> kaban_core::Result<Vec<u8>> {
-    let input: usize = rows.iter().map(crate::decoded_bytes).sum();
-    let charge = u64::try_from(SEGMENT_ARENA_BYTES.saturating_add(input.saturating_mul(2)))
-        .unwrap_or(u64::MAX);
-    let _held = budget.reserve(charge).map_err(Error::Budget)?;
     Ok(build_segment(rows, tombstones, budget)?)
 }
 
 fn build_segment(rows: &[IndexRow], tombstones: &[i64], budget: &QueryBudget) -> Result<Vec<u8>> {
     let ram = RamDirectory::create();
     if rows.is_empty() {
-        return kbx_dir::encode(tombstones, None, &ram);
+        return kbx_dir::encode(tombstones, None, &ram, budget);
     }
+    let _arena = budget.reserve(SEGMENT_ARENA_BYTES as u64)?;
     let (schema, fields) = crate::schema::schema();
     let index = Index::create(ram.clone(), schema, IndexSettings::default())?;
     crate::analyzers::register(&index);
@@ -194,13 +192,16 @@ fn build_segment(rows: &[IndexRow], tombstones: &[i64], budget: &QueryBudget) ->
     }
     let index = writer.finalize()?;
     let segment = index.searchable_segments()?.into_iter().next();
-    kbx_dir::encode(tombstones, segment.as_ref(), &ram)
+    kbx_dir::encode(tombstones, segment.as_ref(), &ram, budget)
 }
 
 /// Merge `packs` (oldest first) into one pack: every document a newer pack's tombstone hides,
 /// or whose rid is in `drop`, is left out, and the union of the tombstones is carried on to
 /// hide the documents of older packs. `None` when one pack would come out unchanged. The
-/// inputs and the output are charged to `budget`.
+/// packs are the caller's, charged by it; what the merge allocates from them (the decoded
+/// tombstones, the hidden documents, the alive sets, the merged segment, which holds no more
+/// than the packs' own bytes, and the encoded pack) is charged to `budget` before it is
+/// allocated.
 ///
 /// # Errors
 /// The budget's refusal; a malformed pack; Tantivy failures.
@@ -209,9 +210,6 @@ pub fn merge(
     drop: &[i64],
     budget: &QueryBudget,
 ) -> kaban_core::Result<Option<Vec<u8>>> {
-    let input: usize = packs.iter().map(OwnedBytes::len).sum();
-    let charge = u64::try_from(input.saturating_mul(2)).unwrap_or(u64::MAX);
-    let _held = budget.reserve(charge).map_err(Error::Budget)?;
     Ok(merge_packs(packs, drop, budget)?)
 }
 
@@ -220,7 +218,7 @@ fn merge_packs(
     drop: &[i64],
     budget: &QueryBudget,
 ) -> Result<Option<Vec<u8>>> {
-    let opened = kbx_dir::open(packs)?;
+    let opened = kbx_dir::open(packs, budget)?;
     let (_, fields) = crate::schema::schema();
     let reader: IndexReader = opened
         .index
@@ -228,42 +226,48 @@ fn merge_packs(
         .reload_policy(ReloadPolicy::Manual)
         .try_into()?;
     let searcher = reader.searcher();
-    let hidden = opened.hidden(&searcher, &fields, drop)?;
-    budget.check()?;
+    let (hidden, _found_with) = opened.hidden(&searcher, &fields, drop, budget)?;
     if packs.len() == 1 && hidden.iter().all(Vec::is_empty) {
         return Ok(None);
     }
-    let tombstones = opened.all_tombstones();
-    let mut segments = Vec::new();
-    let mut alive = Vec::new();
+    let mut charge = budget.reserve(0)?;
+    let tombstones = opened.all_tombstones(&mut charge)?;
+    let readers = searcher.segment_readers();
+    let metas = opened.index.searchable_segment_metas()?;
+    let mut segments = kbx_dir::charged_vec(&mut charge, readers.len())?;
+    let mut alive = kbx_dir::charged_vec(&mut charge, readers.len())?;
     let mut alive_docs: u64 = 0;
-    for (reader, dead) in searcher.segment_readers().iter().zip(&hidden) {
+    for (reader, dead) in readers.iter().zip(&hidden) {
         let max_doc = reader.max_doc();
         alive_docs += u64::from(max_doc) - dead.len() as u64;
-        let meta = opened
-            .index
-            .searchable_segment_metas()?
-            .into_iter()
+        let meta = metas
+            .iter()
             .find(|m| m.id() == reader.segment_id())
             .ok_or(Error::Corrupt("text pack"))?;
-        segments.push(opened.index.segment(meta));
-        alive.push(Some(alive_set(max_doc, dead)));
+        segments.push(opened.index.segment(meta.clone()));
+        alive.push(Some(alive_set(max_doc, dead, &mut charge)?));
     }
     let ram = RamDirectory::create();
     if alive_docs == 0 {
-        return kbx_dir::encode(&tombstones, None, &ram).map(Some);
+        return kbx_dir::encode(&tombstones, None, &ram, budget).map(Some);
     }
+    // the merged segment is written into RAM: no more than the bytes of the packs it reads
+    kbx_dir::charge(&mut charge, packs.iter().map(OwnedBytes::len).sum())?;
     let merged = merge_filtered_segments(&segments, IndexSettings::default(), alive, ram.clone())?;
-    budget.check()?;
     let segment = merged.searchable_segments()?.into_iter().next();
-    kbx_dir::encode(&tombstones, segment.as_ref(), &ram).map(Some)
+    kbx_dir::encode(&tombstones, segment.as_ref(), &ram, budget).map(Some)
 }
 
 /// The alive set of a segment of `max_doc` documents without `dead`, in Tantivy's file layout
-/// (the bound, then one little-endian word per 64 documents).
-fn alive_set(max_doc: u32, dead: &[DocId]) -> AliveBitSet {
+/// (the bound, then one little-endian word per 64 documents), charged on `charge` first.
+fn alive_set(
+    max_doc: u32,
+    dead: &[DocId],
+    charge: &mut kaban_core::query_budget::BudgetLease,
+) -> Result<AliveBitSet> {
     let words = max_doc.div_ceil(64) as usize;
-    let mut bits = vec![u64::MAX; words];
+    let mut bits: Vec<u64> = kbx_dir::charged_vec(charge, words)?;
+    bits.resize(words, u64::MAX);
     if let Some(last) = bits.last_mut()
         && !max_doc.is_multiple_of(64)
     {
@@ -272,11 +276,12 @@ fn alive_set(max_doc: u32, dead: &[DocId]) -> AliveBitSet {
     for doc in dead {
         bits[(doc / 64) as usize] &= !(1 << (doc % 64));
     }
-    let mut bytes = max_doc.to_le_bytes().to_vec();
+    let mut bytes: Vec<u8> = kbx_dir::charged_vec(charge, 4 + words * 8)?;
+    bytes.extend(max_doc.to_le_bytes());
     for word in bits {
         bytes.extend(word.to_le_bytes());
     }
-    AliveBitSet::open(OwnedBytes::new(bytes))
+    Ok(AliveBitSet::open(OwnedBytes::new(bytes)))
 }
 
 #[cfg(test)]

@@ -51,7 +51,6 @@ use kaban_core::text_index::{
     Visibility,
 };
 use kaban_core::{BackendSource, Change, ChangeEntity, Ontology, StoreError};
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 use tantivy::directory::{MmapDirectory, OwnedBytes};
@@ -432,8 +431,10 @@ impl TantivyIndex {
 
     /// A search on the catalog snapshot `at` (spec 11 T7): its tiers mapped from the
     /// container (the caller's pin protects them while the search runs; nothing here outlives
-    /// it), its sediment segments copied under `budget`, the documents a newer tombstone hides
-    /// left out of every page.
+    /// it, and the mapping is uncharged), its sediment segments copied, the documents a newer
+    /// tombstone hides left out of every page. Every allocation of the search is reserved on
+    /// `budget` before it is made, in the order the bytes appear: the copies, the decoded
+    /// tombstones, the hidden documents, the collector and the page (PC-17).
     fn search_snapshot(
         &self,
         at: &TextSnapshot<'_>,
@@ -441,9 +442,9 @@ impl TantivyIndex {
         budget: &QueryBudget,
     ) -> Result<Searched> {
         budget.check()?;
-        let copied: usize = at.sediment.iter().map(|s| <[u8]>::len(s)).sum();
-        let _held = budget.reserve(u64::try_from(copied).unwrap_or(u64::MAX))?;
-        let mut packs: Vec<OwnedBytes> = Vec::with_capacity(at.tiers.len() + at.sediment.len());
+        let mut charge = budget.reserve(0)?;
+        let mut packs: Vec<OwnedBytes> =
+            kbx_dir::charged_vec(&mut charge, at.tiers.len() + at.sediment.len())?;
         if !at.tiers.is_empty() {
             let (Some(dir), Some(name)) = (at.kbx.parent(), at.kbx.file_name()) else {
                 return Err(Error::Corrupt("container path"));
@@ -461,35 +462,38 @@ impl TantivyIndex {
                 packs.push(container.slice(start..end).read_bytes()?);
             }
         }
-        packs.extend(at.sediment.iter().map(|s| OwnedBytes::new(s.to_vec())));
+        for segment in at.sediment {
+            kbx_dir::charge(&mut charge, segment.len())?;
+            packs.push(OwnedBytes::new(segment.to_vec()));
+        }
         if packs.is_empty() {
             return Ok(Searched::Hits {
                 hits: vec![],
                 exhausted: true,
             });
         }
-        let opened = kbx_dir::open(&packs)?;
+        let opened = kbx_dir::open(&packs, budget)?;
         let reader: IndexReader = opened
             .index
             .reader_builder()
             .reload_policy(ReloadPolicy::Manual)
             .try_into()?;
         let searcher = reader.searcher();
-        let hidden: HashSet<DocAddress> = opened
-            .hidden(&searcher, &self.fields, &[])?
-            .into_iter()
-            .enumerate()
-            .flat_map(|(ord, docs)| {
-                let ord = u32::try_from(ord).unwrap_or(u32::MAX);
-                docs.into_iter().map(move |doc| DocAddress::new(ord, doc))
-            })
-            .collect();
+        let (per_segment, found_with) = opened.hidden(&searcher, &self.fields, &[], budget)?;
+        let mut hidden: Vec<DocAddress> =
+            kbx_dir::charged_vec(&mut charge, per_segment.iter().map(Vec::len).sum())?;
+        for (ord, docs) in per_segment.iter().enumerate() {
+            let ord = u32::try_from(ord).map_err(|_| Error::Corrupt("segment ordinal"))?;
+            hidden.extend(docs.iter().map(|doc| DocAddress::new(ord, *doc)));
+        }
+        drop((per_segment, found_with));
+        hidden.sort_unstable();
         let weights = self
             .weights
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
-        let out = query::run_hiding(&self.fields, &weights, &searcher, q, &hidden)?;
+        let out = query::run_hiding(&self.fields, &weights, &searcher, q, &hidden, budget)?;
         budget.check()?;
         Ok(out)
     }
@@ -794,13 +798,14 @@ mod tests {
     use super::TantivyIndex;
     use crate::payload::Payload;
     use crate::schema::ACTIVE;
-    use kaban_core::RecallQuery;
     use kaban_core::config::Recall;
     use kaban_core::ident::IDENT_TERMS_VERSION;
+    use kaban_core::query_budget::{BudgetExceeded, Limit, QueryBudget};
     use kaban_core::text_index::{
-        Canonical, IndexIdentity, IndexRow, MatchMode, Replay, Rows, Searched, SeedFilter,
-        TextIndex, TextQuery,
+        Canonical, ExtentSpan, IndexIdentity, IndexRow, MatchMode, Replay, Rows, Searched,
+        SeedFilter, TextIndex, TextQuery, TextSnapshot,
     };
+    use kaban_core::{RecallQuery, StoreError};
     use tantivy::TantivyDocument;
 
     /// A record store with no rows at one fixed canonical position.
@@ -879,6 +884,101 @@ mod tests {
             index.pin().unwrap().search(&query).unwrap(),
             Searched::Unavailable
         );
+    }
+
+    /// One active row of the default workspace.
+    fn row(rid: i64, text: &str) -> IndexRow {
+        IndexRow {
+            id: format!("id-{rid}"),
+            rid,
+            revision: 1,
+            kind: "Fact".into(),
+            workspace_id: "default".into(),
+            tags: vec![],
+            text: text.into(),
+            summary: String::new(),
+            stored_summary: None,
+            ident_values: vec![],
+            anchor_keys: vec![],
+        }
+    }
+
+    /// An in-memory adapter over no rows.
+    fn adapter() -> TantivyIndex {
+        let at = Canonical {
+            seq: 1,
+            identity: IndexIdentity {
+                instance_id: "db-1".into(),
+                pack_lineage_id: "lineage-1".into(),
+                projection_signature: "sig-1".into(),
+                ident_terms_version: IDENT_TERMS_VERSION.into(),
+            },
+        };
+        TantivyIndex::in_ram(
+            &kaban_core::shipped::resolved().unwrap(),
+            &Recall::default(),
+            Box::new(Fixed(at)),
+        )
+        .unwrap()
+    }
+
+    /// A lexical query for `text` over the whole snapshot.
+    fn lexical<'a>(text: &'a str, q: &'a RecallQuery) -> TextQuery<'a> {
+        TextQuery {
+            text,
+            mode: MatchMode::Lexical,
+            filter: SeedFilter::of(q),
+            limit: 10,
+            sufficient: 10,
+            skip: 0,
+        }
+    }
+
+    /// PC-17 (T7 midpoint review, memory): the tiers' mapping is the caller's and uncharged,
+    /// but their decoded tombstones are the search's own allocation. A ceiling below the size
+    /// of the pinned tier's tombstone set refuses the search with the budget's memory error,
+    /// and every charge is given back.
+    #[test]
+    fn a_search_below_the_size_of_the_tiers_tombstones_is_refused_by_the_budget() {
+        // Arrange: one tier of one document and 10,000 tombstones (80,000 bytes decoded),
+        // written into a container file
+        let tombstones: Vec<i64> = (1..=10_000).collect();
+        let unlimited = QueryBudget::new(u64::MAX, None);
+        let pack =
+            crate::segment(&[row(1, "quokka by the shore")], &tombstones, &unlimited).unwrap();
+        let dir = std::env::temp_dir().join(format!("kaban-t7b-tier-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let kbx = dir.join("kaban.kbx");
+        std::fs::write(&kbx, &pack).unwrap();
+        let tiers = [ExtentSpan {
+            offset: 0,
+            len: pack.len() as u64,
+        }];
+        let at = TextSnapshot {
+            generation: 1,
+            kbx: &kbx,
+            tiers: &tiers,
+            sediment: &[],
+        };
+        let budget = QueryBudget::new(40_000, None);
+        let q = RecallQuery::default();
+
+        // Act
+        let searched = adapter().search_at(&at, &lexical("quokka", &q), &budget);
+
+        // Assert
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(
+            matches!(
+                searched,
+                Err(StoreError::BudgetExceeded(BudgetExceeded {
+                    limit: Limit::Memory,
+                    ..
+                }))
+            ),
+            "expected the budget's memory refusal, got {searched:?}"
+        );
+        assert_eq!(budget.live_bytes(), 0, "every charge was given back");
     }
 
     /// The segment files of the index (every managed file but Tantivy's own bookkeeping).

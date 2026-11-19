@@ -19,10 +19,11 @@ use crate::schema::{ACTIVE, CONTENT, Fields, KIND, REVISION, RID};
 use crate::{Error, Result};
 use kaban_core::config::Recall;
 use kaban_core::ident::{QueryClass, classify};
+use kaban_core::query_budget::QueryBudget;
 use kaban_core::text_index::{MatchMode, Searched, SeedFilter, TextHit, TextQuery};
 use kaban_core::{Ontology, stored_name};
 use std::cmp::Reverse;
-use std::collections::{BTreeSet, HashSet};
+use std::collections::BTreeSet;
 use tantivy::collector::TopDocs;
 use tantivy::query::{
     Bm25StatisticsProvider, BooleanQuery, BoostQuery, ConstScoreQuery, EmptyQuery, FuzzyTermQuery,
@@ -430,7 +431,8 @@ fn top(
     query: &dyn Query,
     skip: usize,
     want: usize,
-    hidden: &HashSet<DocAddress>,
+    hidden: &[DocAddress],
+    budget: &QueryBudget,
 ) -> Result<Vec<TextHit>> {
     for segment in searcher.segment_readers() {
         segment
@@ -440,27 +442,37 @@ fn top(
     }
     // a hidden document takes a place in the collected order at most once each: collect past
     // them from the start, then cut the page from what stays
-    let order = TopDocs::with_limit(want.saturating_add(skip).saturating_add(hidden.len()))
-        .tweak_score(|segment: &SegmentReader| {
-            // the same readers as above: opened there, this cannot fail; `None` stays `None`
-            let rid = segment.fast_fields().i64(RID).ok();
-            move |doc: DocId, score: Score| {
-                (score, Reverse(rid.as_ref().and_then(|c| c.first(doc))))
-            }
-        });
+    let collect = want.saturating_add(skip).saturating_add(hidden.len());
+    // the collector's buffers (Tantivy keeps twice the limit while it collects one segment,
+    // the limit per collected segment, and twice the limit again to merge them) and the page
+    let mut charge = budget.reserve(0)?;
+    let entries = collect.saturating_mul(searcher.segment_readers().len().saturating_add(4));
+    crate::kbx_dir::charge(&mut charge, entries.saturating_mul(size_of::<Collected>()))?;
+    let mut page: Vec<TextHit> = crate::kbx_dir::charged_vec(&mut charge, want.min(collect))?;
+    let order = TopDocs::with_limit(collect).tweak_score(|segment: &SegmentReader| {
+        // the same readers as above: opened there, this cannot fail; `None` stays `None`
+        let rid = segment.fast_fields().i64(RID).ok();
+        move |doc: DocId, score: Score| (score, Reverse(rid.as_ref().and_then(|c| c.first(doc))))
+    });
     let statistics = SharedIdf {
         searcher,
         content: fields.content,
     };
-    searcher
-        .search_with_statistics_provider(query, &order, &statistics)?
+    let collected: Vec<Collected> =
+        searcher.search_with_statistics_provider(query, &order, &statistics)?;
+    for ((score, Reverse(rid)), address) in collected
         .into_iter()
-        .filter(|(_, address)| !hidden.contains(address))
+        .filter(|(_, address)| hidden.binary_search(address).is_err())
         .skip(skip)
         .take(want)
-        .map(|((score, Reverse(rid)), address)| hit(searcher, address, rid, score))
-        .collect()
+    {
+        page.push(hit(searcher, address, rid, score)?);
+    }
+    Ok(page)
 }
+
+/// One collected document: its sort key and its address.
+type Collected = ((Score, Reverse<Option<i64>>), DocAddress);
 
 /// A hit from the fast columns of its segment: no document store is read, and a document
 /// without one of its keys is [`Error::Corrupt`].
@@ -503,17 +515,27 @@ pub(crate) fn run(
     searcher: &Searcher,
     q: &TextQuery<'_>,
 ) -> Result<Searched> {
-    run_hiding(fields, weights, searcher, q, &HashSet::new())
+    run_hiding(
+        fields,
+        weights,
+        searcher,
+        q,
+        &[],
+        &QueryBudget::new(u64::MAX, None),
+    )
 }
 
-/// [`run`] without the documents of `hidden` (a catalog snapshot's documents that a newer
-/// tombstone hides, spec 11 T7): they never take a place in the order or a page.
+/// [`run`] without the documents of `hidden` (sorted: a catalog snapshot's documents that a
+/// newer tombstone hides, spec 11 T7): they never take a place in the order or a page. The
+/// collector and the page are charged on `budget` while they are built; the page returned is
+/// the caller's to charge.
 pub(crate) fn run_hiding(
     fields: &Fields,
     weights: &Weights,
     searcher: &Searcher,
     q: &TextQuery<'_>,
-    hidden: &HashSet<DocAddress>,
+    hidden: &[DocAddress],
+    budget: &QueryBudget,
 ) -> Result<Searched> {
     if q.limit == 0 {
         return Ok(Searched::Hits {
@@ -551,6 +573,7 @@ pub(crate) fn run_hiding(
                 0,
                 through.max(q.sufficient),
                 hidden,
+                budget,
             )?;
             if strict_hits.len() >= q.sufficient {
                 strict_hits.into_iter().skip(q.skip).collect()
@@ -571,6 +594,7 @@ pub(crate) fn run_hiding(
                         q.skip,
                         q.limit + 1,
                         hidden,
+                        budget,
                     )?,
                     None => strict_hits.into_iter().skip(q.skip).collect(),
                 }
@@ -587,6 +611,7 @@ pub(crate) fn run_hiding(
                 q.skip,
                 q.limit + 1,
                 hidden,
+                budget,
             )?
         }
     };

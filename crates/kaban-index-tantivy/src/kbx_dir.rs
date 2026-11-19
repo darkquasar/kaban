@@ -15,10 +15,17 @@
 //!
 //! The directory holds only byte slices of the packs it was given: a tier's slices come from
 //! the caller's mapping of the container, which the caller's pin protects while it lives.
+//!
+//! Memory (PC-17): the mapping itself is the caller's and uncharged. Everything this module
+//! allocates from the packs (each pack's decoded tombstones and fixed metadata, the hidden
+//! documents and the tombstone sets they are found with) is reserved on the caller's
+//! [`QueryBudget`] before it is allocated, and the charge lives as long as the value.
 
 use crate::schema::Fields;
 use crate::{Error, Result};
-use std::collections::{HashMap, HashSet};
+use kaban_core::query_budget::{BudgetLease, GrowError, QueryBudget};
+use std::collections::HashMap;
+use std::convert::Infallible;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -34,6 +41,54 @@ const MAGIC: &[u8; 4] = b"KBXT";
 const VERSION: u8 = 1;
 const META: &str = "meta.json";
 
+/// The fixed metadata one opened pack adds (its entries in the file map and in the
+/// synthesized `meta.json`): a pack carries at most six files and one segment.
+const PACK_METADATA_BYTES: u64 = 1024;
+
+/// Charge `bytes` on `lease` before the allocation they pay for.
+///
+/// # Errors
+/// The budget's refusal.
+pub(crate) fn charge(lease: &mut BudgetLease, bytes: usize) -> Result<()> {
+    let bytes = u64::try_from(bytes).map_err(|_| overflow())?;
+    lease
+        .grow_with(bytes, || Ok::<_, Infallible>(()))
+        .map_err(|e| grown(&e))
+}
+
+/// An empty vector of exactly `capacity` elements, its allocation charged on `lease` first.
+///
+/// # Errors
+/// The budget's refusal.
+pub(crate) fn charged_vec<T>(lease: &mut BudgetLease, capacity: usize) -> Result<Vec<T>> {
+    if capacity == 0 || size_of::<T>() == 0 {
+        return Ok(Vec::new());
+    }
+    let bytes = size_of::<T>()
+        .checked_mul(capacity)
+        .and_then(|b| u64::try_from(b).ok())
+        .ok_or_else(overflow)?;
+    let align = u64::try_from(align_of::<T>()).map_err(|_| overflow())?;
+    let charge = QueryBudget::allocation_charge(bytes, align)?;
+    lease
+        .grow_with(charge, || Ok::<_, Infallible>(Vec::with_capacity(capacity)))
+        .map_err(|e| grown(&e))
+}
+
+fn grown(e: &GrowError<Infallible>) -> Error {
+    match e {
+        GrowError::Budget(refused) => Error::Budget(*refused),
+        GrowError::Alloc(never) => match *never {},
+    }
+}
+
+fn overflow() -> Error {
+    Error::Budget(kaban_core::query_budget::BudgetExceeded {
+        limit: kaban_core::query_budget::Limit::Memory,
+        value: u64::MAX,
+    })
+}
+
 /// The segment files a pack carries, by code (the index into this table).
 const COMPONENTS: [(SegmentComponent, &str); 6] = [
     (SegmentComponent::Postings, ".idx"),
@@ -46,15 +101,35 @@ const COMPONENTS: [(SegmentComponent, &str); 6] = [
 
 /// The pack of `tombstones` and the files of `segment` (none: a pack of tombstones only), read
 /// raw from `raw`, the directory under the segment's index, so every file keeps its footer.
+/// The pack's bytes are charged to `budget` before they are allocated, and released when it
+/// is returned: the caller owns the pack.
 ///
 /// # Errors
-/// A segment file that cannot be read.
+/// A segment file that cannot be read; the budget's refusal.
 pub(crate) fn encode(
     tombstones: &[i64],
     segment: Option<&Segment>,
     raw: &dyn Directory,
+    budget: &QueryBudget,
 ) -> Result<Vec<u8>> {
-    let mut out = MAGIC.to_vec();
+    let mut files = Vec::new();
+    if let Some(segment) = segment {
+        for (code, (component, _)) in COMPONENTS.iter().enumerate() {
+            match raw.open_read(&segment.relative_path(*component)) {
+                // the RAM directory's own bytes, shared, not copied
+                Ok(file) => files.push((code, file.read_bytes()?)),
+                Err(OpenReadError::FileDoesNotExist(_)) => {}
+                Err(e) => return Err(Error::Tantivy(e.into())),
+            }
+        }
+    }
+    let head = MAGIC.len() + 1 + 4 + tombstones.len() * 8 + 1;
+    let body = segment.map_or(0, |_| {
+        32 + 4 + 1 + files.iter().map(|(_, b)| 1 + 8 + b.len()).sum::<usize>()
+    });
+    let mut lease = budget.reserve(0)?;
+    let mut out = charged_vec(&mut lease, head + body)?;
+    out.extend_from_slice(MAGIC);
     out.push(VERSION);
     out.extend(len_u32(tombstones.len())?.to_le_bytes());
     for rid in tombstones {
@@ -67,14 +142,6 @@ pub(crate) fn encode(
     out.push(1);
     out.extend(segment.id().uuid_string().as_bytes());
     out.extend(segment.meta().max_doc().to_le_bytes());
-    let mut files = Vec::new();
-    for (code, (component, _)) in COMPONENTS.iter().enumerate() {
-        match raw.open_read(&segment.relative_path(*component)) {
-            Ok(file) => files.push((code, file.read_bytes()?)),
-            Err(OpenReadError::FileDoesNotExist(_)) => {}
-            Err(e) => return Err(Error::Tantivy(e.into())),
-        }
-    }
     out.push(u8::try_from(files.len()).map_err(|_| Error::Corrupt("text pack"))?);
     for (code, bytes) in files {
         out.push(u8::try_from(code).map_err(|_| Error::Corrupt("text pack"))?);
@@ -143,13 +210,15 @@ impl Cursor<'_> {
     }
 }
 
-fn decode(bytes: &OwnedBytes) -> Result<Pack> {
+/// `bytes` decoded, its tombstones charged on `lease` before they are allocated.
+fn decode(bytes: &OwnedBytes, lease: &mut BudgetLease) -> Result<Pack> {
     let mut c = Cursor { bytes, at: 0 };
     if &c.array::<4>()? != MAGIC || c.array::<1>()? != [VERSION] {
         return Err(Error::Corrupt("text pack"));
     }
     let n = u32::from_le_bytes(c.array()?);
-    let mut tombstones = Vec::with_capacity(usize::try_from(n).unwrap_or(0).min(bytes.len() / 8));
+    // a count past the pack's bytes fails below before it outgrows this capacity
+    let mut tombstones = charged_vec(lease, usize::try_from(n).unwrap_or(0).min(bytes.len() / 8))?;
     for _ in 0..n {
         tombstones.push(i64::from_le_bytes(c.array()?));
     }
@@ -188,19 +257,30 @@ pub(crate) struct Opened {
     tombstones: Vec<Vec<i64>>,
     /// The pack each segment came from.
     positions: HashMap<SegmentId, usize>,
+    /// The charge of the decoded tombstones and the packs' metadata.
+    _charge: BudgetLease,
 }
 
-/// Open `packs` (oldest first) as one read-only index with the crate's schema.
+/// Open `packs` (oldest first) as one read-only index with the crate's schema, its decoded
+/// tombstones and metadata charged on `budget` for as long as the opened index lives.
 ///
 /// # Errors
-/// A malformed pack ([`Error::Corrupt`]) or an index Tantivy refuses to open.
-pub(crate) fn open(packs: &[OwnedBytes]) -> Result<Opened> {
-    let mut files = HashMap::new();
-    let mut segments = Vec::new();
-    let mut tombstones = Vec::with_capacity(packs.len());
-    let mut positions = HashMap::new();
+/// A malformed pack ([`Error::Corrupt`]), the budget's refusal, or an index Tantivy refuses
+/// to open.
+pub(crate) fn open(packs: &[OwnedBytes], budget: &QueryBudget) -> Result<Opened> {
+    let mut lease = budget.reserve(0)?;
+    charge(
+        &mut lease,
+        usize::try_from(PACK_METADATA_BYTES)
+            .unwrap_or(usize::MAX)
+            .saturating_mul(packs.len()),
+    )?;
+    let mut files = HashMap::with_capacity(packs.len().saturating_mul(COMPONENTS.len()));
+    let mut segments = Vec::with_capacity(packs.len());
+    let mut tombstones = charged_vec(&mut lease, packs.len())?;
+    let mut positions = HashMap::with_capacity(packs.len());
     for (position, bytes) in packs.iter().enumerate() {
-        let pack = decode(bytes)?;
+        let pack = decode(bytes, &mut lease)?;
         tombstones.push(pack.tombstones);
         if let Some(segment) = pack.segment {
             for (code, file) in segment.files {
@@ -230,47 +310,73 @@ pub(crate) fn open(packs: &[OwnedBytes]) -> Result<Opened> {
         index,
         tombstones,
         positions,
+        _charge: lease,
     })
 }
 
 impl Opened {
-    /// The union of every pack's tombstones, sorted: what a merge of these packs carries on to
-    /// hide the documents of older packs.
-    pub(crate) fn all_tombstones(&self) -> Vec<i64> {
-        let mut all: Vec<i64> = self.tombstones.iter().flatten().copied().collect();
+    /// The number of tombstones of every pack.
+    fn tombstone_count(&self) -> usize {
+        self.tombstones.iter().map(Vec::len).sum()
+    }
+
+    /// The union of every pack's tombstones, sorted, charged on `lease` before it is
+    /// allocated: what a merge of these packs carries on to hide the documents of older packs.
+    ///
+    /// # Errors
+    /// The budget's refusal.
+    pub(crate) fn all_tombstones(&self, lease: &mut BudgetLease) -> Result<Vec<i64>> {
+        let mut all = charged_vec(lease, self.tombstone_count())?;
+        all.extend(self.tombstones.iter().flatten().copied());
         all.sort_unstable();
         all.dedup();
-        all
+        Ok(all)
     }
 
     /// The documents of each segment of `searcher` (by segment ordinal) that a newer pack's
-    /// tombstone hides, or whose rid is in `drop`.
+    /// tombstone hides, or whose rid is in `drop`, with the charge that pays for them and for
+    /// the tombstone set they were found with (reserved on `budget` before each allocation).
     ///
     /// # Errors
-    /// A segment's rid postings cannot be read.
+    /// A segment's rid postings cannot be read; the budget's refusal.
     pub(crate) fn hidden(
         &self,
         searcher: &Searcher,
         fields: &Fields,
         drop: &[i64],
-    ) -> Result<Vec<Vec<DocId>>> {
-        let by_position: HashMap<usize, usize> = searcher
-            .segment_readers()
-            .iter()
-            .enumerate()
-            .filter_map(|(ord, r)| self.positions.get(&r.segment_id()).map(|p| (*p, ord)))
-            .collect();
-        let mut out = vec![Vec::new(); searcher.segment_readers().len()];
-        // the tombstones of every pack newer than the one being visited
-        let mut newer: HashSet<i64> = drop.iter().copied().collect();
+        budget: &QueryBudget,
+    ) -> Result<(Vec<Vec<DocId>>, BudgetLease)> {
+        let mut lease = budget.reserve(0)?;
+        let readers = searcher.segment_readers();
+        // the segment ordinal of each pack position
+        let mut by_position: Vec<Option<usize>> = charged_vec(&mut lease, self.tombstones.len())?;
+        by_position.resize(self.tombstones.len(), None);
+        for (ord, reader) in readers.iter().enumerate() {
+            if let Some(&position) = self.positions.get(&reader.segment_id()) {
+                by_position[position] = Some(ord);
+            }
+        }
+        let mut out: Vec<Vec<DocId>> = charged_vec(&mut lease, readers.len())?;
+        out.resize_with(readers.len(), Vec::new);
+        // the tombstones of every pack newer than the one being visited, sorted
+        let mut newer: Vec<i64> = charged_vec(
+            &mut lease,
+            drop.len().saturating_add(self.tombstone_count()),
+        )?;
+        newer.extend_from_slice(drop);
+        newer.sort_unstable();
+        newer.dedup();
         for position in (0..self.tombstones.len()).rev() {
-            if let Some(&ord) = by_position.get(&position) {
-                let inverted = searcher.segment_readers()[ord].inverted_index(fields.rid)?;
+            if let Some(ord) = by_position[position] {
+                let inverted = readers[ord].inverted_index(fields.rid)?;
                 for rid in &newer {
                     let term = Term::from_field_i64(fields.rid, *rid);
                     if let Some(mut postings) =
                         inverted.read_postings(&term, IndexRecordOption::Basic)?
                     {
+                        let docs = usize::try_from(postings.doc_freq()).unwrap_or(usize::MAX);
+                        charge(&mut lease, docs.saturating_mul(size_of::<DocId>()))?;
+                        out[ord].reserve_exact(docs);
                         let mut doc = postings.doc();
                         while doc != TERMINATED {
                             out[ord].push(doc);
@@ -280,9 +386,12 @@ impl Opened {
                 }
                 out[ord].sort_unstable();
             }
-            newer.extend(self.tombstones[position].iter().copied());
+            // within the capacity charged above: never reallocates
+            newer.extend_from_slice(&self.tombstones[position]);
+            newer.sort_unstable();
+            newer.dedup();
         }
-        Ok(out)
+        Ok((out, lease))
     }
 }
 

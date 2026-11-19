@@ -62,7 +62,7 @@ impl IndexClass for TextClass {
             return Ok(());
         }
         let budget = QueryBudget::new(STAGE_MEMORY_BYTES, None);
-        let rows = crate::index_rows::staged_rows(&txn.reader(), &rids)?;
+        let (rows, _charged) = crate::index_rows::staged_rows(&txn.reader(), &rids, &budget)?;
         let pack = kaban_index_tantivy::segment(&rows, &rids, &budget)?;
         txn.put_sediment(ExtentClass::TextTier, &pack)?;
         Ok(())
@@ -85,6 +85,12 @@ impl IndexClass for TextClass {
         rows: &[&SedimentRow],
         budget: &QueryBudget,
     ) -> Result<Option<Vec<u8>>> {
+        // the copies the merge reads, charged before they are made
+        let copies = rows
+            .iter()
+            .map(|r| r.payload.len() + size_of::<OwnedBytes>())
+            .sum::<usize>();
+        let _copies = budget.reserve(u64::try_from(copies).unwrap_or(u64::MAX))?;
         let packs: Vec<OwnedBytes> = rows
             .iter()
             .map(|r| OwnedBytes::new(r.payload.clone()))
