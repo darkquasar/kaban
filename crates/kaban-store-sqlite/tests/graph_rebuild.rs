@@ -279,7 +279,7 @@ fn assert_matches_rows(store: &SqliteStore, db: &Path, stage: &str) {
             view,
             &all,
             RankParams::default(),
-            g.order(),
+            &*g.order()?,
             RowCap(count),
             &b,
         )
@@ -312,7 +312,7 @@ fn record(store: &SqliteStore, probes: &[NodeId]) -> (Vec<String>, BTreeMap<Stri
             out.push(format!("{:?}", degree(v, s, &all, Direction::Both, &b)));
             let path = shortest_path(v, s, d, &all, caps, &b).map(|p| p.map(|c| c.into_parts().0));
             out.push(format!("{path:?}"));
-            let weighted = weighted_shortest_path(v, s, d, &all, caps, g.order(), &b)
+            let weighted = weighted_shortest_path(v, s, d, &all, caps, &*g.order()?, &b)
                 .map(|p| p.map(|c| c.into_parts().0));
             out.push(format!("{weighted:?}"));
         }

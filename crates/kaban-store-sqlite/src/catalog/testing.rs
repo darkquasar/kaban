@@ -25,7 +25,7 @@ use super::capture::{BatchChanges, CaptureOp};
 use super::class::{ExtentClass, ExtentLocation, IndexClass};
 use super::commit::Stage;
 use super::compact::{Claim, CompactBudget, CompactReport, Publication, PurgeReport, ViewSwitch};
-use super::graph_class::{GraphClass, LoadedView, NodeOrder, load_view};
+use super::graph_class::{GraphClass, LoadedView, load_view};
 use super::pin::{Pin, PinnedView, budget_exceeded};
 use super::tables::{ExtentId, ExtentRef, SedimentRow, SedimentSeq};
 use crate::SqliteStore;
@@ -885,12 +885,12 @@ pub fn corrupt(store: &SqliteStore, sql: &str) -> Result<()> {
 }
 
 /// `main`'s memory graph at one snapshot, as the graph suites read it (T11): the merged view,
-/// local ids by `NodeId` and back, relation ids and the public tie order. Local ids never leave
-/// the store outside these suites (INV-2).
+/// local ids by `NodeId` and back, relation ids and the public tie order (prepared only when
+/// asked for). Local ids never leave the store outside these suites (INV-2).
 pub struct MainGraph<'v> {
     loaded: &'v LoadedView<'v>,
     view: kaban_index_graph::View<'v>,
-    order: NodeOrder,
+    budget: &'v QueryBudget,
 }
 
 impl<'v> MainGraph<'v> {
@@ -918,10 +918,14 @@ impl<'v> MainGraph<'v> {
     pub fn rel(&self, rel: &str) -> Option<kaban_index_graph::RelId> {
         self.loaded.rel_id(rel)
     }
-    /// The public `NodeId` tie order of the snapshot.
-    #[must_use]
-    pub fn order(&self) -> &dyn kaban_index_graph::StableOrder {
-        &self.order
+    /// The public `NodeId` tie order of the snapshot ([`LoadedView::stable_order`]: the first
+    /// ask at a generation prepares it under the query's budget, later ones share it).
+    ///
+    /// # Errors
+    /// The budget's and SQLite's errors.
+    pub fn order(&self) -> Result<std::sync::Arc<dyn kaban_index_graph::StableOrder>> {
+        let order = self.loaded.stable_order(self.budget)?;
+        Ok(order)
     }
 }
 
@@ -967,7 +971,7 @@ fn with_main_graph_of<T>(
             let graph = MainGraph {
                 loaded: &loaded,
                 view: loaded.view(budget)?,
-                order: loaded.stable_order(budget)?,
+                budget,
             };
             f(&graph)
         })

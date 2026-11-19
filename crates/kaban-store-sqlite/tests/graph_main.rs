@@ -16,11 +16,14 @@ use kaban_core::query_budget::QueryBudget;
 use kaban_core::{
     IngestStore, MemoryStore, NewNode, NodeId, Op, StoreError, WorkspaceId, WriteBatch,
 };
-use kaban_index_graph::{Caps, Direction, RelSelection, expand};
+use kaban_index_graph::{
+    Caps, Direction, LocalId, RankParams, RelSelection, RowCap, StableOrder, expand, pagerank,
+};
 use kaban_store_sqlite::catalog_testing;
 use kaban_store_sqlite::{SqliteStore, WorkKind};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 fn budget() -> QueryBudget {
@@ -326,7 +329,7 @@ fn an_idle_cached_graph_is_dropped_by_the_next_write_without_another_load() {
 fn a_chain_of_code_class_extents_loads_when_the_code_classes_are_asked_for() {
     // Arrange: main's chain holds one code graph base (nodes 1 and 2, edge 1 -> 2) and no
     // memory graph extent
-    use kaban_index_graph::{Attr, EdgeOp, LocalId, NodeOp, OpKind, Records, RelId, build_base};
+    use kaban_index_graph::{Attr, EdgeOp, NodeOp, OpKind, Records, RelId, build_base};
     let s = Scratch::new("kaban-t11-main", "code-chain");
     let store = SqliteStore::open(&s.db(), &s.keys()).unwrap();
     let code = Records {
@@ -576,4 +579,144 @@ fn graph_rows_seal_once_the_node_and_edge_operations_they_hold_reach_seal_ops() 
     // Assert: two operations in one row are not due; three in two rows are
     assert_eq!(below, 0, "2 operations do not reach seal_ops 3");
     assert_eq!(reached, 1, "3 operations reach seal_ops 3");
+}
+
+/// A scored query over `store`'s main graph under `b`: its tie order (the `Arc` it was handed,
+/// and the bytes asking for it reserved on `b`), then a PageRank over it.
+fn ranked(store: &SqliteStore, b: &QueryBudget) -> kaban_core::Result<(Arc<dyn StableOrder>, u64)> {
+    catalog_testing::with_main_graph(store, b, |g| {
+        let before = b.live_bytes();
+        let order = g.order()?;
+        let reserved = b.live_bytes() - before;
+        let params = RankParams::default();
+        pagerank(g.view(), &RelSelection::All, params, &*order, RowCap(10), b).unwrap();
+        Ok((order, reserved))
+    })
+}
+
+#[test]
+fn scored_queries_at_one_generation_share_one_tie_order_and_a_commit_prepares_a_new_one() {
+    // Arrange: a -> b
+    let s = Scratch::new("kaban-t11-main", "order-once");
+    let store = SqliteStore::open(&s.db(), &s.keys()).unwrap();
+    let [a, b] = ["a", "b"].map(|t| nid(&created(&store, "Fact", t).id));
+    store
+        .link(&a, &b, "RELATES_TO", None, None, &ctx())
+        .unwrap();
+
+    // Act: two scored queries at one generation, a commit, a third
+    let (first, first_reserved) = ranked(&store, &budget()).unwrap();
+    let (second, second_reserved) = ranked(&store, &budget()).unwrap();
+    created(&store, "Fact", "c");
+    let (third, third_reserved) = ranked(&store, &budget()).unwrap();
+
+    // Assert: the second query reuses the first one's order and reserves nothing for it; the
+    // third, at the commit's generation, has an order of its own
+    assert!(
+        Arc::ptr_eq(&first, &second),
+        "the second scored query at one generation prepared the tie order again"
+    );
+    assert_eq!(second_reserved, 0, "bytes the reused order reserved");
+    assert!(
+        !Arc::ptr_eq(&second, &third),
+        "a query after a commit reused the older generation's tie order"
+    );
+    assert!(first_reserved > 0, "the first preparation is charged");
+    assert!(
+        third_reserved > 0,
+        "the new generation's preparation is charged"
+    );
+}
+
+/// Present nodes in one commit of `store`: rids `0..n` (each sorting as its rid).
+fn many_nodes(store: &SqliteStore, n: u32) {
+    catalog_testing::corrupt(
+        store,
+        &format!(
+            "WITH RECURSIVE i(k) AS (SELECT 0 UNION ALL SELECT k + 1 FROM i WHERE k + 1 < {n})
+             INSERT INTO node(rid, id, kind, text, created_at, updated_at, workspace_id,
+                              content_hash)
+             SELECT k, printf('00000000-0000-7000-8000-%012x', k), 'Fact', 'node ' || k,
+                    '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z', 'default', printf('%064x', k)
+             FROM i"
+        ),
+    )
+    .unwrap();
+}
+
+#[test]
+fn an_expand_reserves_no_tie_order_and_a_pagerank_under_the_same_ceiling_is_refused() {
+    // Arrange: 20000 present nodes; a first load leaves main's graph in the process cache
+    const NODES: u32 = 20_000;
+    let s = Scratch::new("kaban-t11-main", "order-ceiling");
+    let store = SqliteStore::open(&s.db(), &s.keys()).unwrap();
+    many_nodes(&store, NODES);
+    catalog_testing::with_main_graph(&store, &budget(), |g| Ok(g.view().contains(LocalId(0))))
+        .unwrap();
+
+    // Act: an expand, then a PageRank, each under a ceiling of half the order's id pairs
+    let ceiling = u64::from(NODES) * 4;
+    let tight = || QueryBudget::new(ceiling, Some(Duration::from_secs(10)));
+    let b = tight();
+    let expanded = catalog_testing::with_main_graph(&store, &b, |g| {
+        let r = expand(
+            g.view(),
+            &[LocalId(0)],
+            &RelSelection::All,
+            Direction::Out,
+            CAPS,
+            &b,
+        );
+        Ok(r.unwrap().nodes.len())
+    });
+    let pagerank = ranked(&store, &tight()).map(|_| ());
+
+    // Assert: the expand prepares no order; the PageRank's preparation is refused
+    assert!(
+        expanded.is_ok(),
+        "an expand under {ceiling} bytes for {NODES} nodes: {expanded:?}"
+    );
+    assert!(
+        matches!(pagerank, Err(StoreError::BudgetExceeded(_))),
+        "a PageRank under {ceiling} bytes for {NODES} nodes: {pagerank:?}"
+    );
+}
+
+#[test]
+fn a_query_pinned_before_a_commit_gets_its_own_generations_tie_order_after_it() {
+    // Arrange: two stores of one database; a present
+    let s = Scratch::new("kaban-t11-main", "order-isolation");
+    let reader = SqliteStore::open(&s.db(), &s.keys()).unwrap();
+    let writer = SqliteStore::open(&s.db(), &s.keys()).unwrap();
+    let a = nid(&created(&writer, "Fact", "a").id);
+
+    // Act: inside a query pinned at g, the writer commits c and runs a scored query at the new
+    // generation (preparing its order); only then the pinned query asks for its order
+    let (c_at_g, a_ranked, c_ranked, c_ranked_newer) =
+        catalog_testing::with_main_graph(&reader, &budget(), |g| {
+            let c = nid(&created(&writer, "Fact", "c").id);
+            let (c_local, c_ranked_newer) =
+                catalog_testing::with_main_graph(&writer, &budget(), |h| {
+                    let c_local = h.local(&c)?.expect("c is present after its commit");
+                    Ok((c_local, h.order()?.rank(c_local).is_ok()))
+                })?;
+            let order = g.order()?;
+            let a_local = g.local(&a)?.expect("a is present at g");
+            Ok((
+                g.local(&c)?,
+                order.rank(a_local).is_ok(),
+                order.rank(c_local).is_ok(),
+                c_ranked_newer,
+            ))
+        })
+        .unwrap();
+
+    // Assert: the newer generation ranks c; the pinned query's order is g's (a, not c)
+    assert_eq!(c_at_g, None, "c is not present at g");
+    assert!(c_ranked_newer, "the newer generation's order ranks c");
+    assert!(a_ranked, "g's order ranks a");
+    assert!(
+        !c_ranked,
+        "the query pinned at g got a newer generation's tie order (it ranks c)"
+    );
 }

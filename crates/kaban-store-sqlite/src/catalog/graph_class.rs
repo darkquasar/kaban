@@ -28,7 +28,7 @@ mod read;
     not(feature = "failpoints"),
     expect(unused_imports, reason = "T14 and T16 load graph views")
 )]
-pub(crate) use read::{LoadedView, NodeOrder, load_view};
+pub(crate) use read::{LoadedView, load_view};
 #[cfg(feature = "failpoints")]
 pub(crate) use read::{advance_clock as advance_cache_clock, cache_holds};
 
