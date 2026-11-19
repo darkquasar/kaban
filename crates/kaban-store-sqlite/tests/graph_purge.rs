@@ -124,7 +124,10 @@ fn a_seal_split_between_a_purged_nodes_edge_and_its_removal_leaves_no_entry_for_
     let rid_n = LocalId(rid(&db, &n));
     let purged = catalog_testing::purge(&store, &[i64::from(rid_n.0)]).unwrap();
     assert!(purged.skipped.is_empty(), "{:?}", purged.skipped);
-    let pending = catalog_testing::graph_contents(&store).unwrap().sediment.len();
+    let pending = catalog_testing::graph_contents(&store)
+        .unwrap()
+        .sediment
+        .len();
     assert_eq!(pending, 2, "the edge row and the removal row are pending");
 
     // Act: compact under the smallest budget (in 1 KiB steps) that seals anything, so the

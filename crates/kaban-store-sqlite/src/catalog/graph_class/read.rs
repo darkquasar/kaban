@@ -19,8 +19,8 @@
 //! hold that pin's lock, so an entry is replaced as soon as a newer generation loads, and an
 //! entry idle for [`IDLE`] is dropped at the next load), while the prepared sediment, which holds
 //! no bytes of the container, is carried forward and extended with the newer rows only
-//! (amendment 3.6). What a load builds is charged to the budget of the query that builds it, and
-//! stays charged while the cache keeps it; a query that reuses it is charged nothing more. A
+//! (amendment 3.6). What a load builds is charged to the budget of the query that builds it,
+//! before it is built, and stays charged while the cache keeps it (the entry's lists too); a query that reuses it is charged nothing more. A
 //! store without a container (in memory) caches nothing.
 
 #![cfg_attr(
@@ -73,28 +73,44 @@ pub(crate) struct Rels {
 }
 
 impl Rels {
-    /// The dictionary of the rows `conn` sees.
+    /// The dictionary of the rows `conn` sees, with its charge to `budget`, reserved before
+    /// any of it is built: the names kept and the set that deduplicates them while they are
+    /// built, each a copy of the declared names' bytes with its string headers. The rows are
+    /// streamed, never collected.
     ///
     /// # Errors
-    /// SQLite errors; a stored namespace that is not one.
-    pub(super) fn read(conn: &Connection) -> Result<Self> {
-        let mut stmt = conn.prepare(REL_SQL).sql()?;
-        let rows = stmt
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
-            .sql()?
-            .collect::<rusqlite::Result<Vec<_>>>()
+    /// The budget's and SQLite's errors; a stored namespace that is not one.
+    pub(super) fn read(conn: &Connection, budget: &QueryBudget) -> Result<(Self, BudgetLease)> {
+        let (n, text): (i64, i64) = conn
+            .query_row(
+                "SELECT count(*), COALESCE(sum(length(CAST(ns AS BLOB))
+                     + length(CAST(name AS BLOB)) + 1), 0)
+                 FROM schema_type WHERE kind = 'rel'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
             .sql()?;
-        Self::from_rows(rows)
+        let n = usize::try_from(n).unwrap_or(0);
+        let text = usize::try_from(text).unwrap_or(0);
+        let building = 2 * (text + n * (size_of::<String>() + size_of::<usize>()));
+        let charge = budget.reserve(building as u64).map_err(budget_exceeded)?;
+        let mut stmt = conn.prepare(REL_SQL).sql()?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).sql()?;
+        Ok((Self::from_rows(rows.take(n), n)?, charge))
     }
 
-    /// The dictionary of the `(ns, name)` rows of [`REL_SQL`].
+    /// The dictionary of the `(ns, name)` rows of [`REL_SQL`] (about `n` of them).
     ///
     /// # Errors
-    /// A stored namespace that is not one.
-    pub(super) fn from_rows(rows: Vec<(String, String)>) -> Result<Self> {
-        let mut seen = HashSet::with_capacity(rows.len());
-        let mut names = Vec::with_capacity(rows.len());
-        for (ns, name) in rows {
+    /// SQLite errors of a row; a stored namespace that is not one.
+    pub(super) fn from_rows(
+        rows: impl IntoIterator<Item = rusqlite::Result<(String, String)>>,
+        n: usize,
+    ) -> Result<Self> {
+        let mut seen = HashSet::with_capacity(n);
+        let mut names = Vec::with_capacity(n);
+        for row in rows {
+            let (ns, name) = row.sql()?;
             let ns = Ns::parse(&ns).map_err(|e| StoreError::Backend {
                 source: BackendSource::new(e),
             })?;
@@ -126,12 +142,6 @@ impl Rels {
         u16::try_from(rank)
             .map(RelId)
             .map_err(|_| GraphRefused::RelationIdExhausted(rel.to_owned()).into())
-    }
-
-    /// The bytes the dictionary holds, for its charge.
-    fn bytes(&self) -> u64 {
-        let names: usize = self.names.iter().map(String::capacity).sum();
-        (names + self.names.capacity() * size_of::<String>()) as u64
     }
 }
 
@@ -249,31 +259,44 @@ impl Incarnation {
     }
 }
 
-/// One view's opened state as the newest generation that loaded it left it.
+/// One view's opened state as the newest generation that loaded it left it. A clone clones
+/// handles only.
 #[derive(Debug, Clone)]
 struct Entry {
-    kbx: PathBuf,
-    incarnation: Incarnation,
-    view: String,
+    key: Arc<Key>,
     generation: Generation,
-    chain: Vec<ExtentId>,
     opened: Arc<Opened>,
-    /// The pending rows `sediment` holds, oldest first; the first is batch `first_batch`.
-    seqs: Vec<SedimentSeq>,
+    /// The batch number of `key.seqs[0]` in `sediment`.
     first_batch: usize,
     sediment: Arc<PreparedSediment>,
-    /// What a seal from `sediment` left, to read over `chain` plus the sealed layer.
-    rest: Option<Rest>,
+    /// What a seal from `sediment` left, to read over `key.chain` plus the sealed layer.
+    rest: Option<Arc<Rest>>,
     used: Instant,
 }
 
-/// The sediment a seal left over, with the chain it sealed over.
-#[derive(Debug, Clone)]
+/// What an entry names and lists besides its opened extents and sediment, with its charges to
+/// the budget of the load that kept it (the entry's own slot included), released when the cache
+/// and every clone have dropped it.
+#[derive(Debug)]
+struct Key {
+    kbx: PathBuf,
+    incarnation: Incarnation,
+    view: String,
+    chain: Vec<ExtentId>,
+    /// The pending rows `sediment` holds, oldest first.
+    seqs: Vec<SedimentSeq>,
+    _seqs: Option<BudgetLease>,
+    _charge: BudgetLease,
+}
+
+/// The sediment a seal left over, with the chain it sealed over, charged to the seal's budget.
+#[derive(Debug)]
 struct Rest {
     over: Vec<ExtentId>,
     seqs: Vec<SedimentSeq>,
     first_batch: usize,
     sediment: Arc<PreparedSediment>,
+    _charge: BudgetLease,
 }
 
 /// The process's cache of opened views (see the module documentation).
@@ -294,11 +317,11 @@ fn incarnation(pin: &Pin) -> Option<Incarnation> {
 fn cached(pin: &Pin, incarnation: Incarnation, view: &str) -> Option<Entry> {
     let mut cache = CACHE.lock().unwrap_or_else(PoisonError::into_inner);
     cache.retain(|e| {
-        e.used.elapsed() < IDLE && (e.kbx != pin.kbx_path() || e.incarnation == incarnation)
+        e.used.elapsed() < IDLE && (e.key.kbx != pin.kbx_path() || e.key.incarnation == incarnation)
     });
     cache
         .iter()
-        .find(|e| e.kbx == pin.kbx_path() && e.view == view)
+        .find(|e| e.key.kbx == pin.kbx_path() && e.key.view == view)
         .cloned()
 }
 
@@ -308,9 +331,10 @@ fn keep(entry: Entry) {
     let mut cache = CACHE.lock().unwrap_or_else(PoisonError::into_inner);
     match cache
         .iter_mut()
-        .find(|e| e.kbx == entry.kbx && e.view == entry.view)
+        .find(|e| e.key.kbx == entry.key.kbx && e.key.view == entry.key.view)
     {
-        Some(e) if e.incarnation == entry.incarnation && e.generation > entry.generation => {}
+        Some(e)
+            if e.key.incarnation == entry.key.incarnation && e.generation > entry.generation => {}
         Some(e) => *e = entry,
         None => cache.push(entry),
     }
@@ -350,7 +374,9 @@ pub(super) fn seal_cached(
     let Some(mut entry) = incarnation(pin).and_then(|i| cached(pin, i, &main)) else {
         return Ok(None);
     };
-    if entry.generation != pin.generation() || entry.chain != ids || !entry.seqs.starts_with(&seqs)
+    if entry.generation != pin.generation()
+        || entry.key.chain != ids
+        || !entry.key.seqs.starts_with(&seqs)
     {
         return Ok(None);
     }
@@ -362,12 +388,18 @@ pub(super) fn seal_cached(
     if sealed.through != upto {
         return Ok(None);
     }
-    entry.rest = Some(Rest {
+    let left = entry.key.seqs.get(seqs.len()..).unwrap_or_default();
+    let listed = (ids.len() + left.len()) * size_of::<SedimentSeq>();
+    let charge = budget
+        .reserve((size_of::<Rest>() + listed) as u64)
+        .map_err(budget_exceeded)?;
+    entry.rest = Some(Arc::new(Rest {
         over: ids,
-        seqs: entry.seqs[seqs.len()..].to_vec(),
+        seqs: left.to_vec(),
         first_batch: upto,
         sediment: Arc::new(sealed.rest),
-    });
+        _charge: charge,
+    }));
     keep(entry);
     Ok(Some(sealed.layer))
 }
@@ -390,21 +422,21 @@ pub(crate) fn load_view<'t>(
     let pinned = pin.load_view(rows, view, &[ExtentClass::GraphBase])?;
     let chain = graph_chain(&pinned);
     let ids: Vec<ExtentId> = chain.iter().map(|e| e.id).collect();
-    let (seqs, _seqs_charge) = pending_seqs(rows, view, budget)?;
+    let (seqs, seqs_charge) = pending_seqs(rows, view, budget)?;
     let name = view.to_string();
     let incarnation = incarnation(pin);
     let prior = incarnation.and_then(|i| cached(pin, i, &name));
     let same = prior
         .as_ref()
-        .filter(|e| e.generation == pin.generation() && e.chain == ids);
+        .filter(|e| e.generation == pin.generation() && e.key.chain == ids);
     let opened = match same {
         Some(e) => Arc::clone(&e.opened),
         None => Arc::new(Opened::open(pin, &chain, budget)?),
     };
     // the prepared sediment to carry forward: the cached one, or a seal's leftover
     let carried = prior.as_ref().and_then(|e| {
-        if e.chain == ids && seqs.starts_with(&e.seqs) {
-            return Some((Arc::clone(&e.sediment), e.first_batch, e.seqs.len()));
+        if e.key.chain == ids && seqs.starts_with(&e.key.seqs) {
+            return Some((Arc::clone(&e.sediment), e.first_batch, e.key.seqs.len()));
         }
         e.rest
             .as_ref()
@@ -421,17 +453,27 @@ pub(crate) fn load_view<'t>(
             Arc::new(extend(&prepared, &payloads, budget)?)
         }
     };
-    let rels = Rels::read(rows)?;
-    let rels_charge = budget.reserve(rels.bytes()).map_err(budget_exceeded)?;
+    let (rels, rels_charge) = Rels::read(rows, budget)?;
     if let Some(incarnation) = incarnation {
+        // the entry's slot, its key and what the key names and lists
+        let held = size_of::<Entry>()
+            + size_of::<Key>()
+            + pin.kbx_path().as_os_str().len()
+            + name.len()
+            + ids.len() * size_of::<ExtentId>();
+        let charge = budget.reserve(held as u64).map_err(budget_exceeded)?;
         keep(Entry {
-            kbx: pin.kbx_path().to_path_buf(),
-            incarnation,
-            view: name,
+            key: Arc::new(Key {
+                kbx: pin.kbx_path().to_path_buf(),
+                incarnation,
+                view: name,
+                chain: ids,
+                seqs,
+                _seqs: seqs_charge,
+                _charge: charge,
+            }),
             generation: pin.generation(),
-            chain: ids,
             opened: Arc::clone(&opened),
-            seqs,
             first_batch,
             sediment: Arc::clone(&sediment),
             rest: same.and_then(|e| e.rest.clone()),

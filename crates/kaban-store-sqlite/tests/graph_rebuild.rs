@@ -104,7 +104,9 @@ fn a_fold_whose_engine_estimate_exceeds_its_ceiling_is_refused_by_its_budget() {
     };
     let base = Records {
         nodes: (0..200).map(add).collect(),
-        edges: (0..2000).map(|i| edge(i % 200, (i / 200 + 1 + i % 200) % 200)).collect(),
+        edges: (0..2000)
+            .map(|i| edge(i % 200, (i / 200 + 1 + i % 200) % 200))
+            .collect(),
         ..Records::default()
     };
     catalog_testing::publish_graph_base(&store, &kaban_index_graph::build_base(&base, 0)).unwrap();
@@ -141,7 +143,10 @@ fn a_fold_whose_engine_estimate_exceeds_its_ceiling_is_refused_by_its_budget() {
 
     // Assert: refused by its budget before the engine ran; it folds without the ceiling
     let folds = |r: &kaban_store_sqlite::CompactReport| {
-        r.published.iter().filter(|c| c.kind == WorkKind::Fold).count()
+        r.published
+            .iter()
+            .filter(|c| c.kind == WorkKind::Fold)
+            .count()
     };
     assert!(
         tight.skipped.iter().any(|k| k.kind == WorkKind::Fold

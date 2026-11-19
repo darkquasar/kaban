@@ -114,7 +114,7 @@ impl GraphClass {
                 )
                 .sql()?;
             let _engine = reserve_engine(&budget, u64::try_from(records).unwrap_or(0))?;
-            let rels = read::Rels::read(rows)?;
+            let (rels, _rels) = read::Rels::read(rows, &budget)?;
             let mut records = Records::default();
             {
                 let mut stmt = rows
@@ -181,7 +181,10 @@ impl IndexClass for GraphClass {
             let reader = txn.reader();
             let rels = {
                 let mut stmt = reader.prepare(read::REL_SQL)?;
-                read::Rels::from_rows(stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?)?
+                let rows: Vec<(String, String)> =
+                    stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+                let n = rows.len();
+                read::Rels::from_rows(rows.into_iter().map(Ok), n)?
             };
             let mut row = reader.prepare(
                 "SELECT confidence, created_at FROM edge WHERE src = ?1 AND dst = ?2 AND rel = ?3",

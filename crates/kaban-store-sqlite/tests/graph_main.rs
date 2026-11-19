@@ -160,6 +160,41 @@ fn a_database_recreated_at_the_same_path_loads_its_own_graph_not_the_cached_one(
     assert_eq!(reached, vec![c], "the recreated database's own edge a -> c");
 }
 
+#[test]
+fn a_load_under_a_ceiling_below_what_building_its_relation_dictionary_holds_is_refused() {
+    // Arrange: 2000 more relations of 200-byte names; `text` the bytes of every relation name
+    let s = Scratch::new("kaban-t11-main", "rels-budget");
+    let store = SqliteStore::open(&s.db(), &s.keys()).unwrap();
+    catalog_testing::corrupt(
+        &store,
+        "WITH RECURSIVE i(k) AS (SELECT 0 UNION ALL SELECT k + 1 FROM i WHERE k + 1 < 2000)
+         INSERT INTO schema_type(ns, kind, name, created_at)
+         SELECT 'user', 'rel', printf('L%0199d', k), '2024-01-01T00:00:00Z' FROM i",
+    )
+    .unwrap();
+    let text: i64 = rusqlite::Connection::open(s.db())
+        .unwrap()
+        .query_row(
+            "SELECT sum(length(name)) FROM schema_type WHERE kind = 'rel'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let text = u64::try_from(text).unwrap();
+
+    // Act: a load whose whole budget is twice the names' bytes (the names kept plus the set
+    // that deduplicates them while the dictionary is built)
+    let tight = QueryBudget::new(2 * text, Some(Duration::from_secs(10)));
+    let loaded = catalog_testing::with_main_graph(&store, &tight, |g| Ok(g.rel("RELATES_TO")));
+
+    // Assert: refused by its budget, before the dictionary is built
+    assert!(
+        matches!(loaded, Err(StoreError::BudgetExceeded(_))),
+        "a load under {} bytes for {text} bytes of relation names: {loaded:?}",
+        2 * text
+    );
+}
+
 /// Declare `n` more relations `{prefix}{i}` in one commit of `store`.
 fn declare(store: &SqliteStore, prefix: &str, n: u32) {
     catalog_testing::corrupt(
