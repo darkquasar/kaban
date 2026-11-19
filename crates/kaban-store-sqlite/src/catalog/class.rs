@@ -83,7 +83,6 @@ pub(crate) enum ExtentLocation {
 /// with the budget's error when a reservation is refused, so the compaction retries a smaller
 /// unit. T7, T11 and T16 bring the concrete classes (`super::classes`); the test class lives in
 /// `super::testing`.
-#[expect(dead_code, reason = "T7's reindex calls `rebuild`")]
 pub(crate) trait IndexClass: Send + Sync {
     /// The classes of the extents and sediment this index owns (a layer class and its base
     /// class): compaction and purge select by them. The first is the class its seals write.

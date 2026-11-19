@@ -188,13 +188,6 @@ impl Catalog {
         Self::with_container(PathBuf::new()).attach_writer(conn)
     }
 
-    /// The catalog as a read connection of its own sees it (`crate::index_rows`): the one
-    /// read primitive, [`Self::read`], over that connection. Nothing is checked or created and
-    /// no writer is attached; `db_path` is `None` for the in-memory store's shared connection.
-    pub(crate) fn reader(db_path: Option<&Path>) -> Self {
-        Self::with_container(db_path.map(kbx::kbx_path).unwrap_or_default())
-    }
-
     fn with_container(kbx: PathBuf) -> Self {
         let pins = (!kbx.as_os_str().is_empty()).then(|| Arc::from(kbx::pins_dir(&kbx).as_path()));
         Self {
