@@ -251,11 +251,13 @@ impl IndexClass for GraphClass {
         rows: &[&SedimentRow],
         budget: &QueryBudget,
     ) -> Result<Option<Vec<u8>>> {
-        let rows: Vec<&SedimentRow> = rows
-            .iter()
-            .copied()
-            .filter(|r| r.class == SEDIMENT)
-            .collect();
+        let list_bytes = rows
+            .len()
+            .saturating_mul(size_of::<&SedimentRow>() + size_of::<DecodedRecords>());
+        let _lists = budget.reserve((list_bytes as u64).saturating_add(32))?;
+        let mut selected = Vec::with_capacity(rows.len());
+        selected.extend(rows.iter().copied().filter(|r| r.class == SEDIMENT));
+        let rows = selected;
         if rows.is_empty() {
             return Ok(None);
         }
@@ -266,12 +268,11 @@ impl IndexClass for GraphClass {
         let opened = read::Opened::open(pin, &chain, budget)?;
         let empty = PreparedSediment::empty();
         let parent = opened.view(&empty, budget)?;
-        let decoded = rows
-            .iter()
-            .map(|r| Records::decode(&r.payload, budget))
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(graph_error)?;
-        let gone = vanished(&decoded, &parent);
+        let mut decoded = Vec::with_capacity(rows.len());
+        for row in &rows {
+            decoded.push(Records::decode(&row.payload, budget).map_err(graph_error)?);
+        }
+        let (gone, _gone) = vanished(&decoded, &parent, budget)?;
         let cached = if gone.is_empty() {
             read::seal_cached(pin, &chain, &rows, &parent, budget)?
         } else {
@@ -280,23 +281,60 @@ impl IndexClass for GraphClass {
         let layer = if let Some(layer) = cached {
             layer
         } else {
+            // Reserve exact capacities and every cloned fact payload before building copies.
+            let mut copied = (decoded.len() as u64).saturating_mul(size_of::<Records>() as u64);
+            for batch in &decoded {
+                budget.check()?;
+                let r = batch.records();
+                let records = r
+                    .edges
+                    .len()
+                    .saturating_mul(size_of::<EdgeOp>())
+                    .saturating_add(r.nodes.len().saturating_mul(size_of::<NodeOp>()))
+                    .saturating_add(
+                        r.facts
+                            .len()
+                            .saturating_mul(size_of::<kaban_index_graph::FactOp>()),
+                    );
+                copied = copied.saturating_add(records as u64).saturating_add(48);
+                for fact in &r.facts {
+                    budget.check()?;
+                    copied = copied
+                        .saturating_add(fact.payload.len() as u64)
+                        .saturating_add(16);
+                }
+            }
+            let _copies = budget.reserve(copied.saturating_add(16))?;
             let kept = |n: LocalId| gone.binary_search(&n).is_err();
-            let batches: Vec<Records> = decoded
-                .iter()
-                .map(|d| {
-                    let r = d.records();
-                    Records {
-                        edges: r
-                            .edges
-                            .iter()
-                            .filter(|e| kept(e.src) && kept(e.dst))
-                            .copied()
-                            .collect(),
-                        nodes: r.nodes.iter().filter(|o| kept(o.node)).copied().collect(),
-                        facts: r.facts.iter().filter(|f| kept(f.node)).cloned().collect(),
+            let mut batches = Vec::with_capacity(decoded.len());
+            for d in &decoded {
+                budget.check()?;
+                let r = d.records();
+                let mut batch = Records {
+                    edges: Vec::with_capacity(r.edges.len()),
+                    nodes: Vec::with_capacity(r.nodes.len()),
+                    facts: Vec::with_capacity(r.facts.len()),
+                };
+                for e in &r.edges {
+                    budget.check()?;
+                    if kept(e.src) && kept(e.dst) {
+                        batch.edges.push(*e);
                     }
-                })
-                .collect();
+                }
+                for op in &r.nodes {
+                    budget.check()?;
+                    if kept(op.node) {
+                        batch.nodes.push(*op);
+                    }
+                }
+                for fact in &r.facts {
+                    budget.check()?;
+                    if kept(fact.node) {
+                        batch.facts.push(fact.clone());
+                    }
+                }
+                batches.push(batch);
+            }
             let prepared = PreparedSediment::prepare(&batches, budget).map_err(graph_error)?;
             prepared
                 .seal(&parent, batches.len(), budget)
@@ -469,26 +507,53 @@ pub(crate) fn graph_error(e: GraphError) -> StoreError {
 /// out, whichever unit holds them: a unit that ends with its edge, before the row that removes
 /// it, never writes the purged id back into a layer (the rule holds per unit, so no split of
 /// the pending rows resurrects it).
-fn vanished(batches: &[DecodedRecords], parent: &View<'_>) -> Vec<LocalId> {
+fn vanished(
+    batches: &[DecodedRecords],
+    parent: &View<'_>,
+    budget: &QueryBudget,
+) -> Result<(Vec<LocalId>, BudgetLease)> {
+    // At most two endpoints per edge, one per fact/node. 64 bytes per entry conservatively
+    // cover BTreeMap nodes/links and allocation metadata, plus the result vector. The fixed
+    // allowance covers an almost-empty root. Retain this charge with the result.
+    let mut entries = 0_u64;
+    for batch in batches {
+        budget.check()?;
+        let r = batch.records();
+        entries = entries
+            .saturating_add((r.edges.len() as u64).saturating_mul(2))
+            .saturating_add(r.nodes.len() as u64)
+            .saturating_add(r.facts.len() as u64);
+    }
+    let held = budget.reserve(
+        entries
+            .saturating_mul(64 + size_of::<LocalId>() as u64)
+            .saturating_add(1024),
+    )?;
     let mut newest = std::collections::BTreeMap::new();
     for b in batches {
         let r = b.records();
         for e in &r.edges {
+            budget.check()?;
             newest.entry(e.src).or_insert(None);
             newest.entry(e.dst).or_insert(None);
         }
         for f in &r.facts {
+            budget.check()?;
             newest.entry(f.node).or_insert(None);
         }
         for op in &r.nodes {
+            budget.check()?;
             newest.insert(op.node, Some(op.kind));
         }
     }
-    newest
-        .into_iter()
-        .filter(|&(n, kind)| kind != Some(OpKind::Add) && !parent.contains(n))
-        .map(|(n, _)| n)
-        .collect()
+    let mut gone = Vec::with_capacity(newest.len());
+    for (n, kind) in newest {
+        budget.check()?;
+        if kind != Some(OpKind::Add) && !parent.contains(n) {
+            gone.push(n);
+        }
+    }
+    Ok((gone, held))
 }
 
 /// The local id of the node row `rid` (PC-1).

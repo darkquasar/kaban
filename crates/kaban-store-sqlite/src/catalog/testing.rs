@@ -1114,6 +1114,23 @@ pub fn rebuild_graph(store: &SqliteStore) -> Result<()> {
     GraphClass::rebuild_main(store.catalog(), &mut store.lock())
 }
 
+/// Seal the pending graph rows under `budget`, without publishing the output. The input pin
+/// uses its own budget so tests can observe the unit's released charges on both outcomes.
+///
+/// # Errors
+/// The pin or seal errors, including a maintenance budget refusal.
+pub fn seal_graph(store: &SqliteStore, budget: &QueryBudget) -> Result<Option<Vec<u8>>> {
+    let conn = store.lock();
+    let pin_budget = QueryBudget::new(u64::MAX, None);
+    let classes = &[ExtentClass::GraphLayer, ExtentClass::GraphBase];
+    let pin = store
+        .catalog()
+        .pin(&conn, &pin_budget, &[(ViewName::Main, classes)])?;
+    let main = pin.load_view(&conn, &ViewName::Main, classes)?;
+    let rows: Vec<_> = main.sediment().iter().collect();
+    GraphClass::new().seal(&pin, &rows, budget)
+}
+
 /// What `main`'s memory graph holds at one generation ([`graph_contents`]).
 #[derive(Debug, Clone)]
 pub struct GraphContents {
