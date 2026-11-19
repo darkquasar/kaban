@@ -11,8 +11,8 @@
 CREATE TABLE writer(
   id INTEGER PRIMARY KEY,
   actor_id TEXT NOT NULL,
-  instance_id TEXT NOT NULL,
-  pack_lineage_id TEXT NOT NULL,
+  instance_id TEXT,
+  pack_lineage_id TEXT,
   UNIQUE(actor_id, instance_id, pack_lineage_id)
 );
 
@@ -172,14 +172,18 @@ END;
 
 CREATE TRIGGER changes_stamp AFTER INSERT ON changes WHEN new.writer_id IS NULL BEGIN
   SELECT RAISE(ABORT, 'writer_unbound') WHERE kaban_writer() IS NULL;
+  -- UNIQUE permits repeated NULLs. Match the complete tuple with IS before inserting it.
   INSERT INTO writer(actor_id, instance_id, pack_lineage_id)
-    VALUES(kaban_writer(), (SELECT value FROM index_meta WHERE key = 'db_id'),
-           (SELECT value FROM index_meta WHERE key = 'pack_lineage_id'))
-    ON CONFLICT(actor_id, instance_id, pack_lineage_id) DO NOTHING;
+    SELECT actor, instance, lineage FROM (
+      SELECT kaban_writer() AS actor, (SELECT value FROM index_meta WHERE key = 'db_id') AS instance,
+             (SELECT value FROM index_meta WHERE key = 'pack_lineage_id') AS lineage
+    ) WHERE NOT EXISTS (
+      SELECT 1 FROM writer WHERE (actor_id, instance_id, pack_lineage_id) IS (actor, instance, lineage)
+    );
   UPDATE changes SET writer_id = (
     SELECT id FROM writer WHERE actor_id = kaban_writer()
-      AND instance_id = (SELECT value FROM index_meta WHERE key = 'db_id')
-      AND pack_lineage_id = (SELECT value FROM index_meta WHERE key = 'pack_lineage_id')
+      AND instance_id IS (SELECT value FROM index_meta WHERE key = 'db_id')
+      AND pack_lineage_id IS (SELECT value FROM index_meta WHERE key = 'pack_lineage_id')
   ) WHERE seq = new.seq;
   UPDATE node SET writer_id = (SELECT writer_id FROM changes WHERE seq = new.seq)
     WHERE new.entity = 'node' AND id = new.id;

@@ -241,6 +241,42 @@ fn a_connection_kaban_did_not_open_cannot_write_a_canonical_row() {
 }
 
 #[test]
+fn repeated_writes_share_the_exact_stamp_when_identity_metadata_is_missing() {
+    for retained_key in [Some("db_id"), Some("pack_lineage_id"), None] {
+        let s = Scratch::new("kaban-stamp", retained_key.unwrap_or("neither"));
+        let store = bound(&s, "alice");
+        let node = created(&store, "Fact", "stamped before metadata loss");
+        let conn = Connection::open(s.db()).unwrap();
+        SqliteStore::bind_writer(&conn, &ActorId::parse("alice").unwrap()).unwrap();
+        let mut history = change_stamps(&conn, &node.id);
+        conn.execute(
+            "DELETE FROM index_meta WHERE key IN ('db_id', 'pack_lineage_id') AND key IS NOT ?1",
+            [retained_key],
+        )
+        .unwrap();
+        let stamp = (
+            Some("alice".into()),
+            meta(&conn, "db_id"),
+            meta(&conn, "pack_lineage_id"),
+        );
+        for summary in ["first revision", "second revision"] {
+            conn.execute(
+                "UPDATE node SET summary = ?1 WHERE id = ?2",
+                [summary, &node.id],
+            )
+            .unwrap();
+            assert_eq!(stamp_of(&conn, "node", &node.id), stamp);
+            history.push(("update".into(), stamp.clone()));
+        }
+        assert_eq!(change_stamps(&conn, &node.id), history);
+        let writers: i64 = conn
+            .query_row("SELECT count(*) FROM writer", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(writers, 2, "one writer tuple before and one after the loss");
+    }
+}
+
+#[test]
 fn canonical_writes_share_a_writer_tuple_and_roll_it_back_with_the_change() {
     let s = Scratch::new("kaban-stamp", "shared-tuple");
     let store = bound(&s, "alice");
