@@ -479,6 +479,7 @@ impl TantivyIndex {
             .reload_policy(ReloadPolicy::Manual)
             .try_into()?;
         let searcher = reader.searcher();
+        budget.check()?;
         let (per_segment, found_with) = opened.hidden(&searcher, &self.fields, &[], budget)?;
         let mut hidden: Vec<DocAddress> =
             kbx_dir::charged_vec(&mut charge, per_segment.iter().map(Vec::len).sum())?;
@@ -979,6 +980,50 @@ mod tests {
             "expected the budget's memory refusal, got {searched:?}"
         );
         assert_eq!(budget.live_bytes(), 0, "every charge was given back");
+    }
+
+    /// PC-17 (T7 midpoint review, cancellation): a search over many packs checks the budget
+    /// per pack, so a cancellation at the first pack stops it there with the budget's error.
+    #[test]
+    fn a_search_cancelled_at_its_first_pack_visits_no_other_pack() {
+        // Arrange: 50 pending packs of one document each and no tombstone (nothing to charge
+        // per pack); the budget is cancelled while the search visits its first pack
+        let unlimited = QueryBudget::new(u64::MAX, None);
+        let packs: Vec<Vec<u8>> = (1..=50)
+            .map(|rid| crate::segment(&[row(rid, "quokka by the shore")], &[], &unlimited).unwrap())
+            .collect();
+        let sediment: Vec<&[u8]> = packs.iter().map(Vec::as_slice).collect();
+        let at = TextSnapshot {
+            generation: 1,
+            kbx: std::path::Path::new("unused.kbx"),
+            tiers: &[],
+            sediment: &sediment,
+        };
+        let budget = QueryBudget::new(u64::MAX, None);
+        let visits = std::rc::Rc::new(std::cell::Cell::new(0_usize));
+        let (seen, cancel) = (visits.clone(), budget.clone());
+        crate::kbx_dir::ON_PACK.set(Some(Box::new(move || {
+            seen.set(seen.get() + 1);
+            cancel.cancel();
+        })));
+        let q = RecallQuery::default();
+
+        // Act
+        let searched = adapter().search_at(&at, &lexical("quokka", &q), &budget);
+
+        // Assert
+        crate::kbx_dir::ON_PACK.set(None);
+        assert!(
+            matches!(
+                searched,
+                Err(StoreError::BudgetExceeded(BudgetExceeded {
+                    limit: Limit::Cancelled,
+                    ..
+                }))
+            ),
+            "expected the budget's cancellation, got {searched:?}"
+        );
+        assert_eq!(visits.get(), 1, "packs visited after the cancellation");
     }
 
     /// The segment files of the index (every managed file but Tantivy's own bookkeeping).

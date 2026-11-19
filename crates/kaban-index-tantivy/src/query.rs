@@ -458,8 +458,10 @@ fn top(
         searcher,
         content: fields.content,
     };
+    budget.check()?;
     let collected: Vec<Collected> =
         searcher.search_with_statistics_provider(query, &order, &statistics)?;
+    budget.check()?;
     for ((score, Reverse(rid)), address) in collected
         .into_iter()
         .filter(|(_, address)| hidden.binary_search(address).is_err())

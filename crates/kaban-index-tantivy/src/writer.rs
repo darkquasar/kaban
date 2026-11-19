@@ -190,9 +190,13 @@ fn build_segment(rows: &[IndexRow], tombstones: &[i64], budget: &QueryBudget) ->
         budget.check()?;
         writer.add_document(document(&fields, row))?;
     }
+    budget.check()?;
     let index = writer.finalize()?;
+    budget.check()?;
     let segment = index.searchable_segments()?.into_iter().next();
-    kbx_dir::encode(tombstones, segment.as_ref(), &ram, budget)
+    let pack = kbx_dir::encode(tombstones, segment.as_ref(), &ram, budget)?;
+    budget.check()?;
+    Ok(pack)
 }
 
 /// Merge `packs` (oldest first) into one pack: every document a newer pack's tombstone hides,
@@ -226,6 +230,7 @@ fn merge_packs(
         .reload_policy(ReloadPolicy::Manual)
         .try_into()?;
     let searcher = reader.searcher();
+    budget.check()?;
     let (hidden, _found_with) = opened.hidden(&searcher, &fields, drop, budget)?;
     if packs.len() == 1 && hidden.iter().all(Vec::is_empty) {
         return Ok(None);
@@ -238,6 +243,7 @@ fn merge_packs(
     let mut alive = kbx_dir::charged_vec(&mut charge, readers.len())?;
     let mut alive_docs: u64 = 0;
     for (reader, dead) in readers.iter().zip(&hidden) {
+        budget.check()?;
         let max_doc = reader.max_doc();
         alive_docs += u64::from(max_doc) - dead.len() as u64;
         let meta = metas
@@ -253,9 +259,13 @@ fn merge_packs(
     }
     // the merged segment is written into RAM: no more than the bytes of the packs it reads
     kbx_dir::charge(&mut charge, packs.iter().map(OwnedBytes::len).sum())?;
+    budget.check()?;
     let merged = merge_filtered_segments(&segments, IndexSettings::default(), alive, ram.clone())?;
+    budget.check()?;
     let segment = merged.searchable_segments()?.into_iter().next();
-    kbx_dir::encode(&tombstones, segment.as_ref(), &ram, budget).map(Some)
+    let pack = kbx_dir::encode(&tombstones, segment.as_ref(), &ram, budget)?;
+    budget.check()?;
+    Ok(Some(pack))
 }
 
 /// The alive set of a segment of `max_doc` documents without `dead`, in Tantivy's file layout

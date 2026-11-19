@@ -20,6 +20,12 @@
 //! allocates from the packs (each pack's decoded tombstones and fixed metadata, the hidden
 //! documents and the tombstone sets they are found with) is reserved on the caller's
 //! [`QueryBudget`] before it is allocated, and the charge lives as long as the value.
+//!
+//! Deadline and cancellation (PC-17): every loop this crate owns over the packs checks the
+//! budget per pack and per [`TOMBSTONE_BATCH`] tombstones, and every Tantivy call a text
+//! search, seal or staging makes (an index open, a search, a merge, a segment's finalize) is
+//! checked before and after. A single library call is not interruptible: it is bounded by the
+//! inputs reserved before it.
 
 use crate::schema::Fields;
 use crate::{Error, Result};
@@ -40,6 +46,9 @@ use tantivy::{DocId, DocSet, Index, IndexSettings, Searcher, Segment, TERMINATED
 const MAGIC: &[u8; 4] = b"KBXT";
 const VERSION: u8 = 1;
 const META: &str = "meta.json";
+
+/// The tombstones a loop of this module visits between two budget checks.
+pub(crate) const TOMBSTONE_BATCH: usize = 1024;
 
 /// The fixed metadata one opened pack adds (its entries in the file map and in the
 /// synthesized `meta.json`): a pack carries at most six files and one segment.
@@ -169,6 +178,27 @@ pub fn has_segment(pack: &[u8]) -> bool {
     flag.and_then(|at| pack.get(at)) == Some(&1)
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Called on every pack a loop of this module visits: the tests count the visits and
+    /// cancel through it.
+    pub(crate) static ON_PACK: std::cell::RefCell<Option<Box<dyn FnMut()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// One pack visited by a loop of this module: the budget's deadline and cancellation are
+/// checked first.
+fn visit(budget: &QueryBudget) -> Result<()> {
+    budget.check()?;
+    #[cfg(test)]
+    ON_PACK.with_borrow_mut(|hook| {
+        if let Some(hook) = hook {
+            hook();
+        }
+    });
+    Ok(())
+}
+
 fn len_u32(n: usize) -> Result<u32> {
     u32::try_from(n).map_err(|_| Error::Corrupt("text pack"))
 }
@@ -211,7 +241,7 @@ impl Cursor<'_> {
 }
 
 /// `bytes` decoded, its tombstones charged on `lease` before they are allocated.
-fn decode(bytes: &OwnedBytes, lease: &mut BudgetLease) -> Result<Pack> {
+fn decode(bytes: &OwnedBytes, budget: &QueryBudget, lease: &mut BudgetLease) -> Result<Pack> {
     let mut c = Cursor { bytes, at: 0 };
     if &c.array::<4>()? != MAGIC || c.array::<1>()? != [VERSION] {
         return Err(Error::Corrupt("text pack"));
@@ -219,7 +249,10 @@ fn decode(bytes: &OwnedBytes, lease: &mut BudgetLease) -> Result<Pack> {
     let n = u32::from_le_bytes(c.array()?);
     // a count past the pack's bytes fails below before it outgrows this capacity
     let mut tombstones = charged_vec(lease, usize::try_from(n).unwrap_or(0).min(bytes.len() / 8))?;
-    for _ in 0..n {
+    for (i, _) in (0..n).enumerate() {
+        if i % TOMBSTONE_BATCH == 0 {
+            budget.check()?;
+        }
         tombstones.push(i64::from_le_bytes(c.array()?));
     }
     if c.array::<1>()? == [0] {
@@ -280,7 +313,8 @@ pub(crate) fn open(packs: &[OwnedBytes], budget: &QueryBudget) -> Result<Opened>
     let mut tombstones = charged_vec(&mut lease, packs.len())?;
     let mut positions = HashMap::with_capacity(packs.len());
     for (position, bytes) in packs.iter().enumerate() {
-        let pack = decode(bytes, &mut lease)?;
+        visit(budget)?;
+        let pack = decode(bytes, budget, &mut lease)?;
         tombstones.push(pack.tombstones);
         if let Some(segment) = pack.segment {
             for (code, file) in segment.files {
@@ -301,10 +335,12 @@ pub(crate) fn open(packs: &[OwnedBytes], budget: &QueryBudget) -> Result<Opened>
         "schema": crate::schema::schema().0,
         "opstamp": 0,
     }))?;
+    budget.check()?;
     let index = Index::open(PackDirectory {
         files: Arc::new(files),
         meta: Arc::new(meta),
     })?;
+    budget.check()?;
     crate::analyzers::register(&index);
     Ok(Opened {
         index,
@@ -367,9 +403,13 @@ impl Opened {
         newer.sort_unstable();
         newer.dedup();
         for position in (0..self.tombstones.len()).rev() {
+            visit(budget)?;
             if let Some(ord) = by_position[position] {
                 let inverted = readers[ord].inverted_index(fields.rid)?;
-                for rid in &newer {
+                for (i, rid) in newer.iter().enumerate() {
+                    if i % TOMBSTONE_BATCH == 0 {
+                        budget.check()?;
+                    }
                     let term = Term::from_field_i64(fields.rid, *rid);
                     if let Some(mut postings) =
                         inverted.read_postings(&term, IndexRecordOption::Basic)?
