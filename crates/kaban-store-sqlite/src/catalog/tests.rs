@@ -805,13 +805,10 @@ fn sediment_rows(store: &SqliteStore, rows: usize) {
 
 /// The budget limit `err` reports, if it is a budget error.
 fn budget_limit(err: &StoreError) -> Option<kaban_core::query_budget::Limit> {
-    let StoreError::Backend { source } = err else {
-        return None;
-    };
-    source
-        .driver()
-        .downcast_ref::<kaban_core::query_budget::BudgetExceeded>()
-        .map(|e| e.limit)
+    match err {
+        StoreError::BudgetExceeded(e) => Some(e.limit),
+        _ => None,
+    }
 }
 
 #[test]
@@ -837,6 +834,11 @@ fn a_pin_cancelled_while_copying_returns_the_budget_error_and_releases_everythin
     // Assert
     let err = out.expect_err("a cancelled copy produced a pin");
     assert_eq!(budget_limit(&err), Some(Limit::Cancelled), "{err:?}");
+    // the refusal names the budget, not the redacted backend text
+    assert!(
+        err.to_string().starts_with("query budget exceeded: Cancelled"),
+        "{err}"
+    );
     assert_eq!(budget.live_bytes(), 0, "the copy's reservation outlived it");
     assert!(
         store.lock().is_autocommit(),

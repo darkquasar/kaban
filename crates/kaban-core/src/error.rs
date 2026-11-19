@@ -117,6 +117,11 @@ pub enum StoreError {
         #[source]
         source: BackendSource,
     },
+    /// A query or maintenance budget refused the work (spec 11 QRY-06, 7.6): its memory
+    /// ceiling, its deadline or its cancellation. The text is the budget's own; it carries
+    /// only the limit and its measured value.
+    #[error(transparent)]
+    BudgetExceeded(#[from] crate::query_budget::BudgetExceeded),
     /// JSON (de)serialization of props/tags failed.
     #[error(transparent)]
     Json(#[from] serde_json::Error),
@@ -284,6 +289,7 @@ impl std::fmt::Debug for StoreError {
                 .finish(),
             Self::Builtin(name) => f.debug_tuple("Builtin").field(name).finish(),
             Self::Backend { source } => f.debug_struct("Backend").field("source", source).finish(),
+            Self::BudgetExceeded(e) => f.debug_tuple("BudgetExceeded").field(e).finish(),
             Self::Json(e) => f.debug_tuple("Json").field(e).finish(),
             Self::Audit(e) => f.debug_tuple("Audit").field(e).finish(),
             Self::FileMode(e) => f.debug_tuple("FileMode").field(e).finish(),

@@ -652,10 +652,10 @@ fn class_of(row: &Row<'_>, idx: usize) -> rusqlite::Result<ExtentClass> {
     ExtentClass::parse(name).ok_or_else(|| bad_enum(idx, name))
 }
 
+/// A budget refusal as the store reports it: typed, so compaction tells it apart from a
+/// failure and retries smaller, and named by the budget's own text.
 pub(super) fn budget_exceeded(e: BudgetExceeded) -> StoreError {
-    StoreError::Backend {
-        source: BackendSource::new(e),
-    }
+    StoreError::BudgetExceeded(e)
 }
 
 /// One round of [`Catalog::acquire`]: the closure's outcome, or the candidate to retry from

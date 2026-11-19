@@ -1058,7 +1058,7 @@ fn view_name(view: &PinnedView) -> Result<ViewName> {
 /// reservation, its deadline or its cancellation), `None` for any other error.
 fn budget_refusal(e: &StoreError) -> Option<BudgetExceeded> {
     match e {
-        StoreError::Backend { source } => source.driver().downcast_ref::<BudgetExceeded>().copied(),
+        StoreError::BudgetExceeded(refused) => Some(*refused),
         _ => None,
     }
 }
