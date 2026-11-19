@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use kaban_core::query_budget::{BudgetLease, QueryBudget};
-use kaban_core::text_index::{ExtentSpan, TextSnapshot};
+use kaban_core::text_index::{ExtentSpan, IndexRow, TextSnapshot};
 use kaban_core::{Durability, Result, StoreError, ViewName};
 use rusqlite::Connection;
 use sha2::{Digest as _, Sha256};
@@ -42,8 +42,14 @@ use crate::sql_error::SqlResultExt;
 /// The classes a text read loads: the text tiers and their pending packs.
 const TEXT: &[ExtentClass] = &[ExtentClass::TextTier];
 
-/// The memory ceiling of one commit's staging (its RAM segment and the rows it reads).
-const STAGE_MEMORY_BYTES: u64 = 256 << 20;
+/// The memory ceiling of one commit's staging (its RAM segment and the rows it reads): a body
+/// at the 64 MiB decode bound stages within it (its row charged twice, the writer reserved a
+/// byte per indexed byte, the body indexed three times).
+const STAGE_MEMORY_BYTES: u64 = 512 << 20;
+
+/// The rows a rebuild indexes per writer (PC-17): each batch is its own segment under its own
+/// reservation, and the batches are merged under the budget.
+const REBUILD_BATCH_ROWS: usize = 1024;
 
 /// The text index's class.
 #[derive(Debug, Clone, Copy, Default)]
@@ -161,7 +167,7 @@ impl IndexClass for TextClass {
         let budget = QueryBudget::new(maintenance.memory_bytes, Some(maintenance.deadline));
         catalog.commit(rows, Durability::Normal, |txn| {
             let (active, _charged) = crate::index_rows::active_rows(txn.conn(), &budget)?;
-            let tier = kaban_index_tantivy::segment(&active, &[], &budget)?;
+            let tier = rebuilt_tier(&active, REBUILD_BATCH_ROWS, &budget)?;
             let generation = sql_int(txn.generation()?.0).sql()?;
             retire_text(&catalog.kbx, txn.conn(), generation, &budget)?;
             let extent = catalog.append_extent(ExtentClass::TextTier, &tier)?;
@@ -171,6 +177,27 @@ impl IndexClass for TextClass {
             Ok(())
         })
     }
+}
+
+/// One tier of `rows`, indexed `batch` rows per writer under `budget`: each batch's pack is
+/// charged while it is held, then the packs are merged into one.
+///
+/// # Errors
+/// The budget's refusal; Tantivy failures.
+fn rebuilt_tier(rows: &[IndexRow], batch: usize, budget: &QueryBudget) -> Result<Vec<u8>> {
+    if rows.len() <= batch {
+        return kaban_index_tantivy::segment(rows, &[], budget);
+    }
+    let mut packs = Vec::new();
+    let mut held = Vec::new();
+    for rows in rows.chunks(batch.max(1)) {
+        let pack = kaban_index_tantivy::segment(rows, &[], budget)?;
+        let bytes = pack.len() + size_of::<OwnedBytes>();
+        held.push(budget.reserve(u64::try_from(bytes).unwrap_or(u64::MAX))?);
+        packs.push(OwnedBytes::new(pack));
+    }
+    kaban_index_tantivy::merge(&packs, &[], None, budget)?
+        .ok_or_else(|| StoreError::NotFound("the merged rebuild batches".into()))
 }
 
 /// The bytes of the tiers `extents` from `pin`, their length reserved on `budget` before
@@ -387,6 +414,10 @@ mod tests {
 
     use super::{IndexClass, ON_TIER, TextClass};
     use crate::SqliteStore;
+    use kaban_core::text_index::{
+        IndexRow, MatchMode, Searched, SeedFilter, TextIndex, TextQuery, TextSnapshot,
+    };
+    use std::fmt::Write as _;
 
     /// The live text tiers of `store`, by id.
     fn tiers(store: &SqliteStore) -> Vec<i64> {
@@ -454,5 +485,81 @@ mod tests {
             "expected the budget's cancellation, got {rebuilt:?}"
         );
         assert_eq!(after, before, "the cancelled rebuild published nothing");
+    }
+
+    /// An active row holding `word` and about `bytes` bytes of words no other row holds.
+    fn large_row(rid: i64, word: &str, bytes: usize) -> IndexRow {
+        let mut text = format!("{word} ");
+        let mut state = u64::try_from(rid)
+            .unwrap()
+            .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+            | 1;
+        while text.len() < bytes {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            write!(text, "w{:012x} ", state & 0xFFFF_FFFF_FFFF).unwrap();
+        }
+        IndexRow {
+            id: format!("id-{rid}"),
+            rid,
+            revision: 1,
+            kind: "Fact".into(),
+            workspace_id: "default".into(),
+            tags: vec![],
+            text,
+            summary: String::new(),
+            stored_summary: None,
+            ident_values: vec![],
+            anchor_keys: vec![],
+        }
+    }
+
+    /// PC-17 (T7 end review M1): a rebuild indexes its rows in batches, each writer reserved
+    /// for its own batch only, so rows too large for one writer under the budget still
+    /// rebuild into one tier that holds every row.
+    #[test]
+    fn a_rebuild_too_large_for_one_writer_indexes_its_rows_in_batches() {
+        // Arrange: six rows of 256 KiB of words no other row holds: one writer over all of
+        // them grows past 20 MiB (measured: 24 MiB), one over two of them to 14 MiB
+        let rows: Vec<IndexRow> = (1..=6)
+            .map(|rid| large_row(rid, "quokka", 256 << 10))
+            .collect();
+        let budget = QueryBudget::new(20 << 20, None);
+
+        // Act
+        let tier = super::rebuilt_tier(&rows, 2, &budget);
+
+        // Assert
+        let tier = tier.unwrap_or_else(|e| panic!("expected the batched tier, got {e:?}"));
+        assert_eq!(budget.live_bytes(), 0, "every charge was given back");
+        let index = kaban_index_tantivy::TantivyIndex::new(
+            &kaban_core::shipped::resolved().unwrap(),
+            &kaban_core::config::Recall::default(),
+        );
+        let q = kaban_core::RecallQuery::default();
+        let at = TextSnapshot {
+            generation: 1,
+            kbx: std::path::Path::new("unused.kbx"),
+            tiers: &[],
+            sediment: &[tier.as_slice()],
+        };
+        let query = TextQuery {
+            text: "quokka",
+            mode: MatchMode::Lexical,
+            filter: SeedFilter::of(&q),
+            limit: 10,
+            sufficient: 10,
+            skip: 0,
+        };
+        let searched = index
+            .search(&at, &query, &QueryBudget::new(u64::MAX, None))
+            .unwrap();
+        let Searched::Hits { hits, .. } = searched else {
+            panic!("the tier is unavailable");
+        };
+        let mut rids: Vec<i64> = hits.iter().map(|h| h.rid).collect();
+        rids.sort_unstable();
+        assert_eq!(rids, vec![1, 2, 3, 4, 5, 6]);
     }
 }

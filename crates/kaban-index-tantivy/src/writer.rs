@@ -12,16 +12,34 @@ use tantivy::{
     DocId, Index, IndexReader, IndexSettings, ReloadPolicy, SingleSegmentIndexWriter, Term,
 };
 
-/// The RAM arena the writer of one staged segment is given (spec 11 T7).
+/// The RAM arena the writer of one staged segment is given (spec 11 T7): Tantivy sizes its
+/// term table from it.
 const SEGMENT_ARENA_BYTES: usize = 4 << 20;
+/// What a writer holds before its first document grows it: Tantivy's arena pages and term
+/// table for this schema (measured: 10 MiB at the 4 MiB arena above).
+const WRITER_BASE_BYTES: u64 = 12 << 20;
+/// What a writer is reserved per byte of indexed input ([`crate::indexed_bytes`]) before it
+/// runs (measured: under 1 for prose, about 3 for words no other row holds; the growth past the
+/// reservation is charged per document).
+const WRITER_BYTES_PER_INPUT_BYTE: u64 = 1;
+
+#[cfg(test)]
+thread_local! {
+    /// The documents [`segment`] handed its writer: the tests count them.
+    static DOCS_ADDED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
 
 /// One commit's text as one pack (`crate::kbx_dir`): the identity `tombstones` of every rid
 /// the commit changed and one segment of `rows`, their current active rows, built in RAM.
-/// The writer's arena (only when there are rows to index) and the encoded pack are charged
-/// to `budget` before they are allocated; the rows are the caller's, charged by it.
+/// The writer's memory (only when there are rows to index) is reserved from the rows before
+/// it runs, [`WRITER_BASE_BYTES`] plus [`WRITER_BYTES_PER_INPUT_BYTE`] per indexed byte, and
+/// any growth the writer reports past that is charged after each document, so the charge
+/// stays at least what the writer holds; the segment it writes is no larger than that. The
+/// encoded pack is charged before it is allocated; the rows are the caller's, charged by it.
 ///
 /// # Errors
-/// The budget's refusal; Tantivy failures.
+/// The budget's refusal (rows too large for it are refused before the writer runs); Tantivy
+/// failures.
 pub fn segment(
     rows: &[IndexRow],
     tombstones: &[i64],
@@ -35,7 +53,12 @@ fn build_segment(rows: &[IndexRow], tombstones: &[i64], budget: &QueryBudget) ->
     if rows.is_empty() {
         return kbx_dir::encode(tombstones, None, &ram, budget);
     }
-    let _arena = budget.reserve(SEGMENT_ARENA_BYTES as u64)?;
+    let input = rows.iter().map(crate::indexed_bytes).sum::<u64>();
+    let mut held = budget.reserve(
+        input
+            .saturating_mul(WRITER_BYTES_PER_INPUT_BYTE)
+            .saturating_add(WRITER_BASE_BYTES),
+    )?;
     let (schema, fields) = crate::schema::schema();
     let index = Index::create(ram.clone(), schema, IndexSettings::default())?;
     crate::analyzers::register(&index);
@@ -43,7 +66,13 @@ fn build_segment(rows: &[IndexRow], tombstones: &[i64], budget: &QueryBudget) ->
         SingleSegmentIndexWriter::new(index, SEGMENT_ARENA_BYTES)?;
     for row in rows {
         budget.check()?;
+        #[cfg(test)]
+        DOCS_ADDED.set(DOCS_ADDED.get() + 1);
         writer.add_document(document(&fields, row))?;
+        let used = u64::try_from(writer.mem_usage()).unwrap_or(u64::MAX);
+        if let Some(over) = used.checked_sub(held.bytes()).filter(|over| *over > 0) {
+            kbx_dir::charge(&mut held, usize::try_from(over).unwrap_or(usize::MAX))?;
+        }
     }
     budget.check()?;
     let index = writer.finalize()?;
@@ -187,4 +216,72 @@ fn alive_set(
         bytes.extend(word.to_le_bytes());
     }
     Ok(AliveBitSet::open(OwnedBytes::new(bytes)))
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // test code: failures are the assertion
+mod tests {
+    use super::DOCS_ADDED;
+    use kaban_core::StoreError;
+    use kaban_core::query_budget::{BudgetExceeded, Limit, QueryBudget};
+    use kaban_core::text_index::IndexRow;
+    use std::fmt::Write as _;
+
+    /// An active row of about `bytes` bytes of words no other row holds.
+    fn large_row(rid: i64, bytes: usize) -> IndexRow {
+        let mut text = String::new();
+        let mut state = u64::try_from(rid)
+            .unwrap()
+            .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+            | 1;
+        while text.len() < bytes {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            write!(text, "w{:012x} ", state & 0xFFFF_FFFF_FFFF).unwrap();
+        }
+        IndexRow {
+            id: format!("id-{rid}"),
+            rid,
+            revision: 1,
+            kind: "Fact".into(),
+            workspace_id: "default".into(),
+            tags: vec![],
+            text,
+            summary: String::new(),
+            stored_summary: None,
+            ident_values: vec![],
+            anchor_keys: vec![],
+        }
+    }
+
+    /// PC-17 (T7 end review M1): the writer's memory is reserved from the rows it indexes
+    /// before it runs, so rows whose indexed size exceeds the ceiling are refused with the
+    /// budget's memory error before any document reaches the writer.
+    #[test]
+    fn rows_whose_indexed_size_exceeds_the_budget_are_refused_before_the_writer_runs() {
+        // Arrange: three rows of 1 MiB of text each (indexed three times over: 9 MiB) under an
+        // 8 MiB ceiling, above the fixed 4 MiB arena
+        let rows: Vec<IndexRow> = (1..=3).map(|rid| large_row(rid, 1 << 20)).collect();
+        let budget = QueryBudget::new(8 << 20, None);
+        DOCS_ADDED.set(0);
+
+        // Act
+        let pack = crate::segment(&rows, &[], &budget);
+
+        // Assert
+        assert!(
+            matches!(
+                pack,
+                Err(StoreError::BudgetExceeded(BudgetExceeded {
+                    limit: Limit::Memory,
+                    ..
+                }))
+            ),
+            "expected the budget's memory refusal, got {:?}",
+            pack.map(|p| p.len())
+        );
+        assert_eq!(DOCS_ADDED.get(), 0, "documents the writer indexed");
+        assert_eq!(budget.live_bytes(), 0, "every charge was given back");
+    }
 }

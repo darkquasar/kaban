@@ -217,6 +217,25 @@ fn document(fields: &Fields, row: &IndexRow) -> TantivyDocument {
     doc
 }
 
+/// The bytes [`document`] hands the writer for `row`: every value it adds, as often as it
+/// adds it.
+pub(crate) fn indexed_bytes(row: &IndexRow) -> u64 {
+    let len = |s: &String| s.len() as u64;
+    let tags: u64 = row.tags.iter().map(len).sum();
+    let stored = row.stored_summary.as_ref().map_or(0, len);
+    let keys = [&row.id, &row.kind, &row.workspace_id]
+        .into_iter()
+        .map(len)
+        .sum::<u64>();
+    keys + ACTIVE.len() as u64
+        + 3 * len(&row.text)
+        + len(&row.summary)
+        + 2 * stored
+        + 3 * tags
+        + row.ident_values.iter().map(len).sum::<u64>()
+        + row.anchor_keys.iter().map(len).sum::<u64>()
+}
+
 impl TextIndex for TantivyIndex {
     /// A segment this crate did not write makes the snapshot unavailable, with the cause
     /// logged: nothing is served under a made-up retrieval key.
