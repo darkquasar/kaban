@@ -24,6 +24,7 @@ use super::Catalog;
 use super::capture::{BatchChanges, CaptureOp};
 use super::class::{ExtentClass, ExtentLocation, IndexClass};
 use super::commit::Stage;
+use super::graph_class::{GraphClass, LoadedView, NodeOrder, load_view};
 use super::compact::{Claim, CompactBudget, CompactReport, Publication, PurgeReport, ViewSwitch};
 use super::pin::{Pin, PinnedView, budget_exceeded};
 use super::tables::{ExtentId, ExtentRef, SedimentRow, SedimentSeq};
@@ -881,4 +882,102 @@ pub fn corrupt(store: &SqliteStore, sql: &str) -> Result<()> {
         .commit(&mut store.lock(), Durability::Normal, |txn| {
             txn.conn().execute_batch(sql).sql()
         })
+}
+
+/// `main`'s memory graph at one snapshot, as the graph suites read it (T11): the merged view,
+/// local ids by `NodeId` and back, relation ids and the public tie order. Local ids never leave
+/// the store outside these suites (INV-2).
+pub struct MainGraph<'v> {
+    loaded: &'v LoadedView<'v>,
+    view: kaban_index_graph::View<'v>,
+    order: NodeOrder,
+}
+
+impl<'v> MainGraph<'v> {
+    /// The merged view: base, layers and pending sediment.
+    #[must_use]
+    pub fn view(&self) -> &kaban_index_graph::View<'v> {
+        &self.view
+    }
+    /// The local id of the present node `id`.
+    ///
+    /// # Errors
+    /// SQLite errors.
+    pub fn local(&self, id: &kaban_core::NodeId) -> Result<Option<kaban_index_graph::LocalId>> {
+        self.loaded.node_id_to_rid(id)
+    }
+    /// The public id of the present node `n`.
+    ///
+    /// # Errors
+    /// SQLite errors.
+    pub fn node_id(&self, n: kaban_index_graph::LocalId) -> Result<Option<kaban_core::NodeId>> {
+        self.loaded.rid_to_node_id(n)
+    }
+    /// The id of the declared relation `rel`.
+    #[must_use]
+    pub fn rel(&self, rel: &str) -> Option<kaban_index_graph::RelId> {
+        self.loaded.rel_id(rel)
+    }
+    /// The public `NodeId` tie order of the snapshot.
+    #[must_use]
+    pub fn order(&self) -> &dyn kaban_index_graph::StableOrder {
+        &self.order
+    }
+}
+
+/// Run `f` over `main`'s memory graph in one snapshot of `store` under `budget` (the pin, the
+/// load and every query share it).
+///
+/// # Errors
+/// The snapshot's, the load's or `f`'s errors.
+pub fn with_main_graph<T>(
+    store: &SqliteStore,
+    budget: &QueryBudget,
+    f: impl FnOnce(&MainGraph<'_>) -> Result<T>,
+) -> Result<T> {
+    store
+        .catalog()
+        .with_snapshot(&store.lock(), budget, |tx, pin| {
+            let loaded = load_view(tx, pin, &ViewName::Main, budget)?;
+            let graph = MainGraph {
+                loaded: &loaded,
+                view: loaded.view(budget)?,
+                order: loaded.stable_order(budget)?,
+            };
+            f(&graph)
+        })
+}
+
+/// Rebuild `store`'s memory graph from its rows ([`GraphClass::rebuild_main`]).
+///
+/// # Errors
+/// The rebuild's errors.
+pub fn rebuild_graph(store: &SqliteStore) -> Result<()> {
+    GraphClass::rebuild_main(store.catalog(), &mut store.lock())
+}
+
+/// The bytes of every graph extent in `main`'s chain at the latest generation (oldest first)
+/// and the payloads of its pending graph sediment rows (in sequence order).
+///
+/// # Errors
+/// The pin's errors.
+pub fn graph_contents(store: &SqliteStore) -> Result<(Vec<Vec<u8>>, Vec<Vec<u8>>)> {
+    let budget = QueryBudget::new(u64::MAX, None);
+    let conn = store.lock();
+    let pin = store.catalog().pin(&conn, &budget, &[ViewName::Main])?;
+    let main = pin.load_view(&conn, &ViewName::Main)?;
+    let graph = |c: ExtentClass| matches!(c, ExtentClass::GraphBase | ExtentClass::GraphLayer);
+    let extents = main
+        .chain()
+        .iter()
+        .filter(|e| graph(e.class))
+        .map(|e| pin.bytes(e).map(|b| b.as_slice().to_vec()))
+        .collect::<Result<_>>()?;
+    let sediment = main
+        .sediment()
+        .iter()
+        .filter(|r| r.class == ExtentClass::GraphLayer)
+        .map(|r| r.payload.clone())
+        .collect();
+    Ok((extents, sediment))
 }
