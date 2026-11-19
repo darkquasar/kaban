@@ -117,10 +117,6 @@ impl PinnedView {
     }
 }
 
-#[expect(
-    dead_code,
-    reason = "the index readers (T7, T11, T16) read the pinned extents"
-)]
 impl Pin {
     /// The pinned generation (the actual generation h of PC-8).
     pub(crate) fn generation(&self) -> Generation {
