@@ -115,9 +115,20 @@ impl Observed {
 /// Install the test class on `store`'s catalog: every later commit stages it. Returns the
 /// handle on the change sets it sees.
 pub fn install_edge_sediment_class(store: &SqliteStore) -> Observed {
+    install(store, None)
+}
+
+/// [`install_edge_sediment_class`], with a test class whose `seal_due` answers `due` whatever
+/// its pending rows are.
+pub fn install_edge_sediment_class_due(store: &SqliteStore, due: bool) -> Observed {
+    install(store, Some(due))
+}
+
+fn install(store: &SqliteStore, due: Option<bool>) -> Observed {
     let observed = Observed::default();
     store.catalog().register(Arc::new(EdgeSediment {
         observed: observed.clone(),
+        due,
     }));
     observed
 }
@@ -708,6 +719,8 @@ pub fn degraded_reclamation(store: &SqliteStore) -> bool {
 /// The test class: one sediment row per edge change; records every change set it is handed.
 struct EdgeSediment {
     observed: Observed,
+    /// What `seal_due` answers; `None`: one row is one operation, due at `ops` rows.
+    due: Option<bool>,
 }
 
 impl IndexClass for EdgeSediment {
@@ -737,6 +750,10 @@ impl IndexClass for EdgeSediment {
             .unwrap_or_else(PoisonError::into_inner)
             .push(nodes.chain(edges).collect());
         Ok(())
+    }
+    /// One operation per row, unless the test fixed the answer.
+    fn seal_due(&self, rows: &[&SedimentRow], ops: u32) -> Result<bool> {
+        Ok(self.due.unwrap_or(rows.len() >= ops as usize))
     }
     /// The payloads, one per line, in sequence order.
     fn seal(

@@ -94,6 +94,13 @@ pub(crate) trait IndexClass: Send + Sync {
     /// # Errors
     /// Any error rolls the whole commit back.
     fn stage(&self, txn: &mut Stage<'_>, changes: &BatchChanges) -> Result<()>;
+    /// Whether `rows`, this class's pending sediment rows of `main` (oldest first), are due to
+    /// seal under `ops`, the class's `[catalog] seal_ops` value: the class knows what one row
+    /// holds. Compaction seals only when this says so (then halving on budget refusals).
+    ///
+    /// # Errors
+    /// Reading what the rows hold failed.
+    fn seal_due(&self, rows: &[&SedimentRow], ops: u32) -> Result<bool>;
     /// Seal the pinned sediment rows `rows` (this class's, in sequence order) into one extent.
     ///
     /// # Errors

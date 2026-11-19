@@ -526,7 +526,7 @@ impl Catalog {
     ///
     /// ```text
     ///   maintenance hold (shared) => pin every view
-    ///   per class: seal  main's pending rows of the class >= seal_ops   (rows: n, n/2 .. 1)
+    ///   per class: seal  main's pending rows once seal_due(rows, seal_ops) (rows: n, n/2 .. 1)
     ///              fold  a view's class run past fold_depth or the delta ratio
     ///                    (the newest k of its unshared run: k, k/2 .. 2)
     ///   each unit: claim => merge under its budget => append => publish (one ViewSwitch)
@@ -668,8 +668,8 @@ impl Catalog {
         Ok(report)
     }
 
-    /// Seal `class`'s pending rows of `main` once they reach its trigger, halving the rows on
-    /// each budget refusal down to one.
+    /// Seal `class`'s pending rows of `main` once the class says they are due, halving the
+    /// rows on each budget refusal down to one.
     fn seal_class(
         &self,
         conn: &Mutex<Connection>,
@@ -689,8 +689,8 @@ impl Catalog {
         let Some(&layer) = class.classes().first() else {
             return Ok(());
         };
-        let trigger = seal_trigger(layer, &self.config().seal_ops);
-        if rows.is_empty() || rows.len() < usize::try_from(trigger).unwrap_or(usize::MAX) {
+        let ops = seal_trigger(layer, &self.config().seal_ops);
+        if rows.is_empty() || !class.seal_due(&rows, ops)? {
             return Ok(());
         }
         let main_name = view_name(main)?;
@@ -1030,8 +1030,8 @@ impl Outcome {
     }
 }
 
-/// The pending operations that make `class` seal (`[catalog.seal_ops]`; the test class seals
-/// under the graph trigger).
+/// The `[catalog.seal_ops]` value of `class`, which its `IndexClass::seal_due` judges its
+/// pending rows by (the test class takes the graph's).
 fn seal_trigger(class: ExtentClass, ops: &SealOps) -> u32 {
     match class {
         ExtentClass::TextTier => ops.text,

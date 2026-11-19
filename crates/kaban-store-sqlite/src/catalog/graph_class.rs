@@ -32,6 +32,11 @@ impl IndexClass for GraphClass {
     fn stage(&self, _txn: &mut Stage<'_>, _changes: &BatchChanges) -> Result<()> {
         Ok(())
     }
+    /// One row counts one operation until T11 and T16 count the operations inside the rows
+    /// (one commit is one row).
+    fn seal_due(&self, rows: &[&SedimentRow], ops: u32) -> Result<bool> {
+        Ok(rows.len() >= ops as usize)
+    }
     /// Seals nothing until T11.
     fn seal(
         &self,

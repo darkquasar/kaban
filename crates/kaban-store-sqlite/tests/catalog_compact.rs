@@ -393,6 +393,50 @@ fn compaction_seals_due_sediment_into_one_extent_of_main() {
 }
 
 #[test]
+fn the_class_decides_when_its_pending_rows_seal() {
+    // (what the class's `seal_due` answers, pending rows, the class's `seal_ops`)
+    for (due, rows, ops) in [(false, 5000, 2), (true, 3, 10_000)] {
+        // Arrange: `rows` pending rows of a test class whose `seal_due` answers `due`
+        let s = Scratch::new("kaban-t6-compact", &format!("due-{due}"));
+        let cfg = CatalogCfg {
+            seal_ops: SealOps {
+                graph: ops,
+                ..SealOps::default()
+            },
+            ..policy()
+        };
+        let store = SqliteStore::open(&s.db(), &s.keys())
+            .unwrap()
+            .with_catalog_config(cfg)
+            .unwrap();
+        let _observed = catalog_testing::install_edge_sediment_class_due(&store, due);
+        catalog_testing::corrupt(
+            &store,
+            &format!(
+                "INSERT INTO cat_sediment(class, generation, payload)
+                 WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < {rows})
+                 SELECT 'test', (SELECT COALESCE(max(generation), 0) FROM cat_generation),
+                        CAST('row' AS BLOB) FROM n"
+            ),
+        )
+        .unwrap();
+
+        // Act
+        let report = catalog_testing::compact(&store, unit(u64::MAX)).unwrap();
+
+        // Assert: a seal of every pending row exactly when the class said it is due
+        let sealed: Vec<usize> = report
+            .published
+            .iter()
+            .filter(|c| c.kind == WorkKind::Seal)
+            .map(|c| c.sediment_rows)
+            .collect();
+        let expected = if due { vec![rows] } else { Vec::new() };
+        assert_eq!(sealed, expected, "due {due}: {report:?}");
+    }
+}
+
+#[test]
 fn a_publication_reports_how_long_it_held_the_write_transaction() {
     // Arrange
     let s = Scratch::new("kaban-t6-compact", "publish-hold");

@@ -32,6 +32,11 @@ impl IndexClass for TextClass {
     fn stage(&self, _txn: &mut Stage<'_>, _changes: &BatchChanges) -> Result<()> {
         Ok(())
     }
+    /// Counts pending segments; the plan's 32-segment trigger is the `seal_ops.text` default
+    /// (T7 leaves tombstone rows out of the count).
+    fn seal_due(&self, rows: &[&SedimentRow], ops: u32) -> Result<bool> {
+        Ok(rows.len() >= ops as usize)
+    }
     /// Seals nothing until T7.
     fn seal(
         &self,

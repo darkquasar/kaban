@@ -124,6 +124,9 @@ impl IndexClass for Scripted {
             .push(changes.clone());
         (self.script)(txn, changes)
     }
+    fn seal_due(&self, _rows: &[&super::tables::SedimentRow], _ops: u32) -> Result<bool> {
+        Ok(false)
+    }
     fn seal(
         &self,
         _pin: &Pin,

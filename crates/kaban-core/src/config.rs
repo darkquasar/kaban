@@ -384,7 +384,7 @@ const MIN_MAINTENANCE_DEADLINE_MS: u64 = 100;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct CatalogCfg {
-    /// Pending sediment operations of each class that trigger a seal.
+    /// What each class may hold pending before it seals ([`SealOps`]).
     pub seal_ops: SealOps,
     /// Sealed layers over a base before they fold.
     pub fold_depth: u32,
@@ -419,15 +419,17 @@ impl Default for CatalogCfg {
     }
 }
 
-/// `[catalog.seal_ops]`: the seal trigger of each index class, in pending operations.
+/// `[catalog.seal_ops]`: the seal trigger of each index class, in what the class counts as
+/// pending.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct SealOps {
-    /// Text.
+    /// Text: pending text segments, one per commit, not operations; tombstone rows are not
+    /// counted.
     pub text: u32,
-    /// Graph.
+    /// Graph: pending operations.
     pub graph: u32,
-    /// Code.
+    /// Code: pending operations.
     pub code: u32,
 }
 
@@ -435,7 +437,8 @@ impl Default for SealOps {
     fn default() -> Self {
         // 7.6 (2026-11-18): graph seal of 10,000 ops, VmHWM 21,384 KiB, ran 13 ms (debug build)
         Self {
-            text: 10_000,
+            // owner decision 2026-11-19: seal past 32 pending text segments
+            text: 32,
             graph: 10_000,
             code: 10_000,
         }
