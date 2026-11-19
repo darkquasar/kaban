@@ -948,6 +948,24 @@ pub fn with_main_graph<T>(
         })
 }
 
+/// Advance the idle clock of this process's graph read cache by `by`, without a real wait.
+pub fn advance_graph_cache_clock(by: std::time::Duration) {
+    super::graph_class::advance_cache_clock(by);
+}
+
+/// Whether this process's graph read cache holds an entry of `store`'s container.
+///
+/// # Errors
+/// The snapshot's errors.
+pub fn graph_cache_holds(store: &SqliteStore) -> Result<bool> {
+    let budget = QueryBudget::new(u64::MAX, None);
+    store
+        .catalog()
+        .with_snapshot(&store.lock(), &budget, |_, pin| {
+            Ok(super::graph_class::cache_holds(pin.kbx_path()))
+        })
+}
+
 /// Rebuild `store`'s memory graph from its rows ([`GraphClass::rebuild_main`]).
 ///
 /// # Errors

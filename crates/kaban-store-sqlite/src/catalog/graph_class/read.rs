@@ -15,13 +15,14 @@
 //! The cache (one entry per container and view, in this process) keeps what the newest
 //! generation seen opened, for one incarnation of the container ([`Incarnation`]: a database
 //! recreated at the same path restarts its generations, extent ids and sediment seqs, so an
-//! entry of the old one is dropped, never served): validated extents are reused only at that generation (their bytes
-//! hold that pin's lock, so an entry is replaced as soon as a newer generation loads, and an
-//! entry idle for [`IDLE`] is dropped at the next load), while the prepared sediment, which holds
-//! no bytes of the container, is carried forward and extended with the newer rows only
-//! (amendment 3.6). What a load builds is charged to the budget of the query that builds it,
-//! before it is built, and stays charged while the cache keeps it (the entry's lists too); a query that reuses it is charged nothing more. A
-//! store without a container (in memory) caches nothing.
+//! entry of the old one is dropped, never served). Validated extents are reused only at that
+//! generation: their bytes hold that pin's lock, so an entry is replaced as soon as a newer
+//! generation loads, and an entry idle for [`IDLE`] is dropped at the next load or commit
+//! ([`sweep`]). The prepared sediment, which holds no bytes of the container, is carried
+//! forward and extended with the newer rows only (amendment 3.6). What a load builds is charged
+//! to the budget of the query that builds it, before it is built, and stays charged while the
+//! cache keeps it (the entry's own lists too); a query that reuses it is charged nothing more.
+//! A store without a container (in memory) caches nothing.
 
 #![cfg_attr(
     not(feature = "failpoints"),
@@ -31,6 +32,8 @@
 use std::collections::HashSet;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+#[cfg(any(test, feature = "failpoints"))]
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -302,6 +305,50 @@ struct Rest {
 /// The process's cache of opened views (see the module documentation).
 static CACHE: Mutex<Vec<Entry>> = Mutex::new(Vec::new());
 
+/// A test's skew of the cache's clock, in milliseconds ([`advance_clock`]).
+#[cfg(any(test, feature = "failpoints"))]
+static SKEW_MS: AtomicU64 = AtomicU64::new(0);
+
+/// The cache's clock: now, plus a test's skew.
+#[cfg(any(test, feature = "failpoints"))]
+fn now() -> Instant {
+    Instant::now() + Duration::from_millis(SKEW_MS.load(Ordering::Relaxed))
+}
+
+/// The cache's clock.
+#[cfg(not(any(test, feature = "failpoints")))]
+fn now() -> Instant {
+    Instant::now()
+}
+
+/// Whether `e` has gone unused for [`IDLE`].
+fn idle(e: &Entry) -> bool {
+    now().saturating_duration_since(e.used) >= IDLE
+}
+
+/// Drop every entry idle past [`IDLE`] (and the pin locks its bytes hold). Every commit of a
+/// writer runs it while it stages ([`super::GraphClass`]'s `stage`), so a process that writes
+/// but no longer loads graphs still lets maintenance reclaim the extents its idle entries
+/// held; a lookup sweeps too.
+pub(super) fn sweep() {
+    let mut cache = CACHE.lock().unwrap_or_else(PoisonError::into_inner);
+    cache.retain(|e| !idle(e));
+}
+
+/// Advance the cache's clock by `by`, without a real wait (tests only).
+#[cfg(any(test, feature = "failpoints"))]
+pub(crate) fn advance_clock(by: Duration) {
+    let ms = u64::try_from(by.as_millis()).unwrap_or(u64::MAX);
+    SKEW_MS.fetch_add(ms, Ordering::Relaxed);
+}
+
+/// Whether the cache holds an entry of the container `kbx` (tests only).
+#[cfg(any(test, feature = "failpoints"))]
+pub(crate) fn cache_holds(kbx: &Path) -> bool {
+    let cache = CACHE.lock().unwrap_or_else(PoisonError::into_inner);
+    cache.iter().any(|e| e.key.kbx == kbx)
+}
+
 /// The incarnation of `pin`'s container, `None` for a pin without one (or one that cannot be
 /// read): such a pin's loads are not cached.
 fn incarnation(pin: &Pin) -> Option<Incarnation> {
@@ -316,9 +363,7 @@ fn incarnation(pin: &Pin) -> Option<Incarnation> {
 /// are dropped first.
 fn cached(pin: &Pin, incarnation: Incarnation, view: &str) -> Option<Entry> {
     let mut cache = CACHE.lock().unwrap_or_else(PoisonError::into_inner);
-    cache.retain(|e| {
-        e.used.elapsed() < IDLE && (e.key.kbx != pin.kbx_path() || e.key.incarnation == incarnation)
-    });
+    cache.retain(|e| !idle(e) && (e.key.kbx != pin.kbx_path() || e.key.incarnation == incarnation));
     cache
         .iter()
         .find(|e| e.key.kbx == pin.kbx_path() && e.key.view == view)
@@ -477,7 +522,7 @@ pub(crate) fn load_view<'t>(
             first_batch,
             sediment: Arc::clone(&sediment),
             rest: same.and_then(|e| e.rest.clone()),
-            used: Instant::now(),
+            used: now(),
         });
     }
     Ok(LoadedView {

@@ -195,6 +195,32 @@ fn a_load_under_a_ceiling_below_what_building_its_relation_dictionary_holds_is_r
     );
 }
 
+#[test]
+fn an_idle_cached_graph_is_dropped_by_the_next_write_without_another_load() {
+    // Arrange: a load leaves main's graph in the process cache
+    let s = Scratch::new("kaban-t11-main", "idle");
+    let store = SqliteStore::open(&s.db(), &s.keys()).unwrap();
+    let [a, b] = ["a", "b"].map(|t| nid(&created(&store, "Fact", t).id));
+    store
+        .link(&a, &b, "RELATES_TO", None, None, &ctx())
+        .unwrap();
+    assert_eq!(out_of(&store, &a), vec![b]);
+    assert!(
+        catalog_testing::graph_cache_holds(&store).unwrap(),
+        "cached"
+    );
+
+    // Act: 61 s of idleness on the cache's clock, then one unrelated write and no load
+    catalog_testing::advance_graph_cache_clock(Duration::from_secs(61));
+    created(&store, "Fact", "unrelated");
+
+    // Assert: the idle entry (and the pin locks its bytes hold) is gone
+    assert!(
+        !catalog_testing::graph_cache_holds(&store).unwrap(),
+        "an entry idle past 60 s survived a write"
+    );
+}
+
 /// Declare `n` more relations `{prefix}{i}` in one commit of `store`.
 fn declare(store: &SqliteStore, prefix: &str, n: u32) {
     catalog_testing::corrupt(

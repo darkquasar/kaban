@@ -29,6 +29,8 @@ mod read;
     expect(unused_imports, reason = "T14 and T16 load graph views")
 )]
 pub(crate) use read::{LoadedView, NodeOrder, load_view};
+#[cfg(feature = "failpoints")]
+pub(crate) use read::{advance_clock as advance_cache_clock, cache_holds};
 
 use std::fs::File;
 use std::os::unix::fs::FileExt;
@@ -163,7 +165,9 @@ impl IndexClass for GraphClass {
     /// purged) a node removal; an inserted or updated edge is an edge add with its row's
     /// attributes (an edge gone again by the end of the commit adds nothing), a deleted one an
     /// edge removal. Losing an edge never removes a node. Nothing for a commit without any.
+    /// Every commit also drops this process's idle cached graphs ([`read::sweep`]).
     fn stage(&self, txn: &mut Stage<'_>, changes: &BatchChanges) -> Result<()> {
+        read::sweep();
         let mut records = Records::default();
         for n in changes.nodes() {
             let present = |i: &Option<NodeImage>| i.as_ref().is_some_and(|i| i.lifecycle != PURGED);
