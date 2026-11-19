@@ -14,7 +14,7 @@ use kaban_core::{Durability, Result, StoreError, ViewName};
 use rusqlite::Connection;
 use tantivy::directory::OwnedBytes;
 
-pub use super::failpoint::Window;
+pub use super::failpoint::{BudgetWindow, Window};
 use super::io;
 use super::kbx::failed;
 use super::tables::sql_int;
@@ -335,6 +335,15 @@ pub fn set_failpoint(
     store.catalog().failpoints.set(window, hook);
 }
 
+/// A deterministic test hook that cancels or replaces a budget with an expired one.
+pub type BudgetHook = Arc<dyn Fn(BudgetWindow, &mut QueryBudget) + Send + Sync>;
+
+/// Set the maintenance budget hook (`None` removes it). No waiting is needed to expire a
+/// budget: the test can replace it with a zero-duration budget at the selected boundary.
+pub fn set_budget_hook(store: &SqliteStore, hook: Option<BudgetHook>) {
+    store.catalog().failpoints.set_budget(hook);
+}
+
 /// How often `store`'s readers retried because a reclamation's floor passed their candidate
 /// generation (PC-8 step 4).
 #[must_use]
@@ -490,7 +499,7 @@ pub fn publish(
     };
     store
         .catalog()
-        .publish(&mut store.lock(), p)
+        .publish(&mut store.lock(), p, None)
         .map(|(g, _)| g.0)
         .map_err(|f| Box::new((f.error, TestClaim(f.claim))))
 }

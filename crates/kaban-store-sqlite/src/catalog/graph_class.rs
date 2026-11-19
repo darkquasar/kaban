@@ -45,6 +45,7 @@ use super::Catalog;
 use super::capture::{BatchChanges, CaptureOp, NodeImage};
 use super::class::{ExtentClass, IndexClass};
 use super::commit::Stage;
+use super::failpoint::BudgetWindow;
 use super::kbx;
 use super::pin::{Pin, budget_exceeded};
 use super::tables::{ExtentRef, SedimentRow, holds, sql_int, uint};
@@ -100,7 +101,7 @@ impl GraphClass {
             return Ok(());
         }
         let maintenance = catalog.maintenance_budget();
-        let budget = QueryBudget::new(maintenance.memory_bytes, Some(maintenance.deadline));
+        let mut budget = QueryBudget::new(maintenance.memory_bytes, Some(maintenance.deadline));
         catalog.commit(conn, Durability::Normal, |txn| {
             let rows = txn.conn();
             let records: i64 = rows
@@ -120,6 +121,8 @@ impl GraphClass {
                     .sql()?;
                 let rids = stmt.query_map([PURGED], |r| r.get::<_, i64>(0)).sql()?;
                 for rid in rids {
+                    catalog.budget_window(BudgetWindow::GraphLoading, &mut budget);
+                    budget.check()?;
                     records.nodes.push(NodeOp {
                         node: local_id(rid.sql()?)?,
                         kind: OpKind::Add,
@@ -130,6 +133,7 @@ impl GraphClass {
                     .sql()?;
                 let mut edges = stmt.query([]).sql()?;
                 while let Some(r) = edges.next().sql()? {
+                    budget.check()?;
                     let rel: String = r.get(2).sql()?;
                     let created_at: String = r.get(4).sql()?;
                     records.edges.push(EdgeOp {
@@ -141,10 +145,15 @@ impl GraphClass {
                     });
                 }
             }
+            budget.check()?;
             let base = build_base(&records, 0);
+            budget.check()?;
             let generation = sql_int(txn.generation()?.0).sql()?;
-            retire_graph_rows(&catalog.kbx, txn.conn(), generation)?;
+            retire_graph_rows(catalog, txn.conn(), generation, &mut budget)?;
+            catalog.budget_window(BudgetWindow::BeforePublish, &mut budget);
+            budget.check()?;
             let extent = catalog.append_extent(ExtentClass::GraphBase, &base)?;
+            budget.check()?;
             txn.publish(extent, &[ViewName::Main])?;
             Ok(())
         })
@@ -301,7 +310,10 @@ impl IndexClass for GraphClass {
         let layer = [Layer::open(OwnedBytes::new(layer), budget).map_err(graph_error)?];
         let _engine = reserve_engine(budget, layer.iter().map(Layer::records).sum())?;
         let view = View::new(None, &layer, &empty, budget).map_err(graph_error)?;
-        Ok(Some(fold(&view, &[])))
+        budget.check()?;
+        let base = fold(&view, &[]);
+        budget.check()?;
+        Ok(Some(base))
     }
 
     /// The base of the graph chain run `extents` (oldest first) when it starts at the chain's
@@ -322,7 +334,10 @@ impl IndexClass for GraphClass {
         let _engine = reserve_engine(budget, opened.records())?;
         let empty = PreparedSediment::empty();
         let view = opened.view(&empty, budget)?;
-        Ok(Some(fold(&view, &[])))
+        budget.check()?;
+        let base = fold(&view, &[]);
+        budget.check()?;
+        Ok(Some(base))
     }
 
     /// `extent` rewritten without the purged `rids` (explicit omission, amendment 7.8) when it
@@ -350,13 +365,18 @@ impl IndexClass for GraphClass {
         if at == 0 {
             let _engine = reserve_engine(budget, opened.records())?;
             let view = opened.view(&empty, budget)?;
-            return Ok(Some(fold(&view, &omit)));
+            budget.check()?;
+            let base = fold(&view, &omit);
+            budget.check()?;
+            return Ok(Some(base));
         }
         let mut layers: Vec<Layer> = Vec::with_capacity(at);
         let mut layer = Vec::new();
         for _ in 0..at {
+            budget.check()?;
             let parent = View::new(opened.base(), &layers, &empty, budget).map_err(graph_error)?;
             layer = seal(&parent, &Records::default());
+            budget.check()?;
             layers.push(Layer::open(OwnedBytes::new(layer.clone()), budget).map_err(graph_error)?);
         }
         Ok(Some(layer))
@@ -579,7 +599,12 @@ type ExtentRow = (u64, Option<(u64, u64)>, Option<Vec<u8>>, bool);
 /// writer transaction on `rows` (generation `generation`): chains and claims lose them, an
 /// extent whose bytes are intact in the container `kbx_path` retires, one whose bytes are not
 /// loses its row, and the pending sediment is consumed.
-fn retire_graph_rows(kbx_path: &std::path::Path, rows: &Connection, generation: i64) -> Result<()> {
+fn retire_graph_rows(
+    catalog: &Catalog,
+    rows: &Connection,
+    generation: i64,
+    budget: &mut QueryBudget,
+) -> Result<()> {
     let extents: Vec<ExtentRow> = {
         let mut stmt = rows
             .prepare(
@@ -598,14 +623,12 @@ fn retire_graph_rows(kbx_path: &std::path::Path, rows: &Connection, generation: 
             .sql()?;
         found.collect::<rusqlite::Result<_>>().sql()?
     };
-    let file = kbx::open_existing(kbx_path).ok();
-    // no deadline: the graph rebuild judges every old extent whole, as before
-    let unbounded = QueryBudget::new(u64::MAX, None);
+    let file = kbx::open_existing(&catalog.kbx).ok();
     for (id, range, sha, live) in extents {
+        catalog.budget_window(BudgetWindow::GraphHashing, budget);
+        budget.check()?;
         let intact = match (&file, range, sha) {
-            (Some(file), Some((offset, len)), Some(sha)) => {
-                holds(file, offset, len, &sha, &unbounded)?
-            }
+            (Some(file), Some((offset, len)), Some(sha)) => holds(file, offset, len, &sha, budget)?,
             _ => false,
         };
         let id = sql_int(id).sql()?;

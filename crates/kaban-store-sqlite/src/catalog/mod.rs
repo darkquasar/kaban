@@ -265,6 +265,22 @@ impl Catalog {
         let _ = window;
     }
 
+    /// Test-only deterministic cancellation/deadline injection at a maintenance boundary.
+    #[cfg_attr(
+        not(any(test, feature = "failpoints")),
+        expect(clippy::unused_self, reason = "the test build runs a hook")
+    )]
+    pub(crate) fn budget_window(
+        &self,
+        window: failpoint::BudgetWindow,
+        budget: &mut kaban_core::query_budget::QueryBudget,
+    ) {
+        #[cfg(any(test, feature = "failpoints"))]
+        self.failpoints.budget(window, budget);
+        #[cfg(not(any(test, feature = "failpoints")))]
+        let _ = (window, budget);
+    }
+
     /// Count a reader's retry (test builds only: the race tests read the count).
     #[cfg(any(test, feature = "failpoints"))]
     pub(crate) fn retried(&self) {

@@ -52,7 +52,7 @@ use super::checkpoint::CheckpointReport;
 use super::class::{ExtentClass, ExtentLocation, IndexClass};
 use super::commit::Txn;
 use super::fail;
-use super::failpoint::Window;
+use super::failpoint::{BudgetWindow, Window};
 use super::kbx::Unpublished;
 use super::pin::{Pin, PinnedView};
 use super::reclaim::ReclaimReport;
@@ -254,6 +254,7 @@ impl Catalog {
         &self,
         conn: &mut Connection,
         p: Publication,
+        budget: Option<&QueryBudget>,
     ) -> std::result::Result<(Generation, Duration), Box<PublishFailed>> {
         let Publication {
             claim,
@@ -263,6 +264,9 @@ impl Catalog {
             sediment_consumed,
         } = p;
         let switched = self.commit_held(conn, Durability::Normal, |txn| {
+            if let Some(budget) = budget {
+                budget.check()?;
+            }
             let generation = txn.generation()?;
             let g = sql_int(generation.0).sql()?;
             let held: u64 = txn
@@ -336,6 +340,9 @@ impl Catalog {
                 .execute("DELETE FROM cat_claim WHERE claim = ?1", [&claim.token])
                 .sql()?;
             fail::point("publish.before_commit");
+            if let Some(budget) = budget {
+                budget.check()?;
+            }
             Ok(generation)
         });
         switched.map_err(|error| Box::new(PublishFailed { error, claim }))
@@ -665,15 +672,15 @@ impl Catalog {
                     extents,
                     rows: Vec::new(),
                 };
-                let outcome = self.run_unit(conn, &unit, || {
-                    let work = budget.unit();
+                let mut work = budget.unit();
+                let outcome = self.run_unit(conn, &unit, &mut work, |work| {
                     let mut added = Vec::new();
                     let mut views = Vec::new();
                     let mut retired = Vec::new();
                     // each output stays charged while the pass holds it
                     let mut held = Vec::new();
                     for e in &unit.extents {
-                        let Some(bytes) = class.purge(&pinned.pin, e, rids, &work)? else {
+                        let Some(bytes) = class.purge(&pinned.pin, e, rids, work)? else {
                             continue;
                         };
                         held.push(
@@ -759,10 +766,10 @@ impl Catalog {
                 extents: Vec::new(),
                 rows: rows[..n].to_vec(),
             };
-            let outcome = self.run_unit(conn, &unit, || {
-                let work = budget.unit();
+            let mut work = budget.unit();
+            let outcome = self.run_unit(conn, &unit, &mut work, |work| {
                 Ok(class
-                    .seal(&pinned.pin, &unit.rows, &work)?
+                    .seal(&pinned.pin, &unit.rows, work)?
                     .map(|bytes| Planned {
                         added: vec![(layer, bytes)],
                         views: vec![ViewSwitch {
@@ -837,10 +844,10 @@ impl Catalog {
                 rows: Vec::new(),
             };
             let ids: Vec<ExtentId> = unit.extents.iter().map(|e| e.id).collect();
-            let outcome = self.run_unit(conn, &unit, || {
-                let work = budget.unit();
+            let mut work = budget.unit();
+            let outcome = self.run_unit(conn, &unit, &mut work, |work| {
                 Ok(class
-                    .fold(&pinned.pin, &unit.extents, &work)?
+                    .fold(&pinned.pin, &unit.extents, work)?
                     .map(|bytes| Planned {
                         // the fold takes the class of its oldest input (a base stays a base)
                         added: vec![(unit.extents[0].class, bytes)],
@@ -857,8 +864,7 @@ impl Catalog {
             // A class may not support the smaller suffix. Its earlier budget refusal is
             // still terminal unless a supported retry actually publishes.
             report.refused_units += u64::from(
-                (outcome.is_budget() && !retry)
-                    || (refused && matches!(outcome, Outcome::Nothing)),
+                (outcome.is_budget() && !retry) || (refused && matches!(outcome, Outcome::Nothing)),
             );
             refused |= outcome.is_budget();
             outcome.record(&unit, &mut report.published, &mut report.skipped);
@@ -876,14 +882,15 @@ impl Catalog {
         &self,
         conn: &Mutex<Connection>,
         unit: &Unit<'_>,
-        work: impl FnOnce() -> Result<Option<Planned>>,
+        budget: &mut QueryBudget,
+        work: impl FnOnce(&QueryBudget) -> Result<Option<Planned>>,
     ) -> Result<Outcome> {
         let inputs: Vec<ExtentId> = unit.extents.iter().map(|e| e.id).collect();
         let Some(claim) = self.claim(&mut step(conn), &inputs)? else {
             return Ok(Outcome::Skipped(SkipReason::Claimed));
         };
         self.failpoint(Window::CompactClaimed);
-        let planned = match work() {
+        let planned = match work(budget) {
             Ok(Some(planned)) => planned,
             Ok(None) => {
                 self.release(&mut step(conn), claim)?;
@@ -897,6 +904,11 @@ impl Catalog {
                 };
             }
         };
+        self.budget_window(BudgetWindow::BeforePublish, budget);
+        if let Err(refused) = budget.check() {
+            self.release(&mut step(conn), claim)?;
+            return Ok(Outcome::Skipped(SkipReason::Budget(refused)));
+        }
         match unit.kind {
             WorkKind::Seal => fail::point("seal.mid"),
             WorkKind::Fold => fail::point("fold.mid"),
@@ -922,6 +934,7 @@ impl Catalog {
                 retired: planned.retired,
                 sediment_consumed: planned.sediment,
             },
+            Some(budget),
         );
         match published {
             Ok((generation, hold)) => Ok(Outcome::Published(generation, hold)),
@@ -930,6 +943,9 @@ impl Catalog {
                 self.release(&mut step(conn), claim)?;
                 match error {
                     StoreError::StorageFatal { .. } => Err(error),
+                    StoreError::BudgetExceeded(refused) => {
+                        Ok(Outcome::Skipped(SkipReason::Budget(refused)))
+                    }
                     refused => Ok(Outcome::Skipped(SkipReason::Refused(refusal_text(
                         &refused,
                     )))),

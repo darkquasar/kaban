@@ -27,6 +27,21 @@ pub enum Window {
     VerifyHashing,
 }
 
+/// Maintenance boundaries at which a test can cancel or expire the unit budget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(
+    not(feature = "failpoints"),
+    expect(unreachable_pub, reason = "test seam")
+)]
+pub enum BudgetWindow {
+    /// A canonical graph row is about to be loaded.
+    GraphLoading,
+    /// An old graph extent is about to be hashed.
+    GraphHashing,
+    /// Engine output is ready, before appending or publishing it.
+    BeforePublish,
+}
+
 #[cfg(any(test, feature = "failpoints"))]
 pub(crate) use hooks::Failpoints;
 
@@ -35,7 +50,10 @@ mod hooks {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Mutex, PoisonError};
 
-    use super::Window;
+    use super::{BudgetWindow, Window};
+    use kaban_core::query_budget::QueryBudget;
+
+    pub(crate) type BudgetHook = Arc<dyn Fn(BudgetWindow, &mut QueryBudget) + Send + Sync>;
 
     /// A test's hook for one window: it may block (bounded by the test) to hold the window open.
     pub(crate) type Hook = Arc<dyn Fn() + Send + Sync>;
@@ -45,6 +63,7 @@ mod hooks {
     pub(crate) struct Failpoints {
         hooks: Mutex<[Option<Hook>; 6]>,
         retries: AtomicU64,
+        budget: Mutex<Option<BudgetHook>>,
     }
 
     impl std::fmt::Debug for Failpoints {
@@ -67,6 +86,19 @@ mod hooks {
     }
 
     impl Failpoints {
+        pub(crate) fn set_budget(&self, hook: Option<BudgetHook>) {
+            *self.budget.lock().unwrap_or_else(PoisonError::into_inner) = hook;
+        }
+        pub(crate) fn budget(&self, window: BudgetWindow, budget: &mut QueryBudget) {
+            let hook = self
+                .budget
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone();
+            if let Some(hook) = hook {
+                hook(window, budget);
+            }
+        }
         /// Install (`Some`) or remove (`None`) the hook of `window`.
         pub(crate) fn set(&self, window: Window, hook: Option<Hook>) {
             self.hooks.lock().unwrap_or_else(PoisonError::into_inner)[slot(window)] = hook;

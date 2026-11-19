@@ -213,7 +213,10 @@ fn a_refused_graph_fold_keeps_its_diagnostic_when_a_smaller_suffix_is_unsupporte
     // Act: fold under three times the encoded bytes (well under the engine's working set),
     // then under no ceiling
     let tight = fold(3 * encoded);
-    assert_eq!(tight.refused_units, 1, "an unsupported retry retains the terminal refusal");
+    assert_eq!(
+        tight.refused_units, 1,
+        "an unsupported retry retains the terminal refusal"
+    );
     assert_eq!(folding.catalog_status().unwrap().refused_units, 1);
     let open_ended = fold(u64::MAX);
     assert_eq!(folding.catalog_status().unwrap().refused_units, 0);
