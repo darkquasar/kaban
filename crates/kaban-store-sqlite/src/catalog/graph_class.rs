@@ -32,9 +32,6 @@ pub(crate) use read::{LoadedView, load_view};
 #[cfg(feature = "failpoints")]
 pub(crate) use read::{advance_clock as advance_cache_clock, cache_holds};
 
-use std::fs::File;
-use std::os::unix::fs::FileExt;
-
 use kaban_core::query_budget::{BudgetExceeded, BudgetLease, Limit, QueryBudget};
 use kaban_core::{BackendSource, Durability, Result, StoreError, ViewName};
 use kaban_index_graph::{
@@ -42,7 +39,6 @@ use kaban_index_graph::{
     Records, View, build_base, fold, seal,
 };
 use rusqlite::Connection;
-use sha2::{Digest, Sha256};
 use tantivy::directory::OwnedBytes;
 
 use super::Catalog;
@@ -51,7 +47,7 @@ use super::class::{ExtentClass, IndexClass};
 use super::commit::Stage;
 use super::kbx;
 use super::pin::{Pin, budget_exceeded};
-use super::tables::{ExtentRef, SedimentRow, sql_int, uint};
+use super::tables::{ExtentRef, SedimentRow, holds, sql_int, uint};
 use crate::sql_error::SqlResultExt;
 
 /// The classes of the graph's extents: compaction names a seal's extent after the first.
@@ -603,9 +599,13 @@ fn retire_graph_rows(kbx_path: &std::path::Path, rows: &Connection, generation: 
         found.collect::<rusqlite::Result<_>>().sql()?
     };
     let file = kbx::open_existing(kbx_path).ok();
+    // no deadline: the graph rebuild judges every old extent whole, as before
+    let unbounded = QueryBudget::new(u64::MAX, None);
     for (id, range, sha, live) in extents {
         let intact = match (&file, range, sha) {
-            (Some(file), Some((offset, len)), Some(sha)) => holds(file, offset, len, &sha),
+            (Some(file), Some((offset, len)), Some(sha)) => {
+                holds(file, offset, len, &sha, &unbounded)?
+            }
             _ => false,
         };
         let id = sql_int(id).sql()?;
@@ -630,24 +630,4 @@ fn retire_graph_rows(kbx_path: &std::path::Path, rows: &Connection, generation: 
     )
     .sql()?;
     Ok(())
-}
-
-/// Whether `file` holds `len` bytes at `offset` whose SHA-256 is `sha`.
-fn holds(file: &File, offset: u64, len: u64, sha: &[u8]) -> bool {
-    const CHUNK: u64 = 1 << 16;
-    let mut hasher = Sha256::new();
-    let mut buf = vec![0_u8; 1 << 16];
-    let mut done = 0_u64;
-    while done < len {
-        let n = (len - done).min(CHUNK);
-        let Some(chunk) = usize::try_from(n).ok().and_then(|n| buf.get_mut(..n)) else {
-            return false;
-        };
-        if file.read_exact_at(chunk, offset + done).is_err() {
-            return false;
-        }
-        hasher.update(&*chunk);
-        done += n;
-    }
-    hasher.finalize().as_slice() == sha
 }

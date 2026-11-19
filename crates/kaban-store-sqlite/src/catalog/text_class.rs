@@ -18,8 +18,6 @@
 //!   rebuild==> every active row => one tier in main; old tiers and packs retire (one commit)
 //! ```
 
-use std::fs::File;
-use std::os::unix::fs::FileExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -27,7 +25,6 @@ use kaban_core::query_budget::{BudgetLease, QueryBudget};
 use kaban_core::text_index::{ExtentSpan, IndexRow, TextSnapshot};
 use kaban_core::{Durability, Result, StoreError, ViewName};
 use rusqlite::Connection;
-use sha2::{Digest as _, Sha256};
 use tantivy::directory::OwnedBytes;
 
 use super::Catalog;
@@ -36,7 +33,7 @@ use super::class::{ExtentClass, ExtentLocation, IndexClass};
 use super::commit::Stage;
 use super::kbx;
 use super::pin::{Pin, PinnedView};
-use super::tables::{ExtentRef, SedimentRow, sql_int, uint};
+use super::tables::{ExtentRef, SedimentRow, holds, sql_int, uint};
 use crate::sql_error::SqlResultExt;
 
 /// The classes a text read loads: the text tiers and their pending packs.
@@ -304,31 +301,6 @@ type TierHook = Box<dyn FnMut(&QueryBudget)>;
 thread_local! {
     /// Called with the rebuild's budget on every old tier it judges: the tests cancel there.
     static ON_TIER: std::cell::RefCell<Option<TierHook>> = const { std::cell::RefCell::new(None) };
-}
-
-/// Whether `file` holds `len` bytes at `offset` whose SHA-256 is `sha`, `budget` checked per
-/// chunk.
-///
-/// # Errors
-/// The budget's deadline or cancellation.
-fn holds(file: &File, offset: u64, len: u64, sha: &[u8], budget: &QueryBudget) -> Result<bool> {
-    const CHUNK: u64 = 1 << 16;
-    let mut hasher = Sha256::new();
-    let mut buf = vec![0_u8; 1 << 16];
-    let mut done = 0_u64;
-    while done < len {
-        budget.check()?;
-        let n = (len - done).min(CHUNK);
-        let Some(chunk) = usize::try_from(n).ok().and_then(|n| buf.get_mut(..n)) else {
-            return Ok(false);
-        };
-        if file.read_exact_at(chunk, offset + done).is_err() {
-            return Ok(false);
-        }
-        hasher.update(&*chunk);
-        done += n;
-    }
-    Ok(hasher.finalize().as_slice() == sha)
 }
 
 impl Catalog {

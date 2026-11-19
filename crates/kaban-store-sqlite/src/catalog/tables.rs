@@ -3,7 +3,45 @@
 //! `cat_view_extent` (each view's ordered chain) and `cat_meta` tables (`reclaim_floor` among
 //! the latter) of `schema.sql` hold them; the commit entry writes them and a pin reads them.
 
+use std::fs::File;
+use std::os::unix::fs::FileExt as _;
+
+use kaban_core::Result;
+use kaban_core::query_budget::QueryBudget;
+use sha2::{Digest as _, Sha256};
+
 use super::class::{ExtentClass, ExtentLocation};
+
+/// Whether `file` holds `len` bytes at `offset` whose SHA-256 is `sha`, `budget` checked per
+/// chunk: a rebuild's judgement of an old extent before it keeps its range.
+///
+/// # Errors
+/// The budget's deadline or cancellation.
+pub(crate) fn holds(
+    file: &File,
+    offset: u64,
+    len: u64,
+    sha: &[u8],
+    budget: &QueryBudget,
+) -> Result<bool> {
+    const CHUNK: u64 = 1 << 16;
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0_u8; 1 << 16];
+    let mut done = 0_u64;
+    while done < len {
+        budget.check()?;
+        let n = (len - done).min(CHUNK);
+        let Some(chunk) = usize::try_from(n).ok().and_then(|n| buf.get_mut(..n)) else {
+            return Ok(false);
+        };
+        if file.read_exact_at(chunk, offset + done).is_err() {
+            return Ok(false);
+        }
+        hasher.update(&*chunk);
+        done += n;
+    }
+    Ok(hasher.finalize().as_slice() == sha)
+}
 
 /// Column `idx` of `row` as the unsigned number the catalog stores in an `INTEGER`.
 pub(crate) fn uint(row: &rusqlite::Row<'_>, idx: usize) -> rusqlite::Result<u64> {
