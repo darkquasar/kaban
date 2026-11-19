@@ -4,7 +4,7 @@
 
 mod common;
 
-use kaban_index::ident_terms;
+use kaban_index::writer::snapshot_terms;
 
 #[test]
 fn ident_terms_table() {
@@ -28,14 +28,14 @@ fn ident_terms_table() {
     ];
     for ((name, last, label), expected) in cases {
         assert_eq!(
-            ident_terms::build(name, last, label),
+            snapshot_terms(name, last, label),
             *expected,
             "build({name:?}, {last:?}, {label:?})"
         );
     }
     // total: arbitrary bytes never panic and the result is always lowercase
     let weird = "\u{0}\u{7f}🙂\u{301}A\u{301}b";
-    let out = ident_terms::build(weird, weird, weird);
+    let out = snapshot_terms(weird, weird, weird);
     assert_eq!(out, out.to_lowercase());
 }
 

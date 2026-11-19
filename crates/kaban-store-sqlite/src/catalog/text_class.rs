@@ -193,7 +193,7 @@ pub(super) fn rebuild_in(
     // a deadline or cancellation since the last check publishes nothing
     budget.check()?;
     txn.publish(extent, &[ViewName::Main])?;
-    Ok(())
+    crate::ident::mark_indexed(txn.conn())
 }
 
 /// One tier of `rows`, indexed `batch` rows per writer under `budget`: each batch's pack is

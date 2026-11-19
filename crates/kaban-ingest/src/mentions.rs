@@ -307,6 +307,19 @@ pub fn build_dictionary(
                         ] {
                             insert(raw, target, Method::Symbol, DictSource::V4Symbols);
                         }
+                        // A split spelling is an alias of the whole name. Matching its
+                        // individual words would turn every CartService into a mention of Cart.
+                        if let Some(name) = admitted(policy, &symbol.name) {
+                            let parts = kaban_core::ident::split_terms(&name);
+                            if parts.len() > 1 {
+                                insert(
+                                    &parts.join(" "),
+                                    target,
+                                    Method::Symbol,
+                                    DictSource::V4Symbols,
+                                );
+                            }
+                        }
                     }
                 }
             }

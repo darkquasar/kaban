@@ -501,7 +501,7 @@ expression: a
         "build_hwm_delta": "<observed>",
         "build_peak_delta": "<observed>",
         "dropped": [],
-        "memory_usage": 6360,
+        "memory_usage": 6948,
         "outcome": "ok"
       },
       "outbox_rows": 11,
@@ -2206,7 +2206,7 @@ expression: a
           "ok": true
         },
         {
-          "detail": "2",
+          "detail": "3",
           "name": "ident_terms_version",
           "ok": true
         },

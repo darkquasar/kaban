@@ -1,27 +1,21 @@
-//! The analyzers (spec 05 SS-08), registered on every `Index` handle. [`STEMMED`] is the FTS5
-//! `porter unicode61` twin for the content fields and for every query operand; [`FOLDED`] is
-//! the same without the stemmer, for the fuzzy field (a misspelling is matched against the
-//! surface form); [`IDENT`] is the identifier-aware analyzer of the `ident_terms` field: it
-//! expands its input with [`kaban_core::ident::ident_terms`] (whole identifiers, their
-//! separator and camel parts, lowercase copies) and then analyzes the result like
-//! [`STEMMED`], so the field's term set equals the FTS5 `ident_terms` column's when fed the
-//! same five inputs, and a query analyzed with [`STEMMED`] matches it exactly as FTS5 does.
+//! Prose, fuzzy surface forms, whole names, and split code identifiers.
 
-use kaban_core::ident::ident_terms;
+use kaban_core::ident::split_terms;
 use tantivy::Index;
 use tantivy::tokenizer::{
-    AsciiFoldingFilter, Language, LowerCaser, RemoveLongFilter, SimpleTokenizer, Stemmer,
-    TextAnalyzer, Token, TokenStream, Tokenizer,
+    AsciiFoldingFilter, Language, LowerCaser, RawTokenizer, RemoveLongFilter, SimpleTokenizer,
+    Stemmer, TextAnalyzer, Token, TokenStream, Tokenizer,
 };
 
 pub(crate) const STEMMED: &str = "kaban_stemmed";
 pub(crate) const FOLDED: &str = "kaban_folded";
-pub(crate) const IDENT: &str = "kaban_ident";
+pub(crate) const CODE_IDENT: &str = "kaban_code_ident";
+pub(crate) const CODE_NAME: &str = "kaban_code_name";
 
 /// Tokens longer than this are dropped (FTS5 has no limit; Tantivy's term dictionary does).
 const MAX_TOKEN_BYTES: usize = 255;
 
-/// Register the three analyzers on `index`; runs for every handle this crate opens.
+/// Register the analyzers on `index`; runs for every handle this crate opens.
 pub(crate) fn register(index: &Index) {
     let tokenizers = index.tokenizers();
     tokenizers.register(
@@ -42,58 +36,49 @@ pub(crate) fn register(index: &Index) {
             .build(),
     );
     tokenizers.register(
-        IDENT,
+        CODE_NAME,
+        TextAnalyzer::builder(RawTokenizer::default())
+            .filter(RemoveLongFilter::limit(MAX_TOKEN_BYTES))
+            .filter(LowerCaser)
+            .build(),
+    );
+    tokenizers.register(
+        CODE_IDENT,
         TextAnalyzer::builder(IdentTokenizer)
             .filter(RemoveLongFilter::limit(MAX_TOKEN_BYTES))
             .filter(LowerCaser)
             .filter(AsciiFoldingFilter)
-            .filter(Stemmer::new(Language::English))
             .build(),
     );
 }
 
-/// The identifier expansion as a tokenizer: the derived terms of the input, each split on
-/// non-alphanumerics as the simple tokenizer would (`foo_bar` is `foo bar` to FTS5 as well).
-/// Derived terms have no source span, so the offsets are zero; positions are consecutive.
 #[derive(Clone, Default)]
 struct IdentTokenizer;
 
 impl Tokenizer for IdentTokenizer {
-    type TokenStream<'a> = IdentStream;
+    type TokenStream<'a> = IdentStream<'a>;
 
-    fn token_stream<'a>(&'a mut self, text: &'a str) -> IdentStream {
-        let tokens = ident_terms(text, None, &[], &[], &[])
-            .split(' ')
-            .flat_map(|term| {
-                term.split(|c: char| !c.is_alphanumeric())
-                    .filter(|part| !part.is_empty())
-                    .map(str::to_owned)
-                    .collect::<Vec<_>>()
-            })
-            .collect();
+    fn token_stream<'a>(&'a mut self, text: &'a str) -> IdentStream<'a> {
         IdentStream {
-            tokens,
-            next: 0,
+            parts: split_terms(text).into_iter(),
             token: Token::default(),
         }
     }
 }
 
-struct IdentStream {
-    tokens: Vec<String>,
-    next: usize,
+struct IdentStream<'a> {
+    parts: std::vec::IntoIter<&'a str>,
     token: Token,
 }
 
-impl TokenStream for IdentStream {
+impl TokenStream for IdentStream<'_> {
     fn advance(&mut self) -> bool {
-        let Some(text) = self.tokens.get(self.next) else {
+        let Some(part) = self.parts.next() else {
             return false;
         };
         self.token.position = self.token.position.wrapping_add(1);
         self.token.text.clear();
-        self.token.text.push_str(text);
-        self.next += 1;
+        self.token.text.push_str(part);
         true
     }
 
@@ -109,7 +94,7 @@ impl TokenStream for IdentStream {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)] // test code: failures are the assertion
 mod tests {
-    use super::{IDENT, STEMMED, register};
+    use super::{CODE_IDENT, CODE_NAME, STEMMED, register};
     use tantivy::Index;
     use tantivy::schema::Schema;
 
@@ -123,34 +108,23 @@ mod tests {
         out
     }
 
-    /// The analyzer goldens: camel, snake, dotted and anchor-shaped identifiers expand into the
-    /// whole identifier and its parts, stemmed and lowercased like the FTS5 column; prose stays
-    /// prose; the query side (`STEMMED`) produces the term a camel identifier is indexed under.
     #[test]
-    fn identifier_expansion_matches_the_fts5_column_and_the_query_side() {
+    fn identifiers_and_prose_use_their_declared_analyzers() {
         let index = Index::create_in_ram(Schema::builder().build());
         register(&index);
-        let ident = |text| terms(&index, IDENT, text);
-        assert_eq!(
-            ident("TransactionCoordinator retries"),
-            [
-                "transactioncoordin",
-                "transact",
-                "coordin",
-                "transactioncoordin",
-                "transact",
-                "coordin"
-            ]
-        );
-        // an all-lowercase identifier has no lowercase copy to add: the whole, then its parts
-        assert_eq!(ident("retry_path"), ["retri", "path", "retri", "path"]);
-        assert_eq!(ident("config.yaml"), ["config", "yaml", "config", "yaml"]);
-        assert_eq!(
-            ident("src/store/open.rs"),
-            ["src", "store", "open", "rs", "src", "store", "open", "rs"]
-        );
-        assert_eq!(ident("plain prose only"), Vec::<String>::new());
-        // the query side: one term per camel identifier, as FTS5 tokenizes a query
+        for (input, expected) in [
+            (
+                "TransactionCoordinator retries",
+                vec!["transaction", "coordinator", "retries"],
+            ),
+            ("retry_path", vec!["retry", "path"]),
+            ("config.yaml", vec!["config", "yaml"]),
+            ("src/store/open.rs", vec!["src", "store", "open", "rs"]),
+            ("plain prose only", vec!["plain", "prose", "only"]),
+        ] {
+            assert_eq!(terms(&index, CODE_IDENT, input), expected);
+        }
+        assert_eq!(terms(&index, CODE_NAME, "HTTPServer"), ["httpserver"]);
         assert_eq!(
             terms(&index, STEMMED, "TransactionCoordinator"),
             ["transactioncoordin"]

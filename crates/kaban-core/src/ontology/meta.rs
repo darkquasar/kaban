@@ -198,7 +198,7 @@ pub struct KindBody {
     /// mixin's declaration counts for the conflict rule, E1.3a RE1-5).
     #[serde(default)]
     pub fts_fields: Option<Vec<String>>,
-    /// Prop paths whose identifiers feed `ident_terms` (`Some` when declared).
+    /// Prop paths indexed as whole names and code identifier parts (`Some` when declared).
     #[serde(default)]
     pub ident_fields: Option<Vec<String>>,
     /// BM25F column weights.

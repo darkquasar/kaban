@@ -48,9 +48,9 @@ use thiserror::Error;
 
 use crate::derive::{self, Counts, Dangling};
 use crate::gate::{self, Admitted, GateCounts, WarningClass};
-use crate::ident_terms;
 use crate::ranges::{RangeForm, RangeForms};
 use crate::union::{self, UNION_REASON};
+use std::borrow::Cow;
 
 /// The `scip` crate pin the schema was read from (`meta.scip_version`).
 pub const SCIP_VERSION: &str = "0.10.0";
@@ -735,6 +735,30 @@ fn fold_forms(a: RangeForms, b: RangeForms) -> RangeForms {
     }
 }
 
+/// The space-joined, lowercased, de-duplicated terms of the three inputs, in order.
+#[must_use]
+pub fn snapshot_terms(name: &str, key_last_descriptor: &str, label: &str) -> String {
+    let mut seen: Vec<Cow<'_, str>> = Vec::new();
+    for input in [name, key_last_descriptor, label] {
+        for term in kaban_core::ident::split_terms(input) {
+            let lower = lowercase(term);
+            if !seen.contains(&lower) {
+                seen.push(lower);
+            }
+        }
+    }
+    seen.join(" ")
+}
+
+/// Lowercase without allocating when the term already is (own-cow-conditional).
+fn lowercase(term: &str) -> Cow<'_, str> {
+    if term.chars().any(char::is_uppercase) {
+        Cow::Owned(term.to_lowercase())
+    } else {
+        Cow::Borrowed(term)
+    }
+}
+
 /// `symbols.ident_terms` from the gated `name`, the last descriptor of `key` (the symbol
 /// string for a local, nothing for a file node) and `label`, re-scanned as a formed string
 /// (G1-S1 step 3): a hit empties the field. Returns the number emptied (`policy_dropped`).
@@ -748,7 +772,7 @@ fn fill_ident_terms(symbols: &mut [SymbolRow], policy: &Policy) -> u64 {
             .and_then(|s| symbol::parse(s).ok())
             .and_then(|sym| sym.descriptors.last().map(descriptor_text))
             .unwrap_or_default();
-        let terms = ident_terms::build(&row.name, &last, &row.label);
+        let terms = snapshot_terms(&row.name, &last, &row.label);
         let verdict = policy.scan(&terms);
         if verdict.rejected || !verdict.hits.is_empty() {
             dropped += 1;

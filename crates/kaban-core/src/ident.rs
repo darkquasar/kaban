@@ -1,9 +1,7 @@
 //! Deterministic identifier vocabulary shared by ingestion and lexical retrieval.
 
-use std::collections::HashSet;
-
-/// Version of the deterministic derived vocabulary, persisted in `index_meta`.
-pub const IDENT_TERMS_VERSION: &str = "2";
+/// Format of the projected text and identifier analyzers. A change rebuilds persisted text tiers.
+pub const TEXT_ANALYZER_VERSION: &str = "3";
 
 /// The lexical shape of a query, not an inference about its meaning.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,68 +46,32 @@ fn camel_boundary(text: &str) -> bool {
         })
 }
 
-/// Derive whole identifiers, separator/camel parts and lowercase copies, in first-seen order.
-/// Plain prose and short tokens do not inflate the derived column. Inputs are already gated.
+/// The alphanumeric runs of `s`, further split on case boundaries: before an uppercase letter
+/// that follows a lowercase letter or a digit (`parseURL` -> `parse`, `URL`), and before the
+/// last uppercase letter of an uppercase run that is followed by a lowercase letter
+/// (`HTTPServer` -> `HTTP`, `Server`).
 #[must_use]
-pub fn ident_terms(
-    text: &str,
-    summary: Option<&str>,
-    tags: &[String],
-    ident_fields: &[&str],
-    anchors: &[&str],
-) -> String {
-    let mut terms = Vec::new();
-    let mut seen = HashSet::new();
-    let mut push = |term: &str| {
-        if !term.is_empty() && seen.insert(term.to_owned()) {
-            terms.push(term.to_owned());
-        }
-    };
-    for input in std::iter::once(text)
-        .chain(summary)
-        .chain(tags.iter().map(String::as_str))
-        .chain(ident_fields.iter().copied())
-        .chain(anchors.iter().copied())
-    {
-        for token in input.split(|c: char| !(c.is_ascii_alphanumeric() || "_:./-".contains(c))) {
-            // a sentence period or ellipsis closes the token, it is not part of it
-            let token = token.trim_end_matches('.');
-            if token.len() < 3
-                || !token
-                    .as_bytes()
-                    .first()
-                    .is_some_and(|c| c.is_ascii_alphabetic() || *c == b'_')
-                || classify(token) != QueryClass::Identifier
-            {
-                continue;
-            }
-            push(token);
-            for segment in token.split([':', '.', '/', '-']).filter(|s| !s.is_empty()) {
-                push(segment);
-                for piece in segment.split('_').filter(|s| !s.is_empty()) {
-                    let bytes = piece.as_bytes();
-                    let mut start = 0;
-                    for i in 1..bytes.len() {
-                        let boundary = bytes[i].is_ascii_uppercase()
-                            && (bytes[i - 1].is_ascii_lowercase()
-                                || (bytes[i - 1].is_ascii_uppercase()
-                                    && bytes.get(i + 1).is_some_and(u8::is_ascii_lowercase)));
-                        if boundary {
-                            push(&piece[start..i]);
-                            start = i;
-                        }
-                    }
-                    push(&piece[start..]);
-                }
+pub fn split_terms(s: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    for run in s.split(|c: char| !c.is_alphanumeric()) {
+        let mut chars = run.char_indices().peekable();
+        let Some((_, mut prev)) = chars.next() else {
+            continue;
+        };
+        let mut start = 0;
+        while let Some((at, c)) = chars.next() {
+            let boundary = c.is_uppercase()
+                && (prev.is_lowercase()
+                    || prev.is_numeric()
+                    || (prev.is_uppercase()
+                        && chars.peek().is_some_and(|(_, next)| next.is_lowercase())));
+            prev = c;
+            if boundary {
+                out.push(&run[start..at]);
+                start = at;
             }
         }
+        out.push(&run[start..]);
     }
-    let originals = terms.clone();
-    for term in originals {
-        let lower = term.to_ascii_lowercase();
-        if seen.insert(lower.clone()) {
-            terms.push(lower);
-        }
-    }
-    terms.join(" ")
+    out
 }

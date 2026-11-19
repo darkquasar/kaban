@@ -451,6 +451,14 @@ impl SqliteStore {
 }
 
 impl SqliteStore {
+    /// Finish or retry a format change only after the project key and writable catalog are admitted.
+    fn finish_text_projection(self) -> Result<Self> {
+        if crate::ident::needs_rebuild(&self.lock())? {
+            self.rebuild_class(ExtentClass::TextTier)?;
+        }
+        Ok(self)
+    }
+
     /// Open (creating if missing) the database at `path`, apply the baseline schema and open
     /// the HMAC key `keys_dir/<db-id>.key`, created with the project (0600, `O_EXCL`;
     /// concurrent first openers reuse) and required of it afterwards. The writer is the
@@ -479,7 +487,7 @@ impl SqliteStore {
         let mut catalog = Catalog::open_as_is(path, &mut conn)?;
         let signer = Self::project_key(&catalog, &mut conn, keys_dir, &db_id)?;
         catalog.open_writable(&mut conn)?;
-        Ok(Self::assemble(
+        Self::assemble(
             conn,
             catalog,
             db_id,
@@ -487,7 +495,8 @@ impl SqliteStore {
             report,
             Some(live),
             Some(path),
-        ))
+        )
+        .finish_text_projection()
     }
     /// The database's HMAC key: created with the project, required ever after. A project
     /// that has recorded its key (`index_meta` `KEY_RECORDED`) must never get a fresh one:
@@ -707,15 +716,8 @@ impl SqliteStore {
         let (mut conn, db_id, report, live) =
             Self::open_file(path, &ActorId::default(), Self::CAPABILITIES)?;
         let catalog = Catalog::open(path, &mut conn)?;
-        Ok(Self::assemble(
-            conn,
-            catalog,
-            db_id,
-            signer,
-            report,
-            Some(live),
-            Some(path),
-        ))
+        Self::assemble(conn, catalog, db_id, signer, report, Some(live), Some(path))
+            .finish_text_projection()
     }
     /// An in-memory store with an ephemeral random HMAC key (tests); the writer is `local`.
     ///

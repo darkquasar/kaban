@@ -9,7 +9,7 @@
 //! column and the FTS5 mirrors went with migration 0013.
 
 use crate::sql_error::SqlResultExt;
-use kaban_core::{Ontology, Result, ident::IDENT_TERMS_VERSION, stored_name};
+use kaban_core::{Ontology, Result, ident::TEXT_ANALYZER_VERSION, stored_name};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -17,6 +17,26 @@ use std::fmt::Write;
 
 pub(crate) const FIELDS: &str = "ident_fields_resolved";
 pub(crate) const FTS_FIELDS: &str = "fts_fields_resolved";
+/// The old metadata key is also part of the public doctor report.
+const VERSION: &str = "ident_terms_version";
+const PENDING: &str = "pending";
+
+pub(crate) fn needs_rebuild(conn: &Connection) -> Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM index_meta WHERE key=?1 AND value=?2)",
+        params![VERSION, PENDING],
+        |r| r.get(0),
+    )
+    .sql()
+}
+
+/// Runs in the same transaction as publishing a tier built from the committed projections.
+pub(crate) fn mark_indexed(conn: &Connection) -> Result<()> {
+    conn.execute("INSERT INTO index_meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        params![VERSION, TEXT_ANALYZER_VERSION]).sql()?;
+    Ok(())
+}
+
 const SIGNATURE: &str = "fts_projection_signature";
 pub(crate) type Fields = BTreeMap<String, Vec<String>>;
 
@@ -154,7 +174,7 @@ fn deploy_fields(
          END;"
     );
     let signature = kaban_policy::sha256_hex(
-        format!("{IDENT_TERMS_VERSION}\n{fields}\n{projection}\n{changes_sql}").as_bytes(),
+        format!("{TEXT_ANALYZER_VERSION}\n{fields}\n{projection}\n{changes_sql}").as_bytes(),
     );
     let current: Option<String> = conn
         .query_row(
@@ -182,7 +202,7 @@ fn deploy_fields(
         .sql()?;
     if !force
         && current.as_deref() == Some(signature.as_str())
-        && terms_version.as_deref() == Some(IDENT_TERMS_VERSION)
+        && terms_version.as_deref() == Some(TEXT_ANALYZER_VERSION)
         && current_projection.as_deref() == Some(projection_fields.as_str())
     {
         return Ok(false);
@@ -190,11 +210,27 @@ fn deploy_fields(
     conn.execute_batch("DROP TRIGGER IF EXISTS node_changes_au;")
         .sql()?;
     conn.execute_batch(&changes_sql).sql()?;
+    // A first deployment has no old packs. For an existing project retain a durable retry
+    // signal even if the process exits after deploying the fields but before publishing the tier.
+    let existing: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM index_meta WHERE key='db_id') AND EXISTS(SELECT 1 FROM pragma_database_list WHERE name='main' AND file <> '')",
+            [],
+            |r| r.get(0),
+        )
+        .sql()?;
     for (key, value) in [
         (FIELDS, fields.as_str()),
         (FTS_FIELDS, projection_fields.as_str()),
         (SIGNATURE, signature.as_str()),
-        ("ident_terms_version", IDENT_TERMS_VERSION),
+        (
+            VERSION,
+            if existing {
+                PENDING
+            } else {
+                TEXT_ANALYZER_VERSION
+            },
+        ),
     ] {
         conn.execute("INSERT INTO index_meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", params![key,value]).sql()?;
     }

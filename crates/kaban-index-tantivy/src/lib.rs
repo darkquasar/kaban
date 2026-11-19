@@ -183,10 +183,7 @@ impl TantivyIndex {
     }
 }
 
-/// One row as a document: the keys, the filter fields, the four content fields and the fuzzy
-/// copy. The `ident_terms` field takes the five inputs of the identifier derivation (text, the
-/// stored summary, the tags, the `ident_fields` values, the anchor keys), each expanded by its
-/// analyzer; the FTS5 `tags` column is the JSON array, whose tokens are the tags' own.
+/// Project canonical content, code terms, whole names, and fuzzy surface forms.
 fn document(fields: &Fields, row: &IndexRow) -> TantivyDocument {
     let mut doc = TantivyDocument::default();
     doc.add_text(fields.id, &row.id);
@@ -202,19 +199,38 @@ fn document(fields: &Fields, row: &IndexRow) -> TantivyDocument {
     doc.add_text(text, &row.text);
     doc.add_text(summary, &row.summary);
     doc.add_text(tags, row.tags.join(" "));
+    for name in row.ident_values.iter().chain(&row.anchor_keys) {
+        doc.add_text(ident, name);
+        doc.add_text(fields.name, name);
+        doc.add_text(fields.fuzzy, name);
+    }
     for input in std::iter::once(&row.text)
-        .chain(row.stored_summary.as_ref())
+        .chain(std::iter::once(&row.summary))
         .chain(&row.tags)
         .chain(&row.ident_values)
         .chain(&row.anchor_keys)
     {
-        doc.add_text(ident, input);
+        doc.add_text(fields.code, input);
+    }
+    for token in identifier_tokens(row) {
+        doc.add_text(ident, token);
     }
     doc.add_text(fields.fuzzy, &row.text);
-    if let Some(stored) = &row.stored_summary {
-        doc.add_text(fields.fuzzy, stored);
+    doc.add_text(fields.fuzzy, &row.summary);
+    for tag in &row.tags {
+        doc.add_text(fields.fuzzy, tag);
     }
     doc
+}
+
+/// Preserve the configured identifier weight on identifier-shaped prose tokens.
+fn identifier_tokens(row: &IndexRow) -> impl Iterator<Item = &str> {
+    use kaban_core::ident::{QueryClass, classify};
+    std::iter::once(&row.text)
+        .chain(std::iter::once(&row.summary))
+        .chain(&row.tags)
+        .flat_map(|s| s.split_whitespace())
+        .filter(|token| classify(token) == QueryClass::Identifier)
 }
 
 /// The bytes [`document`] hands the writer for `row`: every value it adds, as often as it
@@ -222,18 +238,22 @@ fn document(fields: &Fields, row: &IndexRow) -> TantivyDocument {
 pub(crate) fn indexed_bytes(row: &IndexRow) -> u64 {
     let len = |s: &String| s.len() as u64;
     let tags: u64 = row.tags.iter().map(len).sum();
-    let stored = row.stored_summary.as_ref().map_or(0, len);
     let keys = [&row.id, &row.kind, &row.workspace_id]
         .into_iter()
         .map(len)
         .sum::<u64>();
     keys + ACTIVE.len() as u64
         + 3 * len(&row.text)
-        + len(&row.summary)
-        + 2 * stored
-        + 3 * tags
-        + row.ident_values.iter().map(len).sum::<u64>()
-        + row.anchor_keys.iter().map(len).sum::<u64>()
+        + 3 * len(&row.summary)
+        + 4 * tags
+        + row.tags.len().saturating_sub(1) as u64
+        + identifier_tokens(row).map(|s| s.len() as u64).sum::<u64>()
+        + 4 * row
+            .ident_values
+            .iter()
+            .chain(&row.anchor_keys)
+            .map(len)
+            .sum::<u64>()
 }
 
 impl TextIndex for TantivyIndex {

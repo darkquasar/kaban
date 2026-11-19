@@ -76,7 +76,6 @@ pub mod doctor;
 pub mod error;
 pub mod gate;
 pub mod gc;
-pub mod ident_terms;
 pub mod identity_cli;
 pub mod isolate;
 pub mod language;
