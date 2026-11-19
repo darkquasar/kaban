@@ -157,7 +157,7 @@ enum BenchCg {
     /// Kill children at catalog crash points, then recover and verify
     Crash(bench::crash::Args),
     /// The text index bench
-    Text,
+    Text(bench::text::Args),
     /// The memory graph bench
     Graph(bench::graph::Args),
     /// The rollup bench
