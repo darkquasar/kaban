@@ -18,11 +18,38 @@ pub(crate) const ARM: &str = "KABAN_FAILPOINT";
 #[cfg(feature = "failpoints")]
 pub(crate) fn point(name: &'static str) {
     static ARMED: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    // A separate, bounded rendezvous lets cross-process tests inspect lock ownership
+    // without sleeps or relying on how quickly an opener reaches this point.
+    if name.starts_with("replacement.") {
+        replacement_rendezvous(name);
+    }
     let armed = ARMED.get_or_init(|| std::env::var(ARM).ok());
     if armed.as_deref() == Some(name) {
         let _ =
             rustix::process::kill_process(rustix::process::getpid(), rustix::process::Signal::KILL);
         // the signal is delivered before the call returns; never go on past an armed point
+        std::process::abort();
+    }
+}
+
+#[cfg(feature = "failpoints")]
+fn replacement_rendezvous(name: &str) {
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixStream;
+    use std::time::Duration;
+
+    let Ok(path) = std::env::var("KABAN_TEST_REPLACEMENT_SOCKET") else {
+        return;
+    };
+    let exchange = || -> std::io::Result<()> {
+        let mut socket = UnixStream::connect(path)?;
+        socket.set_read_timeout(Some(Duration::from_secs(30)))?;
+        socket.set_write_timeout(Some(Duration::from_secs(30)))?;
+        writeln!(socket, "{name}")?;
+        let mut release = [0];
+        socket.read_exact(&mut release)
+    };
+    if exchange().is_err() {
         std::process::abort();
     }
 }

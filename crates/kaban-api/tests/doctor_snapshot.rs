@@ -133,3 +133,260 @@ fn renamed_symbol_is_listed_stale_and_nothing_else_is() {
     assert_eq!(check.detail, "cannot inspect: no snapshot", "{check:?}");
     assert_eq!(write_counts(&s), before, "doctor writes nothing");
 }
+
+/// Real store operations used by doctor and reindex, without the CLI adapter dependency.
+struct TestCatalog(Arc<SqliteStore>);
+
+impl kaban_api::CatalogMaintenance for TestCatalog {
+    fn compact(&self) -> Result<kaban_api::CompactReport, kaban_core::StoreError> {
+        panic!("these tests inspect the store's complete compaction report directly")
+    }
+    fn recover(&self) -> Result<String, kaban_core::StoreError> {
+        Ok(format!("{:?}", self.0.recover_catalog()?))
+    }
+    fn verify(&self) -> Result<kaban_api::CatalogVerify, kaban_core::StoreError> {
+        let found = self.0.verify_catalog()?;
+        Ok(kaban_api::CatalogVerify {
+            inconsistencies: if found.inconsistencies() == 0 {
+                Vec::new()
+            } else {
+                vec![format!("{found:?}")]
+            },
+            needs_reimport: found.needs_reimport,
+            ..Default::default()
+        })
+    }
+    fn status(&self) -> Result<kaban_api::CatalogStatus, kaban_core::StoreError> {
+        Ok(kaban_api::CatalogStatus {
+            refused_units: self.0.catalog_status()?.refused_units,
+            ..Default::default()
+        })
+    }
+    fn checkpoint_if_due(&self) -> Result<bool, kaban_core::StoreError> {
+        Ok(self.0.checkpoint_if_due()?.is_some())
+    }
+    fn reindex_graph(&self) -> Result<(), kaban_core::StoreError> {
+        self.0.reindex_graph()
+    }
+}
+
+fn catalog_api(store: &Arc<SqliteStore>, catalog: kaban_core::config::CatalogCfg) -> KabanApi {
+    KabanApi::with_config(
+        store.clone(),
+        Policy::empty(),
+        store.signer(),
+        ApiConfig {
+            engine: Arc::new(kaban_core::config::EngineConfig {
+                catalog,
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+    )
+    .with_catalog(Arc::new(TestCatalog(store.clone())))
+}
+
+#[test]
+fn doctor_retains_a_real_three_extent_fold_refusal_until_a_larger_budget_succeeds() {
+    use kaban_core::config::{CatalogCfg, SealOps};
+    use kaban_core::{Actor, IngestStore, NewNode, NodeId, Op, WorkspaceId, WriteBatch, WriteCtx};
+    use kaban_store_sqlite::{SkipReason, WorkKind};
+
+    let s = Scratch::new("doctor-budget", "fold-retry");
+    let policy = CatalogCfg {
+        seal_ops: SealOps {
+            graph: 1,
+            ..Default::default()
+        },
+        fold_depth: 100,
+        fold_delta_ratio: 100.0,
+        checkpoint_interval_ms: 60_000,
+        ..Default::default()
+    };
+    let store = SqliteStore::open(&s.db(), &s.keys())
+        .unwrap()
+        .with_catalog_config(policy.clone())
+        .unwrap();
+    let ids: Vec<_> = (0..300).map(|_| NodeId::new()).collect();
+    let mut ops: Vec<_> = ids
+        .iter()
+        .enumerate()
+        .map(|(i, id)| Op::UpsertNode {
+            id: id.clone(),
+            node: NewNode {
+                kind: "Fact".into(),
+                text: format!("budget node {i}"),
+                ..Default::default()
+            },
+        })
+        .collect();
+    for source in 0..300 {
+        for offset in 1..=200 {
+            ops.push(Op::UpsertEdge {
+                src: ids[source].clone(),
+                dst: ids[(source + offset) % 300].clone(),
+                rel: "RELATES_TO".into(),
+                props: None,
+            });
+        }
+    }
+    let write = |ops| {
+        store
+            .apply_batch(
+                WriteBatch::new(WorkspaceId::default(), ops),
+                &WriteCtx::new(WorkspaceId::default(), Actor::Agent),
+            )
+            .unwrap();
+    };
+    write(ops);
+    store.reindex_graph().unwrap();
+    for source in [0, 1] {
+        write(vec![Op::UpsertEdge {
+            src: ids[source].clone(),
+            dst: ids[299].clone(),
+            rel: "RELATES_TO".into(),
+            props: None,
+        }]);
+        let sealed = store.compact().unwrap();
+        assert!(
+            sealed.published.iter().any(|u| u.kind == WorkKind::Seal),
+            "{sealed:?}"
+        );
+    }
+    let before = store.catalog_status().unwrap().classes;
+    assert_eq!(
+        before
+            .iter()
+            .filter(|c| c.class.starts_with("graph_"))
+            .map(|c| c.live)
+            .sum::<u64>(),
+        3
+    );
+    let tight = CatalogCfg {
+        maintenance_memory_mib: 16,
+        fold_depth: 1,
+        ..policy
+    };
+    let store = Arc::new(store.with_catalog_config(tight.clone()).unwrap());
+    let api = catalog_api(&store, tight.clone());
+    let refused = store.compact().unwrap();
+    assert!(
+        refused.pass_skipped.is_none(),
+        "must reach the fold: {refused:?}"
+    );
+    assert_eq!(refused.refused_units, 1, "{refused:?}");
+    assert!(refused.published.is_empty(), "{refused:?}");
+    assert!(refused.skipped.iter().any(|u| u.kind == WorkKind::Fold
+        && matches!(u.reason, SkipReason::Budget(e) if e.limit == kaban_core::query_budget::Limit::Memory)), "{refused:?}");
+    assert_eq!(store.catalog_status().unwrap().classes, before);
+    let check = api
+        .doctor(&context(&s))
+        .checks
+        .into_iter()
+        .find(|c| c.name == "catalog_budget")
+        .unwrap();
+    assert!(!check.ok, "{check:?}");
+    assert!(
+        check
+            .detail
+            .contains("1 units refused at the smallest size"),
+        "{check:?}"
+    );
+    assert!(
+        check.detail.contains("maintenance_memory_mib 16"),
+        "{check:?}"
+    );
+    drop(api);
+    drop(store);
+
+    let ample = CatalogCfg {
+        maintenance_memory_mib: 128,
+        ..tight
+    };
+    let store = Arc::new(
+        SqliteStore::open(&s.db(), &s.keys())
+            .unwrap()
+            .with_catalog_config(ample.clone())
+            .unwrap(),
+    );
+    let api = catalog_api(&store, ample);
+    let folded = store.compact().unwrap();
+    assert!(
+        folded.published.iter().any(|u| u.kind == WorkKind::Fold),
+        "{folded:?}"
+    );
+    assert_eq!(store.catalog_status().unwrap().refused_units, 0);
+    let check = api
+        .doctor(&context(&s))
+        .checks
+        .into_iter()
+        .find(|c| c.name == "catalog_budget")
+        .unwrap();
+    assert!(check.ok, "{check:?}");
+    assert!(
+        check.detail.contains("maintenance_memory_mib 128"),
+        "{check:?}"
+    );
+}
+
+#[test]
+fn reindex_all_reports_both_classes_after_a_mixed_container_is_lost() {
+    use kaban_api::{LinkRequest, ReindexTarget};
+    use kaban_core::MemoryStore;
+    use kaban_core::config::CatalogCfg;
+
+    let s = Scratch::new("api-reindex", "lost-mixed");
+    let store = Arc::new(SqliteStore::open(&s.db(), &s.keys()).unwrap());
+    let api = catalog_api(&store, CatalogCfg::default());
+    let alpha = api.remember(common::fact("zebra alpha")).unwrap().id;
+    let beta = api.remember(common::fact("zebra beta")).unwrap().id;
+    let link = |from, to| LinkRequest {
+        from,
+        to,
+        rel: "RELATES_TO".into(),
+        confidence: None,
+        props: None,
+    };
+    api.link(link(alpha, beta.clone())).unwrap();
+    assert!(api.reindex(ReindexTarget::Graph).unwrap().graph_rebuilt);
+    assert_eq!(api.reindex(ReindexTarget::Text).unwrap().rows, Some(2));
+    let pending = api.remember(common::fact("zebra pending")).unwrap().id;
+    api.link(link(beta, pending)).unwrap();
+    let rows = rusqlite::Connection::open(s.db()).unwrap();
+    assert_eq!(
+        rows.query_row(
+            "SELECT class FROM cat_extent WHERE kbx_offset = 0",
+            [],
+            |r| r.get::<_, String>(0)
+        )
+        .unwrap(),
+        "graph_base"
+    );
+    let hits = |store: &SqliteStore| {
+        let mut ids: Vec<_> = store
+            .recall(&kaban_core::RecallQuery {
+                query: "zebra".into(),
+                ..Default::default()
+            })
+            .unwrap()
+            .into_iter()
+            .map(|hit| hit.node.id)
+            .collect();
+        ids.sort();
+        ids
+    };
+    let expected = hits(&store);
+    assert_eq!(expected.len(), 3);
+    drop(rows);
+    drop(api);
+    drop(store);
+    std::fs::remove_file(s.0.join("kaban.kbx")).unwrap();
+    let store = Arc::new(SqliteStore::open(&s.db(), &s.keys()).unwrap());
+    let api = catalog_api(&store, CatalogCfg::default());
+    let report = api.reindex(ReindexTarget::All).unwrap();
+    assert_eq!(report.rows, Some(3));
+    assert!(report.graph_rebuilt);
+    assert_eq!(hits(&store), expected);
+    let verified = store.verify_catalog().unwrap();
+    assert_eq!(verified.inconsistencies(), 0, "{verified:?}");
+}

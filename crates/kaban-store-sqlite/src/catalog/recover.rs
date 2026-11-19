@@ -193,6 +193,7 @@ impl Catalog {
         }
         let pins = kbx::pins_dir(&self.kbx);
         kbx::create_dir(&pins).map_err(StoreError::FileMode)?;
+        fail::point("replacement.before_lock");
         let exclusive =
             pins::exclusive_maintenance(&pins, Duration::from_secs(10))?.ok_or_else(|| {
                 failed(
@@ -201,6 +202,7 @@ impl Catalog {
                     std::io::Error::from(std::io::ErrorKind::TimedOut),
                 )
             })?;
+        fail::point("replacement.locked");
         // Recheck after the exclusive acquisition: a competing opener may have completed.
         self.commit(conn, Durability::Full, |txn| {
             if !self

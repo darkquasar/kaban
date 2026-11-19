@@ -236,7 +236,7 @@ fn a_project_whose_recorded_key_is_lost_or_malformed_gains_no_catalog_artefact()
         for name in CATALOG_ARTEFACTS {
             let path = s.0.join(name);
             if path.is_dir() {
-                std::fs::remove_dir(&path).unwrap();
+                std::fs::remove_dir_all(&path).unwrap();
             } else {
                 std::fs::remove_file(&path).unwrap();
             }

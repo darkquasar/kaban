@@ -379,6 +379,146 @@ fn replacement_role() {
     SqliteStore::open(db, &db.with_file_name("keys")).unwrap();
 }
 
+/// One opener's bounded rendezvous, with each socket released explicitly by the test.
+struct ReplacementSteps(std::os::unix::net::UnixListener);
+
+impl ReplacementSteps {
+    fn new(path: &std::path::Path) -> Self {
+        let listener = std::os::unix::net::UnixListener::bind(path).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        Self(listener)
+    }
+
+    fn at(&self, expected: &str) -> std::os::unix::net::UnixStream {
+        use std::io::BufRead;
+        let start = Instant::now();
+        let socket = loop {
+            match self.0.accept() {
+                Ok((socket, _)) => break socket,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(start.elapsed() < STEP, "opener never reached {expected}");
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => panic!("accept {expected}: {error}"),
+            }
+        };
+        socket.set_read_timeout(Some(STEP)).unwrap();
+        socket.set_write_timeout(Some(STEP)).unwrap();
+        let mut name = String::new();
+        std::io::BufReader::new(&socket)
+            .read_line(&mut name)
+            .unwrap();
+        assert_eq!(name.trim(), expected);
+        socket
+    }
+}
+
+fn release_step(mut socket: std::os::unix::net::UnixStream) {
+    use std::io::Write;
+    socket.write_all(&[1]).unwrap();
+}
+
+fn replacement_child(s: &Scratch, socket: &std::path::Path) -> Supervised {
+    Supervised(
+        Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "replacement_role", "--ignored", "--nocapture"])
+            .env(CRASH_DB, s.db())
+            .env("KABAN_TEST_REPLACEMENT_SOCKET", socket)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap(),
+    )
+}
+
+#[test]
+fn replacement_owns_maintenance_before_the_writer_and_until_both_classes_publish() {
+    use rustix::fs::{FlockOperation, flock};
+
+    let s = Scratch::new("kaban-replacement", "owners");
+    let store = SqliteStore::open(&s.db(), &s.keys()).unwrap();
+    created(&store, "Fact", "zebra owner");
+    store.reindex_graph().unwrap();
+    store.reindex_text().unwrap();
+    let graph = catalog_testing::graph_contents(&store).unwrap().extents;
+    drop(store);
+    std::fs::remove_file(s.0.join("kaban.kbx")).unwrap();
+    let first_path = s.0.join("first.sock");
+    let second_path = s.0.join("second.sock");
+    let first_steps = ReplacementSteps::new(&first_path);
+    let second_steps = ReplacementSteps::new(&second_path);
+    let mut first = replacement_child(&s, &first_path);
+    let before_lock = first_steps.at("replacement.before_lock");
+    let maintenance = std::fs::File::open(s.0.join("kaban.kbx.pins/maintenance")).unwrap();
+    flock(&maintenance, FlockOperation::NonBlockingLockShared).unwrap();
+    let rows = rusqlite::Connection::open(s.db()).unwrap();
+    rows.execute_batch("BEGIN IMMEDIATE").unwrap();
+    release_step(before_lock);
+    flock(&maintenance, FlockOperation::Unlock).unwrap();
+
+    // The opener reaches exclusive ownership while this other process still holds the
+    // writer. Taking the writer first would deadlock and fail the bounded rendezvous.
+    let locked = first_steps.at("replacement.locked");
+    let assert_exclusive = || {
+        assert_eq!(
+            flock(&maintenance, FlockOperation::NonBlockingLockShared),
+            Err(rustix::io::Errno::WOULDBLOCK)
+        );
+    };
+    assert_exclusive();
+    rows.execute_batch("COMMIT").unwrap();
+    release_step(locked);
+    let before_create = first_steps.at("replacement.before_create");
+    assert_exclusive();
+    let mut second = replacement_child(&s, &second_path);
+    release_step(second_steps.at("replacement.before_lock"));
+    release_step(before_create);
+    for point in ["replacement.after_create", "replacement.before_commit"] {
+        let paused = first_steps.at(point);
+        assert_exclusive();
+        release_step(paused);
+    }
+    assert!(first.wait(STEP).success());
+    let locked = second_steps.at("replacement.locked");
+    let generation = || -> i64 {
+        rows.query_row("SELECT max(generation) FROM cat_generation", [], |r| {
+            r.get(0)
+        })
+        .unwrap()
+    };
+    let published = generation();
+    release_step(locked);
+    for point in ["replacement.before_create", "replacement.after_create"] {
+        release_step(second_steps.at(point));
+    }
+    assert!(second.wait(STEP).success());
+    assert_eq!(
+        generation(),
+        published,
+        "the competing opener must reuse recovery"
+    );
+    flock(&maintenance, FlockOperation::NonBlockingLockExclusive).unwrap();
+    flock(&maintenance, FlockOperation::Unlock).unwrap();
+    let store = SqliteStore::open(&s.db(), &s.keys()).unwrap();
+    assert_eq!(
+        catalog_testing::graph_contents(&store).unwrap().extents,
+        graph
+    );
+    assert_eq!(
+        store
+            .recall(&kaban_core::RecallQuery {
+                query: "zebra".into(),
+                ..Default::default()
+            })
+            .unwrap()
+            .len(),
+        1
+    );
+    let verified = store.verify_catalog().unwrap();
+    assert_eq!(verified.inconsistencies(), 0, "{verified:?}");
+}
+
 #[test]
 fn empty_and_diagnostic_opens_do_not_rebuild_or_advance_generations() {
     let s = Scratch::new("kaban-replacement", "empty-and-diagnostic");
