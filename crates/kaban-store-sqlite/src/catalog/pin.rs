@@ -201,6 +201,24 @@ impl Pin {
         Ok(loaded)
     }
 
+    /// A view this pin already loaded for `classes` (or for more classes), from its cache and
+    /// without a connection; `None` when no such load was made. Its chain is the view's whole
+    /// chain; its sediment holds the rows of every class it was loaded for.
+    pub(crate) fn loaded(
+        &self,
+        view: &ViewName,
+        classes: &[ExtentClass],
+    ) -> Option<Arc<PinnedView>> {
+        let name = view.to_string();
+        let set = class_set(classes);
+        let views = self.views.lock().unwrap_or_else(PoisonError::into_inner);
+        views
+            .loaded
+            .iter()
+            .find(|v| *v.name == *name && v.classes & set == set)
+            .map(Arc::clone)
+    }
+
     /// The bytes of `e`, an extent of a view this pin loaded: a slice of the container's
     /// mapping, re-mapped when the span lies beyond it, bounds-checked against the file. The
     /// bytes carry the pin's lock: the extent stays protected from reclamation for as long as

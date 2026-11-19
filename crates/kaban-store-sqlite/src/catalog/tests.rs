@@ -1892,3 +1892,32 @@ fn a_writer_catalog_registers_the_text_graph_and_code_classes() {
         ]
     );
 }
+
+#[test]
+fn a_pin_hands_out_a_view_it_loaded_without_a_connection() {
+    // Arrange: text sediment in `main`
+    let fs = FileStore::new("loaded");
+    catalog_rows(&fs.store, &["text_tier"], 1, 4, 0);
+    let code: ViewName = format!("code@{}", "d".repeat(40)).parse().unwrap();
+    let budget = QueryBudget::new(u64::MAX, None);
+
+    // Act: `main` loaded for the text class, then asked of the cache
+    let (hit, other_class, other_view) = fs
+        .store
+        .catalog()
+        .with_snapshot(&fs.store.lock(), &budget, |tx, pin| {
+            let text = pin.load_view(tx, &ViewName::Main, &[ExtentClass::TextTier])?;
+            Ok((
+                pin.loaded(&ViewName::Main, &[ExtentClass::TextTier])
+                    .is_some_and(|v| Arc::ptr_eq(&v, &text)),
+                pin.loaded(&ViewName::Main, &[ExtentClass::GraphBase]),
+                pin.loaded(&code, &[]),
+            ))
+        })
+        .unwrap();
+
+    // Assert: the cached view comes back; one loaded for other classes or another view does not
+    assert!(hit, "the loaded view was not handed out");
+    assert!(other_class.is_none(), "a text load served the graph class");
+    assert!(other_view.is_none(), "an unloaded view was handed out");
+}
