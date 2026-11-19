@@ -188,8 +188,7 @@ mod imp {
         Ok(dir)
     }
 
-    /// A store in `dir` whose catalog never checkpoints during a run and seals any pending
-    /// graph op when it compacts (only `--sealed` compacts).
+    /// A store using the normal setup checkpoint interval. Only `--sealed` compacts.
     fn open(dir: &Path) -> Result<SqliteStore> {
         Ok(
             SqliteStore::open(&dir.join("kaban.db"), &dir.join("keys"))?.with_catalog_config(
@@ -198,7 +197,6 @@ mod imp {
                         graph: 1,
                         ..SealOps::default()
                     },
-                    checkpoint_interval_ms: 3_600_000,
                     ..CatalogCfg::default()
                 },
             )?,

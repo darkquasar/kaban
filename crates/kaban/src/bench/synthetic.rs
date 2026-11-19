@@ -88,10 +88,17 @@ fn public_id(ordinal: u32) -> Result<NodeId> {
     ))?)
 }
 
+#[derive(Clone, Copy)]
+enum BatchPhase {
+    Setup,
+    Append,
+}
+
 fn write_batches(
     store: &SqliteStore,
     mut ops: impl Iterator<Item = Result<Op>>,
     batch_size: usize,
+    phase: BatchPhase,
 ) -> Result<()> {
     let ctx = WriteCtx::new(WorkspaceId::default(), Actor::Agent);
     loop {
@@ -100,6 +107,9 @@ fn write_batches(
             return Ok(());
         }
         store.apply_batch(WriteBatch::new(WorkspaceId::default(), batch), &ctx)?;
+        if matches!(phase, BatchPhase::Setup) {
+            store.checkpoint_if_due()?;
+        }
     }
 }
 
@@ -116,8 +126,13 @@ pub(crate) fn populate(store: &SqliteStore, seed: u64, nodes: u32, edges: u64) -
             },
         })
     });
-    write_batches(store, ops, BATCH_SIZE)?;
-    append_edges(store, seed, nodes, edges, BATCH_SIZE)
+    write_batches(store, ops, BATCH_SIZE, BatchPhase::Setup)?;
+    write_batches(
+        store,
+        edge_ops(seed, nodes, edges),
+        BATCH_SIZE,
+        BatchPhase::Setup,
+    )
 }
 
 /// Append edge-only batches. Re-upserting source nodes would reconcile away their
@@ -131,7 +146,16 @@ pub(crate) fn append_edges(
 ) -> Result<()> {
     ensure!(batch_size > 0, "edge batch size must be positive");
     ensure!(edges == 0 || nodes >= 2, "edges require at least two nodes");
-    let ops = edge_records(seed, nodes, edges).map(|edge| {
+    write_batches(
+        store,
+        edge_ops(seed, nodes, edges),
+        batch_size,
+        BatchPhase::Append,
+    )
+}
+
+fn edge_ops(seed: u64, nodes: u32, edges: u64) -> impl Iterator<Item = Result<Op>> {
+    edge_records(seed, nodes, edges).map(move |edge| {
         // A raw layer can contain loops. If its target is the source, use
         // another draw from this record to select among the other ordinals.
         let dst = if edge.dst == edge.src {
@@ -146,8 +170,7 @@ pub(crate) fn append_edges(
             rel: RELATIONS[usize::from(edge.rel.0)].into(),
             props: None,
         })
-    });
-    write_batches(store, ops, batch_size)
+    })
 }
 
 #[cfg(test)]
