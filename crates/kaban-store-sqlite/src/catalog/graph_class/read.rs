@@ -46,7 +46,8 @@ use crate::sql_error::SqlResultExt;
 const IDLE: Duration = Duration::from_secs(60);
 
 /// The declared relations in declaration order (`schema_type` row order).
-pub(super) const REL_SQL: &str = "SELECT ns, name FROM schema_type WHERE kind = 'rel' ORDER BY rowid";
+pub(super) const REL_SQL: &str =
+    "SELECT ns, name FROM schema_type WHERE kind = 'rel' ORDER BY rowid";
 
 /// The relation dictionary: a relation's id is the rank of its stored name among the declared
 /// relations in declaration order, deduplicated. Declarations are only ever added (and keep their

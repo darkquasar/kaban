@@ -25,8 +25,11 @@ fn budget() -> QueryBudget {
     QueryBudget::new(u64::MAX, Some(Duration::from_secs(10)))
 }
 
-/// Every node `(id, kind)` and edge `(src id, dst id, rel)` of the database at `db`.
-fn rows(db: &Path) -> (Vec<(String, String)>, BTreeSet<(String, String, String)>) {
+/// Nodes `(id, kind)` in rid order and edges `(src id, dst id, rel)`.
+type Rows = (Vec<(String, String)>, BTreeSet<(String, String, String)>);
+
+/// Every node and edge of the database at `db`.
+fn rows(db: &Path) -> Rows {
     let conn = rusqlite::Connection::open(db).unwrap();
     let mut stmt = conn
         .prepare("SELECT id, kind FROM node ORDER BY rid")
@@ -59,7 +62,15 @@ fn reached(store: &SqliteStore, src: &NodeId) -> (BTreeSet<NodeId>, u32) {
             depth: 2,
             rows: 1_500,
         };
-        let r = expand(g.view(), &[s], &RelSelection::All, Direction::Out, caps, &budget()).unwrap();
+        let r = expand(
+            g.view(),
+            &[s],
+            &RelSelection::All,
+            Direction::Out,
+            caps,
+            &budget(),
+        )
+        .unwrap();
         let ids = r
             .nodes
             .iter()

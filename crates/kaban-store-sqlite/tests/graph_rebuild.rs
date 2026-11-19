@@ -60,11 +60,11 @@ fn fixture_pairs() -> Vec<(usize, usize)> {
             .wrapping_add(1_442_695_040_888_963_407);
         usize::try_from(seed >> 33).unwrap() % NODES
     };
-    let mut seen = BTreeSet::new();
+    let mut taken = BTreeSet::new();
     let mut pairs = Vec::with_capacity(EDGES);
     while pairs.len() < EDGES {
         let (a, b) = (next(), next());
-        if a != b && seen.insert((a, b)) {
+        if a != b && taken.insert((a, b)) {
             pairs.push((a, b));
         }
     }
@@ -140,52 +140,66 @@ fn truth(db: &Path) -> Truth {
 }
 
 /// Weakly connected components of the truth: node -> lowest member.
-fn components(t: &Truth) -> BTreeMap<u32, u32> {
-    let mut root: BTreeMap<u32, u32> = t.nodes.iter().map(|&n| (n, n)).collect();
-    fn find(root: &mut BTreeMap<u32, u32>, n: u32) -> u32 {
-        let p = root[&n];
-        if p == n {
-            return n;
+fn components(truth: &Truth) -> BTreeMap<u32, u32> {
+    fn find(root: &mut BTreeMap<u32, u32>, node: u32) -> u32 {
+        let parent = root[&node];
+        if parent == node {
+            return node;
         }
-        let r = find(root, p);
-        root.insert(n, r);
-        r
+        let top = find(root, parent);
+        root.insert(node, top);
+        top
     }
-    for &(a, b) in &t.edges {
-        let (ra, rb) = (find(&mut root, a), find(&mut root, b));
-        root.insert(ra.max(rb), ra.min(rb));
+    let mut root: BTreeMap<u32, u32> = truth.nodes.iter().map(|&n| (n, n)).collect();
+    for &(src, dst) in &truth.edges {
+        let (one, two) = (find(&mut root, src), find(&mut root, dst));
+        root.insert(one.max(two), one.min(two));
     }
-    let nodes: Vec<u32> = t.nodes.iter().copied().collect();
+    let nodes: Vec<u32> = truth.nodes.iter().copied().collect();
     nodes.into_iter().map(|n| (n, find(&mut root, n))).collect()
 }
 
 /// The graph at `stage` equals the rows: contains, nodes, every edge and its weight, WCC and
-/// PageRank membership.
+/// `PageRank` membership.
 fn assert_matches_rows(store: &SqliteStore, db: &Path, stage: &str) {
-    let t = truth(db);
-    let comps = components(&t);
-    let n = u32::try_from(t.nodes.len()).unwrap();
+    let rows = truth(db);
+    let comps = components(&rows);
+    let count = u32::try_from(rows.nodes.len()).unwrap();
     catalog_testing::with_main_graph(store, &budget(), |g| {
-        let (v, b, all) = (g.view(), budget(), RelSelection::All);
-        let listed: BTreeSet<u32> = v.nodes(&b).map(|n| n.unwrap().0).collect();
-        assert_eq!(listed, t.nodes, "{stage}: nodes");
-        assert!(t.nodes.iter().all(|&n| v.contains(LocalId(n))), "{stage}");
-        assert!(t.purged.iter().all(|&n| !v.contains(LocalId(n))), "{stage}");
+        let (view, b, all) = (g.view(), budget(), RelSelection::All);
+        let listed: BTreeSet<u32> = view.nodes(&b).map(|n| n.unwrap().0).collect();
+        assert_eq!(listed, rows.nodes, "{stage}: nodes");
+        assert!(
+            rows.nodes.iter().all(|&n| view.contains(LocalId(n))),
+            "{stage}"
+        );
+        assert!(
+            rows.purged.iter().all(|&n| !view.contains(LocalId(n))),
+            "{stage}"
+        );
         let mut weights = BTreeMap::new();
-        for &s in &t.nodes {
-            for e in v.neighbours(LocalId(s), &all, Direction::Out, &b) {
-                let (d, _, attr) = e.unwrap();
-                weights.insert((s, d.0), attr.weight);
+        for &src in &rows.nodes {
+            for edge in view.neighbours(LocalId(src), &all, Direction::Out, &b) {
+                let (dst, _, attr) = edge.unwrap();
+                weights.insert((src, dst.0), attr.weight);
             }
         }
-        assert_eq!(weights, t.weights, "{stage}: edges and weights");
-        let w = wcc(v, &all, RowCap(n), &b).unwrap();
-        assert!(!w.truncated, "{stage}");
-        let got: BTreeMap<u32, u32> = w.rows.iter().map(|&(a, c)| (a.0, c.0)).collect();
+        assert_eq!(weights, rows.weights, "{stage}: edges and weights");
+        let comp = wcc(view, &all, RowCap(count), &b).unwrap();
+        assert!(!comp.truncated, "{stage}");
+        let got: BTreeMap<u32, u32> = comp.rows.iter().map(|&(a, c)| (a.0, c.0)).collect();
         assert_eq!(got, comps, "{stage}: components");
-        let pr = pagerank(v, &all, RankParams::default(), g.order(), RowCap(n), &b).unwrap();
+        let pr = pagerank(
+            view,
+            &all,
+            RankParams::default(),
+            g.order(),
+            RowCap(count),
+            &b,
+        )
+        .unwrap();
         let ranked: BTreeSet<u32> = pr.rows.iter().map(|&(a, _)| a.0).collect();
-        assert_eq!(ranked, t.nodes, "{stage}: ranked membership");
+        assert_eq!(ranked, rows.nodes, "{stage}: ranked membership");
         Ok(())
     })
     .unwrap();
@@ -205,7 +219,9 @@ fn record(store: &SqliteStore, probes: &[NodeId]) -> (Vec<String>, BTreeMap<Stri
         for (i, p) in probes.iter().enumerate() {
             let (s, d) = (local(p), local(&probes[(i + 1) % probes.len()]));
             let reached = |r: &kaban_index_graph::Reached| format!("{r:?}");
-            out.push(reached(&expand(v, &[s], &all, Direction::Both, caps, &b).unwrap()));
+            out.push(reached(
+                &expand(v, &[s], &all, Direction::Both, caps, &b).unwrap(),
+            ));
             out.push(reached(&closure(v, &[s], &all, caps, &b).unwrap()));
             out.push(format!("{:?}", degree(v, s, &all, Direction::Both, &b)));
             let path = shortest_path(v, s, d, &all, caps, &b).map(|p| p.map(|c| c.into_parts().0));
@@ -241,7 +257,8 @@ fn assert_extents_hold_only_graph_records(store: &SqliteStore, db: &Path, stage:
         Ok(names.iter().filter_map(|n| g.rel(n)).count())
     })
     .unwrap();
-    let (extents, sediment) = ok(catalog_testing::graph_contents(store));
+    let catalog_testing::GraphContents { extents, sediment } =
+        ok(catalog_testing::graph_contents(store));
     assert!(!extents.is_empty(), "{stage}: a chain");
     let base = Base::open(OwnedBytes::new(extents[0].clone()), &b).unwrap();
     let layers: Vec<Layer> = extents[1..]
@@ -256,7 +273,10 @@ fn assert_extents_hold_only_graph_records(store: &SqliteStore, db: &Path, stage:
         let r = r.records();
         assert!(r.facts.is_empty(), "{stage}: a fact in the sediment");
         for e in &r.edges {
-            assert!(usize::from(e.rel.0) < rels && e.attr.weight >= 0, "{stage}: {e:?}");
+            assert!(
+                usize::from(e.rel.0) < rels && e.attr.weight >= 0,
+                "{stage}: {e:?}"
+            );
         }
     }
     let empty = PreparedSediment::empty();
@@ -268,7 +288,10 @@ fn assert_extents_hold_only_graph_records(store: &SqliteStore, db: &Path, stage:
     for v in &checked {
         for n in v.nodes(&b) {
             let n = n.unwrap();
-            assert!((0..=u8::MAX).all(|k| v.fact(n, k).is_none()), "{stage}: a fact");
+            assert!(
+                (0..=u8::MAX).all(|k| v.fact(n, k).is_none()),
+                "{stage}: a fact"
+            );
             for e in v.neighbours(n, &RelSelection::All, Direction::Both, &b) {
                 let (_, rel, attr) = e.unwrap();
                 assert!(usize::from(rel.0) < rels && attr.weight >= 0, "{stage}");
@@ -394,7 +417,7 @@ fn the_graph_equals_the_rows_at_every_stage_and_a_rebuild_after_losing_the_conta
             &WriteCtx::new(other, Actor::Agent),
         )
         .unwrap();
-    let (_, pending) = catalog_testing::graph_contents(&store).unwrap();
+    let pending = catalog_testing::graph_contents(&store).unwrap().sediment;
     assert!(!pending.is_empty(), "the sediment is not empty");
     assert_matches_rows(&store, &db, "final");
     assert_extents_hold_only_graph_records(&store, &db, "final");

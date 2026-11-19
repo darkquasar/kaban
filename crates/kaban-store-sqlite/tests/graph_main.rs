@@ -10,8 +10,8 @@
 mod common;
 
 use common::{Scratch, created, ctx, nid};
-use kaban_core::{MemoryStore, StoreError};
 use kaban_core::query_budget::QueryBudget;
+use kaban_core::{MemoryStore, NodeId, StoreError};
 use kaban_index_graph::{Caps, Direction, RelSelection, expand};
 use kaban_store_sqlite::SqliteStore;
 use kaban_store_sqlite::catalog_testing;
@@ -29,10 +29,7 @@ fn driver_text(e: &StoreError) -> String {
     source.driver().to_string()
 }
 
-const CAPS: Caps = Caps {
-    depth: 2,
-    rows: 50,
-};
+const CAPS: Caps = Caps { depth: 2, rows: 50 };
 
 #[test]
 fn a_link_committed_in_one_store_is_traversable_from_another_at_once() {
@@ -51,8 +48,15 @@ fn a_link_committed_in_one_store_is_traversable_from_another_at_once() {
     let (reached, isolated, unused_rel) =
         catalog_testing::with_main_graph(&reader, &budget(), |g| {
             let la = g.local(&a)?.expect("a has a local id");
-            let r = expand(g.view(), &[la], &RelSelection::All, Direction::Out, CAPS, &budget())
-                .unwrap();
+            let r = expand(
+                g.view(),
+                &[la],
+                &RelSelection::All,
+                Direction::Out,
+                CAPS,
+                &budget(),
+            )
+            .unwrap();
             let reached: Vec<_> = r
                 .nodes
                 .iter()
@@ -67,7 +71,10 @@ fn a_link_committed_in_one_store_is_traversable_from_another_at_once() {
     // edge uses has an id
     assert_eq!(reached, vec![b.clone()]);
     assert!(isolated, "an isolated node is present");
-    assert!(unused_rel.is_some(), "a declared, unused relation has an id");
+    assert!(
+        unused_rel.is_some(),
+        "a declared, unused relation has an id"
+    );
 }
 
 #[test]
@@ -103,10 +110,7 @@ fn an_edge_carries_its_rows_weight_and_time_and_unmappable_values_refuse_the_wri
     // Assert: weight in millionths, time in epoch milliseconds; both refusals name the
     // attribute and roll their write back
     assert_eq!(attrs.len(), 1);
-    assert_eq!(
-        (attrs[0].weight, attrs[0].ts),
-        (250_000, 1_709_200_800_123)
-    );
+    assert_eq!((attrs[0].weight, attrs[0].ts), (250_000, 1_709_200_800_123));
     let negative = driver_text(&negative.expect_err("a negative weight was admitted"));
     assert!(
         negative.contains("graph_weight_refused") && negative.contains("confidence"),
@@ -117,4 +121,131 @@ fn an_edge_carries_its_rows_weight_and_time_and_unmappable_values_refuse_the_wri
         untimed.contains("graph_timestamp_refused") && untimed.contains("created_at"),
         "{untimed}"
     );
+}
+
+/// Declare `n` more relations `{prefix}{i}` in one commit of `store`.
+fn declare(store: &SqliteStore, prefix: &str, n: u32) {
+    catalog_testing::corrupt(
+        store,
+        &format!(
+            "WITH RECURSIVE i(k) AS (SELECT 0 UNION ALL SELECT k + 1 FROM i WHERE k + 1 < {n})
+             INSERT INTO schema_type(ns, kind, name, created_at)
+             SELECT 'user', 'rel', '{prefix}' || k, '2024-01-01T00:00:00Z' FROM i"
+        ),
+    )
+    .unwrap();
+}
+
+/// Write the edge `src -> dst` of relation `rel` as a raw row in one commit of `store`.
+fn raw_edge(store: &SqliteStore, src: &NodeId, dst: &NodeId, rel: &str) -> kaban_core::Result<()> {
+    catalog_testing::corrupt(
+        store,
+        &format!(
+            "INSERT INTO edge(id, src, dst, rel, created_at) VALUES ('{rel}-{d}',
+               (SELECT rid FROM node WHERE id = '{s}'), (SELECT rid FROM node WHERE id = '{d}'),
+               '{rel}', '2024-01-01T00:00:00Z')",
+            s = src.as_str(),
+            d = dst.as_str()
+        ),
+    )
+}
+
+/// The declared relation names in declaration order.
+fn rel_names(db: &std::path::Path) -> Vec<String> {
+    let conn = rusqlite::Connection::open(db).unwrap();
+    let mut stmt = conn
+        .prepare("SELECT name FROM schema_type WHERE kind = 'rel' ORDER BY rowid")
+        .unwrap();
+    stmt.query_map([], |r| r.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect()
+}
+
+/// For each selection, the `NodeId`s reached in one hop from `src`.
+fn selected(store: &SqliteStore, src: &NodeId, selections: &[RelSelection]) -> Vec<Vec<NodeId>> {
+    catalog_testing::with_main_graph(store, &budget(), |g| {
+        let s = g.local(src)?.unwrap();
+        let caps = Caps { depth: 1, rows: 50 };
+        Ok(selections
+            .iter()
+            .map(|sel| {
+                let r = expand(g.view(), &[s], sel, Direction::Out, caps, &budget()).unwrap();
+                r.nodes
+                    .iter()
+                    .map(|&(n, _)| g.node_id(n).unwrap().unwrap())
+                    .collect()
+            })
+            .collect())
+    })
+    .unwrap()
+}
+
+#[test]
+fn relation_ids_cover_every_u16_without_aliasing_survive_a_rebuild_and_refuse_when_exhausted() {
+    // Arrange: 70 more relations (65+ in all), edges of the relations with ids 0, 63 and 64
+    let dir = Scratch::new("kaban-t11-main", "rels");
+    let store = SqliteStore::open(&dir.db(), &dir.keys()).unwrap();
+    let [hub, zero, r63, r64, last] =
+        ["a", "b", "c", "d", "e"].map(|t| nid(&created(&store, "Fact", t).id));
+    declare(&store, "R", 70);
+    let names = rel_names(&dir.db());
+    let by_id = |id: u16| -> String {
+        catalog_testing::with_main_graph(&store, &budget(), |g| {
+            Ok(names
+                .iter()
+                .find(|n| g.rel(n) == Some(kaban_index_graph::RelId(id)))
+                .cloned())
+        })
+        .unwrap()
+        .expect("a relation with this id")
+    };
+    for (id, dst) in [(0, &zero), (63, &r63), (64, &r64)] {
+        raw_edge(&store, &hub, dst, &by_id(id)).unwrap();
+    }
+    let rel = kaban_index_graph::RelId;
+    let selections = [
+        RelSelection::All,
+        RelSelection::only(vec![]),
+        RelSelection::only(vec![rel(0)]),
+        RelSelection::only(vec![rel(63)]),
+        RelSelection::only(vec![rel(64)]),
+        RelSelection::only(vec![rel(u16::MAX)]),
+    ];
+    let expected = vec![
+        vec![zero.clone(), r63.clone(), r64.clone()],
+        vec![],
+        vec![zero.clone()],
+        vec![r63.clone()],
+        vec![r64.clone()],
+        vec![],
+    ];
+
+    // Act, Assert: each selection reaches its own relation's edge only, before and after a
+    // rebuild
+    assert_eq!(selected(&store, &hub, &selections), expected);
+    catalog_testing::rebuild_graph(&store).unwrap();
+    assert_eq!(selected(&store, &hub, &selections), expected, "rebuilt");
+
+    // Arrange: relations up to and past the last id
+    let have = u32::try_from(rel_names(&dir.db()).len()).unwrap();
+    declare(&store, "X", 65_537 - have);
+    let names = rel_names(&dir.db());
+    assert_eq!(names.len(), 65_537);
+
+    // Act: an edge of the relation with the last id, then one of the relation past it
+    raw_edge(&store, &hub, &last, &names[65_535]).unwrap();
+    let refused = raw_edge(&store, &hub, &last, &names[65_536]);
+
+    // Assert: the last id serves; the relation past it is refused by name, and every earlier
+    // result stands
+    let refused = driver_text(&refused.expect_err("a relation past the last id was admitted"));
+    assert!(
+        refused.contains("graph_relation_ids_exhausted"),
+        "{refused}"
+    );
+    let mut after = expected;
+    after[0].push(last.clone());
+    after[5] = vec![last.clone()];
+    assert_eq!(selected(&store, &hub, &selections), after);
 }

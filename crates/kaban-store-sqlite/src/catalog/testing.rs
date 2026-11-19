@@ -24,8 +24,8 @@ use super::Catalog;
 use super::capture::{BatchChanges, CaptureOp};
 use super::class::{ExtentClass, ExtentLocation, IndexClass};
 use super::commit::Stage;
-use super::graph_class::{GraphClass, LoadedView, NodeOrder, load_view};
 use super::compact::{Claim, CompactBudget, CompactReport, Publication, PurgeReport, ViewSwitch};
+use super::graph_class::{GraphClass, LoadedView, NodeOrder, load_view};
 use super::pin::{Pin, PinnedView, budget_exceeded};
 use super::tables::{ExtentId, ExtentRef, SedimentRow, SedimentSeq};
 use crate::SqliteStore;
@@ -956,12 +956,20 @@ pub fn rebuild_graph(store: &SqliteStore) -> Result<()> {
     GraphClass::rebuild_main(store.catalog(), &mut store.lock())
 }
 
-/// The bytes of every graph extent in `main`'s chain at the latest generation (oldest first)
-/// and the payloads of its pending graph sediment rows (in sequence order).
+/// What `main`'s memory graph holds at one generation ([`graph_contents`]).
+#[derive(Debug, Clone)]
+pub struct GraphContents {
+    /// The bytes of every graph extent of the chain, oldest first.
+    pub extents: Vec<Vec<u8>>,
+    /// The payloads of the pending graph sediment rows, in sequence order.
+    pub sediment: Vec<Vec<u8>>,
+}
+
+/// What `main`'s memory graph holds at the latest generation of `store`.
 ///
 /// # Errors
 /// The pin's errors.
-pub fn graph_contents(store: &SqliteStore) -> Result<(Vec<Vec<u8>>, Vec<Vec<u8>>)> {
+pub fn graph_contents(store: &SqliteStore) -> Result<GraphContents> {
     let budget = QueryBudget::new(u64::MAX, None);
     let conn = store.lock();
     let pin = store.catalog().pin(&conn, &budget, &[ViewName::Main])?;
@@ -979,5 +987,5 @@ pub fn graph_contents(store: &SqliteStore) -> Result<(Vec<Vec<u8>>, Vec<Vec<u8>>
         .filter(|r| r.class == ExtentClass::GraphLayer)
         .map(|r| r.payload.clone())
         .collect();
-    Ok((extents, sediment))
+    Ok(GraphContents { extents, sediment })
 }

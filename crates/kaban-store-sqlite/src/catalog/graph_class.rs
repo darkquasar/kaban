@@ -217,20 +217,20 @@ impl IndexClass for GraphClass {
         let opened = read::Opened::open(pin, &chain, budget)?;
         let empty = PreparedSediment::empty();
         let parent = opened.view(&empty, budget)?;
-        let layer = match read::seal_cached(pin, &chain, &rows, &parent, budget)? {
-            Some(layer) => layer,
-            None => {
-                let decoded = rows
-                    .iter()
-                    .map(|r| Records::decode(&r.payload, budget))
-                    .collect::<std::result::Result<Vec<_>, _>>()
-                    .map_err(graph_error)?;
-                let prepared = PreparedSediment::prepare(&decoded, budget).map_err(graph_error)?;
-                prepared
-                    .seal(&parent, decoded.len(), budget)
-                    .map_err(graph_error)?
-                    .layer
-            }
+        let cached = read::seal_cached(pin, &chain, &rows, &parent, budget)?;
+        let layer = if let Some(layer) = cached {
+            layer
+        } else {
+            let decoded = rows
+                .iter()
+                .map(|r| Records::decode(&r.payload, budget))
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(graph_error)?;
+            let prepared = PreparedSediment::prepare(&decoded, budget).map_err(graph_error)?;
+            prepared
+                .seal(&parent, decoded.len(), budget)
+                .map_err(graph_error)?
+                .layer
         };
         if !chain.is_empty() {
             return Ok(Some(layer));
@@ -316,7 +316,10 @@ impl std::fmt::Display for GraphRefused {
                 "graph_local_id_refused: node rid {rid} does not fit a local id"
             ),
             Self::UnknownRelation(rel) => {
-                write!(f, "graph_relation_unknown: relation {rel:?} is not declared")
+                write!(
+                    f,
+                    "graph_relation_unknown: relation {rel:?} is not declared"
+                )
             }
             Self::RelationIdExhausted(rel) => write!(
                 f,
@@ -368,7 +371,10 @@ fn attr(confidence: Option<f64>, created_at: &str) -> Result<Attr> {
     let c = confidence.unwrap_or(1.0);
     let scaled = (c * 1e6).round();
     // 2^63: no i64 holds it, every smaller integral f64 fits
-    #[expect(clippy::cast_precision_loss, reason = "the bound itself, 2^63, is exact")]
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "the bound itself, 2^63, is exact"
+    )]
     let bound = i64::MAX as f64;
     if !(0.0..bound).contains(&scaled) {
         return Err(GraphRefused::Weight(c).into());
@@ -386,6 +392,10 @@ fn attr(confidence: Option<f64>, created_at: &str) -> Result<Attr> {
 /// `s` as epoch milliseconds when it is an RFC 3339 date-time (`YYYY-MM-DDTHH:MM:SS`, an
 /// optional fraction, then `Z` or `±HH:MM`); `None` otherwise. Digits below a millisecond are
 /// truncated.
+#[expect(
+    clippy::many_single_char_names,
+    reason = "the date fields and the civil-date algorithm's own names"
+)]
 fn rfc3339_ms(s: &str) -> Option<i64> {
     let b = s.as_bytes();
     let num = |r: std::ops::Range<usize>| -> Option<i64> {
