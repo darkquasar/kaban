@@ -11,7 +11,8 @@
 //! or write lands wholly before or wholly after it, never in between.
 
 use crate::catalog::Catalog;
-use crate::ident::{committed_fields, summary_projection_over};
+use crate::catalog::phase::Reader;
+use crate::ident::{FIELDS, FTS_FIELDS, Fields, committed_fields, summary_projection_over};
 use crate::sql_error::SqlResultExt;
 use kaban_core::Result;
 use kaban_core::text_index::{Canonical, IndexIdentity, IndexRow, Replay, Rows};
@@ -185,53 +186,94 @@ fn rows(
     ids: Option<&str>,
     visit: &mut dyn FnMut(IndexRow) -> Result<()>,
 ) -> Result<()> {
-    // the committed maps; a store without the engine deployment (schema < 4) has neither a
-    // projection nor identifier fields nor anchors, like its FTS5 index
     let committed = committed_fields(conn)?;
-    let (ident_fields, fts_fields) = committed.clone().unwrap_or_default();
+    let selected = if ids.is_some() {
+        " AND n.id IN (SELECT value FROM json_each(?1))"
+    } else {
+        ""
+    };
+    let sql = select(committed.as_ref(), selected);
+    let ident_fields = committed.map(|(ident, _)| ident).unwrap_or_default();
+    let mut st = conn.prepare_cached(&sql).sql()?;
+    let binds: Vec<&dyn rusqlite::ToSql> = ids.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+    let mut it = st.query(binds.as_slice()).sql()?;
+    while let Some(r) = it.next().sql()? {
+        visit(decode(r, &ident_fields).sql()?)?;
+    }
+    Ok(())
+}
+
+/// The active rows among `rids`, in `rid` order, read through a commit's staging reader (spec
+/// 11 T7: the text class stages the rows a commit changed; every statement is prepared fresh
+/// in the phase).
+///
+/// # Errors
+/// SQLite's; a stored value that does not decode.
+pub(crate) fn staged_rows(reader: &Reader<'_>, rids: &[i64]) -> Result<Vec<IndexRow>> {
+    let mut meta = reader.prepare("SELECT value FROM index_meta WHERE key = ?1")?;
+    let mut map = |key: &str| -> Result<Option<Fields>> {
+        meta.query_row([key], |r| r.get::<_, String>(0))?
+            .map(|v| serde_json::from_str(&v))
+            .transpose()
+            .map_err(Into::into)
+    };
+    let committed = map(FIELDS)?.zip(map(FTS_FIELDS)?);
+    let sql = select(
+        committed.as_ref(),
+        " AND n.rid IN (SELECT value FROM json_each(?1))",
+    );
+    let ident_fields = committed.map(|(ident, _)| ident).unwrap_or_default();
+    let selected = serde_json::to_string(rids)?;
+    reader
+        .prepare(&sql)?
+        .query_map([selected], |r| decode(r, &ident_fields))
+}
+
+/// The statement of the active rows under the committed maps (`None`: a store without the
+/// engine deployment, schema < 4, has neither a projection nor identifier fields nor anchors,
+/// like its FTS5 index), filtered by `selected`.
+fn select(committed: Option<&(Fields, Fields)>, selected: &str) -> String {
+    let fts_fields = committed.map(|(_, fts)| fts.clone()).unwrap_or_default();
     let projection = summary_projection_over(&fts_fields, "n", "kaban_body(n.text)");
     let anchors = if committed.is_some() {
         "(SELECT json_group_array(key) FROM (SELECT key FROM node_anchor a WHERE a.rid = n.rid ORDER BY anchor_kind, key))"
     } else {
         "'[]'"
     };
-    let selected = if ids.is_some() {
-        " AND n.id IN (SELECT value FROM json_each(?1))"
-    } else {
-        ""
-    };
-    let sql = format!(
+    format!(
         "SELECT n.id, n.rid, n.rev, n.kind, n.workspace_id, n.tags, n.text, {projection}, n.summary, n.props, {anchors} \
          FROM node n WHERE n.lifecycle = 'active'{selected} ORDER BY n.rid"
-    );
-    let mut st = conn.prepare_cached(&sql).sql()?;
-    let binds: Vec<&dyn rusqlite::ToSql> = ids.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
-    let mut it = st.query(binds.as_slice()).sql()?;
-    while let Some(r) = it.next().sql()? {
-        let kind: String = r.get(3).sql()?;
-        let tags: Vec<String> = serde_json::from_str(&r.get::<_, String>(5).sql()?)?;
-        let text = crate::body_codec::read_column(r, 6).sql()?;
-        let summary: Option<String> = r.get(7).sql()?;
-        let stored_summary: Option<String> = r.get(8).sql()?;
-        let props: Value = serde_json::from_str(&r.get::<_, String>(9).sql()?)?;
-        let anchor_keys: Vec<String> = serde_json::from_str(&r.get::<_, String>(10).sql()?)?;
-        let fields = ident_fields.get(&kind).map_or(&[][..], Vec::as_slice);
-        let row = IndexRow {
-            id: r.get(0).sql()?,
-            rid: r.get(1).sql()?,
-            revision: r.get(2).sql()?,
-            ident_values: ident_values(fields, &text, stored_summary.as_deref(), &tags, &props),
-            kind,
-            workspace_id: r.get(4).sql()?,
-            tags,
-            text,
-            summary: summary.unwrap_or_default(),
-            stored_summary,
-            anchor_keys,
-        };
-        visit(row)?;
-    }
-    Ok(())
+    )
+}
+
+/// One row of [`select`] as the index sees it.
+fn decode(r: &rusqlite::Row<'_>, ident_fields: &Fields) -> rusqlite::Result<IndexRow> {
+    let json = |idx: usize, e: serde_json::Error| {
+        rusqlite::Error::FromSqlConversionFailure(idx, rusqlite::types::Type::Text, Box::new(e))
+    };
+    let kind: String = r.get(3)?;
+    let tags: Vec<String> =
+        serde_json::from_str(&r.get::<_, String>(5)?).map_err(|e| json(5, e))?;
+    let text = crate::body_codec::read_column(r, 6)?;
+    let summary: Option<String> = r.get(7)?;
+    let stored_summary: Option<String> = r.get(8)?;
+    let props: Value = serde_json::from_str(&r.get::<_, String>(9)?).map_err(|e| json(9, e))?;
+    let anchor_keys: Vec<String> =
+        serde_json::from_str(&r.get::<_, String>(10)?).map_err(|e| json(10, e))?;
+    let fields = ident_fields.get(&kind).map_or(&[][..], Vec::as_slice);
+    Ok(IndexRow {
+        id: r.get(0)?,
+        rid: r.get(1)?,
+        revision: r.get(2)?,
+        ident_values: ident_values(fields, &text, stored_summary.as_deref(), &tags, &props),
+        kind,
+        workspace_id: r.get(4)?,
+        tags,
+        text,
+        summary: summary.unwrap_or_default(),
+        stored_summary,
+        anchor_keys,
+    })
 }
 
 /// The kind's `ident_fields` values of one row, exactly as `ident::refresh` selects them for

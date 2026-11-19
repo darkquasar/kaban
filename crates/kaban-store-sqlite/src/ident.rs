@@ -15,10 +15,10 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use std::fmt::Write;
 
-const FIELDS: &str = "ident_fields_resolved";
-const FTS_FIELDS: &str = "fts_fields_resolved";
+pub(crate) const FIELDS: &str = "ident_fields_resolved";
+pub(crate) const FTS_FIELDS: &str = "fts_fields_resolved";
 const SIGNATURE: &str = "fts_projection_signature";
-type Fields = BTreeMap<String, Vec<String>>;
+pub(crate) type Fields = BTreeMap<String, Vec<String>>;
 
 fn literal(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))

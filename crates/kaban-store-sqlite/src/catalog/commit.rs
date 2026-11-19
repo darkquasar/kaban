@@ -275,10 +275,6 @@ pub(crate) struct Stage<'t> {
 
 impl<'t> Stage<'t> {
     /// The class's reads of this commit's rows.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "T7's and T11's classes read through it")
-    )]
     pub(crate) fn reader(&self) -> Reader<'t> {
         Reader::new(self.conn, self.phases)
     }

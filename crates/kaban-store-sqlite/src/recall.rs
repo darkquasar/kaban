@@ -14,7 +14,10 @@ use crate::sql_error::SqlResultExt;
 use crate::sqlite::{WS_COL, in_workspace};
 use kaban_core::ident::{QueryClass, classify};
 use kaban_core::ontology::meta::RankHints;
-use kaban_core::text_index::{MatchMode, Searched, SeedFilter, TextHit, TextIndex, TextQuery};
+use kaban_core::query_budget::QueryBudget;
+use kaban_core::text_index::{
+    MatchMode, Searched, SeedFilter, TextHit, TextIndex, TextQuery, TextSnapshot,
+};
 use kaban_core::{Hit, Lifecycle, Node, RecallQuery, Result, StoreError};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::Value;
@@ -138,9 +141,12 @@ impl Seeds {
 
     /// Retrieve until `target` eligible seeds are kept or the candidates are exhausted. Each
     /// page is searched with no connection held and revalidated under one statement's lock.
+    #[allow(clippy::too_many_arguments)] // the snapshot and its budget travel with every page
     fn fill(
         &mut self,
         view: &dyn TextIndex,
+        at: &TextSnapshot<'_>,
+        budget: &QueryBudget,
         q: &RecallQuery,
         target: usize,
         sufficient: usize,
@@ -148,14 +154,18 @@ impl Seeds {
     ) -> Result<()> {
         let filter = SeedFilter::of(q);
         while self.kept.len() < target && !self.exhausted {
-            let page = view.search(&TextQuery {
-                text: &q.query,
-                mode: self.mode,
-                filter,
-                limit: self.page,
-                sufficient,
-                skip: self.skip,
-            })?;
+            let page = view.search_at(
+                at,
+                &TextQuery {
+                    text: &q.query,
+                    mode: self.mode,
+                    filter,
+                    limit: self.page,
+                    sufficient,
+                    skip: self.skip,
+                },
+                budget,
+            )?;
             let Searched::Hits { hits, exhausted } = page else {
                 self.exhausted = true;
                 return Ok(());
@@ -250,13 +260,16 @@ fn chunk_card(mut node: Node) -> Node {
 /// continues (SS-11) until `limit` deliverable results are filled, counted after every
 /// rejection stage (revalidation, lifecycle, workspace, kind and tag, canonical resolution
 /// and `eligible`: the caller's read gate), or the candidates of every mode in play are
-/// exhausted, all through one pinned generation.
+/// exhausted, all through one pinned catalog generation (`at`, searched under `budget`).
+#[allow(clippy::too_many_arguments)] // the recall's inputs and the one snapshot it reads
 pub(crate) fn recall_with(
     access: &Access<'_>,
     ontology: &kaban_core::Ontology,
     config: &kaban_core::config::Recall,
     q: &RecallQuery,
     index: &dyn TextIndex,
+    at: &TextSnapshot<'_>,
+    budget: &QueryBudget,
     eligible: &dyn Fn(&Node) -> bool,
 ) -> Result<Vec<Hit>> {
     let permits = |mode| q.modes.as_ref().is_none_or(|modes| modes.contains(&mode));
@@ -266,9 +279,8 @@ pub(crate) fn recall_with(
         f64::from(config.effective_rrf_k().map_err(|_| {
             StoreError::InvalidName("recall.fusion".into(), "invalid_configuration")
         })?);
-    // one pinned generation for every page of this recall (SS-11), taken with no connection
-    // held; the filters travel with every seed search so LIMIT never starves a filtered recall
-    let view = index.pin()?;
+    // one pinned catalog generation for every page of this recall (SS-11, the caller's `at`);
+    // the filters travel with every seed search so LIMIT never starves a filtered recall
     let mut lexical = Seeds::new(
         q,
         MatchMode::Lexical,
@@ -284,11 +296,11 @@ pub(crate) fn recall_with(
     let mut target = seed_k;
     loop {
         // 1) lexical candidates, revalidated and refilled (an unavailable index seeds nothing)
-        lexical.fill(view.as_ref(), q, target, limit, access)?;
+        lexical.fill(index, at, budget, q, target, limit, access)?;
         // the fuzzy seeds join on request, or when the lexical ones are empty
         let fuzzy_in_play = q.fuzzy || lexical.kept.is_empty();
         if fuzzy_in_play {
-            fuzzy.fill(view.as_ref(), q, target, limit, access)?;
+            fuzzy.fill(index, at, budget, q, target, limit, access)?;
         }
         let out = fuse(
             &access.conn(),
@@ -514,9 +526,21 @@ pub(crate) fn chunk_covering(
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // test code: failures are the assertion
 mod tests {
     use super::{Access, recall_with};
+    use kaban_core::query_budget::QueryBudget;
     use kaban_core::text_index::TextHit;
+    use kaban_core::text_index::TextSnapshot;
     use kaban_core::text_index::fake::FakeIndex;
     use kaban_core::{ForgetMode, MemoryStore, NewNode, Node, NodeId, RecallQuery, WriteCtx};
+
+    /// An empty catalog snapshot: the scripted index answers without one.
+    fn snapshot() -> TextSnapshot<'static> {
+        TextSnapshot {
+            generation: 0,
+            kbx: std::path::Path::new(""),
+            tiers: &[],
+            sediment: &[],
+        }
+    }
 
     fn ctx(ws: &str) -> WriteCtx {
         WriteCtx::new(kaban_core::WorkspaceId::new(ws), kaban_core::Actor::Agent)
@@ -604,6 +628,8 @@ mod tests {
             &config,
             &q,
             &index,
+            &snapshot(),
+            &QueryBudget::new(u64::MAX, None),
             &|_| true,
         )
         .unwrap();
@@ -643,6 +669,8 @@ mod tests {
             &config,
             &q,
             &index,
+            &snapshot(),
+            &QueryBudget::new(u64::MAX, None),
             &|_| true,
         )
         .unwrap();
@@ -691,6 +719,8 @@ mod tests {
             &config,
             &q,
             &index,
+            &snapshot(),
+            &QueryBudget::new(u64::MAX, None),
             &eligible,
         )
         .unwrap();
@@ -723,6 +753,8 @@ mod tests {
             &config,
             &q,
             &FakeIndex::default(),
+            &snapshot(),
+            &QueryBudget::new(u64::MAX, None),
             &|_| true,
         );
         assert!(hits.unwrap().is_empty());

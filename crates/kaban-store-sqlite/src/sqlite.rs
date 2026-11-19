@@ -34,6 +34,8 @@ use crate::session;
 use crate::sql_error::SqlResultExt;
 use crate::tantivy::{self, Attach, Attached, SharedConnection};
 use crate::traverse;
+use kaban_core::query_budget::QueryBudget;
+use kaban_core::text_index::{Searched, TextQuery, TextSnapshot};
 use kaban_core::{
     ActorId, BatchReport, Change, ChangeLogStore, Edge, FailurePatch, ForgetMode, ForgetOutcome,
     Hit, IndexMeta, IngestStore, Lease, LeaseStore, Lifecycle, LinkReq, MemoryStore, Method,
@@ -54,6 +56,12 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex, RwLock};
+use std::time::Duration;
+
+/// The memory ceiling of one recall's text reads (its pin and the pending packs it copies).
+const RECALL_MEMORY_BYTES: u64 = 256 << 20;
+/// The deadline of one recall's text reads.
+const RECALL_DEADLINE: Duration = Duration::from_secs(30);
 
 /// The shipped ontology, resolved once per process (the store crate holds no loaded user
 /// ontology; the service passes one through `SqliteStore::with_ontology`).
@@ -230,6 +238,27 @@ impl SqliteStore {
     /// The database's catalog (spec 11 KER-07).
     pub(crate) fn catalog(&self) -> &Catalog {
         &self.catalog
+    }
+
+    /// Run `f` over the text of the latest catalog generation under one recall budget.
+    fn with_text_snapshot<T>(
+        &self,
+        f: impl FnOnce(&TextSnapshot<'_>, &QueryBudget) -> Result<T>,
+    ) -> Result<T> {
+        let budget = QueryBudget::new(RECALL_MEMORY_BYTES, Some(RECALL_DEADLINE));
+        self.catalog
+            .with_text(&self.conn, &budget, |at| f(at, &budget))
+    }
+
+    /// The text index's seed candidates for `query` at the latest catalog generation, before
+    /// any revalidation against the rows (spec 11 T7, TXT-06): what a recall seeds from.
+    ///
+    /// # Errors
+    /// [`StoreError::TextIndexUnavailable`] when no index is attached; the pin's, the budget's
+    /// or the index's error.
+    pub fn search_text(&self, query: &TextQuery<'_>) -> Result<Searched> {
+        let index = self.seed_index().ok_or(StoreError::TextIndexUnavailable)?;
+        self.with_text_snapshot(|at, budget| index.search_at(at, query, budget))
     }
 
     /// The seed index behind the text-search seam, when one is attached.
@@ -1158,14 +1187,18 @@ impl MemoryStore for SqliteStore {
         // connection): recall takes the lock per statement and never across an adapter call
         // a store with no index attached has nothing to seed from: refused, never empty
         let index = self.seed_index().ok_or(StoreError::TextIndexUnavailable)?;
-        recall::recall_with(
-            &recall::Access(&self.conn),
-            &self.ontology,
-            &self.recall,
-            q,
-            index,
-            eligible,
-        )
+        self.with_text_snapshot(|at, budget| {
+            recall::recall_with(
+                &recall::Access(&self.conn),
+                &self.ontology,
+                &self.recall,
+                q,
+                index,
+                at,
+                budget,
+                eligible,
+            )
+        })
     }
     /// The attached index's watermark (spec 05 SS-10). A store with nothing attached has no
     /// watermark to read: the barrier then acknowledges `not_yet_searchable` and doctor

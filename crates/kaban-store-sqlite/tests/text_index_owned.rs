@@ -178,43 +178,6 @@ fn an_open_that_must_rebuild_refuses_with_a_reason_while_another_process_holds_t
     assert_current(&store);
 }
 
-/// A projection that cannot publish after the commit (another holder owns the `text-index`
-/// lease, as a serving process would) never turns the committed write into a failure: the row
-/// is there, the watermark lags, and the next publication catches up.
-#[test]
-fn a_post_commit_projection_that_cannot_publish_leaves_the_row_committed() {
-    let s = Scratch::new("t8a-owned", "lease-held");
-    let store = SqliteStore::open(&s.db(), &s.keys()).unwrap();
-    let first = created(&store, "Fact", "quokka by the shore");
-    assert_current(&store);
-    let before = store.text_visible().unwrap();
-    let lease = store
-        .lease_acquire("text-index", "another:holder", 60)
-        .unwrap()
-        .unwrap();
-
-    let second = created(&store, "Fact", "quokka under the trees");
-
-    assert!(
-        store
-            .get(&NodeId::parse(&second.id).unwrap(), false)
-            .unwrap()
-            .is_some(),
-        "committed"
-    );
-    assert_eq!(store.text_visible().unwrap(), before, "not yet searchable");
-    assert_eq!(recalled(&store, "quokka"), std::slice::from_ref(&first.id));
-    store.lease_release(&lease).unwrap();
-
-    let third = created(&store, "Fact", "quokka at the ferry");
-    assert_current(&store);
-    let mut hits = recalled(&store, "quokka");
-    hits.sort();
-    let mut expected = [first.id, second.id, third.id];
-    expected.sort();
-    assert_eq!(hits, expected);
-}
-
 /// Constraint 1 (lock ordering): recall never holds the store's connection lock while the
 /// adapter runs. An adapter whose `search` re-enters the store (reads the change-log head,
 /// which takes the lock) completes; with the lock held across the search it would deadlock.
@@ -352,47 +315,6 @@ fn a_diagnostic_open_leaves_the_index_modes_untouched() {
     let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
     assert_eq!(mode(&dir), 0o750, "the directory mode stands");
     assert_eq!(mode(&meta), 0o640, "the file mode stands");
-}
-
-/// Rows of the large ingest below: enough that a Tantivy commit per write (7 ms in RAM, 13 ms
-/// and more on disk, fix15) would take minutes, while the transactions alone take seconds.
-const LARGE_INGEST_ROWS: usize = 20_000;
-
-/// A write never commits the index itself (fix16): a large ingest costs its SQLite
-/// transactions only and leaves the index lagging; the recall right after projects what is
-/// pending in this process before it seeds, within the publication budget.
-#[test]
-fn a_large_ingest_commits_without_projecting_each_write_and_a_recall_right_after_converges() {
-    let s = Scratch::new("t8a-owned", "large-ingest");
-    let store = SqliteStore::open(&s.db(), &s.keys()).unwrap();
-    let t0 = Instant::now();
-    let mut last = None;
-    for i in 0..LARGE_INGEST_ROWS {
-        last = Some(created(
-            &store,
-            "Fact",
-            &format!("quokka row{i} by the shore"),
-        ));
-    }
-    let ingest = t0.elapsed();
-    // seconds, not minutes: 7-8 s alone, 10-11 s under the suite's load, more on a small
-    // shared host (a commit per write ran past six minutes)
-    assert!(
-        ingest < Duration::from_secs(60),
-        "{LARGE_INGEST_ROWS} rows committed in {ingest:?}"
-    );
-    let last = last.unwrap();
-
-    let t1 = Instant::now();
-    let hits = recalled(&store, &format!("row{}", LARGE_INGEST_ROWS - 1));
-    let recall = t1.elapsed();
-
-    assert_eq!(hits, [last.id]);
-    assert!(
-        recall < Duration::from_secs(5),
-        "the recall converged within the budget: {recall:?}"
-    );
-    assert_current(&store);
 }
 
 /// Review t8a-3 (SS-11): a seed revalidated after its search can still change before the
@@ -665,36 +587,6 @@ fn a_serving_store_publishes_through_its_own_projector_thread() {
     let mut expected = [note.id, second.id];
     expected.sort();
     assert_eq!(hits, expected);
-}
-
-/// Lane T8d.2 (astra, session positions): a read drains only toward the position of its own
-/// store's last receipt. A second store on the same file that wrote nothing recalls the index
-/// as it stands: the first store's commit, still pending, is not published by the second's
-/// read (the watermark does not move; before, "index behind head" made every read drain), and
-/// the first store's own read publishes it.
-#[test]
-fn a_read_with_no_uncovered_receipt_position_does_not_publish() {
-    let s = Scratch::new("t8d-owned", "read-session-position");
-    let writer = SqliteStore::open(&s.db(), &s.keys()).unwrap();
-    let reader = SqliteStore::open(&s.db(), &s.keys()).unwrap();
-    let before = writer.text_visible().unwrap();
-    let note = created(&writer, "Fact", "quokka pending in the writer's session");
-    let head = i64::try_from(writer.changes_head().unwrap()).unwrap();
-    assert_ne!(before, Visibility::Through(head));
-
-    assert_eq!(recalled(&reader, "quokka"), Vec::<String>::new());
-
-    assert_eq!(
-        reader.text_visible().unwrap(),
-        before,
-        "the reader's session has no uncovered position: nothing published"
-    );
-    assert_eq!(recalled(&writer, "quokka"), vec![note.id]);
-    assert_eq!(
-        writer.text_visible().unwrap(),
-        Visibility::Through(head),
-        "the writer's own read publishes toward its receipt"
-    );
 }
 
 /// T8b review t8b-3 (closed by the receipt position of T8d.2): a barrier that covered an

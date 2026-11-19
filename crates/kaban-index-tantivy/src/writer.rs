@@ -11,13 +11,19 @@
 
 use crate::payload::Payload;
 use crate::schema::Fields;
-use crate::{Error, Result, document};
+use crate::{Error, Result, document, kbx_dir};
+use kaban_core::query_budget::QueryBudget;
 use kaban_core::text_index::{Canonical, IndexRow, Rows};
-use tantivy::directory::GarbageCollectionResult;
 use tantivy::directory::error::LockError;
+use tantivy::directory::{GarbageCollectionResult, OwnedBytes, RamDirectory};
+use tantivy::fastfield::AliveBitSet;
 use tantivy::index::SegmentId;
+use tantivy::indexer::merge_filtered_segments;
 use tantivy::schema::Term;
-use tantivy::{Index, IndexWriter, TantivyError};
+use tantivy::{
+    DocId, Index, IndexReader, IndexSettings, IndexWriter, ReloadPolicy, SingleSegmentIndexWriter,
+    TantivyError,
+};
 
 /// The writer's memory budget: one indexing thread, so a rebuild is one segment per commit.
 const WRITER_BUDGET_BYTES: usize = 32 << 20;
@@ -149,6 +155,128 @@ impl Drop for Writer {
             tracing::warn!(error = %e, "a merge of the index writer failed while it was released");
         }
     }
+}
+
+/// The RAM arena of one staged segment (spec 11 T7).
+const SEGMENT_ARENA_BYTES: usize = 4 << 20;
+
+/// One commit's text as one pack (`crate::kbx_dir`): the identity `tombstones` of every rid
+/// the commit changed and one segment of `rows`, their current active rows, built in RAM.
+/// The arena and the inputs are charged to `budget` while it builds.
+///
+/// # Errors
+/// The budget's refusal; Tantivy failures.
+pub fn segment(
+    rows: &[IndexRow],
+    tombstones: &[i64],
+    budget: &QueryBudget,
+) -> kaban_core::Result<Vec<u8>> {
+    let input: usize = rows.iter().map(crate::decoded_bytes).sum();
+    let charge = u64::try_from(SEGMENT_ARENA_BYTES.saturating_add(input.saturating_mul(2)))
+        .unwrap_or(u64::MAX);
+    let _held = budget.reserve(charge).map_err(Error::Budget)?;
+    Ok(build_segment(rows, tombstones, budget)?)
+}
+
+fn build_segment(rows: &[IndexRow], tombstones: &[i64], budget: &QueryBudget) -> Result<Vec<u8>> {
+    let ram = RamDirectory::create();
+    if rows.is_empty() {
+        return kbx_dir::encode(tombstones, None, &ram);
+    }
+    let (schema, fields) = crate::schema::schema();
+    let index = Index::create(ram.clone(), schema, IndexSettings::default())?;
+    crate::analyzers::register(&index);
+    let mut writer: SingleSegmentIndexWriter =
+        SingleSegmentIndexWriter::new(index, SEGMENT_ARENA_BYTES)?;
+    for row in rows {
+        budget.check()?;
+        writer.add_document(document(&fields, row))?;
+    }
+    let index = writer.finalize()?;
+    let segment = index.searchable_segments()?.into_iter().next();
+    kbx_dir::encode(tombstones, segment.as_ref(), &ram)
+}
+
+/// Merge `packs` (oldest first) into one pack: every document a newer pack's tombstone hides,
+/// or whose rid is in `drop`, is left out, and the union of the tombstones is carried on to
+/// hide the documents of older packs. `None` when one pack would come out unchanged. The
+/// inputs and the output are charged to `budget`.
+///
+/// # Errors
+/// The budget's refusal; a malformed pack; Tantivy failures.
+pub fn merge(
+    packs: &[OwnedBytes],
+    drop: &[i64],
+    budget: &QueryBudget,
+) -> kaban_core::Result<Option<Vec<u8>>> {
+    let input: usize = packs.iter().map(OwnedBytes::len).sum();
+    let charge = u64::try_from(input.saturating_mul(2)).unwrap_or(u64::MAX);
+    let _held = budget.reserve(charge).map_err(Error::Budget)?;
+    Ok(merge_packs(packs, drop, budget)?)
+}
+
+fn merge_packs(
+    packs: &[OwnedBytes],
+    drop: &[i64],
+    budget: &QueryBudget,
+) -> Result<Option<Vec<u8>>> {
+    let opened = kbx_dir::open(packs)?;
+    let (_, fields) = crate::schema::schema();
+    let reader: IndexReader = opened
+        .index
+        .reader_builder()
+        .reload_policy(ReloadPolicy::Manual)
+        .try_into()?;
+    let searcher = reader.searcher();
+    let hidden = opened.hidden(&searcher, &fields, drop)?;
+    budget.check()?;
+    if packs.len() == 1 && hidden.iter().all(Vec::is_empty) {
+        return Ok(None);
+    }
+    let tombstones = opened.all_tombstones();
+    let mut segments = Vec::new();
+    let mut alive = Vec::new();
+    let mut alive_docs: u64 = 0;
+    for (reader, dead) in searcher.segment_readers().iter().zip(&hidden) {
+        let max_doc = reader.max_doc();
+        alive_docs += u64::from(max_doc) - dead.len() as u64;
+        let meta = opened
+            .index
+            .searchable_segment_metas()?
+            .into_iter()
+            .find(|m| m.id() == reader.segment_id())
+            .ok_or(Error::Corrupt("text pack"))?;
+        segments.push(opened.index.segment(meta));
+        alive.push(Some(alive_set(max_doc, dead)));
+    }
+    let ram = RamDirectory::create();
+    if alive_docs == 0 {
+        return kbx_dir::encode(&tombstones, None, &ram).map(Some);
+    }
+    let merged = merge_filtered_segments(&segments, IndexSettings::default(), alive, ram.clone())?;
+    budget.check()?;
+    let segment = merged.searchable_segments()?.into_iter().next();
+    kbx_dir::encode(&tombstones, segment.as_ref(), &ram).map(Some)
+}
+
+/// The alive set of a segment of `max_doc` documents without `dead`, in Tantivy's file layout
+/// (the bound, then one little-endian word per 64 documents).
+fn alive_set(max_doc: u32, dead: &[DocId]) -> AliveBitSet {
+    let words = max_doc.div_ceil(64) as usize;
+    let mut bits = vec![u64::MAX; words];
+    if let Some(last) = bits.last_mut()
+        && !max_doc.is_multiple_of(64)
+    {
+        *last = (1 << (max_doc % 64)) - 1;
+    }
+    for doc in dead {
+        bits[(doc / 64) as usize] &= !(1 << (doc % 64));
+    }
+    let mut bytes = max_doc.to_le_bytes().to_vec();
+    for word in bits {
+        bytes.extend(word.to_le_bytes());
+    }
+    AliveBitSet::open(OwnedBytes::new(bytes))
 }
 
 #[cfg(test)]

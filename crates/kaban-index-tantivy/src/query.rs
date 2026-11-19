@@ -22,7 +22,7 @@ use kaban_core::ident::{QueryClass, classify};
 use kaban_core::text_index::{MatchMode, Searched, SeedFilter, TextHit, TextQuery};
 use kaban_core::{Ontology, stored_name};
 use std::cmp::Reverse;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use tantivy::collector::TopDocs;
 use tantivy::query::{
     Bm25StatisticsProvider, BooleanQuery, BoostQuery, ConstScoreQuery, EmptyQuery, FuzzyTermQuery,
@@ -430,6 +430,7 @@ fn top(
     query: &dyn Query,
     skip: usize,
     want: usize,
+    hidden: &HashSet<DocAddress>,
 ) -> Result<Vec<TextHit>> {
     for segment in searcher.segment_readers() {
         segment
@@ -437,16 +438,16 @@ fn top(
             .i64(RID)
             .map_err(|_| Error::Corrupt("rid column"))?;
     }
-    let order =
-        TopDocs::with_limit(want)
-            .and_offset(skip)
-            .tweak_score(|segment: &SegmentReader| {
-                // the same readers as above: opened there, this cannot fail; `None` stays `None`
-                let rid = segment.fast_fields().i64(RID).ok();
-                move |doc: DocId, score: Score| {
-                    (score, Reverse(rid.as_ref().and_then(|c| c.first(doc))))
-                }
-            });
+    // a hidden document takes a place in the collected order at most once each: collect past
+    // them from the start, then cut the page from what stays
+    let order = TopDocs::with_limit(want.saturating_add(skip).saturating_add(hidden.len()))
+        .tweak_score(|segment: &SegmentReader| {
+            // the same readers as above: opened there, this cannot fail; `None` stays `None`
+            let rid = segment.fast_fields().i64(RID).ok();
+            move |doc: DocId, score: Score| {
+                (score, Reverse(rid.as_ref().and_then(|c| c.first(doc))))
+            }
+        });
     let statistics = SharedIdf {
         searcher,
         content: fields.content,
@@ -454,6 +455,9 @@ fn top(
     searcher
         .search_with_statistics_provider(query, &order, &statistics)?
         .into_iter()
+        .filter(|(_, address)| !hidden.contains(address))
+        .skip(skip)
+        .take(want)
         .map(|((score, Reverse(rid)), address)| hit(searcher, address, rid, score))
         .collect()
 }
@@ -499,6 +503,18 @@ pub(crate) fn run(
     searcher: &Searcher,
     q: &TextQuery<'_>,
 ) -> Result<Searched> {
+    run_hiding(fields, weights, searcher, q, &HashSet::new())
+}
+
+/// [`run`] without the documents of `hidden` (a catalog snapshot's documents that a newer
+/// tombstone hides, spec 11 T7): they never take a place in the order or a page.
+pub(crate) fn run_hiding(
+    fields: &Fields,
+    weights: &Weights,
+    searcher: &Searcher,
+    q: &TextQuery<'_>,
+    hidden: &HashSet<DocAddress>,
+) -> Result<Searched> {
     if q.limit == 0 {
         return Ok(Searched::Hits {
             hits: vec![],
@@ -534,6 +550,7 @@ pub(crate) fn run(
                 strict.as_ref(),
                 0,
                 through.max(q.sufficient),
+                hidden,
             )?;
             if strict_hits.len() >= q.sufficient {
                 strict_hits.into_iter().skip(q.skip).collect()
@@ -547,7 +564,14 @@ pub(crate) fn run(
                     identifier,
                     &q.filter,
                 )? {
-                    Some(widened) => top(searcher, fields, widened.as_ref(), q.skip, q.limit + 1)?,
+                    Some(widened) => top(
+                        searcher,
+                        fields,
+                        widened.as_ref(),
+                        q.skip,
+                        q.limit + 1,
+                        hidden,
+                    )?,
                     None => strict_hits.into_iter().skip(q.skip).collect(),
                 }
             }
@@ -556,7 +580,14 @@ pub(crate) fn run(
             let Some(query) = fuzzy(searcher, fields, q.text, &q.filter)? else {
                 return Ok(empty);
             };
-            top(searcher, fields, query.as_ref(), q.skip, q.limit + 1)?
+            top(
+                searcher,
+                fields,
+                query.as_ref(),
+                q.skip,
+                q.limit + 1,
+                hidden,
+            )?
         }
     };
     let exhausted = found.len() <= q.limit;

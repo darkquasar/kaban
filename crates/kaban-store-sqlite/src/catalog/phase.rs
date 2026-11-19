@@ -103,13 +103,6 @@ pub(crate) enum Refusal {
     /// The authorizer refused a statement of the phase (the action as SQLite named it).
     Statement(String),
     /// A statement sent through the phase's [`Reader`] is not read-only (its SQL).
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "constructed by the reader T7, T11 and T13 read through"
-        )
-    )]
     ReaderWrite(String),
     /// The capture queue held a canonical change made after the freeze.
     CanonicalChange,
@@ -294,26 +287,12 @@ impl Drop for PhaseGuard<'_> {
 /// statement cache, so the authorizer judges it in that phase; one that is not read-only is
 /// refused before it runs (`sqlite3_stmt_readonly`) and refuses the commit. Transaction and
 /// savepoint statements count as read-only there; the authorizer refuses them first.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "T7's, T11's and T13's classes and hook read through it"
-    )
-)]
 #[derive(Clone, Copy)]
 pub(crate) struct Reader<'t> {
     conn: &'t Connection,
     phases: &'t Phases,
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "T7's, T11's and T13's classes and hook read through it"
-    )
-)]
 impl<'t> Reader<'t> {
     /// The reader of the transaction on `conn` in the phase `phases` holds.
     pub(super) fn new(conn: &'t Connection, phases: &'t Phases) -> Self {
@@ -339,22 +318,8 @@ impl<'t> Reader<'t> {
 }
 
 /// One read-only statement of a [`Reader`], run any number of times in its phase.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "T7's, T11's and T13's classes and hook read through it"
-    )
-)]
 pub(crate) struct ReadStatement<'t>(Statement<'t>);
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "T7's, T11's and T13's classes and hook read through it"
-    )
-)]
 impl ReadStatement<'_> {
     /// The first row for `params` through `f`, `None` when there is none.
     ///

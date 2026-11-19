@@ -20,6 +20,7 @@
 //! ([`Canonical`]). Record bodies cross here only on their way into the index.
 
 use crate::changelog::Change;
+use crate::query_budget::QueryBudget;
 use crate::{CodeRefFilter, RecallQuery, Result};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -118,6 +119,32 @@ pub enum Searched {
     Unavailable,
 }
 
+/// One sealed text tier: a byte range of the container (spec 11 T7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExtentSpan {
+    /// Start of the range.
+    pub offset: u64,
+    /// Length of the range.
+    pub len: u64,
+}
+
+/// The text index at one catalog generation (spec 11 T7): the sealed tiers in `kbx`, oldest
+/// first, then the pending sediment segments in commit order. Each tier and segment carries
+/// the identity tombstones of its commits, which hide the documents of every older tier and
+/// segment (a flat list could not order a delete before a later re-add of the same rid). The
+/// caller's pin keeps every span protected for as long as the snapshot is borrowed.
+#[derive(Debug, Clone, Copy)]
+pub struct TextSnapshot<'a> {
+    /// The pinned catalog generation.
+    pub generation: u64,
+    /// The container the tiers live in.
+    pub kbx: &'a Path,
+    /// The sealed tiers, oldest first.
+    pub tiers: &'a [ExtentSpan],
+    /// The pending sediment segments, oldest first.
+    pub sediment: &'a [&'a [u8]],
+}
+
 /// How far committed writes are visible to searches.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Visibility {
@@ -154,6 +181,22 @@ pub trait TextIndex {
     /// # Errors
     /// A backend failure; an absent or disabled index is [`Searched::Unavailable`], not an error.
     fn search(&self, query: &TextQuery<'_>) -> Result<Searched>;
+
+    /// Seed candidates from the catalog snapshot `at` (spec 11 T7), charged to `budget`. An
+    /// adapter without its own catalog reader (a scripted test double) answers as
+    /// [`Self::search`] does.
+    ///
+    /// # Errors
+    /// A backend failure or the budget's refusal.
+    fn search_at(
+        &self,
+        at: &TextSnapshot<'_>,
+        query: &TextQuery<'_>,
+        budget: &QueryBudget,
+    ) -> Result<Searched> {
+        let _ = (at, budget);
+        self.search(query)
+    }
 
     /// The visibility watermark.
     ///
@@ -201,6 +244,14 @@ impl<T: TextIndex + ?Sized> TextIndex for &T {
     fn search(&self, query: &TextQuery<'_>) -> Result<Searched> {
         (**self).search(query)
     }
+    fn search_at(
+        &self,
+        at: &TextSnapshot<'_>,
+        query: &TextQuery<'_>,
+        budget: &QueryBudget,
+    ) -> Result<Searched> {
+        (**self).search_at(at, query, budget)
+    }
     fn visible(&self) -> Result<Visibility> {
         (**self).visible()
     }
@@ -221,6 +272,14 @@ impl<T: TextIndex + ?Sized> TextIndex for &T {
 impl<T: TextIndex + ?Sized> TextIndex for Arc<T> {
     fn search(&self, query: &TextQuery<'_>) -> Result<Searched> {
         (**self).search(query)
+    }
+    fn search_at(
+        &self,
+        at: &TextSnapshot<'_>,
+        query: &TextQuery<'_>,
+        budget: &QueryBudget,
+    ) -> Result<Searched> {
+        (**self).search_at(at, query, budget)
     }
     fn visible(&self) -> Result<Visibility> {
         (**self).visible()

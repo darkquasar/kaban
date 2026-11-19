@@ -28,6 +28,7 @@
 pub mod admission;
 mod analyzers;
 mod captured;
+mod kbx_dir;
 mod payload;
 pub mod projector;
 mod purge;
@@ -36,20 +37,28 @@ mod reader;
 mod schema;
 mod writer;
 
+pub use crate::kbx_dir::has_segment;
 use crate::payload::Payload;
 use crate::query::Weights;
 use crate::reader::{Served, Serving};
 use crate::schema::{ACTIVE, Fields};
 use crate::writer::Writer;
+pub use crate::writer::{merge, segment};
 use kaban_core::config::Recall;
+use kaban_core::query_budget::{BudgetExceeded, QueryBudget};
 use kaban_core::text_index::{
-    Canonical, IndexRow, PurgeOutcome, Rows, Searched, TextIndex, TextQuery, Visibility,
+    Canonical, IndexRow, PurgeOutcome, Rows, Searched, TextIndex, TextQuery, TextSnapshot,
+    Visibility,
 };
 use kaban_core::{BackendSource, Change, ChangeEntity, Ontology, StoreError};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
-use tantivy::directory::MmapDirectory;
-use tantivy::{Index, TantivyDocument, TantivyError};
+use tantivy::directory::{MmapDirectory, OwnedBytes};
+use tantivy::{
+    Directory as _, DocAddress, HasLen as _, Index, IndexReader, ReloadPolicy, TantivyDocument,
+    TantivyError,
+};
 
 /// Why an adapter operation failed. Converted into [`StoreError::Backend`] at the seam, so a
 /// caller sees the content-free rendering and an operator downcasts to this.
@@ -82,6 +91,9 @@ pub enum Error {
     /// may serve there: another lineage or another projection than the database's.
     #[error("the installed index is not fit for this database: {0}")]
     Unfit(&'static str),
+    /// The query budget refused a charge, or passed its deadline or was cancelled (PC-17).
+    #[error(transparent)]
+    Budget(#[from] BudgetExceeded),
 }
 
 /// The adapter's result.
@@ -89,8 +101,14 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 impl From<Error> for StoreError {
     fn from(error: Error) -> Self {
-        Self::Backend {
-            source: BackendSource::new(error),
+        match error {
+            // the budget's own refusal, so a caller (compaction's retry) recognizes it
+            Error::Budget(refused) => Self::Backend {
+                source: BackendSource::new(refused),
+            },
+            error => Self::Backend {
+                source: BackendSource::new(error),
+            },
         }
     }
 }
@@ -414,6 +432,70 @@ impl TantivyIndex {
         }
     }
 
+    /// A search on the catalog snapshot `at` (spec 11 T7): its tiers mapped from the
+    /// container (the caller's pin protects them while the search runs; nothing here outlives
+    /// it), its sediment segments copied under `budget`, the documents a newer tombstone hides
+    /// left out of every page.
+    fn search_snapshot(
+        &self,
+        at: &TextSnapshot<'_>,
+        q: &TextQuery<'_>,
+        budget: &QueryBudget,
+    ) -> Result<Searched> {
+        budget.check()?;
+        let copied: usize = at.sediment.iter().map(|s| <[u8]>::len(s)).sum();
+        let _held = budget.reserve(u64::try_from(copied).unwrap_or(u64::MAX))?;
+        let mut packs: Vec<OwnedBytes> = Vec::with_capacity(at.tiers.len() + at.sediment.len());
+        if !at.tiers.is_empty() {
+            let (Some(dir), Some(name)) = (at.kbx.parent(), at.kbx.file_name()) else {
+                return Err(Error::Corrupt("container path"));
+            };
+            let container = MmapDirectory::open(dir)
+                .map_err(TantivyError::from)?
+                .open_read(Path::new(name))
+                .map_err(TantivyError::from)?;
+            for span in at.tiers {
+                let start = usize::try_from(span.offset).map_err(|_| Error::Corrupt("tier"))?;
+                let end = start
+                    .checked_add(usize::try_from(span.len).map_err(|_| Error::Corrupt("tier"))?)
+                    .filter(|end| *end <= container.len())
+                    .ok_or(Error::Corrupt("tier"))?;
+                packs.push(container.slice(start..end).read_bytes()?);
+            }
+        }
+        packs.extend(at.sediment.iter().map(|s| OwnedBytes::new(s.to_vec())));
+        if packs.is_empty() {
+            return Ok(Searched::Hits {
+                hits: vec![],
+                exhausted: true,
+            });
+        }
+        let opened = kbx_dir::open(&packs)?;
+        let reader: IndexReader = opened
+            .index
+            .reader_builder()
+            .reload_policy(ReloadPolicy::Manual)
+            .try_into()?;
+        let searcher = reader.searcher();
+        let hidden: HashSet<DocAddress> = opened
+            .hidden(&searcher, &self.fields, &[])?
+            .into_iter()
+            .enumerate()
+            .flat_map(|(ord, docs)| {
+                let ord = u32::try_from(ord).unwrap_or(u32::MAX);
+                docs.into_iter().map(move |doc| DocAddress::new(ord, doc))
+            })
+            .collect();
+        let weights = self
+            .weights
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let out = query::run_hiding(&self.fields, &weights, &searcher, q, &hidden)?;
+        budget.check()?;
+        Ok(out)
+    }
+
     /// The writer, with the directory lock as the fence: a lock held elsewhere is
     /// [`Error::WriterHeld`] at once, never a wait.
     pub(crate) fn acquire_writer(&self) -> Result<Writer> {
@@ -538,6 +620,24 @@ impl TextIndex for TantivyIndex {
         match self.serving()? {
             Some(serving) => self.search_in(&serving, query),
             None => Ok(Searched::Unavailable),
+        }
+    }
+
+    /// A segment this crate did not write makes the snapshot unavailable, as for
+    /// [`Self::search`].
+    fn search_at(
+        &self,
+        at: &TextSnapshot<'_>,
+        query: &TextQuery<'_>,
+        budget: &QueryBudget,
+    ) -> kaban_core::Result<Searched> {
+        match self.search_snapshot(at, query, budget) {
+            Ok(searched) => Ok(searched),
+            Err(error @ Error::Corrupt(_)) => {
+                tracing::error!(%error, "the catalog's text snapshot is unavailable");
+                Ok(Searched::Unavailable)
+            }
+            Err(error) => Err(error.into()),
         }
     }
 
