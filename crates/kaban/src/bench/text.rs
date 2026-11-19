@@ -41,7 +41,7 @@ pub(crate) fn run(args: &Args) -> ExitCode {
 
 #[cfg(feature = "bench")]
 mod imp {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::fs;
     use std::io::{BufWriter, Write};
     use std::os::unix::fs::MetadataExt;
@@ -276,6 +276,21 @@ mod imp {
             .collect()
     }
 
+    fn required_fragment(q: usize, ranked: &[Value]) -> Option<(Value, bool)> {
+        match q {
+            40 => Some((
+                json!({"includes_rid":27_294}),
+                ranked.iter().any(|r| r["rid"] == 27_294),
+            )),
+            // The second Method supplies both parts via its Snapshot descriptor.
+            43 => Some((
+                json!({"first_rid":27_501, "rids":[16_402,27_501]}),
+                matches!(ranked, [first, second] if first["rid"] == 27_501 && second["rid"] == 16_402),
+            )),
+            _ => None,
+        }
+    }
+
     fn parity(
         store: &SqliteStore,
         rows: &[Symbol],
@@ -302,14 +317,10 @@ mod imp {
                         rows,
                         &query(name, MatchMode::Lexical, &kinds, None, 5),
                     )?;
-                    let fixed = match i {
-                        40 => Some(ranked.iter().any(|r| r["name"] == "configure_connection")),
-                        43 => Some(
-                            !ranked.is_empty()
-                                && ranked.iter().all(|r| r["name"] == "snapshot_symbols"),
-                        ),
-                        _ => None,
-                    };
+                    let fixed = required_fragment(i, &ranked).map(|(expected, passed)| {
+                        result["expected"] = expected;
+                        passed
+                    });
                     required_pass &= fixed.unwrap_or(true);
                     result["class"] = json!("fragment");
                     result["label_lexical"] = json!(ranked);
@@ -409,6 +420,48 @@ mod imp {
             .collect()
     }
 
+    /// Validate the six frozen S4 probes from their independently identified
+    /// source rows. Both capped probes have a single eligible whole surface token.
+    fn fuzzy_oracle(rows: &[Symbol], text: &str, rids: &[i64]) -> Result<(Value, bool)> {
+        let capped = match text {
+            "sqlitestoer" => Some(("sqlitestore", 239)),
+            "codegraphreder" => Some(("codegraphreader", 37)),
+            _ => None,
+        };
+        if let Some((token, population)) = capped {
+            let eligible: BTreeSet<_> = rows
+                .iter()
+                .filter(|row| {
+                    [&row.name, &row.tail].into_iter().any(|field| {
+                        field
+                            .split(|c: char| !c.is_ascii_alphanumeric())
+                            .any(|word| word.eq_ignore_ascii_case(token))
+                    })
+                })
+                .map(|row| row.rid)
+                .collect();
+            let returned: BTreeSet<_> = rids.iter().copied().collect();
+            let valid = eligible.len() == population
+                && rids.len() == 10
+                && returned.len() == 10
+                && returned.is_subset(&eligible);
+            return Ok((
+                json!({"whole_token":token,"population":population,
+                "eligible_rids":eligible,"distinct_hits":10}),
+                valid,
+            ));
+        }
+        let expected: &[i64] = match text {
+            "configur_connection" => &[27_294],
+            "snapshotsymbls" => &[],
+            "graphstor" => &[19_937],
+            "toolrouter" => &[7_845, 7_846, 7_847, 7_848],
+            _ => bail!("missing fuzzy oracle for {text}"),
+        };
+        let valid = rids.len() == expected.len() && expected.iter().all(|rid| rids.contains(rid));
+        Ok((json!({"rids":expected}), valid))
+    }
+
     fn warm(store: &SqliteStore, rows: &[Symbol], out: &mut impl Write) -> Result<bool> {
         let mut all_pass = true;
         for (class, mode, texts) in [
@@ -423,7 +476,7 @@ mod imp {
                 .collect();
             let mut warmup = Vec::new();
             let mut results_valid = true;
-            for (index, q) in queries.iter().enumerate() {
+            for q in &queries {
                 let hits = search(store, q)?;
                 let rids: Vec<_> = hits.iter().map(|h| h.rid).collect();
                 let names: Vec<_> = rids
@@ -439,12 +492,7 @@ mod imp {
                         )
                     }
                     "prefix" => (json!({"hits":10}), hits.len() == 10),
-                    "fuzzy" => {
-                        // The zero-result typo is part of the original rotation. The other
-                        // five have 8, 14 (capped at 10), 2, 1 and 1 matches respectively.
-                        let count = [8, 10, 0, 2, 1, 1][index];
-                        (json!({"hits":count}), hits.len() == count)
-                    }
+                    "fuzzy" => fuzzy_oracle(rows, q.text, &rids)?,
                     _ => (json!({"min_hits":1}), !hits.is_empty()),
                 };
                 results_valid &= valid;
