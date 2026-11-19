@@ -31,6 +31,12 @@ impl Base {
             extent: Extent::open(bytes, KIND_BASE, &t)?,
         })
     }
+
+    /// Whether any entry of this base names `n` (see [`crate::Layer::mentions`]).
+    #[must_use]
+    pub fn mentions(&self, n: LocalId) -> bool {
+        self.extent.mentions(n.0)
+    }
 }
 
 /// Build a base from `r` applied in order to an empty graph. The id domain is `n` widened to

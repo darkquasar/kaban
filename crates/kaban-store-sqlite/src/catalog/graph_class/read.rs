@@ -155,6 +155,17 @@ impl Opened {
         })
     }
 
+    /// The base, `None` for an empty chain.
+    pub(super) fn base(&self) -> Option<&Base> {
+        self.base.as_ref()
+    }
+
+    /// Whether any of these extents names `n` (a removal included).
+    pub(super) fn mentions(&self, n: LocalId) -> bool {
+        self.base.as_ref().is_some_and(|b| b.mentions(n))
+            || self.layers.iter().any(|l| l.mentions(n))
+    }
+
     /// The view of these extents over `sediment`.
     ///
     /// # Errors

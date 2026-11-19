@@ -7,6 +7,7 @@
 //!   commit [Stage] => one GraphLayer sediment row: Records::encode(node + edge ops)
 //!   compact        => seal: pending rows -> layer over the chain (the first seal -> base)
 //!                  => fold: the whole chain from its first extent -> one base
+//!   purge rids     => base: the whole chain folded without the rids; layers: empty layers
 //!   rebuild        => node truth + edge rows of one snapshot -> base; old graph rows go
 //! ```
 //!
@@ -35,8 +36,8 @@ use std::os::unix::fs::FileExt;
 use kaban_core::query_budget::{BudgetExceeded, Limit, QueryBudget};
 use kaban_core::{BackendSource, Durability, Result, StoreError, ViewName};
 use kaban_index_graph::{
-    Attr, EdgeOp, GraphError, Layer, LocalId, NodeOp, OpKind, PreparedSediment, Records, View,
-    build_base, fold,
+    Attr, DecodedRecords, EdgeOp, GraphError, Layer, LocalId, NodeOp, OpKind, PreparedSediment,
+    Records, View, build_base, fold, seal,
 };
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
@@ -202,7 +203,9 @@ impl IndexClass for GraphClass {
     /// The layer of `rows` (main's pending graph rows, oldest first) over main's graph chain at
     /// the pin; over an empty chain, that layer flattened into a base. Seals from the cached
     /// prepared sediment when it holds exactly these rows first (amendment 3.6), otherwise
-    /// prepares them under `budget`.
+    /// prepares them under `budget`. A node the rows leave removed that the chain does not hold
+    /// (a purged one among them) is left out with its edges ([`vanished`]), so its id never
+    /// returns into an extent.
     fn seal(
         &self,
         pin: &Pin,
@@ -224,18 +227,40 @@ impl IndexClass for GraphClass {
         let opened = read::Opened::open(pin, &chain, budget)?;
         let empty = PreparedSediment::empty();
         let parent = opened.view(&empty, budget)?;
-        let cached = read::seal_cached(pin, &chain, &rows, &parent, budget)?;
+        let decoded = rows
+            .iter()
+            .map(|r| Records::decode(&r.payload, budget))
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(graph_error)?;
+        let gone = vanished(&decoded, &parent);
+        let cached = if gone.is_empty() {
+            read::seal_cached(pin, &chain, &rows, &parent, budget)?
+        } else {
+            None
+        };
         let layer = if let Some(layer) = cached {
             layer
         } else {
-            let decoded = rows
+            let kept = |n: LocalId| gone.binary_search(&n).is_err();
+            let batches: Vec<Records> = decoded
                 .iter()
-                .map(|r| Records::decode(&r.payload, budget))
-                .collect::<std::result::Result<Vec<_>, _>>()
-                .map_err(graph_error)?;
-            let prepared = PreparedSediment::prepare(&decoded, budget).map_err(graph_error)?;
+                .map(|d| {
+                    let r = d.records();
+                    Records {
+                        edges: r
+                            .edges
+                            .iter()
+                            .filter(|e| kept(e.src) && kept(e.dst))
+                            .cloned()
+                            .collect(),
+                        nodes: r.nodes.iter().filter(|o| kept(o.node)).cloned().collect(),
+                        facts: r.facts.iter().filter(|f| kept(f.node)).cloned().collect(),
+                    }
+                })
+                .collect();
+            let prepared = PreparedSediment::prepare(&batches, budget).map_err(graph_error)?;
             prepared
-                .seal(&parent, decoded.len(), budget)
+                .seal(&parent, batches.len(), budget)
                 .map_err(graph_error)?
                 .layer
         };
@@ -270,15 +295,43 @@ impl IndexClass for GraphClass {
         Ok(Some(fold(&view, &[])))
     }
 
-    /// Purge is Step 5 of T11 (`graph_purge.rs`): nothing yet.
+    /// `extent` rewritten without the purged `rids` (explicit omission, amendment 7.8) when it
+    /// is in main's graph chain and some extent of that chain names one of them; `None`
+    /// otherwise. The chain's base becomes the whole chain folded with `omit` = the rids, and
+    /// each layer above it an empty layer at its depth: the new base already holds what the
+    /// layers held, and a layer is replaced one for one.
     fn purge(
         &self,
-        _pin: &Pin,
-        _extent: &ExtentRef,
-        _rids: &[i64],
-        _budget: &QueryBudget,
+        pin: &Pin,
+        extent: &ExtentRef,
+        rids: &[i64],
+        budget: &QueryBudget,
     ) -> Result<Option<Vec<u8>>> {
-        Ok(None)
+        let chain = read::main_chain(pin)?;
+        let Some(at) = chain.iter().position(|e| e == extent) else {
+            return Ok(None);
+        };
+        let omit: Vec<LocalId> = rids.iter().filter_map(|&r| local_id(r).ok()).collect();
+        let opened = read::Opened::open(pin, &chain, budget)?;
+        if !omit.iter().any(|&n| opened.mentions(n)) {
+            return Ok(None);
+        }
+        let empty = PreparedSediment::empty();
+        if at == 0 {
+            // the base's bytes, about the size of the extents it flattens
+            let held: u64 = chain.iter().map(kbx_len).sum();
+            let _held = budget.reserve(held).map_err(budget_exceeded)?;
+            let view = opened.view(&empty, budget)?;
+            return Ok(Some(fold(&view, &omit)));
+        }
+        let mut layers: Vec<Layer> = Vec::with_capacity(at);
+        let mut layer = Vec::new();
+        for _ in 0..at {
+            let parent = View::new(opened.base(), &layers, &empty, budget).map_err(graph_error)?;
+            layer = seal(&parent, &Records::default());
+            layers.push(Layer::open(OwnedBytes::new(layer.clone()), budget).map_err(graph_error)?);
+        }
+        Ok(Some(layer))
     }
 
     /// [`GraphClass::rebuild_main`].
@@ -358,6 +411,24 @@ pub(crate) fn graph_error(e: GraphError) -> StoreError {
             source: BackendSource::new(other),
         },
     }
+}
+
+/// The nodes `batches` (oldest first) leave removed, their newest node op a removal, that
+/// `parent` does not hold: sorted. Their ops change nothing the chain holds, so a seal leaves
+/// them and their edges out. This relies on the memory graph's rows: an edge row needs both of
+/// its nodes, so a node the chain does not hold has no edge there either.
+fn vanished(batches: &[DecodedRecords], parent: &View<'_>) -> Vec<LocalId> {
+    let mut newest = std::collections::BTreeMap::new();
+    for b in batches {
+        for op in &b.records().nodes {
+            newest.insert(op.node, op.kind);
+        }
+    }
+    newest
+        .into_iter()
+        .filter(|&(n, kind)| kind == OpKind::Remove && !parent.contains(n))
+        .map(|(n, _)| n)
+        .collect()
 }
 
 /// The local id of the node row `rid` (PC-1).

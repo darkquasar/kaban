@@ -37,6 +37,7 @@ use tantivy::directory::OwnedBytes;
 use crate::charge::{Phase, Ticker};
 use crate::error::GraphError;
 use crate::facts::{FactEntry, Facts};
+use crate::id::LocalId;
 use crate::op::{Attr, OpKind, Reader, Records, column, corrupt, kind_byte, kind_from, put_len};
 use crate::presence::{IdIndex, IdIter, Presence, check_kinds};
 use crate::view::View;
@@ -304,6 +305,13 @@ impl Edges {
         let t = Ticker::unmetered();
         std::iter::from_fn(move || ids.next(&t, Phase::Writer))
     }
+
+    /// Whether `n` has a list here or is the neighbour of any entry.
+    fn names(&self, n: u32) -> bool {
+        self.index.rank(n).is_some()
+            || (0..self.entries)
+                .any(|i| column::<4>(&self.nbrs, i).map(u32::from_le_bytes) == Some(n))
+    }
 }
 
 /// The union of touched nodes over a chain, in one direction: a density-chosen id index.
@@ -331,6 +339,19 @@ pub(crate) struct Extent {
 }
 
 impl Extent {
+    /// Whether any entry of this extent names `n`: its presence, an edge list of it or an edge
+    /// to it, a fact of it, or a chain union.
+    pub(crate) fn mentions(&self, n: u32) -> bool {
+        self.presence.get(n).is_some()
+            || self.out.names(n)
+            || self.inc.names(n)
+            || self.facts.of_node(n).next().is_some()
+            || self
+                .union
+                .as_ref()
+                .is_some_and(|(out, inc)| out.contains(n) || inc.contains(n))
+    }
+
     /// The edge section of one direction (`true` for outgoing).
     pub(crate) fn edges(&self, out: bool) -> &Edges {
         if out { &self.out } else { &self.inc }
@@ -513,6 +534,13 @@ impl Layer {
         Ok(Layer {
             extent: Extent::open(bytes, KIND_LAYER, &t)?,
         })
+    }
+
+    /// Whether any entry of this layer names `n` (presence, edges in either direction, facts or
+    /// the chain unions, a removal included): how a purge is checked.
+    #[must_use]
+    pub fn mentions(&self, n: LocalId) -> bool {
+        self.extent.mentions(n.0)
     }
 }
 
