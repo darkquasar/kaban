@@ -972,8 +972,8 @@ impl<'v> MainGraph<'v> {
     pub fn rel(&self, rel: &str) -> Option<kaban_index_graph::RelId> {
         self.loaded.rel_id(rel)
     }
-    /// The public `NodeId` tie order of the snapshot ([`LoadedView::stable_order`]: the first
-    /// ask at a generation prepares it under the query's budget, later ones share it).
+    /// The public `NodeId` tie order of the snapshot ([`LoadedView::stable_order`]: this snapshot's
+    /// identity ceiling over the shared committed keys, extended under the query's budget).
     ///
     /// # Errors
     /// The budget's and SQLite's errors.

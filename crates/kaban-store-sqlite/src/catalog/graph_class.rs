@@ -22,6 +22,7 @@
 //! flattened), so the first graph extent of a chain is opened as a base and the rest as layers,
 //! whatever class name compaction gave them.
 
+mod order;
 mod read;
 
 #[cfg_attr(

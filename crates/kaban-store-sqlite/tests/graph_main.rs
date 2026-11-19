@@ -17,13 +17,12 @@ use kaban_core::{
     IngestStore, MemoryStore, NewNode, NodeId, Op, StoreError, WorkspaceId, WriteBatch,
 };
 use kaban_index_graph::{
-    Caps, Direction, LocalId, RankParams, RelSelection, RowCap, StableOrder, expand, pagerank,
+    Caps, Direction, LocalId, RankParams, RelSelection, RowCap, expand, pagerank,
 };
 use kaban_store_sqlite::catalog_testing;
 use kaban_store_sqlite::{SqliteStore, WorkKind};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 fn budget() -> QueryBudget {
@@ -109,6 +108,8 @@ fn multi_process_link_role() {
     store
         .link(&a, &b, "RELATES_TO", None, None, &ctx())
         .unwrap();
+    let remote = nid(&created(&store, "Fact", "created in the child").id);
+    std::fs::write(dir.join("new-node"), remote.as_str()).unwrap();
 }
 
 /// A spawned role process, killed and reaped however the test ends.
@@ -164,6 +165,10 @@ fn a_link_committed_by_another_process_is_traversable_here_once_it_exits() {
     let store = SqliteStore::open(&s.db(), &s.keys()).unwrap();
     let [a, b] = ["a", "b"].map(|t| nid(&created(&store, "Fact", t).id));
     assert_eq!(out_of(&store, &a), Vec::<NodeId>::new(), "no edge yet");
+    let (old_rid, old_order) = catalog_testing::with_main_graph(&store, &budget(), |g| {
+        Ok((g.local(&a)?.unwrap(), g.order()?))
+    })
+    .unwrap();
     std::fs::write(
         s.0.join(LINK_NODES),
         format!("{}\n{}", a.as_str(), b.as_str()),
@@ -182,6 +187,19 @@ fn a_link_committed_by_another_process_is_traversable_here_once_it_exits() {
     // Assert: A traverses the edge at once, through its cached graph
     assert!(status.success(), "the linking process failed: {status}");
     assert_eq!(out_of(&store, &a), vec![b]);
+    let remote = nid(&std::fs::read_to_string(s.0.join("new-node")).unwrap());
+    catalog_testing::with_main_graph(&store, &budget(), |g| {
+        let rid = g.local(&remote)?.unwrap();
+        let order = g.order()?;
+        assert_eq!(
+            order.rank(old_rid).unwrap(),
+            old_order.rank(old_rid).unwrap()
+        );
+        assert!(order.rank(rid).is_ok());
+        assert!(old_order.rank(rid).is_err());
+        Ok(())
+    })
+    .unwrap();
 }
 
 #[test]
@@ -581,51 +599,63 @@ fn graph_rows_seal_once_the_node_and_edge_operations_they_hold_reach_seal_ops() 
     assert_eq!(reached, 1, "3 operations reach seal_ops 3");
 }
 
-/// A scored query over `store`'s main graph under `b`: its tie order (the `Arc` it was handed,
-/// and the bytes asking for it reserved on `b`), then a `PageRank` over it.
-fn ranked(store: &SqliteStore, b: &QueryBudget) -> kaban_core::Result<(Arc<dyn StableOrder>, u64)> {
+/// Run a scored query through the order selected by the graph adapter.
+fn ranked(store: &SqliteStore, b: &QueryBudget) -> kaban_core::Result<()> {
     catalog_testing::with_main_graph(store, b, |g| {
-        let before = b.live_bytes();
-        let order = g.order()?;
-        let reserved = b.live_bytes() - before;
-        let params = RankParams::default();
-        pagerank(g.view(), &RelSelection::All, params, &*order, RowCap(10), b).unwrap();
-        Ok((order, reserved))
+        pagerank(
+            g.view(),
+            &RelSelection::All,
+            RankParams::default(),
+            &*g.order()?,
+            RowCap(10),
+            b,
+        )
+        .unwrap();
+        Ok(())
     })
 }
 
 #[test]
-fn scored_queries_at_one_generation_share_one_tie_order_and_a_commit_prepares_a_new_one() {
-    // Arrange: a -> b
-    let s = Scratch::new("kaban-t11-main", "order-once");
+fn scored_queries_reuse_committed_identities_within_and_across_snapshots() {
+    const NODES: u32 = 4096;
+    let s = Scratch::new("kaban-w5-order", "reuse");
     let store = SqliteStore::open(&s.db(), &s.keys()).unwrap();
-    let [a, b] = ["a", "b"].map(|t| nid(&created(&store, "Fact", t).id));
-    store
-        .link(&a, &b, "RELATES_TO", None, None, &ctx())
+    many_nodes(&store, NODES);
+    let cold = budget();
+    let (first, old_key) = catalog_testing::with_main_graph(&store, &cold, |g| {
+        let order = g.order()?;
+        let key = order.rank(LocalId(NODES - 1)).unwrap();
+        Ok((order, key))
+    })
+    .unwrap();
+
+    // Leave enough budget for a handle and a small tail.
+    let read = |new: Option<&NodeId>| {
+        let b = budget();
+        catalog_testing::with_main_graph(&store, &b, |g| {
+            let _held = b.reserve(u64::MAX - b.live_bytes() - 16_384).unwrap();
+            let order = g.order()?;
+            assert_eq!(order.rank(LocalId(NODES - 1)).unwrap(), old_key);
+            if let Some(id) = new {
+                let rid = g.local(id)?.unwrap();
+                assert!(order.rank(rid).is_ok());
+                assert!(first.rank(rid).is_err());
+            }
+            Ok(())
+        })
         .unwrap();
+    };
+    read(None);
+    let new = nid(&created(&store, "Fact", "new identity").id);
+    read(Some(&new));
+    catalog_testing::rebuild_graph(&store).unwrap();
+    read(Some(&new));
 
-    // Act: two scored queries at one generation, a commit, a third
-    let (first, first_reserved) = ranked(&store, &budget()).unwrap();
-    let (second, second_reserved) = ranked(&store, &budget()).unwrap();
-    created(&store, "Fact", "c");
-    let (third, third_reserved) = ranked(&store, &budget()).unwrap();
-
-    // Assert: the second query reuses the first one's order and reserves nothing for it; the
-    // third, at the commit's generation, has an order of its own
-    assert!(
-        Arc::ptr_eq(&first, &second),
-        "the second scored query at one generation prepared the tie order again"
-    );
-    assert_eq!(second_reserved, 0, "bytes the reused order reserved");
-    assert!(
-        !Arc::ptr_eq(&second, &third),
-        "a query after a commit reused the older generation's tie order"
-    );
-    assert!(first_reserved > 0, "the first preparation is charged");
-    assert!(
-        third_reserved > 0,
-        "the new generation's preparation is charged"
-    );
+    catalog_testing::advance_graph_cache_clock(Duration::from_secs(61));
+    catalog_testing::with_main_graph(&store, &budget(), |_| Ok(())).unwrap();
+    assert!(cold.live_bytes() > 0, "the old order still owns its keys");
+    drop(first);
+    assert_eq!(cold.live_bytes(), 0);
 }
 
 /// Present nodes in one commit of `store`: rids `0..n` (each sorting as its rid).
@@ -654,7 +684,7 @@ fn an_expand_reserves_no_tie_order_and_a_pagerank_under_the_same_ceiling_is_refu
     catalog_testing::with_main_graph(&store, &budget(), |g| Ok(g.view().contains(LocalId(0))))
         .unwrap();
 
-    // Act: an expand, then a PageRank, each under a ceiling of half the order's id pairs
+    // Act: an expand, then a PageRank, each under a ceiling too small for all identities
     let ceiling = u64::from(NODES) * 4;
     let tight = || QueryBudget::new(ceiling, Some(Duration::from_secs(10)));
     let b = tight();
@@ -669,7 +699,7 @@ fn an_expand_reserves_no_tie_order_and_a_pagerank_under_the_same_ceiling_is_refu
         );
         Ok(r.unwrap().nodes.len())
     });
-    let pagerank = ranked(&store, &tight()).map(|_| ());
+    let pagerank = ranked(&store, &tight());
 
     // Assert: the expand prepares no order; the PageRank's preparation is refused
     assert!(
@@ -680,6 +710,13 @@ fn an_expand_reserves_no_tie_order_and_a_pagerank_under_the_same_ceiling_is_refu
         matches!(pagerank, Err(StoreError::BudgetExceeded(_))),
         "a PageRank under {ceiling} bytes for {NODES} nodes: {pagerank:?}"
     );
+    // A failed refresh may have retained a prefix. A fresh query must see every key.
+    catalog_testing::with_main_graph(&store, &budget(), |g| {
+        let order = g.order()?;
+        assert!((0..NODES).all(|rid| order.rank(LocalId(rid)).is_ok()));
+        Ok(())
+    })
+    .unwrap();
 }
 
 #[test]
@@ -719,4 +756,112 @@ fn a_query_pinned_before_a_commit_gets_its_own_generations_tie_order_after_it() 
         !c_ranked,
         "the query pinned at g got a newer generation's tie order (it ranks c)"
     );
+}
+
+fn insert_fact(id: &NodeId, text: &str) -> Op {
+    Op::UpsertNode {
+        id: id.clone(),
+        node: NewNode {
+            kind: "Fact".into(),
+            text: text.into(),
+            ..Default::default()
+        },
+    }
+}
+
+#[test]
+fn inserting_an_earlier_public_uuid_preserves_the_existing_identity_key() {
+    let s = Scratch::new("kaban-w5-order", "insert");
+    let store = SqliteStore::open(&s.db(), &s.keys()).unwrap();
+    let old = nid(&created(&store, "Fact", "old").id);
+    let (rid, first) = catalog_testing::with_main_graph(&store, &budget(), |g| {
+        Ok((g.local(&old)?.unwrap(), g.order()?))
+    })
+    .unwrap();
+    let original = first.rank(rid).unwrap();
+
+    let earlier = nid("00000000-0000-7000-8000-000000000001");
+    let refused = nid("00000000-0000-7000-8000-000000000002");
+    let rolled_back = store.apply_batch(
+        WriteBatch::new(
+            WorkspaceId::default(),
+            vec![
+                insert_fact(&refused, "rolled back"),
+                Op::UpsertEdge {
+                    src: refused.clone(),
+                    dst: old.clone(),
+                    rel: "NO_SUCH_REL".into(),
+                    props: None,
+                },
+            ],
+        ),
+        &ctx(),
+    );
+    assert!(matches!(rolled_back, Err(StoreError::UnknownRel(_))));
+    store
+        .apply_batch(
+            WriteBatch::new(
+                WorkspaceId::default(),
+                vec![insert_fact(&earlier, "earlier")],
+            ),
+            &ctx(),
+        )
+        .unwrap();
+    catalog_testing::with_main_graph(&store, &budget(), |g| {
+        let second = g.order()?;
+        let new_rid = g.local(&earlier)?.unwrap();
+        assert_eq!(
+            second.rank(rid).unwrap(),
+            original,
+            "a node keeps its identity key across commits"
+        );
+        let key = second.rank(new_rid).unwrap();
+        assert!(key < original);
+        assert_eq!(
+            key.0,
+            0x0000_0000_0000_7000_8000_0000_0000_0001_u128.to_be_bytes()
+        );
+        assert_eq!(g.local(&refused)?, None);
+        assert!(
+            second.rank(LocalId(0)).is_err(),
+            "an unknown rid below the ceiling"
+        );
+        assert!(first.rank(new_rid).is_err());
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+fn a_purged_identity_keeps_its_key_but_leaves_the_scored_graph() {
+    let s = Scratch::new("kaban-w5-order", "ghost");
+    let store = SqliteStore::open(&s.db(), &s.keys()).unwrap();
+    let gone = nid(&created(&store, "Fact", "gone").id);
+    let stays = nid(&created(&store, "Fact", "stays").id);
+    let (rid, before) = catalog_testing::with_main_graph(&store, &budget(), |g| {
+        let rid = g.local(&gone)?.unwrap();
+        Ok((rid, g.order()?.rank(rid).unwrap()))
+    })
+    .unwrap();
+    store
+        .forget(&gone, kaban_core::ForgetMode::Purge, &ctx())
+        .unwrap();
+    catalog_testing::advance_graph_cache_clock(Duration::from_secs(61));
+    catalog_testing::with_main_graph(&store, &budget(), |g| {
+        let order = g.order()?;
+        assert_eq!(order.rank(rid).ok(), Some(before));
+        assert!(!g.view().contains(rid));
+        let scored = pagerank(
+            g.view(),
+            &RelSelection::All,
+            RankParams::default(),
+            &*order,
+            RowCap(1),
+            &budget(),
+        )
+        .unwrap();
+        assert_eq!(scored.rows[0].0, g.local(&stays)?.unwrap());
+        Ok(())
+    })
+    .unwrap();
 }

@@ -6,7 +6,7 @@ use kaban_core::query_budget::QueryBudget;
 
 use crate::charge::{Charged, Grow, Hold, Phase, Ticker};
 use crate::error::GraphError;
-use crate::id::{Direction, LocalId, RelSelection, StableOrder};
+use crate::id::{Direction, LocalId, RelSelection, StableOrder, TieRank};
 use crate::traverse::{Caps, Reached, check_caps, expand_window};
 use crate::view::View;
 
@@ -15,7 +15,7 @@ pub type WeightedPath = (i64, Vec<LocalId>);
 
 /// A heap entry: (cost, hops, node rank, parent rank, node, parent). Ranks are unique per node,
 /// so the order of the first four fields decides.
-type Entry = (i64, u32, u32, u32, u32, u32);
+type Entry = (i64, u32, TieRank, TieRank, u32, u32);
 
 /// Push `e` onto the min-heap `h`.
 fn heap_push(h: &mut Grow<'_, Entry>, e: Entry) -> Result<(), GraphError> {
@@ -118,7 +118,8 @@ pub fn weighted_shortest_path(
     let rows = usize::try_from(caps.rows).unwrap_or(usize::MAX);
     let depth = u32::from(caps.depth);
     let mut found = None;
-    heap_push(&mut heap, (0, 0, order.rank(src)?.0, 0, src.0, src.0))?;
+    let source_rank = order.rank(src)?;
+    heap_push(&mut heap, (0, 0, source_rank, source_rank, src.0, src.0))?;
     loop {
         tick.tick(Phase::Weighted)?;
         let Some((cost, hops, rank, _, node, parent)) = heap_pop(&mut heap) else {
@@ -161,10 +162,7 @@ pub fn weighted_shortest_path(
                 past.push((m.0, cost))?;
                 continue;
             }
-            heap_push(
-                &mut heap,
-                (cost, hops + 1, order.rank(m)?.0, rank, m.0, node),
-            )?;
+            heap_push(&mut heap, (cost, hops + 1, order.rank(m)?, rank, m.0, node))?;
         }
     }
     for &(m, cost) in past.iter() {

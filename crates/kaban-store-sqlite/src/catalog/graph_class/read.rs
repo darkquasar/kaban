@@ -10,8 +10,7 @@
 //!                           (only the newer rows' payloads are read)
 //!                           a seal's leftover fits? extend that; otherwise prepare afresh
 //!     => LoadedView { opened extents, prepared sediment, relations, the transaction }
-//!   stable_order => the tie order by public id of the generation: prepared by the first
-//!                   query that asks for it, kept with the entry, shared by later queries
+//!   stable_order => a snapshot ceiling over the shared map of committed node identities
 //! ```
 //!
 //! The cache (one entry per container and view, in this process) keeps what the newest
@@ -25,7 +24,8 @@
 //! to the budget of the query that builds it, before it is built, and stays charged while the
 //! cache keeps it (the entry's own lists too); a query that reuses it is charged nothing more.
 //! The tie order by public id is prepared lazily: only a query that consumes it (the scored
-//! functions, the weighted path) asks for it, and it goes with its generation's entry.
+//! functions, the weighted path) asks for it. Entries of the same incarnation and view carry
+//! its map forward across chain and generation changes.
 //! A store without a container (in memory) caches nothing.
 
 #![cfg_attr(
@@ -44,11 +44,10 @@ use std::time::{Duration, Instant, SystemTime};
 use kaban_core::ontology::{Ns, Qualified, stored_name};
 use kaban_core::query_budget::{BudgetLease, QueryBudget};
 use kaban_core::{BackendSource, NodeId, Result, StoreError, ViewName};
-use kaban_index_graph::{
-    Base, GraphError, Layer, LocalId, PreparedSediment, Records, RelId, StableOrder, TieRank, View,
-};
+use kaban_index_graph::{Base, Layer, LocalId, PreparedSediment, Records, RelId, View};
 use rusqlite::{Connection, OptionalExtension, Transaction};
 
+use super::order::{Identities, NodeOrder};
 use super::{CLASSES, GraphRefused, PURGED, SEDIMENT, graph_error};
 use crate::catalog::class::ExtentClass;
 use crate::catalog::pin::{OutsidePin, Pin, PinnedView, budget_exceeded};
@@ -278,7 +277,7 @@ struct Entry {
     sediment: Arc<PreparedSediment>,
     /// What a seal from `sediment` left, to read over `key.chain` plus the sealed layer.
     rest: Option<Arc<Rest>>,
-    tie_order: TieOrder,
+    identities: Arc<Identities>,
     used: Instant,
 }
 
@@ -308,10 +307,6 @@ struct Rest {
     sediment: Arc<PreparedSediment>,
     _charge: BudgetLease,
 }
-
-/// The tie order by public id of one generation, prepared by the first query at that
-/// generation that asks for it ([`LoadedView::stable_order`]).
-type TieOrder = Arc<Mutex<Option<Arc<NodeOrder>>>>;
 
 /// The process's cache of opened views (see the module documentation).
 static CACHE: Mutex<Vec<Entry>> = Mutex::new(Vec::new());
@@ -388,15 +383,24 @@ fn cached(
 
 /// Keep `entry` as its container's and view's entry, unless the cache already holds a newer
 /// generation of the same incarnation of them.
-fn keep(entry: Entry) {
+fn keep(mut entry: Entry) -> Arc<Identities> {
     let mut cache = CACHE.lock().unwrap_or_else(PoisonError::into_inner);
-    match cache.iter_mut().find(|e| {
+    if let Some(e) = cache.iter_mut().find(|e| {
         e.key.kbx == entry.key.kbx && e.key.view == entry.key.view && e.key.layer == entry.key.layer
     }) {
-        Some(e)
-            if e.key.incarnation == entry.key.incarnation && e.generation > entry.generation => {}
-        Some(e) => *e = entry,
-        None => cache.push(entry),
+        if e.key.incarnation == entry.key.incarnation {
+            if e.generation > entry.generation {
+                return Arc::clone(&e.identities);
+            }
+            // Concurrent first loads may have provisioned separate empty maps.
+            entry.identities = Arc::clone(&e.identities);
+        }
+        *e = entry;
+        Arc::clone(&e.identities)
+    } else {
+        let identities = Arc::clone(&entry.identities);
+        cache.push(entry);
+        identities
     }
 }
 
@@ -520,13 +524,14 @@ pub(crate) fn load_view<'t>(
         _ => prepared,
     };
     let (rels, rels_charge) = Rels::read(rows, budget)?;
-    // this generation's tie order (one of the same generation and chain shares it)
-    let tie_order = same.map_or_else(TieOrder::default, |e| Arc::clone(&e.tie_order));
-    if let Some(incarnation) = incarnation {
+    let identities = match &prior {
+        Some(e) => Arc::clone(&e.identities),
+        None => Identities::new(budget)?,
+    };
+    let identities = if let Some(incarnation) = incarnation {
         // the entry's slot, its key and what the key names and lists
         let held = size_of::<Entry>()
             + size_of::<Key>()
-            + size_of::<Mutex<Option<Arc<NodeOrder>>>>()
             + pin.kbx_path().as_os_str().len()
             + name.len()
             + ids.len() * size_of::<ExtentId>();
@@ -547,17 +552,19 @@ pub(crate) fn load_view<'t>(
             first_batch,
             sediment: Arc::clone(&sediment),
             rest: same.and_then(|e| e.rest.clone()),
-            tie_order: Arc::clone(&tie_order),
+            identities,
             used: now(),
-        });
-    }
+        })
+    } else {
+        identities
+    };
     Ok(LoadedView {
         rows,
         opened,
         sediment,
         rels,
         _rels_charge: rels_charge,
-        tie_order,
+        identities,
     })
 }
 
@@ -652,7 +659,7 @@ pub(crate) struct LoadedView<'t> {
     sediment: Arc<PreparedSediment>,
     rels: Rels,
     _rels_charge: BudgetLease,
-    tie_order: TieOrder,
+    identities: Arc<Identities>,
 }
 
 impl LoadedView<'_> {
@@ -708,86 +715,12 @@ impl LoadedView<'_> {
         rid.map(super::local_id).transpose()
     }
 
-    /// The tie order by public id of the snapshot's present nodes (the scored functions' and
-    /// the weighted path's). The first query at this generation that asks prepares it from its
-    /// own snapshot, charged to its `budget` while the cache keeps it; a later one at the same
-    /// generation gets the same table and is charged nothing. A query never sees another
-    /// generation's table.
+    /// The public UUID order of identities committed in this snapshot, including retained
+    /// purge ghosts. Graph operators select present nodes through their graph view.
     ///
     /// # Errors
     /// The budget's and SQLite's errors.
     pub(crate) fn stable_order(&self, budget: &QueryBudget) -> Result<Arc<NodeOrder>> {
-        let mut slot = self
-            .tie_order
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        if let Some(order) = slot.as_ref() {
-            return Ok(Arc::clone(order));
-        }
-        let order = Arc::new(NodeOrder::prepare(self.rows, budget)?);
-        *slot = Some(Arc::clone(&order));
-        Ok(order)
-    }
-}
-
-impl NodeOrder {
-    /// The public `NodeId` order of the present nodes `rows` sees, reserved on `budget` before
-    /// it is built.
-    ///
-    /// # Errors
-    /// The budget's and SQLite's errors.
-    fn prepare(rows: &Connection, budget: &QueryBudget) -> Result<Self> {
-        let n: i64 = rows
-            .query_row(
-                "SELECT count(*) FROM node WHERE lifecycle <> ?1",
-                [PURGED],
-                |r| r.get(0),
-            )
-            .sql()?;
-        let n = usize::try_from(n).unwrap_or(0);
-        let lease = budget
-            .reserve((n * size_of::<(u32, u32)>()) as u64)
-            .map_err(budget_exceeded)?;
-        let mut ranks = Vec::with_capacity(n);
-        let mut stmt = rows
-            .prepare("SELECT rid FROM node WHERE lifecycle <> ?1 ORDER BY id")
-            .sql()?;
-        let mut rows = stmt.query([PURGED]).sql()?;
-        let mut rank = 0_u32;
-        while let Some(r) = rows.next().sql()? {
-            if ranks.len() == n {
-                break;
-            }
-            if ranks.len() % 256 == 0 {
-                budget.check().map_err(budget_exceeded)?;
-            }
-            ranks.push((super::local_id(r.get(0).sql()?)?.0, rank));
-            rank += 1;
-        }
-        ranks.sort_unstable();
-        Ok(Self {
-            ranks,
-            _lease: lease,
-        })
-    }
-}
-
-/// The tie order by public id: local ids ranked in public `NodeId` order
-/// ([`LoadedView::stable_order`]).
-#[derive(Debug)]
-pub(crate) struct NodeOrder {
-    /// `(local id, rank)`, sorted by local id.
-    ranks: Vec<(u32, u32)>,
-    _lease: BudgetLease,
-}
-
-impl StableOrder for NodeOrder {
-    fn rank(&self, n: LocalId) -> std::result::Result<TieRank, GraphError> {
-        self.ranks
-            .binary_search_by_key(&n.0, |&(id, _)| id)
-            .ok()
-            .and_then(|i| self.ranks.get(i))
-            .map(|&(_, rank)| TieRank(rank))
-            .ok_or_else(|| GraphError::Corrupt("a node without a rank".into()))
+        self.identities.order(self.rows, budget)
     }
 }
