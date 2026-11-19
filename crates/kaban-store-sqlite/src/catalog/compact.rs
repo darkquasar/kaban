@@ -13,9 +13,10 @@
 //! claim of an input that is claimed, retired or unknown claims nothing.
 //!
 //! The chain rule of a switch: each affected view names its own change ([`ViewSwitch`]): a
-//! run of consecutive extents of its chain, in chain order, gives way to added extents in the
-//! same place (an empty run appends, as a seal does to `main`). A run that is not consecutive
-//! is refused, so a fold never moves later layers before surviving ones, and a retired extent
+//! run of extents consecutive among its chain's extents of the run's own classes, in chain
+//! order, gives way to added extents at the place of its first member (an empty run appends,
+//! as a seal does to `main`); other classes' extents keep their places. A run that is not
+//! consecutive is refused, so a fold never moves later layers before surviving ones, and a retired extent
 //! that any chain still holds after the switch is refused, so a fold in one view never takes a
 //! base another view still reads. A pin reads its chains inside its own read transaction
 //! (`Pin::load_view`), so a pin taken before the switch still sees the old rows and one taken
@@ -357,36 +358,58 @@ impl Catalog {
 }
 
 /// Apply `switch` to its view's chain: the replaced run, which must be consecutive and in
-/// chain order, gives way to the added extents (`ids` by index) in its place; an empty run
-/// appends them. Positions are renumbered from 0.
+/// chain order among the chain's extents of its own classes (other classes' extents between
+/// its members keep their places), gives way to the added extents (`ids` by index) at the
+/// place of its first member; an empty run appends them. Positions are renumbered from 0.
 fn switch_view(txn: &Txn<'_>, switch: &ViewSwitch, ids: &[ExtentId]) -> Result<()> {
     let conn = txn.conn();
     let view = switch.view.to_string();
-    let old: Vec<ExtentId> = {
+    let old: Vec<(ExtentId, Option<String>)> = {
         let mut stmt = conn
-            .prepare("SELECT extent_id FROM cat_view_extent WHERE view = ?1 ORDER BY position")
+            .prepare(
+                "SELECT v.extent_id, e.class FROM cat_view_extent v
+                 LEFT JOIN cat_extent e ON e.id = v.extent_id
+                 WHERE v.view = ?1 ORDER BY v.position",
+            )
             .sql()?;
-        let rows = stmt.query_map([&view], |r| uint(r, 0)).sql()?;
-        rows.map(|r| r.map(ExtentId))
-            .collect::<rusqlite::Result<_>>()
-            .sql()?
+        let rows = stmt
+            .query_map([&view], |r| Ok((ExtentId(uint(r, 0)?), r.get(1)?)))
+            .sql()?;
+        rows.collect::<rusqlite::Result<_>>().sql()?
     };
     let run = switch.replaced.as_slice();
-    let at = match run.first() {
-        None => old.len(),
-        Some(first) => old
+    if let Some(first) = run.first() {
+        let classes: Vec<&Option<String>> = old
             .iter()
-            .position(|id| id == first)
-            .filter(|&p| old.get(p..p + run.len()) == Some(run))
-            .ok_or_else(|| SwitchRefused::NotConsecutive(view.clone()))?,
-    };
-    let added = switch.added.iter().filter_map(|&i| ids.get(i).copied());
-    let chain: Vec<ExtentId> = old[..at]
+            .filter(|(id, _)| run.contains(id))
+            .map(|(_, class)| class)
+            .collect();
+        let same: Vec<ExtentId> = old
+            .iter()
+            .filter(|(_, class)| classes.contains(&class))
+            .map(|(id, _)| *id)
+            .collect();
+        let at = same.iter().position(|id| id == first);
+        if at.and_then(|p| same.get(p..p + run.len())) != Some(run) {
+            return Err(SwitchRefused::NotConsecutive(view).into());
+        }
+    }
+    let added: Vec<ExtentId> = switch
+        .added
         .iter()
-        .copied()
-        .chain(added)
-        .chain(old[at + run.len()..].iter().copied())
+        .filter_map(|&i| ids.get(i).copied())
         .collect();
+    let mut chain: Vec<ExtentId> = Vec::with_capacity(old.len() + added.len());
+    for (id, _) in &old {
+        if run.first() == Some(id) {
+            chain.extend(&added);
+        } else if !run.contains(id) {
+            chain.push(*id);
+        }
+    }
+    if run.is_empty() {
+        chain.extend(&added);
+    }
     conn.execute("DELETE FROM cat_view_extent WHERE view = ?1", [&view])
         .sql()?;
     let mut insert = conn
@@ -756,21 +779,16 @@ impl Catalog {
         if !(deep || heavy) {
             return Ok(());
         }
-        // the newest consecutive run of the class's extents that no other view holds
+        // the newest consecutive run of the class's extents that no other view holds (other
+        // classes' extents between them do not break it)
         let shared = |e: &ExtentRef| {
             pinned
                 .views
                 .iter()
                 .any(|v| !std::ptr::eq(v.as_ref(), view) && v.chain().contains(e))
         };
-        let Some(last) = chain.iter().rposition(owns) else {
-            return Ok(());
-        };
-        let first = chain[..=last]
-            .iter()
-            .rposition(|e| !owns(e) || shared(e))
-            .map_or(0, |p| p + 1);
-        let run = &chain[first..=last];
+        let first = own.iter().rposition(|e| shared(e)).map_or(0, |p| p + 1);
+        let run = &own[first..];
         if run.len() < 2 {
             return Ok(());
         }
@@ -780,7 +798,7 @@ impl Catalog {
             let unit = Unit {
                 class,
                 kind: WorkKind::Fold,
-                extents: run[run.len() - k..].to_vec(),
+                extents: run[run.len() - k..].iter().map(|e| (*e).clone()).collect(),
                 rows: Vec::new(),
             };
             let ids: Vec<ExtentId> = unit.extents.iter().map(|e| e.id).collect();

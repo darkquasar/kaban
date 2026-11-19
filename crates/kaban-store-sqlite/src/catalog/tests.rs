@@ -1921,3 +1921,84 @@ fn a_pin_hands_out_a_view_it_loaded_without_a_connection() {
     assert!(other_class.is_none(), "a text load served the graph class");
     assert!(other_view.is_none(), "an unloaded view was handed out");
 }
+
+/// Append `bytes` as an extent of `class` and publish it into `main`; its id.
+fn publish_into_main(store: &SqliteStore, class: ExtentClass, bytes: &[u8]) -> u64 {
+    let token = store.catalog().append_extent(class, bytes).unwrap();
+    store
+        .catalog()
+        .commit(&mut store.lock(), Durability::Normal, |txn| {
+            txn.publish(token, &[ViewName::Main])
+        })
+        .unwrap()
+        .0
+}
+
+#[test]
+fn a_fold_reaches_its_class_s_extents_past_another_class_s_between_them() {
+    // Arrange: `main` = [T0, G0, T1, G1, T2]: the test class's run with graph extents between
+    // (layers heavy enough for the test class to fold, the graph's too light to)
+    let fs = FileStore::new("fold-interleaved");
+    let store = &fs.store;
+    let _observed = super::testing::install_edge_sediment_class(store);
+    let t0 = publish_into_main(store, ExtentClass::Test, b"t0");
+    let g0 = publish_into_main(store, ExtentClass::GraphBase, &[1; 1000]);
+    let t1 = publish_into_main(store, ExtentClass::Test, b"t1");
+    let g1 = publish_into_main(store, ExtentClass::GraphBase, &[2; 10]);
+    let t2 = publish_into_main(store, ExtentClass::Test, b"t2");
+
+    // Act
+    let report = super::testing::compact(
+        store,
+        super::compact::CompactBudget {
+            memory_bytes: u64::MAX,
+            deadline: std::time::Duration::from_secs(10),
+        },
+    )
+    .unwrap();
+
+    // Assert: one fold of T0..T2 placed where T0 was; the graph extents keep their order
+    let folds: Vec<Vec<u64>> = report.published.iter().map(|c| c.extents.clone()).collect();
+    assert_eq!(folds, vec![vec![t0, t1, t2]], "{report:?}");
+    let (pin, main) = pin_main(store);
+    let chain: Vec<(ExtentClass, u64)> = main.chain().iter().map(|e| (e.class, e.id.0)).collect();
+    assert_eq!(
+        chain[1..],
+        [(ExtentClass::GraphBase, g0), (ExtentClass::GraphBase, g1)]
+    );
+    assert_eq!(chain[0].0, ExtentClass::Test);
+    assert_eq!(pin.bytes(&main.chain()[0]).unwrap().as_slice(), b"t0t1t2");
+}
+
+#[test]
+fn a_replaced_run_with_a_gap_in_its_own_class_is_refused() {
+    // Arrange: `main` = [T0, G0, T1, T2], and a claim on T0 and T2 (T1 left out)
+    let fs = FileStore::new("switch-gap");
+    let store = &fs.store;
+    let t0 = publish_into_main(store, ExtentClass::Test, b"t0");
+    let _g0 = publish_into_main(store, ExtentClass::GraphBase, b"g0");
+    let _t1 = publish_into_main(store, ExtentClass::Test, b"t1");
+    let t2 = publish_into_main(store, ExtentClass::Test, b"t2");
+    let claim = super::testing::claim(store, &[t0, t2]).unwrap().unwrap();
+
+    // Act
+    let out = super::testing::publish(
+        store,
+        claim,
+        &[b"t0t2".to_vec()],
+        &[("main", &[t0, t2])],
+        &[t0, t2],
+        &[],
+    );
+
+    // Assert
+    let err = out
+        .map(drop)
+        .expect_err("a run with a gap in its class was replaced")
+        .0;
+    let StoreError::Backend { source } = &err else {
+        panic!("not a refused switch: {err:?}");
+    };
+    let text = source.driver().to_string();
+    assert!(text.contains("is not consecutive"), "{text}");
+}
