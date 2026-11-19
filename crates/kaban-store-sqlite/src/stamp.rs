@@ -1,6 +1,5 @@
 //! Write stamps (spec 05 SS-26): who wrote a record or a change row, on which database copy,
-//! in which pack lineage. One mechanism for every write path, part of the schema (migration
-//! 0009) so no connection writes around it:
+//! in which pack lineage. The schema applies the same mechanism on every write path:
 //!
 //! ```text
 //! open => bind: register kaban_writer() = the actor on the connection (before any migration)
@@ -8,7 +7,7 @@
 //!   ~> changes_stamp (persistent, AFTER INSERT, stamp still NULL)
 //!        => RAISE writer_unbound when kaban_writer() IS NULL
 //!        => stamp the change row from kaban_writer() + index_meta (db_id, pack_lineage_id)
-//!        => copy that stamp onto the node or edge row the change names
+//!        => copy its writer reference onto the node or edge row the change names
 //! ```
 //!
 //! The writer is fixed for the connection's life: a persistent trigger may not read a
@@ -26,18 +25,17 @@ use kaban_core::{ActorId, Result, new_id};
 use rusqlite::Connection;
 use rusqlite::functions::FunctionFlags;
 
-/// The stamp columns of `node`, `edge` and `changes` (migration 0009);
-/// never canonical.
-pub(crate) const COLUMNS: [&str; 3] = ["actor_id", "instance_id", "pack_lineage_id"];
+/// The interned stamp reference on each canonical row and change.
+pub(crate) const COLUMN: &str = "writer_id";
 
 /// The SQL function the `changes_stamp` trigger reads the writer from.
 const WRITER_FUNCTION: &str = "kaban_writer";
 
-/// Whether the database carries the stamp columns (schema 0009 or later).
+/// Whether the database carries the interned stamp reference.
 fn stamped(conn: &Connection) -> Result<bool> {
     conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('changes') WHERE name = 'actor_id')",
-        [],
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('changes') WHERE name = ?1)",
+        [COLUMN],
         |r| r.get(0),
     )
     .sql()

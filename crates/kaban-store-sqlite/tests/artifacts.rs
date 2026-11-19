@@ -982,6 +982,14 @@ fn artifact_retirement_queries_use_existing_edge_and_source_indexes() {
     }
     for (sql, index) in [
         (
+            "EXPLAIN QUERY PLAN SELECT dst FROM edge WHERE src=1 AND rel='MENTIONS'",
+            "COVERING INDEX sqlite_autoindex_edge_2 (src=? AND rel=?)",
+        ),
+        (
+            "EXPLAIN QUERY PLAN SELECT src FROM edge WHERE dst=1 AND rel='MENTIONS'",
+            "edge_dst (dst=? AND rel=?)",
+        ),
+        (
             "EXPLAIN QUERY PLAN SELECT src,dst,rel FROM edge WHERE workspace_id='default' AND rel='MENTIONS' AND producer='gazetteer' AND source_id='doc-fixture'",
             "edge_rel_producer",
         ),

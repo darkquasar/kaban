@@ -129,9 +129,8 @@ fn deploy_fields(
     // the projection text, an input of the signature (module doc)
     let projection = summary_projection_over(fts_fields, "n", "kaban_body(n.text)");
     // Preserve logging for every existing canonical column, including no-op canonical
-    // updates. Only the write stamps (SS-26, a stamp-only update follows every canonical
-    // write) are excluded; no history is deleted. Leaving the stamps out keeps this text, and
-    // so the signature, unchanged by 0009.
+    // updates. The writer reference is excluded because the stamp trigger copies it
+    // onto the node after each canonical write.
     let canonical_columns: Vec<String> = conn
         .prepare(
             "SELECT name FROM pragma_table_info('node') WHERE name <> 'ident_terms' ORDER BY cid",
@@ -142,7 +141,7 @@ fn deploy_fields(
         .collect::<rusqlite::Result<Vec<_>>>()
         .sql()?
         .into_iter()
-        .filter(|name| !crate::stamp::COLUMNS.contains(&name.as_str()))
+        .filter(|name| name != crate::stamp::COLUMN)
         .collect();
     let columns = canonical_columns
         .iter()

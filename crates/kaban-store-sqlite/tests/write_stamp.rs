@@ -20,7 +20,7 @@ type Stamp = (Option<String>, Option<String>, Option<String>);
 
 fn stamp_of(conn: &Connection, table: &str, id: &str) -> Stamp {
     conn.query_row(
-        &format!("SELECT actor_id, instance_id, pack_lineage_id FROM {table} WHERE id = ?1"),
+        &format!("SELECT actor_id, instance_id, pack_lineage_id FROM {table} AS rec JOIN writer ON writer.id = rec.writer_id WHERE rec.id = ?1"),
         [id],
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
     )
@@ -31,7 +31,7 @@ fn stamp_of(conn: &Connection, table: &str, id: &str) -> Stamp {
 fn change_stamps(conn: &Connection, id: &str) -> Vec<(String, Stamp)> {
     let mut st = conn
         .prepare(
-            "SELECT op, actor_id, instance_id, pack_lineage_id FROM changes WHERE id = ?1 ORDER BY seq",
+            "SELECT op, actor_id, instance_id, pack_lineage_id FROM changes JOIN writer ON writer.id = changes.writer_id WHERE changes.id = ?1 ORDER BY seq",
         )
         .unwrap();
     st.query_map([id], |r| Ok((r.get(0)?, (r.get(1)?, r.get(2)?, r.get(3)?))))
@@ -166,7 +166,7 @@ fn two_actors_on_one_instance_stamp_public_and_maintenance_writes() {
     // no change row escapes the stamp, and the record's provenance is untouched
     let unstamped: i64 = conn
         .query_row(
-            "SELECT count(*) FROM changes WHERE actor_id IS NULL OR instance_id IS NULL OR pack_lineage_id IS NULL",
+            "SELECT count(*) FROM changes LEFT JOIN writer ON writer.id = changes.writer_id WHERE writer.id IS NULL OR actor_id IS NULL OR instance_id IS NULL OR pack_lineage_id IS NULL",
             [],
             |r| r.get(0),
         )
@@ -238,4 +238,42 @@ fn a_connection_kaban_did_not_open_cannot_write_a_canonical_row() {
             .map(|(op, stamp)| (op.as_str(), stamp.0.as_deref())),
         Some(("update", Some("bob")))
     );
+}
+
+#[test]
+fn canonical_writes_share_a_writer_tuple_and_roll_it_back_with_the_change() {
+    let s = Scratch::new("kaban-stamp", "shared-tuple");
+    let store = bound(&s, "alice");
+    let a = created(&store, "Fact", "first stamped fact");
+    created(&store, "Fact", "second stamped fact");
+    let conn = Connection::open(s.db()).unwrap();
+    let has_writer: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='writer')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        has_writer,
+        "canonical writes share one interned writer tuple"
+    );
+    let count_writers = || {
+        conn.query_row("SELECT count(*) FROM writer", [], |r| r.get::<_, i64>(0))
+            .unwrap()
+    };
+    assert_eq!(count_writers(), 1);
+    let before = change_stamps(&conn, &a.id);
+    SqliteStore::bind_writer(&conn, &ActorId::parse("rollback-actor").unwrap()).unwrap();
+    conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+    conn.execute(
+        "UPDATE node SET summary = 'temporary' WHERE id = ?",
+        [&a.id],
+    )
+    .unwrap();
+    assert_eq!(count_writers(), 2);
+    conn.execute_batch("ROLLBACK").unwrap();
+    assert_eq!(count_writers(), 1);
+    assert_eq!(change_stamps(&conn, &a.id), before);
+    assert_eq!(stamp_of(&conn, "node", &a.id).0.as_deref(), Some("alice"));
 }

@@ -340,7 +340,8 @@ fn workspace_id_is_not_null_on_exactly_the_tenant_scoped_tables() {
             "leases",
             "projections",
             "schema_type",
-            "session_edits"
+            "session_edits",
+            "writer"
         ],
         "F17 (PR-6): DB-scoped bookkeeping tables carry no workspace column"
     );

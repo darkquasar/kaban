@@ -347,15 +347,13 @@ mod tests {
                created_at TEXT, updated_at TEXT, valid_from TEXT, valid_to TEXT,
                source_session TEXT, agent_id TEXT, workspace_id TEXT, props TEXT,
                content_hash TEXT, lifecycle TEXT, store_scope TEXT, path_scope TEXT, rev INTEGER,
-               dup_key TEXT, repo TEXT, commit_sha TEXT, session_id TEXT, actor_id TEXT,
-               instance_id TEXT, pack_lineage_id TEXT);
+               dup_key TEXT, repo TEXT, commit_sha TEXT, session_id TEXT, writer_id INTEGER);
              CREATE TABLE edge(id TEXT PRIMARY KEY,
                src INTEGER NOT NULL REFERENCES node(rid) ON DELETE CASCADE,
                dst INTEGER NOT NULL REFERENCES node(rid) ON DELETE CASCADE,
                rel TEXT NOT NULL, confidence REAL, created_at TEXT, props TEXT,
                workspace_id TEXT, producer TEXT, method TEXT, score REAL, source_id TEXT,
-               offset INTEGER, len INTEGER, actor_id TEXT, instance_id TEXT,
-               pack_lineage_id TEXT, UNIQUE(src, dst, rel));",
+               offset INTEGER, len INTEGER, writer_id INTEGER, UNIQUE(src, dst, rel));",
         )
         .unwrap();
         install(&conn).unwrap();
@@ -428,8 +426,8 @@ mod tests {
 
         // Act: a stamp on both tables, then a lifecycle change and a moved edge
         conn.execute_batch(
-            "UPDATE node SET actor_id = 'x' WHERE rid = 1;
-             UPDATE edge SET actor_id = 'x' WHERE id = 'a';
+            "UPDATE node SET writer_id = 7 WHERE rid = 1;
+             UPDATE edge SET writer_id = 7 WHERE id = 'a';
              UPDATE node SET lifecycle = 'archived' WHERE rid = 1;
              UPDATE edge SET dst = 1, src = 2 WHERE id = 'a';",
         )
@@ -609,8 +607,8 @@ mod tests {
                ON CONFLICT DO NOTHING;
              INSERT OR IGNORE INTO edge(id, src, dst, rel, producer)
                VALUES ('a', 1, 2, 'RELATES_TO', 'rules');
-             UPDATE edge SET actor_id = 'x' WHERE id = 'a';
-             UPDATE node SET actor_id = 'x' WHERE rid = 1;",
+             UPDATE edge SET writer_id = 7 WHERE id = 'a';
+             UPDATE node SET writer_id = 7 WHERE rid = 1;",
         )
         .unwrap();
         let changes = drain(&conn).unwrap();
