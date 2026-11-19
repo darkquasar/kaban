@@ -8,9 +8,7 @@
 pub mod meta;
 pub mod resolve;
 
-pub use meta::{
-    DirName, IdentifierError, Index, KindBody, KindName, Ns, OntologyFile, RelBody, RelName, Stamp,
-};
+pub use meta::{IdentifierError, KindBody, KindName, Ns, OntologyFile, RelBody, RelName, Rules};
 pub use resolve::{NamespaceSet, Ontology, Qualified, resolve, split_stored, stored_name};
 
 use crate::validator::SchemaError;
@@ -52,8 +50,8 @@ pub enum OntologyError {
         rule: String,
     },
     /// A value outside its engine-spec §3.1 admission range (`version >= 1`,
-    /// `rank.expand_depth <= 4`, question `depth <= 3`, `priors`, `min_confidence` and
-    /// `confidence_required` in `[0, 1]`): `schema_invalid:range:<dotted path>`.
+    /// `rank.expand_depth <= 4`, question `depth <= 3`):
+    /// `schema_invalid:range:<dotted path>`.
     #[error("schema_invalid:range:{path}")]
     OutOfRange {
         /// The dotted path of the field (never its value).
@@ -87,9 +85,6 @@ pub enum OntologyError {
     /// A user file redefining a builtin (raised by the E1.3 seam).
     #[error("ontology_builtin_immutable")]
     BuiltinImmutable(Qualified),
-    /// The discovered-labels cap is reached (raised by E1.8).
-    #[error("discovered_cap_reached")]
-    DiscoveredCapReached,
 }
 
 /// The EN-F7 texts, exit 4 each; `<kw>` and `<rule>` are templates. A test iterates every
@@ -104,7 +99,6 @@ pub const ONTOLOGY_ERROR_TEXTS: &[&str] = &[
     "unknown_rel",
     "unknown_namespace",
     "ambiguous_kind",
-    "discovered_cap_reached",
 ];
 
 impl From<SchemaError> for OntologyError {

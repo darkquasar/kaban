@@ -9,9 +9,7 @@
 mod common;
 
 use common::Scratch;
-use kaban_core::{
-    Actor, AuditStore, ChangeLogStore, IngestStore, MemoryStore, NodeId, WorkspaceId, WriteCtx,
-};
+use kaban_core::{Actor, ChangeLogStore, IngestStore, MemoryStore, NodeId, WorkspaceId, WriteCtx};
 use kaban_ingest::{
     Candidate, PIPELINE_VERSION, Skip, SkipKey, SourceId, WalkConfig, blocked_path_document,
     config_hash, should_skip_blocked, walk,
@@ -134,15 +132,8 @@ fn ingest_blocked(tree: &Tree) -> Vec<NodeId> {
                 if should_skip_blocked(&tree.store, &keyed, &key).unwrap() {
                     continue;
                 }
-                let blocked = blocked_path_document(
-                    &ws,
-                    &keyed,
-                    &rule_ids,
-                    &key,
-                    tree.policy.effective_hash(),
-                );
-                let mut ctx = WriteCtx::new(tree.policy.effective_hash(), ws.clone(), Actor::Agent);
-                ctx.audit.push(blocked.audit);
+                let blocked = blocked_path_document(&ws, &keyed, &rule_ids, &key);
+                let ctx = WriteCtx::new(ws.clone(), Actor::Agent);
                 tree.store.apply_batch(blocked.batch, &ctx).unwrap();
                 written.push(blocked.id);
             }
@@ -212,8 +203,6 @@ fn a_canary_in_a_file_name_is_rejected_before_hashing_and_reaches_no_byte_store(
         "{props}"
     );
 
-    let audit = tree.store.audit_verify().unwrap();
-    assert!(audit.ok && audit.entries >= 1, "{audit:?}");
     let disk = disk_bytes(&tree.db);
     assert!(!contains(&disk, CANARY), "canary in db/wal/shm bytes");
     assert!(
@@ -245,7 +234,6 @@ fn the_same_rejected_file_is_skipped_on_a_second_run_via_its_keyed_identity() {
     let first = ingest_blocked(&tree);
     assert_eq!(first.len(), 1);
     let outbox_after_first = outbox_rows(&tree.store);
-    let audit_after_first = tree.store.audit_verify().unwrap().entries;
     let rev_after_first = tree.store.get(&first[0], true).unwrap().unwrap().rev;
 
     let second = ingest_blocked(&tree);
@@ -257,11 +245,6 @@ fn the_same_rejected_file_is_skipped_on_a_second_run_via_its_keyed_identity() {
         outbox_rows(&tree.store),
         outbox_after_first,
         "no changes row on the re-run"
-    );
-    assert_eq!(
-        tree.store.audit_verify().unwrap().entries,
-        audit_after_first,
-        "no audit row on the re-run"
     );
     assert_eq!(
         tree.store.get(&first[0], true).unwrap().unwrap().rev,
@@ -327,7 +310,7 @@ fn should_skip_is_true_only_when_every_component_is_unchanged() {
         })),
         ..NewNode::default()
     };
-    let ctx = WriteCtx::new(policy.effective_hash(), ws.clone(), Actor::Agent);
+    let ctx = WriteCtx::new(ws.clone(), Actor::Agent);
     store
         .apply_batch(
             WriteBatch::new(

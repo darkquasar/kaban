@@ -8,7 +8,6 @@ license.workspace = true
 authors.workspace = true
 
 [dependencies]
-kaban-core.workspace = true
 aho-corasick.workspace = true
 regex.workspace = true
 serde.workspace = true

@@ -5,8 +5,11 @@
 //! the whole DDL of `schema.sql` (embedded with `include_str!`) in one transaction, with the
 //! version record and the body codec record beside it; a database already at that version is
 //! served as it is; a database at any other version, older or newer, is refused at open with
-//! [`StoreError::SchemaUnsupported`] and the way out (export with the kaban that wrote it and
-//! re-ingest, or start a new database). No backup, no upgrade step, no exclusive admission
+//! [`StoreError::SchemaUnsupported`] and the way out (no upgrade path exists: create a fresh
+//! project and re-ingest; spec 11 CMP-01, OD-1). The refusal comes first from the read-only
+//! probe every file open runs before it creates or writes anything
+//! (`connection::probe_version`, reading the version as [`Migrator`] does); the checks here
+//! stand behind it. No backup, no upgrade step, no exclusive admission
 //! for a migration: a breaking schema change is a breaking release. The schema version is
 //! `index_meta(key='schema_version')`; a database with the `node` table and no such key is an
 //! unversioned spike file, refused like any other version. Connection PRAGMAs are not part of
@@ -24,22 +27,30 @@ use std::time::{Duration, Instant};
 const SCHEMA: &str = include_str!("../schema.sql");
 
 /// Per-connection settings applied after WAL is established (not DDL, not versioned): durability
-/// level, foreign keys and secure delete (core-spec S5).
+/// level, foreign keys and secure delete (core-spec S5), and no automatic checkpoint on a
+/// writer (spec 11 PC-9 item 3): every checkpoint is explicit. Today those are the bootstrap
+/// publication (`connection::publish_version`), the purge hygiene and `optimize_fts`
+/// (`SqliteStore::purge_hygiene`), plus SQLite's own fold when the last connection to the file
+/// closes; a long-lived writer's WAL grows until one of them runs. T6's scheduled checkpoint
+/// bounds it.
 const CONNECTION_PRAGMAS: &str = "PRAGMA synchronous = NORMAL;
 PRAGMA foreign_keys = ON;
-PRAGMA secure_delete = FAST;";
+PRAGMA secure_delete = FAST;
+PRAGMA wal_autocheckpoint = 0;";
 
 /// How long a connection waits for a lock (core-spec N4), both as SQLite's busy handler and as
 /// the deadline of [`ensure_wal`].
 pub(crate) const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Apply the per-connection settings on every open, before anything else: the busy timeout,
-/// then WAL (with the retry SQLite omits, see [`ensure_wal`]), then [`CONNECTION_PRAGMAS`].
+/// then incremental auto-vacuum on a fresh file ([`set_fresh_auto_vacuum`]), then WAL (with
+/// the retry SQLite omits, see [`ensure_wal`]), then [`CONNECTION_PRAGMAS`].
 ///
 /// # Errors
 /// SQLite errors; `SQLITE_BUSY` only after [`BUSY_TIMEOUT`] of retrying the WAL conversion.
 pub(crate) fn configure_connection(conn: &Connection) -> Result<()> {
     conn.busy_timeout(BUSY_TIMEOUT).sql()?;
+    set_fresh_auto_vacuum(conn)?;
     ensure_wal(conn)?;
     conn.execute_batch(CONNECTION_PRAGMAS).sql()?;
     crate::body_codec::register(conn)?;
@@ -51,6 +62,21 @@ pub(crate) fn configure_connection(conn: &Connection) -> Result<()> {
         return Err(StoreError::Backend {
             source: kaban_core::BackendSource::new(ForeignKeysOff),
         });
+    }
+    Ok(())
+}
+
+/// Put a fresh database (no page written yet) in incremental auto-vacuum mode (spec 11
+/// KER-05), so ordinary maintenance can release wholly free pages. The mode is fixed by the
+/// first page SQLite writes, and the WAL conversion writes it: this runs before
+/// [`ensure_wal`]. An existing database keeps the mode it was created with.
+fn set_fresh_auto_vacuum(conn: &Connection) -> Result<()> {
+    let pages: i64 = conn
+        .query_row("PRAGMA page_count", [], |r| r.get(0))
+        .sql()?;
+    if pages == 0 {
+        conn.execute_batch("PRAGMA auto_vacuum = INCREMENTAL;")
+            .sql()?;
     }
     Ok(())
 }
@@ -111,9 +137,10 @@ pub(crate) fn is_busy(e: &rusqlite::Error) -> bool {
 
 /// The one schema version this binary serves: created on a fresh database, required of an
 /// existing one (spec 05 OWN-P). The number continues the former ladder (13: the Tantivy
-/// index beside the database is the only text index and every body is encoded, OWN-M) so a
-/// database of the last ladder release is told apart from a spike file by its version.
-pub const LATEST_SCHEMA_VERSION: u32 = 13;
+/// index beside the database is the only text index and every body is encoded, OWN-M; 14:
+/// the unified format of spec 11, without governance tables, with producer columns and
+/// never-reused rids) so a database of an older release is told apart by its version.
+pub const LATEST_SCHEMA_VERSION: u32 = 14;
 
 /// The `index_meta.schema_version` as recorded, 0 when the key is absent (a fresh or spike
 /// database): the cheap read of code that behaves by version on a live connection.
@@ -161,7 +188,7 @@ impl Migrator {
     /// Detect the schema version of the database behind `conn`: `None` when the key is
     /// absent but the spike `node` table exists (an unversioned spike file), `Some(0)` for a
     /// fresh database, `Some(v)` when `index_meta.schema_version` is recorded.
-    fn detect(conn: &Connection) -> Result<Option<u32>> {
+    pub(crate) fn detect(conn: &Connection) -> Result<Option<u32>> {
         let has = |name: &str| -> Result<bool> {
             Ok(conn
                 .query_row(
@@ -201,7 +228,7 @@ impl Migrator {
     }
 
     /// The refusal of a database at `found` (an unversioned spike file is reported as 1).
-    const fn unsupported(found: Option<u32>) -> StoreError {
+    pub(crate) const fn unsupported(found: Option<u32>) -> StoreError {
         StoreError::SchemaUnsupported {
             found: match found {
                 Some(v) => v,
@@ -213,7 +240,7 @@ impl Migrator {
 
     /// Read the schema version of an existing database without creating anything: the one
     /// version this binary serves, or the refusal. Used by the opens that must not mutate
-    /// the database (`kaban verify-audit`, MD-28; `doctor`; the hook; a pack source).
+    /// the database (`doctor`; the hook).
     ///
     /// # Errors
     /// `StoreError::SchemaUnsupported` for any version but [`LATEST_SCHEMA_VERSION`] (a
@@ -306,6 +333,35 @@ mod tests {
             MigrationReport::unchanged(LATEST_SCHEMA_VERSION)
         );
         assert_eq!(Migrator::check(&conn).unwrap(), LATEST_SCHEMA_VERSION);
+    }
+
+    /// PC-1: `node.rid` is the graph's local id, so a deleted highest rid is never handed to
+    /// the next row (stale layer entries would alias it).
+    #[test]
+    fn a_deleted_highest_rid_is_never_reused() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        configure_connection(&conn).unwrap();
+        crate::stamp::bind(&conn, &kaban_core::ActorId::default()).unwrap();
+        Migrator::ensure_current(&mut conn).unwrap();
+        conn.execute(
+            "INSERT INTO index_meta(key, value) VALUES ('db_id', 'd')",
+            [],
+        )
+        .unwrap();
+        let insert = |id: &str| -> i64 {
+            conn.execute(
+                "INSERT INTO node(id, kind, text, created_at, updated_at, workspace_id, content_hash)
+                 VALUES (?1, 'Fact', x'00', '', '', 'default', ?1)",
+                [id],
+            )
+            .unwrap();
+            conn.last_insert_rowid()
+        };
+        insert("a");
+        let highest = insert("b");
+        conn.execute("DELETE FROM node WHERE rid = ?1", [highest])
+            .unwrap();
+        assert!(insert("c") > highest, "rid {highest} reused");
     }
 
     /// OWN-P: a database at another version, older or newer, and an unversioned spike file

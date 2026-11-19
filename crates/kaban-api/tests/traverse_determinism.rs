@@ -11,8 +11,8 @@
 
 use kaban_api::{KabanApi, LinkRequest, TraverseRequest, TraverseResponse};
 use kaban_core::{
-    Actor, EdgeDiff, GraphStore, IngestStore, NewNode, NodeId, Op, Owner, WorkspaceId, WriteBatch,
-    WriteCtx,
+    Actor, EdgeDiff, GraphStore, IngestStore, NewNode, NodeId, Op, Producer, WorkspaceId,
+    WriteBatch, WriteCtx,
 };
 use kaban_policy::Policy;
 use kaban_store_sqlite::SqliteStore;
@@ -27,8 +27,8 @@ fn ids() -> Vec<NodeId> {
         .collect()
 }
 
-/// The six edges out of `a` and one hop beyond: three human links and three structural ingest
-/// edges, so a layer filter has something to keep and something to drop.
+/// The six edges out of `a` and one hop beyond: three authored links and three structural
+/// ingest edges, so a producer filter has something to keep and something to drop.
 const EDGES: [(usize, usize, bool); 6] = [
     (0, 1, true),
     (0, 2, false),
@@ -44,14 +44,9 @@ fn fixture(order: &[usize]) -> KabanApi {
     let policy = Policy::from_file(Policy::parse(b"").unwrap(), "test".into()).unwrap();
     let store = Arc::new(SqliteStore::open_memory().unwrap());
     let signer = store.signer();
-    let api = KabanApi::new(
-        Arc::clone(&store) as Arc<dyn GraphStore>,
-        policy,
-        signer,
-        None,
-    );
+    let api = KabanApi::new(Arc::clone(&store) as Arc<dyn GraphStore>, policy, signer);
     let ids = ids();
-    let ctx = WriteCtx::new("v1", WorkspaceId::default(), Actor::Agent);
+    let ctx = WriteCtx::new(WorkspaceId::default(), Actor::Agent);
     let nodes = ids
         .iter()
         .enumerate()
@@ -89,7 +84,7 @@ fn fixture(order: &[usize]) -> KabanApi {
                 }],
             );
             b.edge_diff = EdgeDiff::Owned {
-                owner: Owner::KabanIngest,
+                producer: Producer::DocumentIngest,
             };
             store.apply_batch(b, &ctx).unwrap();
         }
@@ -137,7 +132,7 @@ proptest! {
     fn any_insertion_order_gives_the_same_response(order in Just((0..EDGES.len()).collect::<Vec<usize>>()).prop_shuffle()) {
         let reference = fixture(&(0..EDGES.len()).collect::<Vec<usize>>());
         let permuted = fixture(&order);
-        for filter in [None, Some(json!({"layers": ["human"]})), Some(json!({"min_score": 0.5}))] {
+        for filter in [None, Some(json!({"producers": ["authored"]})), Some(json!({"min_score": 0.5}))] {
             let want = canonical(&reference.traverse(request(filter.as_ref())).unwrap());
             let first = permuted.traverse(request(filter.as_ref())).unwrap();
             let second = permuted.traverse(request(filter.as_ref())).unwrap();
@@ -151,19 +146,19 @@ proptest! {
     }
 }
 
-/// Negative: two different edge filters give different JSON (the human layer keeps the two
-/// human edges out of `a`; `c -> f` is human too but `c` is reached only through the ingest
-/// edge the filter drops; an absent layer keeps none), and either differs from the
-/// unfiltered response.
+/// Negative: two different edge filters give different JSON (the authored producer keeps the
+/// two authored edges out of `a`; `c -> f` is authored too but `c` is reached only through the
+/// ingest edge the filter drops; a producer that wrote nothing keeps none), and either differs
+/// from the unfiltered response.
 #[test]
 fn different_edge_filters_give_different_responses() {
     let api = fixture(&(0..EDGES.len()).collect::<Vec<usize>>());
     let all = api.traverse(request(None)).unwrap();
     let human = api
-        .traverse(request(Some(&json!({"layers": ["human"]}))))
+        .traverse(request(Some(&json!({"producers": ["authored"]}))))
         .unwrap();
     let v4 = api
-        .traverse(request(Some(&json!({"layers": ["v4"]}))))
+        .traverse(request(Some(&json!({"producers": ["git_history"]}))))
         .unwrap();
     assert_eq!(all.edges.len(), 6, "{all:?}");
     assert_eq!(human.edges.len(), 2, "{human:?}");

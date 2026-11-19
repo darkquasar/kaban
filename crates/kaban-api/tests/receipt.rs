@@ -9,18 +9,15 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // test code: failures are the assertion
 
 mod common;
-#[path = "common/status.rs"]
-mod status;
 
 use common::{Scratch, fact};
 use kaban_api::{
-    ApiError, DeprecateRequest, ForgetRequest, HookEvent, HookHost, KabanApi, LinkRequest,
-    LinkSpec, PruningOperation, PruningProtectionRequest, PruningTargetKind, RememberRequest,
+    ApiError, ForgetRequest, HookEvent, HookHost, KabanApi, LinkRequest, LinkSpec, RememberRequest,
     WriteOutcome, WriteReceipt,
 };
 use kaban_core::{
-    Actor, ChangeLogStore, GovernanceStore, IndexMeta, IngestStore, LeaseStore, MemoryStore,
-    NodeId, PendingFailuresQuery, PendingScope,
+    Actor, ChangeLogStore, IndexMeta, IngestStore, LeaseStore, MemoryStore, NodeId,
+    PendingFailuresQuery, PendingScope, SessionStore,
 };
 use kaban_policy::Policy;
 use kaban_store_sqlite::SqliteStore;
@@ -40,20 +37,14 @@ fn policy(yaml: &str) -> Policy {
 fn store_api() -> (Arc<SqliteStore>, KabanApi) {
     let store = Arc::new(SqliteStore::open_memory().unwrap());
     let signer = store.signer();
-    (
-        store.clone(),
-        KabanApi::new(store, policy(""), signer, None),
-    )
+    (store.clone(), KabanApi::new(store, policy(""), signer))
 }
 
 /// A file-backed store (a second connection can inject a failure into one step of a call).
 fn file_store_api(s: &Scratch) -> (Arc<SqliteStore>, KabanApi) {
     let store = Arc::new(SqliteStore::open(&s.db(), &s.keys()).unwrap());
     let signer = store.signer();
-    (
-        store.clone(),
-        KabanApi::new(store, policy(""), signer, None),
-    )
+    (store.clone(), KabanApi::new(store, policy(""), signer))
 }
 
 fn raw(s: &Scratch) -> rusqlite::Connection {
@@ -99,40 +90,33 @@ fn a_rejected_remember_never_yields_committed_and_moves_no_sequence() {
     assert_identities(&store, &ok.receipt);
 }
 
-/// Spec 05 OWN-M (constraint 2): the store projects its own commit after the transaction,
-/// and a projection that cannot publish (another holder owns the `text-index` lease, as a
-/// serving process would) never turns the committed write into a rejection. The receipt is
-/// `committed_not_yet_searchable` with its position, the record is stored, and once the lease
-/// is back the next write publishes and reports `committed`.
+/// Spec 11 T7 (KER-01, Step 1): text is searchable at commit, so a write is `committed` and a
+/// recall finds it as soon as the write returns, whatever another process holds (here the
+/// `text-index` lease a serving process once held): there is no lag outcome and no wait.
 #[test]
-fn a_write_whose_projection_cannot_publish_reports_committed_not_yet_searchable() {
+fn a_write_is_committed_and_recalled_at_return_whoever_holds_the_text_index_lease() {
     let s = Scratch::new("ss10-receipt", "lease-held");
     let (store, api) = file_store_api(&s);
-    let lease = store
+    let _held = store
         .lease_acquire("text-index", "another:holder", 60)
         .unwrap()
         .unwrap();
 
-    let pending = api
-        .remember(fact("quokka committed, not yet searchable"))
-        .unwrap();
+    let written = api.remember(fact("quokka committed at return")).unwrap();
 
+    assert_eq!(written.receipt.outcome, WriteOutcome::Committed);
+    assert_eq!(written.receipt.seq, Some(store.changes_head().unwrap()));
+    assert_identities(&store, &written.receipt);
+    let found = store
+        .recall(&kaban_core::RecallQuery {
+            query: "quokka".into(),
+            ..Default::default()
+        })
+        .unwrap();
     assert_eq!(
-        pending.receipt.outcome,
-        WriteOutcome::CommittedNotYetSearchable
+        found.iter().map(|h| h.node.id.as_str()).collect::<Vec<_>>(),
+        [written.id.as_str()]
     );
-    assert_eq!(pending.receipt.seq, Some(store.changes_head().unwrap()));
-    assert_identities(&store, &pending.receipt);
-    assert!(
-        store
-            .get(&NodeId::parse(&pending.id).unwrap(), false)
-            .unwrap()
-            .is_some(),
-        "the write stands"
-    );
-    store.lease_release(&lease).unwrap();
-    let published = api.remember(fact("quokka searchable")).unwrap();
-    assert_eq!(published.receipt.outcome, WriteOutcome::Committed);
 }
 
 /// D3 review d3-10: the rollback happens inside the mutation transaction after partial work.
@@ -189,19 +173,15 @@ fn a_committed_forget_carries_its_transaction_sequence_and_the_store_identities(
     assert_eq!(r.receipt.outcome, WriteOutcome::Committed);
     assert_eq!(
         r.receipt.seq,
-        Some(r.outbox_seq),
+        Some(store.changes_head().unwrap()),
         "the seq read inside the transaction"
     );
-    assert_eq!(r.receipt.seq, Some(store.changes_head().unwrap()));
     assert_identities(&store, &r.receipt);
 }
 
 /// D3 review d3-2: the identities are per database and read once when the service is built,
 /// so a committed write never fails on reading them afterwards; the rows gone from
 /// `index_meta` after construction change nothing in the receipt's identities or position.
-/// The store's lineage-bound index (spec 05 OWN-M, amendment 2) cannot serve a database whose
-/// lineage key is gone, so the barrier reports the committed write as not yet searchable,
-/// never as a failure.
 #[test]
 fn a_committed_write_keeps_its_receipt_when_the_identities_cannot_be_read_after_the_commit() {
     let s = Scratch::new("kaban-receipt", "identities");
@@ -222,11 +202,9 @@ fn a_committed_write_keeps_its_receipt_when_the_identities_cannot_be_read_after_
     let r = api
         .remember(fact("durable whatever the receipt read"))
         .expect("a write that committed is never an error");
-    assert!(
-        matches!(
-            r.receipt.outcome,
-            WriteOutcome::Committed | WriteOutcome::CommittedNotYetSearchable
-        ),
+    assert_eq!(
+        r.receipt.outcome,
+        WriteOutcome::Committed,
         "{:?}",
         r.receipt
     );
@@ -245,8 +223,7 @@ fn the_store_records_the_terminal_sequence_of_a_write_in_its_context() {
     let a = api.remember(fact("left")).unwrap();
     let b = api.remember(fact("right")).unwrap();
     let (a, b) = (NodeId::parse(&a.id).unwrap(), NodeId::parse(&b.id).unwrap());
-    let ctx =
-        || kaban_core::WriteCtx::new(api.policy_version(), api.workspace().clone(), Actor::Agent);
+    let ctx = || kaban_core::WriteCtx::new(api.workspace().clone(), Actor::Agent);
 
     let linking = ctx();
     assert_eq!(
@@ -353,8 +330,7 @@ fn assert_receipt_shape(response: &Value) {
 /// D3 review d3-3 (SS-27): every receipt-bearing response type this suite can produce,
 /// serialized as the adapters serialize it, carries no local record reference (`rid`,
 /// `rowid`, `chunk_rid`, numeric `src`/`dst`), not even as JSON inside a string: `remember`,
-/// `link`, `pruning_protection`, `forget`, `explain --deprecate` and `resolve --winner` (the
-/// one that used to echo the conflict group's canonical key, whose subject is a row id).
+/// `link` and `forget`.
 #[test]
 fn no_local_record_reference_leaves_in_any_receipt_bearing_response() {
     let (store, api) = store_api();
@@ -369,70 +345,19 @@ fn no_local_record_reference_leaves_in_any_receipt_bearing_response() {
             props: None,
         })
         .unwrap();
-    let protected = api
-        .pruning_protection(
-            PruningProtectionRequest {
-                operation: PruningOperation::Set,
-                target_kind: PruningTargetKind::Node,
-                id: Some(other.id.clone()),
-                key: None,
-                src: None,
-                dst: None,
-                rel: None,
-            },
-            Actor::HumanCli,
-        )
-        .unwrap();
     let forgotten = api
         .forget(ForgetRequest {
             id: remembered.id.clone(),
             mode: None,
         })
         .unwrap();
-    let mut responses = vec![
+    let responses = vec![
         ("remember", serde_json::to_value(&remembered).unwrap()),
         ("link", serde_json::to_value(&linked).unwrap()),
-        (
-            "pruning_protection",
-            serde_json::to_value(&protected).unwrap(),
-        ),
         ("forget", serde_json::to_value(&forgotten).unwrap()),
     ];
     // the position is a log position, not the node's row id (the one node row is 1)
     assert!(store.changes_head().unwrap() > 1);
-
-    // the claim-bearing responses over the reconcile fixture (a chunk with a candidate group)
-    let s = status::Scratch::new("receipt-scan");
-    let it = status::items(&s);
-    let winner = it
-        .api
-        .explain_status(kaban_api::ExplainStatusRequest {
-            address: it.chunk.to_string(),
-        })
-        .unwrap()
-        .explanation
-        .unwrap()
-        .candidates[0]
-        .value
-        .as_str()
-        .unwrap()
-        .to_owned();
-    let resolved = it
-        .api
-        .resolve_winner(&it.chunk, &winner, None, Actor::HumanCli)
-        .unwrap();
-    let deprecated = it
-        .api
-        .deprecate(
-            DeprecateRequest {
-                key: status::key_of(&s, "a1"),
-                reason: "reviewed".into(),
-            },
-            Actor::HumanCli,
-        )
-        .unwrap();
-    responses.push(("resolve", serde_json::to_value(&resolved).unwrap()));
-    responses.push(("explain", serde_json::to_value(&deprecated).unwrap()));
 
     for (scope, response) in &responses {
         assert_receipt_shape(response);
@@ -441,9 +366,7 @@ fn no_local_record_reference_leaves_in_any_receipt_bearing_response() {
 }
 
 /// D3 review d3-4: the receipt's outcome and identities are control under every scope whose
-/// response carries one (`remember`, `link`, `forget`, `unmerge`, `pruning_protection`, the
-/// CLI's `explain --deprecate` and `resolve`, `sync`'s and `import`'s import report,
-/// `ingest_finish`), so a policy that rejects the word `committed` can never withhold or
+/// response carries one (`remember`, `link`, `forget`, `ingest_finish`), so a policy that rejects the word `committed` can never withhold or
 /// alter a committed mutation's own outcome at the response gate.
 #[test]
 fn a_policy_rejecting_the_word_committed_never_withholds_a_receipt_on_any_write_scope() {
@@ -453,23 +376,15 @@ fn a_policy_rejecting_the_word_committed_never_withholds_a_receipt_on_any_write_
         store.clone(),
         policy("words:\n  - { term: committed, action: reject, id: no-commit }\n"),
         signer,
-        None,
     );
     let receipt = serde_json::to_value(api.committed_receipt(Some(7))).unwrap();
     assert_eq!(receipt["outcome"], json!("committed"));
     let plain = json!({"receipt": receipt});
-    let nested = json!({"import": {"receipt": receipt}});
     for (scope, value) in [
         ("remember", &plain),
         ("link", &plain),
         ("forget", &plain),
-        ("unmerge", &plain),
-        ("pruning_protection", &plain),
-        ("explain", &plain),
-        ("resolve", &plain),
-        ("import", &plain),
         ("ingest_finish", &plain),
-        ("sync", &nested),
     ] {
         let gated = api
             .gate_response(scope, value)
@@ -479,8 +394,8 @@ fn a_policy_rejecting_the_word_committed_never_withholds_a_receipt_on_any_write_
     // the same policy still gates content under those scopes
     let err = api
         .gate_response(
-            "resolve",
-            &json!({"value": "committed", "receipt": receipt}),
+            "remember",
+            &json!({"text": "committed", "receipt": receipt}),
         )
         .unwrap_err();
     assert!(matches!(err, ApiError::Rejected { .. }), "{err:?}");
@@ -620,7 +535,7 @@ fn a_fix_whose_failure_patch_fails_after_the_improvement_committed_reports_commi
         .receipt
         .clone()
         .expect("the Improvement committed: {out:?}");
-    assert_eq!(receipt.outcome, WriteOutcome::Committed, "{out:?}");
+    assert_eq!(receipt.outcome, WriteOutcome::Committed, "{receipt:?}");
     assert!(
         receipt.seq.unwrap() > head,
         "the Improvement and its edge are in the log: {out:?}"
@@ -667,7 +582,7 @@ fn a_failure_whose_session_pairing_fails_after_the_record_committed_reports_comm
         &failure_envelope("make test"),
     );
     let receipt = out.receipt.clone().expect("the Failure committed: {out:?}");
-    assert_eq!(receipt.outcome, WriteOutcome::Committed, "{out:?}");
+    assert_eq!(receipt.outcome, WriteOutcome::Committed, "{receipt:?}");
     assert!(receipt.seq.unwrap() > head, "{out:?}");
     assert_eq!(receipt.seq, Some(store.changes_head().unwrap()));
     assert_identities(&store, &receipt);

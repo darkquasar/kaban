@@ -1,6 +1,6 @@
 //! Idempotency of the real pipeline (docs-ingest-plan.md DI1.5, DI1.7; docs-ingest-spec D5, §5):
 //! `Ingestor` + `DocumentPreparer` over a scratch tree and an in-memory store. A second run on
-//! an unchanged tree writes nothing (no node, edge, changes or audit row; the report says so) and
+//! an unchanged tree writes nothing (no node, edge or changes row; the report says so) and
 //! leaves `stats` byte-identical; over the whole fixture tree every table's row count is
 //! unchanged.
 
@@ -9,7 +9,7 @@
 mod common;
 
 use common::real::{Rig, rig, rig_on_disk};
-use kaban_core::{AuditStore, MemoryStore, NodeId};
+use kaban_core::{MemoryStore, NodeId};
 use kaban_policy::Policy;
 use std::fs;
 
@@ -17,13 +17,12 @@ fn new_rig(name: &str) -> Rig {
     rig("kaban-ingest-idem", name)
 }
 
-/// Row counts of every table a run can touch: nodes and edges (`stats`), changes, audit.
+/// Row counts of every table a run can touch: nodes and edges (`stats`), changes.
 #[derive(Debug, PartialEq, Eq)]
 struct Rows {
     nodes: u64,
     edges: u64,
     outbox: usize,
-    audit: u64,
 }
 
 fn rows(rig: &Rig) -> Rows {
@@ -32,7 +31,6 @@ fn rows(rig: &Rig) -> Rows {
         nodes: stats["nodes"].as_u64().unwrap(),
         edges: stats["edges"].as_u64().unwrap(),
         outbox: rig.outbox_len(),
-        audit: rig.store.audit_verify().unwrap().entries,
     }
 }
 
@@ -136,7 +134,7 @@ fn second_run_on_an_unchanged_tree_writes_nothing(rig: &Rig, compressed: bool) {
 
 /// DI1.7: over the whole Markdown fixture tree (the five goldens plus a text file; wikilinks
 /// to siblings and to files that are not there), the second full-tree run writes zero rows in
-/// every table: nodes, edges, changes and audit are counted before and after.
+/// every table: nodes, edges and changes are counted before and after.
 #[test]
 fn a_full_tree_second_run_writes_zero_rows_in_every_table() {
     // Arrange
@@ -158,7 +156,6 @@ fn a_full_tree_second_run_writes_zero_rows_in_every_table() {
 
     // Assert
     assert_eq!(first.documents, 6, "{first:?}");
-    // clean documents under the empty policy leave no audit row; the count is still compared
     assert!(
         before.nodes > 6 && before.edges > 0 && before.outbox > 0,
         "{before:?}"

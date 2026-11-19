@@ -3,7 +3,7 @@
 
 pub use kaban_api::ingest_jobs::{
     ChunkPage, ChunkView, EdgeDraft, EvidenceRef, IngestBrief, IngestDialect, IngestMode,
-    LinkDraft, PairJudgement, PairRef, RecordDraft, StructuredReturn,
+    LinkDraft, RecordDraft, StructuredReturn,
 };
 
 use kaban_core::{JobId, NodeId, WorkspaceId};

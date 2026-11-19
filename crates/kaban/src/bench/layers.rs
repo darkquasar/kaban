@@ -12,10 +12,9 @@
 //!                    (build peak, retained automaton), producer-origin MENTIONS precision,
 //!                    then (after the row is read) per-chunk match time, informational
 //!   l0+l3-brief      ingest_brief + ingest_next on a 100 KiB target, warm; cache N/A
-//!   l0+l2-query      deferred row (OWN-93/94), no process work
 //! ```
 //!
-//! Bounds are the effective values of `kaban_api::layers::budgets` for the loaded engine
+//! Bounds are the effective values of `kaban_api::producers::budgets` for the loaded engine
 //! configuration; overrides are recorded. A missing measurement is an error, never a pass.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -25,10 +24,10 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{Context, Result, bail, ensure};
-use kaban_api::layers::{BudgetRow, RunFlags, budgets};
+use kaban_api::producers::{BudgetRow, RunFlags, budgets};
 use kaban_api::{ApiConfig, EdgeFilter, KabanApi, TraverseRequest};
 use kaban_core::{
-    ActorId, NodeId, RecallLayer, TraverseDirection, WorkspaceId, config::EngineConfig,
+    ActorId, NodeId, RecallMode, TraverseDirection, WorkspaceId, config::EngineConfig,
 };
 use kaban_ingest::{ChunkConfig, DocumentPreparer, IngestConfig, Ingestor, WalkConfig};
 use kaban_policy::Policy;
@@ -61,7 +60,6 @@ const RW_E3_W2_1: &str = "RW-E3-W2-1 (Medium, deferred): the evaluator reads MEN
 enum LayerSet {
     L0,
     Gazetteer,
-    L2Query,
     L3Brief,
 }
 
@@ -70,7 +68,6 @@ impl LayerSet {
         Ok(match name {
             "l0" => Self::L0,
             "l0+gazetteer-run" => Self::Gazetteer,
-            "l0+l2-query" => Self::L2Query,
             "l0+l3-brief" => Self::L3Brief,
             _ => bail!("unknown layer set"),
         })
@@ -80,7 +77,6 @@ impl LayerSet {
         match self {
             Self::L0 => "l0",
             Self::Gazetteer => "l0+gazetteer-run",
-            Self::L2Query => "l0+l2-query",
             Self::L3Brief => "l0+l3-brief",
         }
     }
@@ -88,16 +84,15 @@ impl LayerSet {
     /// The `budgets()` key that bounds the set; L3 has no memory bound (cache N/A, OWN-93).
     const fn bound_key(self) -> Option<&'static str> {
         match self {
-            Self::L0 => Some("budget.l0_rss_mb"),
+            Self::L0 => Some("text.build_rss_mb"),
             Self::Gazetteer => Some("gazetteer.max_automaton_mb"),
-            Self::L2Query => Some("embed.max_scan_rss_mb"),
             Self::L3Brief => None,
         }
     }
 }
 
-/// The RP-13 row. `pass` is `None` for an informational (L3) or deferred (L2) row, so no
-/// cache or embed pass is ever fabricated; the measured fields are `None` only when deferred.
+/// The RP-13 row. `pass` is `None` for an informational (L3) row, so no cache pass is ever
+/// fabricated.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct LayerMeasurement {
     layer_set: &'static str,
@@ -136,7 +131,7 @@ fn judge(set: LayerSet, seen: &Observed, bound_bytes: u64) -> Option<bool> {
                     .retained
                     .is_some_and(|retained| retained <= bound_bytes),
         ),
-        LayerSet::L2Query | LayerSet::L3Brief => None,
+        LayerSet::L3Brief => None,
     }
 }
 
@@ -237,8 +232,8 @@ struct Rig<'a> {
 }
 
 impl Rig<'_> {
-    fn queries(&self, layers: &[RecallLayer]) -> Result<Value> {
-        evaluate(self.api, self.fixtures, self.map, self.classes, layers)
+    fn queries(&self, modes: &[RecallMode]) -> Result<Value> {
+        evaluate(self.api, self.fixtures, self.map, self.classes, modes)
     }
 }
 
@@ -361,7 +356,7 @@ fn gazetteer(rig: &Rig<'_>, db: &Path, samples: usize) -> Result<(Observed, Valu
             max_depth: Some(1),
             limit: Some(500),
             edge_filter: Some(EdgeFilter {
-                layers: vec!["gazetteer".into()],
+                producers: vec!["gazetteer".into()],
                 ..Default::default()
             }),
             ..Default::default()
@@ -416,7 +411,7 @@ fn gazetteer(rig: &Rig<'_>, db: &Path, samples: usize) -> Result<(Observed, Valu
         "chunks_upserted": report.chunks_upserted,
         "serve_retained": "index_docs builds one preparer per call and drops it after the run; \
             not separately sampled here",
-        "edge_precision": { "layer": "gazetteer", "rel": "MENTIONS",
+        "edge_precision": { "producer": "gazetteer", "rel": "MENTIONS",
             "precision": precision.precision, "coverage": precision.coverage,
             "judged": precision.judged, "predicted": precision.predicted,
             "judged_predicted": precision.judged_predicted, "correct": precision.correct,
@@ -512,33 +507,10 @@ pub(super) fn run(
         .collect();
     let overrides: Vec<&BudgetRow> = rows
         .iter()
-        .filter(|row| row.source != kaban_api::layers::BudgetOrigin::Default)
+        .filter(|row| row.source != kaban_api::producers::BudgetOrigin::Default)
         .collect();
-    let deferred = json!({ "l0+l2-query": "OWN-93/94: embed vectors and L2 not in this release",
-        "cache": "OWN-93", "cc_fusion": "OWN-68 SC-06", "holdout_f1": "OWN-68 SC-03",
+    let deferred = json!({ "cache": "OWN-93", "cc_fusion": "OWN-68 SC-06", "holdout_f1": "OWN-68 SC-03",
         "500k": "OWN-68 SC-13" });
-    if set == LayerSet::L2Query {
-        let row = LayerMeasurement {
-            layer_set: set.name(),
-            status: "deferred",
-            total_vm_hwm_bytes: None,
-            baseline_vm_hwm_bytes: None,
-            delta_bytes: None,
-            build_peak_delta_bytes: None,
-            retained_bytes: None,
-            cache_bytes: None,
-            bound_key: set.bound_key(),
-            bound_bytes: None,
-            pass: None,
-        };
-        return envelope(
-            0,
-            json!({ "mode": "layers", "layer_measurements": [row], "effective_budgets": rows,
-            "overrides": overrides, "deferred": deferred,
-            "layer_gate": { "status": "deferred", "pass": null } }),
-            "layers",
-        );
-    }
     ensure!(
         args.n >= 5 && args.warmup > 0,
         "corpus requires at least five notes and warmup"
@@ -565,18 +537,16 @@ pub(super) fn run(
     let sqlite =
         Arc::new(SqliteStore::open_as(db, keys, actor)?.with_recall_config(engine.recall.clone())?);
     let mut corpus = Corpus::new(SEED);
-    let commit = fixture_repo(&fixture, &corpus)?;
+    fixture_repo(&fixture, &corpus)?;
     let api = Arc::new(KabanApi::with_config(
         sqlite.clone(),
         policy,
         sqlite.signer(),
-        None,
         ApiConfig {
             engine: Arc::new(engine.clone()),
             workspace: WorkspaceId::new("ws1"),
             repo_root: Some(fixture),
             repo: Some("bench-fixture-repo".into()),
-            ..Default::default()
         },
     ));
     let map = materialize(
@@ -586,7 +556,6 @@ pub(super) fn run(
         args.n,
         args.edges_per_node,
         &mut corpus,
-        &commit,
     )?;
     let classes: BTreeSet<QueryClass> = fixtures.queries.iter().map(|q| q.class).collect();
     let rig = Rig {
@@ -595,7 +564,7 @@ pub(super) fn run(
         map: &map,
         classes: &classes,
     };
-    rig.queries(&[RecallLayer::Fts])?;
+    rig.queries(&[RecallMode::Lexical])?;
     let process_hwm = vm_hwm()?;
     let samples = args.samples.max(30).max(engine.bench.min_samples as usize);
     let (seen, layer) = if set == LayerSet::L0 {
@@ -610,7 +579,7 @@ pub(super) fn run(
         )
     } else {
         reset_hwm()?;
-        rig.queries(&[RecallLayer::Fts])?;
+        rig.queries(&[RecallMode::Lexical])?;
         let baseline = vm_hwm()?;
         let (mut seen, layer) = match set {
             LayerSet::Gazetteer => gazetteer(&rig, db, samples)?,
@@ -624,7 +593,7 @@ pub(super) fn run(
                     layer,
                 )
             }
-            LayerSet::L0 | LayerSet::L2Query => unreachable!("handled above"),
+            LayerSet::L0 => unreachable!("handled above"),
         };
         seen.baseline = baseline;
         (seen, layer)
@@ -687,7 +656,7 @@ mod tests {
         );
         // An override raises the bound but never the 100 MiB promise.
         let mut engine = EngineConfig::default();
-        engine.budget.l0_rss_mb = 200;
+        engine.text.build_rss_mb = 200;
         let raised = budget_rows(&engine);
         assert_eq!(
             measurement(LayerSet::L0, &l0(101 * MIB), &raised)
@@ -731,6 +700,8 @@ mod tests {
         let l3 = measurement(LayerSet::L3Brief, &l0(10 * MIB), &rows).unwrap();
         assert_eq!((l3.pass, l3.cache_bytes, l3.bound_key), (None, None, None));
         assert!(LayerSet::parse("l0+cache").is_err());
+        // the embed layer is gone: its deferred set is no longer a set
+        assert!(LayerSet::parse("l0+l2-query").is_err());
     }
 
     #[test]

@@ -1,7 +1,6 @@
 //! Sinks over the `ChangeLog` (engine-spec EN-E10b, EN-F15; engine-plan E2.0; correction RP-6,
-//! SD-10): anything that reads `changes` rows is a [`Sink`]; the in-binary projections and the
-//! `kaban sync` bookkeeping are the default sink (`kaban-api`), the reserved `reconcile`
-//! consumer and any future `Replicator` (core-spec F17) implement the same trait.
+//! SD-10): anything that reads `changes` rows is a [`Sink`]; a future `Replicator` (core-spec
+//! F17) implements the same trait.
 //!
 //! [`run_sink`] is the one runner: it pages the log through a [`ChangeLogStore`], hands each
 //! page to the sink and acknowledges the sink's position under the caller's lease fence. The
@@ -25,20 +24,6 @@ use crate::store::ChangeLogStore;
 /// A sink's name: its `projections` cursor row and the lease it runs under share it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SinkId(pub &'static str);
-
-impl SinkId {
-    /// The default sink of `kaban sync` (M5-19): the in-binary projections and the sync
-    /// bookkeeping. The name `export` predates the sink vocabulary and is kept so the
-    /// `projections` cursor and the `export` lease of an existing database stay valid.
-    pub const EXPORT: Self = Self("export");
-    /// The reserved asynchronous reconcile consumer (EN-F15; the loop itself is deferred,
-    /// OWN-68 SC-12). Its reserved lease is `reconcile`, with versioned cursor `reconcile:1`;
-    /// no binary schedules this consumer, and reconciliation remains synchronous.
-    pub const RECONCILE: Self = Self("reconcile");
-    /// The text-index projector of an index with its own storage (spec 05 SS-09): its cursor
-    /// is retention only, the index's own commit payload is its resume point.
-    pub const TEXT_INDEX: Self = Self("text-index");
-}
 
 impl std::fmt::Display for SinkId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

@@ -6,14 +6,20 @@
 //! walk fails closed; M4-3). The code-graph provider is wired as `serve` wires it (read-only:
 //! the codegraph key is read, never created) so `stale_anchors` sees the current snapshot.
 //! Exit 0 when every check passes, 5 when one fails or the database cannot be opened; a
-//! withheld report is 2 like every other withheld result.
+//! withheld report is 2 like every other withheld result. A database whose format the open
+//! refuses (spec 11 CMP-01: another schema version, or no kaban project) is reported, not
+//! failed: the report's one row is the failed `schema_version` check, printed directly (its
+//! only string is the refusal's fixed text and two versions), and the exit is 0.
 
 use crate::Cli;
-use crate::cli::output::{EXIT_INVALID, EXIT_STORE_ERROR, Format, print_failure, store_exit_code};
+use crate::cli::output::{
+    EXIT_INVALID, EXIT_STORE_ERROR, Format, SERIALIZATION_FAILED, print_error, print_failure,
+    print_json, store_exit_code,
+};
 use crate::cli::seam;
 use crate::codegraph;
 use kaban_api::{ApiConfig, DoctorContext, DoctorReport, GitRunner, KabanApi};
-use kaban_core::WorkspaceId;
+use kaban_core::{StoreError, WorkspaceId};
 use kaban_store_sqlite::SqliteStore;
 use serde::Deserialize;
 use serde_json::json;
@@ -22,12 +28,27 @@ use std::path::Path;
 use std::process::ExitCode;
 use std::sync::Arc;
 
-/// The request the seam scans: the two flags, no caller string.
+/// The request the seam scans: the flags, no caller string.
 #[derive(Debug, Deserialize)]
 struct DoctorArgs {
     vacuum: bool,
-    priors: bool,
     optimize: bool,
+    recover: bool,
+}
+
+/// The actions doctor runs besides its checks (`--vacuum`, `--optimize`, `--recover`).
+#[derive(Debug, Clone, Copy)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent command-line flags, each one action"
+)]
+pub(crate) struct Actions {
+    /// `--vacuum`: run VACUUM after the checks.
+    pub(crate) vacuum: bool,
+    /// `--optimize`: optimize the full-text index segments once.
+    pub(crate) optimize: bool,
+    /// `--recover`: recover the catalog before the checks.
+    pub(crate) recover: bool,
 }
 
 /// Run the checks against `cli.db` with the audit key under `keys_dir` and print the report.
@@ -35,9 +56,7 @@ pub(crate) fn run(
     cli: &Cli,
     policy: kaban_policy::Policy,
     keys_dir: &Path,
-    vacuum: bool,
-    priors: bool,
-    optimize: bool,
+    actions: Actions,
     format: Format,
 ) -> ExitCode {
     let engine = match crate::load_engine() {
@@ -57,6 +76,13 @@ pub(crate) fn run(
     }
     let (store, files) = match SqliteStore::open_diagnostic(&cli.db, keys_dir, &cli.actor_id) {
         Ok(opened) => opened,
+        Err(e @ (StoreError::SchemaUnsupported { .. } | StoreError::NotAKabanProject { .. })) => {
+            if print_json(&DoctorReport::refused_format(&e), format).is_err() {
+                print_error(SERIALIZATION_FAILED);
+                return ExitCode::from(EXIT_STORE_ERROR);
+            }
+            return ExitCode::SUCCESS;
+        }
         Err(e) => {
             print_failure(&format_args!(
                 "opening database {} for diagnosis: {e}",
@@ -69,6 +95,7 @@ pub(crate) fn run(
     // report reads its payload watermark (no loop, no drain, nothing created: doctor
     // publishes nothing and a missing index is reported, never built, T4 review t4-9)
     let store = Arc::new(store);
+    let catalog = Arc::new(super::compact::StoreCatalog(Arc::clone(&store)));
     // the same binding rule as the server (S6; `open_api`): the workspace only stamps the
     // audit rows a gate rejection would write
     let workspace = match &cli.workspace {
@@ -103,15 +130,14 @@ pub(crate) fn run(
         store,
         policy,
         signer,
-        None,
         ApiConfig {
             workspace,
             repo_root,
             repo,
             engine,
-            ..ApiConfig::default()
         },
-    );
+    )
+    .with_catalog(catalog);
     let api = match wiring {
         Some(wiring) => api.with_snapshot_provider(wiring.dir, wiring.provider),
         None => api,
@@ -122,8 +148,11 @@ pub(crate) fn run(
     let code = seam::run_tool::<DoctorArgs, DoctorReport, _>(
         &api,
         "doctor",
-        json!({ "vacuum": vacuum, "priors": priors, "optimize": optimize }),
-        &[],
+        json!({
+            "vacuum": actions.vacuum,
+            "optimize": actions.optimize,
+            "recover": actions.recover,
+        }),
         format,
         |api, args| {
             let context = DoctorContext {
@@ -131,9 +160,11 @@ pub(crate) fn run(
                 schema_version,
                 keys_dir: keys_dir.to_path_buf(),
                 vacuum: args.vacuum,
-                priors: args.priors,
+                allocator_adapter: kaban_vtab::bootstrap::installed_before_main(),
             };
-            let mut report = if args.optimize {
+            let mut report = if args.recover {
+                api.doctor_recover(&context)?
+            } else if args.optimize {
                 api.doctor_optimize(&context)?
             } else {
                 api.doctor(&context)

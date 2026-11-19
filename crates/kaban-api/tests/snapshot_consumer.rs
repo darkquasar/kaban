@@ -49,7 +49,6 @@ fn admitted_callback_pages_symbols_and_absence_or_too_new_detaches_old_snapshot(
         store.clone(),
         Policy::empty(),
         store.signer(),
-        None,
         ApiConfig {
             repo: Some("fixture".into()),
             repo_root: Some(root),

@@ -18,7 +18,6 @@ async fn plain_brief_stays_unfenced_and_claimed_source_is_rechecked_under_curren
         rig.store.clone(),
         kaban_policy::Policy::empty(),
         rig.store.signer(),
-        None,
     );
     let prepared = brief(&api, &rig.root, "a.md", &IngestOpts::default())
         .await

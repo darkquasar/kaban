@@ -3,14 +3,14 @@
 mod common;
 use kaban_core::{
     Actor, EdgeDiff, IngestJob, IngestStore, JobClaimRequest, JobFinishRequest,
-    JobFinishStateUpdate, JobId, JobStatus, JobSubmitContract, Layer, LeaseStore, MemoryStore,
-    NewNode, NodeId, Op, SourceRev, StoreError, WorkspaceId, WriteBatch, WriteCtx,
+    JobFinishStateUpdate, JobId, JobStatus, JobSubmitContract, LeaseStore, MemoryStore, NewNode,
+    NodeId, Op, SourceRev, StoreError, WorkspaceId, WriteBatch, WriteCtx,
 };
 use kaban_store_sqlite::SqliteStore;
 use serde_json::{Value, json};
 
 fn ctx() -> WriteCtx {
-    WriteCtx::new("fixture-policy", WorkspaceId::default(), Actor::Agent)
+    WriteCtx::new(WorkspaceId::default(), Actor::Agent)
 }
 fn document(store: &SqliteStore, path: &str, workspace: &WorkspaceId) -> IngestJob {
     let id = NodeId::new();
@@ -108,7 +108,6 @@ fn finish_marker_release_and_report_rollback_together_and_retry_cannot_change_th
         .job_finish(finish_request(&store, &job, 1), &ctx(), &mut |_, _| {
             Ok(JobFinishStateUpdate {
                 report_json: "{}".into(),
-                audit: vec![],
             })
         })
         .unwrap();
@@ -131,7 +130,6 @@ fn finish_marker_release_and_report_rollback_together_and_retry_cannot_change_th
             .job_finish(finish_request(&store, &job, 1), &ctx(), &mut |_, _| Ok(
                 JobFinishStateUpdate {
                     report_json: "{\"changed\":true}".into(),
-                    audit: vec![]
                 }
             ))
             .is_err()
@@ -145,7 +143,6 @@ fn finish_marker_release_and_report_rollback_together_and_retry_cannot_change_th
         store.job_finish(finish_request(&store, &job, 1), &ctx(), &mut |_, _| Ok(
             JobFinishStateUpdate {
                 report_json: "{}".into(),
-                audit: vec![]
             }
         )),
         Err(StoreError::LeaseLost { .. })
@@ -186,7 +183,6 @@ fn source_and_workspace_are_independent_of_valid_fence_and_claim_rollback_is_ato
         store
             .job_finish(req, &ctx(), &mut |_, _| Ok(JobFinishStateUpdate {
                 report_json: "{}".into(),
-                audit: vec![]
             }))
             .is_err()
     );
@@ -266,12 +262,6 @@ fn default_pending_scan_is_path_ordered_bounded_at_one_thousand_and_keeps_exhaus
     store.jobs_prune(&workspace, i64::MAX, 1000).unwrap();
     assert!(claim(&store, &first).is_none());
     assert_eq!(store.jobs_exhausted(&workspace, 3).unwrap(), 1);
-    let report = store.jobs_reindex(Layer::Gliner, 1, &ctx()).unwrap();
-    assert!(report.transactions > 0);
-    assert!(
-        claim(&store, &first).is_none(),
-        "reset cannot erase an unmarked exhausted attempt cap"
-    );
     let obsolete_name = format!("ingest:{workspace}:gliner:{}@old-revision", id(&first));
     let obsolete = store
         .lease_acquire(&obsolete_name, "old", 300)
@@ -312,5 +302,40 @@ fn default_pending_scan_is_path_ordered_bounded_at_one_thousand_and_keeps_exhaus
             .unwrap()
             .is_none(),
         "bounded scan never claimed the available 1001st document"
+    );
+}
+
+/// A document whose claim attempts reached the cap is not exhausted once its job finished: the
+/// finish marker (stored under the job's extractor producer, PC-16) is matched to the attempt
+/// lease of the same dialect.
+#[test]
+fn a_finished_document_at_the_attempt_cap_is_not_counted_as_exhausted() {
+    let store = SqliteStore::open_memory().unwrap();
+    let workspace = WorkspaceId::default();
+    let job = document(&store, "finished.md", &workspace);
+    let lease = claim(&store, &job).unwrap();
+    assert_eq!(
+        store.jobs_exhausted(&workspace, 1).unwrap(),
+        1,
+        "one attempt, no finish marker yet"
+    );
+    store
+        .job_holder(&job.job, &job.workspace, Some(lease.fence), false)
+        .unwrap();
+    store
+        .job_finish(
+            finish_request(&store, &job, lease.fence),
+            &ctx(),
+            &mut |_, _| {
+                Ok(JobFinishStateUpdate {
+                    report_json: "{}".into(),
+                })
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        store.jobs_exhausted(&workspace, 1).unwrap(),
+        0,
+        "the finish marker answers the attempts"
     );
 }

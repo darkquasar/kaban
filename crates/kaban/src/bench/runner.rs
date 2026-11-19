@@ -1,15 +1,14 @@
 //! The benchmark itself: build the corpus through the full service path and time the §16
-//! operation set (C3.4 adds `why_one_path` here).
+//! operation set (`why_one_path` is reported not applicable since the `why` tool was removed).
 
 use super::corpus::{Corpus, Kind, Life, RELS, SEED, WORKSPACES, fixture_repo};
 use super::report::{machine_profile, not_applicable, self_status_kb, summarize};
 use kaban_api::{
     ApiConfig, CodeRefWire, ForgetRequest, KabanApi, LinkRequest, RecallRequest, RememberRequest,
-    RememberStatus, TraverseRequest, WhyRequest, WhyTarget,
+    RememberStatus, TraverseRequest,
 };
 use kaban_core::{
-    Actor, ActorId, ForgetMode, Governance, GraphStore, Location, NewEvent, NodeId, RecallQuery,
-    TraverseQuery, WorkspaceId, WriteCtx,
+    ActorId, ForgetMode, GraphStore, Location, NodeId, RecallQuery, TraverseQuery, WorkspaceId,
 };
 use kaban_policy::Policy;
 use kaban_store_sqlite::{LATEST_SCHEMA_VERSION, SqliteStore};
@@ -88,7 +87,6 @@ struct ReadPlan {
     recall_or_fallback: Vec<RecallRequest>,
     recall_filtered: Vec<RecallRequest>,
     recall_chunks: Option<Vec<RecallRequest>>,
-    why_paths: Vec<String>,
     denylist_short: Vec<String>,
     denylist_long: String,
 }
@@ -97,7 +95,6 @@ impl ReadPlan {
     const GETS: usize = 5000;
     const TRAVERSES: usize = 1000;
     const RECALLS: usize = 1000;
-    const WHYS: usize = 1000;
     const DENYLIST_SHORT: usize = 1000;
     const DENYLIST_LONG: usize = 200;
 
@@ -140,7 +137,6 @@ impl ReadPlan {
                 ..Default::default()
             })
         });
-        let why_paths = (0..Self::WHYS).map(|_| corpus.vocab_path()).collect();
         let denylist_short = (0..Self::DENYLIST_SHORT)
             .map(|_| {
                 format!(
@@ -167,7 +163,6 @@ impl ReadPlan {
             recall_or_fallback,
             recall_filtered,
             recall_chunks,
-            why_paths,
             denylist_short,
             denylist_long,
         })
@@ -207,7 +202,6 @@ impl ReadPlan {
                 direction: kaban_core::TraverseDirection::Both,
                 max_depth: 2,
                 node_kinds: vec![],
-                governance: vec![],
                 limit: 100,
                 workspace_id: Some(WORKSPACES[0].0.into()),
                 ..Default::default()
@@ -224,9 +218,8 @@ impl ReadPlan {
                 let mut returned = 0usize;
                 for req in reqs {
                     let q = RecallQuery {
-                        layers: req.layers.clone(),
+                        modes: req.modes.clone(),
                         fuzzy: req.fuzzy,
-                        filters: kaban_core::ReadFilters::default(),
                         query: req.query.clone(),
                         kinds: req.kinds.clone(),
                         tags: req.tags.clone(),
@@ -236,7 +229,6 @@ impl ReadPlan {
                             .or_else(|| Some(WORKSPACES[0].0.into())),
                         limit: 10,
                         hops: 1,
-                        include_superseded: false,
                         include_archived: false,
                         r#ref: None,
                     };
@@ -264,32 +256,6 @@ impl ReadPlan {
         if let Some(reqs) = &self.recall_chunks {
             recall("recall_chunks", false, reqs)?;
         }
-        // N2 `why`: one path per call, currency included (one `git log` per anchor group over
-        // the fixture repository; every accepted Decision shares the anchor, so one git call
-        // per why)
-        let mut lat = Vec::new();
-        let mut returned = 0usize;
-        let mut by_state: std::collections::BTreeMap<String, usize> =
-            std::collections::BTreeMap::new();
-        for target in &self.why_paths {
-            let s = Instant::now();
-            let r = api.why(WhyRequest {
-                targets: vec![WhyTarget::Path(target.clone())],
-                limit: Some(10),
-                ..Default::default()
-            })?;
-            lat.push(s.elapsed().as_secs_f64() * 1e6);
-            returned += r.results.len();
-            for c in &r.results {
-                *by_state
-                    .entry(format!("{:?}", c.currency.state).to_lowercase())
-                    .or_insert(0) += 1;
-            }
-        }
-        let mut v = summarize("why_one_path", "api", lat);
-        v["avg_results"] = json!(returned as f64 / self.why_paths.len() as f64);
-        v["currency_states"] = json!(by_state);
-        ops.push(v);
         // N3: the high-water mark right after the recall phase
         let vm_hwm_kb = self_status_kb("VmHWM");
 
@@ -356,17 +322,14 @@ pub(crate) fn run(
     let store: Arc<dyn GraphStore> = Arc::new(sqlite);
     let open_ms = t_open.elapsed().as_secs_f64() * 1e3;
     let mut corpus = Corpus::new(SEED);
-    // the N2 `why` fixture: a 50-commit repository beside the database; every accepted
+    // the fixture repository: a 50-commit repository beside the database; every accepted
     // Decision is stamped with its commit 25 and the fixture's root name (M3-22, M3-23)
     let fixture = db.with_file_name("bench-fixture-repo");
-    let t_fixture = Instant::now();
-    let fixture_commit = fixture_repo(&fixture, &corpus)?;
-    let fixture_s = t_fixture.elapsed().as_secs_f64();
+    fixture_repo(&fixture, &corpus)?;
     let api = Arc::new(KabanApi::with_config(
         store.clone(),
         policy,
         signer,
-        None,
         ApiConfig {
             workspace: WorkspaceId::new(WORKSPACES[0].0),
             repo_root: Some(fixture.clone()),
@@ -374,7 +337,6 @@ pub(crate) fn run(
             ..Default::default()
         },
     ));
-    let policy_version = api.policy_version();
     let mut ops = Vec::new();
     let mut counts = serde_json::Map::new();
     let bump = |counts: &mut serde_json::Map<String, Value>, key: &str| {
@@ -387,7 +349,6 @@ pub(crate) fn run(
     let mut lat = Vec::with_capacity(20_000);
     let mut by_ws: Vec<Vec<String>> = vec![Vec::new(); WORKSPACES.len()];
     let mut all_ids: Vec<String> = Vec::with_capacity(n);
-    let mut decisions: Vec<(String, bool)> = Vec::new();
     let mut to_forget: Vec<(String, ForgetMode)> = Vec::new();
     let mut rejected_writes = 0usize;
     for i in 0..n {
@@ -420,9 +381,6 @@ pub(crate) fn run(
             .unwrap_or(0);
         by_ws[ws].push(out.id.clone());
         all_ids.push(out.id.clone());
-        if spec.kind == Kind::Decision {
-            decisions.push((out.id.clone(), spec.accepted));
-        }
         match spec.life {
             Life::Active => bump(&mut counts, "lifecycle_active"),
             Life::Archived => to_forget.push((out.id, ForgetMode::Archive)),
@@ -431,30 +389,6 @@ pub(crate) fn run(
     }
     let remember_total_s = phase.elapsed().as_secs_f64();
     ops.push(summarize("remember", "api", lat));
-
-    // governance: acceptance is a store call until C3.2 (`accept` tool)
-    let phase = Instant::now();
-    let ctx = WriteCtx::new(policy_version.clone(), WorkspaceId::default(), Actor::Agent);
-    let mut accept_lat = Vec::new();
-    for (id, accepted) in &decisions {
-        if *accepted {
-            let s = Instant::now();
-            store.transition(
-                &NodeId::parse(id)?,
-                Governance::Accepted,
-                NewEvent {
-                    reason: "bench-accept".into(),
-                    commit_sha: Some(fixture_commit.clone()),
-                    ..Default::default()
-                },
-                &ctx,
-            )?;
-            accept_lat.push(s.elapsed().as_secs_f64() * 1e6);
-            bump(&mut counts, "decisions_accepted");
-        }
-    }
-    ops.push(summarize("accept_transition", "store", accept_lat));
-    let governance_total_s = phase.elapsed().as_secs_f64();
 
     // ---- edges: `epn` per node inside its workspace, through the full path ----
     let phase = Instant::now();
@@ -563,12 +497,11 @@ pub(crate) fn run(
     let pre_migration_ops: Option<Vec<Value>> = None;
     let (read_ops, vm_hwm_kb) = plan.run(&api, store.as_ref())?;
     ops.extend(read_ops);
-    if let Some(why) = ops
-        .iter_mut()
-        .find(|o| o["op"] == "why_one_path" && o["path"] == "api")
-    {
-        why["fixture"] = json!({ "commits": super::corpus::FIXTURE_COMMITS, "accepted_commit": fixture_commit, "build_s": fixture_s });
-    }
+    ops.push(not_applicable(
+        "why_one_path",
+        "spec 11 DEL-01",
+        "the why tool is removed with governance",
+    ));
     ops.push(not_applicable(
         "recall_ref",
         "C3.5",
@@ -587,7 +520,7 @@ pub(crate) fn run(
         "corpus": {
             "counts": counts, "rejected_writes": rejected_writes,
             "links_created": links_created, "links_skipped": links_skipped,
-            "remember_total_s": remember_total_s, "governance_total_s": governance_total_s,
+            "remember_total_s": remember_total_s,
             "link_total_s": link_total_s, "lifecycle_total_s": lifecycle_total_s,
             "inserts_per_s": (n as f64 / remember_total_s).round(),
             "links_per_s": (total_links as f64 / link_total_s).round(),

@@ -12,7 +12,6 @@
 //!     documents_by_status, chunks, blocked_chunks, table_unknown_chunks, failed[], rule_ids
 //!   IngestStore::list_nodes("Document", ws, offset, limit) (one page, id order) ==> documents[]
 //!   IngestStore::index_meta()[ingest_last_run:<ws>]                             ==> last_run
-//!   MemoryStore::stats(ws)["outbox_lag"]                                        ==> outbox_lag
 //! ```
 
 use crate::extract::extractor_for;
@@ -146,11 +145,6 @@ pub fn index_status(
         .entries
         .get(&format!("gazetteer_last_run:{workspace}"))
         .and_then(|raw| serde_json::from_str(raw).ok());
-    status.outbox_lag = store
-        .stats(Some(workspace.as_str()))?
-        .get("outbox_lag")
-        .and_then(Value::as_u64)
-        .unwrap_or(0);
     Ok(status)
 }
 

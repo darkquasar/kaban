@@ -28,7 +28,11 @@ const FORBIDDEN: [&str; 5] = ["SELECT ", "INSERT ", "UPDATE ", "DELETE FROM", "r
 
 /// Directories under `crates/` whose sources are allowed to carry SQL (relative to the workspace
 /// root, with a trailing slash so `kaban-store-sqlite-foo` would not match).
-const ALLOWED_CRATES: [&str; 2] = ["crates/kaban-store-sqlite/", "crates/kaban-codegraph/"];
+const ALLOWED_CRATES: [&str; 3] = [
+    "crates/kaban-store-sqlite/",
+    "crates/kaban-codegraph/",
+    "crates/kaban-vtab/",
+];
 
 /// Path components that mark test code or SQL files rather than production sources.
 const SKIPPED_COMPONENTS: [&str; 2] = ["tests", "migrations"];

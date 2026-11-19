@@ -1,16 +1,11 @@
 //! [`IngestStore`]: the bulk and maintenance write role trait, with the types only it uses.
 
-use crate::audit::{Actor, AuditEntry, WorkspaceId, WriteCtx};
-use crate::config::PromoteWhen;
+use crate::audit::{WorkspaceId, WriteCtx};
 use crate::error::Result;
 use crate::ids::NodeId;
 use crate::model::{
-    BatchReport, IndexMeta, KindStat, Node, PromoteReport, PruneReport, RescanAction, RescanReport,
-    WriteBatch,
+    BatchReport, IndexMeta, Node, RescanCursor, RescanJudge, RescanReport, WriteBatch,
 };
-use crate::ontology::Qualified;
-use serde_json::Value;
-use std::time::Duration;
 
 /// One `failed` document of a [`DocumentIndexSummary`]: the gated path and the recorded error.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,22 +82,7 @@ pub trait IngestStore: Send + Sync {
         let _ = (workspace, attempts);
         Ok(0)
     }
-    /// Explicit DB-only reset of one extractor layer, preserving other authorities.
-    /// # Errors
-    /// Invalid layer/bound, unsafe ownership or backend failure.
-    fn jobs_reindex(
-        &self,
-        layer: crate::Layer,
-        limit: u32,
-        ctx: &WriteCtx,
-    ) -> Result<crate::RetireReport> {
-        let _ = (layer, limit, ctx);
-        Err(crate::StoreError::InvalidName(
-            "layer".into(),
-            "unavailable_producer",
-        ))
-    }
-    /// Atomically retire omitted scoped claims/edges and retain the gated canonical report.
+    /// Atomically retire omitted scoped edges and retain the gated canonical report.
     /// Callback cannot lock the store or await; errors roll back the complete transaction.
     /// # Errors
     /// Revoked, stale, expired source preparation or backend/gate failure.
@@ -164,7 +144,8 @@ pub trait IngestStore: Send + Sync {
     /// # Errors
     /// Backend failures; `false` means unresolved without disclosing another tenant's row.
     fn job_mark_stale(&self, job: &crate::JobId, workspace: &WorkspaceId) -> Result<bool>;
-    /// Publish gated L3 graph/assertions/audit and successful accumulation atomically.
+    /// Publish the gated batch (its nodes, edges and their change-log entries, active at
+    /// once) and the job's successful accumulation in one transaction.
     /// The callback sees the transaction-current row and actual outcomes; it must not
     /// acquire the store or await. Any callback error rolls back the entire publication.
     /// Source/contract races and stale batches never count as successful submits.
@@ -186,45 +167,15 @@ pub trait IngestStore: Send + Sync {
             "not_available_in_this_release",
         ))
     }
-    /// Retire obsolete tracked artifact-only publications in bounded tenant transactions.
-    /// No obsolete claim-producing Gazetteer version is admitted: ambiguous claims refuse
-    /// before writes, and the trusted current producer always refuses.
-    ///
-    /// # Errors
-    /// Invalid batch bound, invalid source ownership, or transactional backend errors.
-    fn retire_producer(
-        &self,
-        authority: crate::CurrentProducerAuthority,
-        old_producer: &str,
-        batch_rows: u32,
-        ctx: &WriteCtx,
-    ) -> Result<crate::RetireReport>;
-    /// Offline read-only artifact and reserved sink freshness checks; reports counts only.
+    /// Offline read-only artifact freshness checks; reports counts only.
     ///
     /// # Errors
     /// Backend read failures; no repair, publication or optimization is performed.
-    fn artifact_diagnostics(
-        &self,
-        workspace: &WorkspaceId,
-        authority: crate::CurrentProducerAuthority,
-    ) -> Result<crate::ArtifactDiagnostics>;
-    /// Bounded, tenant-scoped maintenance of an admitted machine layer. Document paths
-    /// must have passed the service CONTENT gate before this storage lookup.
-    ///
-    /// # Errors
-    /// Invalid source ownership, invalid batch bound, or transactional backend errors.
-    fn maintain_layer(
-        &self,
-        authority: crate::CurrentProducerAuthority,
-        operation: crate::LayerMaintenance,
-        document_path: Option<&str>,
-        batch_rows: u32,
-        ctx: &WriteCtx,
-    ) -> Result<crate::RetireReport>;
+    fn artifact_diagnostics(&self, workspace: &WorkspaceId) -> Result<crate::ArtifactDiagnostics>;
     /// Apply one ingestion batch in one write transaction (core-plan C2.6; F16 store side):
     /// node ops in order, then edge ops, then the MD-23 edge diff (outgoing edges of each
     /// upserted node that the batch did not name are deleted; incoming edges are untouched),
-    /// with `ctx.audit` appended in the same transaction (D-17). A node whose WD-7 content
+    /// in one transaction. A node whose WD-7 content
     /// hash is unchanged writes no row and no changes row. The report's `ChangeLog` range covers
     /// exactly the `changes` rows this transaction wrote. Any failing op rolls the whole batch
     /// back.
@@ -239,139 +190,42 @@ pub trait IngestStore: Send + Sync {
     /// `NotFound` (unknown, purged or other-workspace id), `KindMismatch`, `InvalidTransition`
     /// or a backend error.
     fn apply_batch(&self, batch: WriteBatch, ctx: &WriteCtx) -> Result<BatchReport>;
-    /// Re-judge one batch of at most `batch` non-purged nodes whose `policy_version` differs
-    /// from `policy_version`, oldest row first, in one write transaction (core-spec S4;
-    /// core-plan C2.7): `f` decides per node and the store applies the [`RescanAction`]
-    /// (stamp; rewrite every rewritable string column in place with a new `rev` and a new
-    /// `content_hash` over the id and the masked strings; or tombstone with a `policy-reject`
-    /// event), with the action's audit entries in the same transaction. Every node the batch
-    /// judged ends up stamped with `policy_version`, so the caller loops until `scanned == 0`
-    /// and a cancelled or crashed run leaves the earlier batches committed and the rest pending
-    /// (idempotent re-run). An empty batch records `index_meta.policy_hash = policy_version`
-    /// in the same transaction (R2-3: the marker and the "nothing stale" check are atomic).
-    /// `f` must not call back into the store.
+    /// Re-judge one batch of stored rows against `policy_version` in one write transaction
+    /// (core-spec S4; core-plan C2.7), resuming at `at` (the previous batch's
+    /// [`RescanReport::cursor`], [`RescanCursor::Start`] to begin a run); the caller loops
+    /// until the cursor is [`RescanCursor::Done`]. `judge` decides per row and the store
+    /// applies the action: for a node nothing, a rewrite of every rewritable string column
+    /// in place (new `rev`, new `content_hash` over the id and the masked strings) or a
+    /// tombstone; for an edge nothing, masked `props` in place or a delete. Rows carry no
+    /// policy stamp (REC-08); freshness is the change log instead:
+    ///
+    /// - From `Start`, when `index_meta.policy_hash` differs from `policy_version` (or the
+    ///   change log was pruned past the watermark), the run is a full walk: the watermark
+    ///   [`IndexMeta::POLICY_SCAN_SEQ`] is reset to the change-log head, every non-purged
+    ///   node is walked by row id, then every edge; the empty edge read records
+    ///   `policy_hash = policy_version` in the same transaction.
+    /// - Every batch first judges the rows the change log names after the watermark (at most
+    ///   `batch` entries), so a row another writer changed behind the walk's cursor is judged
+    ///   again; rows ahead of the cursor are left to the walk. The watermark then moves past
+    ///   the entries read and, when the log is caught up, past the batch's own writes (with
+    ///   more than `batch` entries pending, the own writes are judged again later: the
+    ///   actions are idempotent, a row may count twice in a run's report).
+    /// - From `Start` with a matching marker the run judges only the change log, so a row
+    ///   written after a completed walk (by a process under an older policy, say) is judged
+    ///   by the next run.
+    ///
+    /// A cancelled or crashed walk leaves the earlier batches committed and restarts on the
+    /// next run (idempotent). `judge` must not call back into the store.
     ///
     /// # Errors
     /// Backend errors; the batch is rolled back.
     fn rescan(
         &self,
         policy_version: &str,
+        at: RescanCursor,
         batch: usize,
-        f: &mut dyn FnMut(&Node) -> RescanAction,
+        judge: &mut dyn RescanJudge,
     ) -> Result<RescanReport>;
-    /// Re-judge every stored claim value under `policy_version` in one write transaction
-    /// (engine-spec EN-S9 "rescan covers `assertion.value`"; engine-plan E2.2 item 11): `f`
-    /// sees each claim whose `value` is not null and returns the masked value when the policy
-    /// redacts or rejects a string in it (`None` keeps the row), pushing its audit entries. A
-    /// masked claim has its `value` column rewritten and is retired for good: `rank` becomes
-    /// `deprecated` with `rank_reason` `policy:<rule ids>` (the rules of the entries `f`
-    /// pushed for it, else `policy:<policy_version>`), its status is set to `rejected`, and
-    /// every touched conflict group is re-decided over its remaining supporters, the way the
-    /// replay seam does, so a masked claim neither votes nor projects, now or after any later
-    /// decide or replay. The pass is keyed by two DB-scoped `index_meta` rows (claim rows
-    /// carry no per-row stamp): `assertion_policy_hash`, the version the last pass ran
-    /// under, and `assertion_policy_hw`, the greatest claim id it reached. An equal version
-    /// judges the claims above the high-water id only (rows another process inserted since
-    /// the last pass; none means nothing is touched and `f` is never called); another
-    /// version judges every claim. Both rows are written at the end of a pass, in its
-    /// transaction; a purge of claim rows lowers the high-water id to the greatest
-    /// surviving one. The report counts claims: `scanned`, `kept`, `rejected` (masked);
-    /// `redacted` stays `0`. `f` must not call back into the store.
-    ///
-    /// # Errors
-    /// Backend errors; the transaction is rolled back and both rows are left unchanged.
-    fn rescan_assertions(
-        &self,
-        policy_version: &str,
-        f: &mut dyn FnMut(&crate::reconcile::Assertion, &mut Vec<AuditEntry>) -> Option<Value>,
-    ) -> Result<RescanReport>;
-    /// A human sets one claim's rank to `deprecated` with `reason` (engine-spec EN-F12b, the
-    /// `kaban explain <key> --deprecate` action; engine-plan E2.3 item 5) and the claim's
-    /// conflict group is re-decided in the same transaction without its vote (the rank is
-    /// outside the identity key, EN-F12a (2): an update, never a new row; the gated `reason`
-    /// is stored as `rank_reason`). The claim is looked up inside `ctx.workspace_id` (S6: a
-    /// key of another workspace is `NotFound`, the same refusal an unknown key gets) and
-    /// `ctx.audit` is appended in the same transaction. Returns the claim's status after the
-    /// re-decide. The caller judges the actor and the reason; the store judges neither.
-    ///
-    /// # Errors
-    /// `NotFound` for an unknown or foreign key; backend errors (the transaction is rolled
-    /// back).
-    fn deprecate_assertion(
-        &self,
-        key: &str,
-        reason: &str,
-        ctx: &WriteCtx,
-    ) -> Result<crate::reconcile::AssertionStatus>;
-    /// A human names the winner of one of `node`'s outstanding candidate groups (engine-plan
-    /// E2.5 `kaban resolve <id> --winner <value> [--group <key>]`; EN-F5a, EN-F12c; wave-3
-    /// review RW3-3): one human `preferred` claim carrying `value` joins the node's
-    /// `candidate` group named by `group`, or its only one when `group` is `None`; the group
-    /// is re-decided and projected, the node's candidate row is released, and `ctx.audit` is
-    /// appended, all in one store transaction (the status write and the `DELETE FROM
-    /// node_candidate` commit together or not at all). The group's subject, class and
-    /// predicate are read from the group itself; `value` is the caller's gated string. The
-    /// node is looked up in `workspace` (S6). The caller judges the actor; the store judges
-    /// neither the actor nor the value. Returns the group key.
-    ///
-    /// # Errors
-    /// `NotFound` for an unknown node, one of another workspace, one with no candidate group
-    /// or a `group` that is not one of the node's candidate groups; `InvalidName("group",
-    /// "ambiguous_group")` when the node has several candidate groups and none is named;
-    /// backend errors (the transaction is rolled back).
-    fn resolve_winner(
-        &self,
-        workspace: &str,
-        node: &NodeId,
-        value: &str,
-        group: Option<&str>,
-        ctx: &WriteCtx,
-    ) -> Result<String>;
-    /// A human re-targets a `CodeRef` whose anchored symbol the resolved snapshot no longer
-    /// holds (engine-plan E2.5 `kaban resolve <coderef-id> --symbol <key>`, SO-6): one human
-    /// `preferred` `prop_value` claim with predicate `symbol` carrying `key` is recorded and
-    /// decided, the node's `props.symbol` becomes `key` and its `symbol` anchor row follows
-    /// (EN-F10 anchor maintenance on write), and `ctx.audit` is appended, all in one store
-    /// transaction. The node is looked up in `workspace` (S6). The caller judges the actor and
-    /// the key's form (the normalised key of stage1-spec §4.2); the store judges neither.
-    ///
-    /// # Errors
-    /// `NotFound` for an unknown node, one of another workspace, one that is not an active
-    /// `CodeRef`; backend errors (the transaction is rolled back).
-    fn resolve_symbol(
-        &self,
-        workspace: &str,
-        node: &NodeId,
-        key: &str,
-        ctx: &WriteCtx,
-    ) -> Result<()>;
-    /// Count a human verdict on the reconciled claims of `node` (engine-spec EN-F16; engine-plan
-    /// E2.4): in the `priors_obs` table (created on first use, no migration) the
-    /// `(layer, method, claim_class)` counter named by `outcome` moves by one for every claim
-    /// of the node's conflict groups whose status is `winner` or `candidate` and whose layer is
-    /// not `human` (a person's own claim is no evidence about a layer). No edge, claim or
-    /// status row changes; `calibration_version` stays 0 (v1 never applies the counters).
-    /// Returns how many claims were counted.
-    ///
-    /// # Errors
-    /// `NotFound` for an unknown or purged node; backend errors.
-    fn priors_obs_bump(
-        &self,
-        node: &NodeId,
-        outcome: crate::reconcile::PriorsOutcome,
-    ) -> Result<u32>;
-    /// Every configured prior with its counters (zero before any observation), in the
-    /// vocabulary order of `(layer, method, claim_class)`: what `doctor --priors` prints.
-    ///
-    /// # Errors
-    /// Backend errors.
-    fn priors_obs(&self) -> Result<Vec<crate::reconcile::PriorsObs>>;
-    /// The group keys of `workspace` holding at least one `unresolved` claim (EN-F12b: the
-    /// groups only a human action resolves), ascending.
-    ///
-    /// # Errors
-    /// Backend errors.
-    fn unresolved_groups(&self, workspace: &str) -> Result<Vec<String>>;
     /// Every `index_meta` entry (DB-scoped bookkeeping: schema version, `db_id`, policy hash).
     ///
     /// # Errors
@@ -485,47 +339,6 @@ pub trait IngestStore: Send + Sync {
     /// Backend errors other than a busy or corrupt index; `TextIndexUnavailable` when the
     /// database retired FTS5 and no index is attached.
     fn optimize_fts(&self) -> Result<MaintenanceOutcome>;
-
-    // engine-plan E1.8: discovered labels (EN-F5, EN-F6). The placement itself happens inside
-    // `apply_batch` and `remember` under `WriteCtx.discovered`; these are its bookkeeping.
-
-    /// The `kind_stats` rows of `workspace` (EN-F6, EN-S3: another workspace's rows never
-    /// appear), ordered by `(ns, kind)`.
-    ///
-    /// # Errors
-    /// Backend errors.
-    fn kind_stats(&self, workspace: &WorkspaceId) -> Result<Vec<KindStat>>;
-    /// Promote the discovered kind `from` (`x:Vendor`) of `workspace` to the declared kind
-    /// `to` (EN-F5, human-only): in one write transaction every node's `kind` is renamed, the
-    /// `kind_stats` row moves under `to`, the `node_candidate` rows of reason
-    /// `discovered_kind` are deleted (EN-F5a), the `x:` `schema_type` row goes when no
-    /// workspace counts it any more and one `events` row (`kind_promoted`) is written.
-    ///
-    /// # Errors
-    /// `HumanOnly` for an agent actor; `Ontology(unknown_kind)` when `to` is not declared or
-    /// `from` has no `kind_stats` row in `workspace`; backend errors.
-    fn promote_kind(
-        &self,
-        workspace: &WorkspaceId,
-        from: &str,
-        to: &Qualified,
-        actor: &Actor,
-    ) -> Result<PromoteReport>;
-    /// List, and unless `dry_run` remove, the `x:` kinds of `workspace` with `n_nodes <
-    /// below.min_count` whose `last_seen` is older than `older_than` (EN-F5): their
-    /// candidate nodes are tombstoned, their `node_candidate` and `kind_stats` rows deleted
-    /// (the cap count drops), the `x:` `schema_type` row when no workspace counts it any more.
-    /// A dry run writes nothing.
-    ///
-    /// # Errors
-    /// Backend errors.
-    fn prune_kinds(
-        &self,
-        workspace: &WorkspaceId,
-        below: &PromoteWhen,
-        older_than: Duration,
-        dry_run: bool,
-    ) -> Result<PruneReport>;
 }
 
 /// Outcome of one maintenance check or operation of `doctor` (core-spec §7; M4-19): a check

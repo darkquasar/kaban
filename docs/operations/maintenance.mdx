@@ -1,6 +1,6 @@
 ---
 title: "Maintenance and recovery"
-description: "Diagnose existing stores, maintain derived indexes, sync records, and protect recoverable backups."
+description: "Diagnose existing stores, maintain derived indexes, and protect recoverable backups."
 ---
 
 Run maintenance with the same `KABAN_HOME`, database, policy, and workspace as
@@ -13,20 +13,21 @@ mutating maintenance on valuable data.
 ```bash
 kaban doctor
 kaban stats
-kaban verify-audit
 ```
 
 Ordinary `doctor` diagnoses the database as it exists: it does not create,
 migrate, seed, tighten file modes, or automatically optimize it. Checks include
-database integrity, schema, file modes, audit, the text index's position, conflicts, and layer state.
+database integrity, schema, file modes, the text index's position, and producer state.
 It returns `0` when all checks pass and `5` for a failed check or open failure;
-content gates can withhold its report. Policy-gate auditing can still record a
-rejection, so this is not a forensic promise of zero writes to the file.
+content gates can withhold its report. A database of another schema version is the
+exception: `doctor` prints a report whose `schema_version` check fails with the
+refusal text ("no upgrade path exists; create a fresh project and re-ingest") and
+exits `0`, leaving the files unchanged. This is not a forensic promise of zero
+writes to a database that opens.
 
-`stats` reports counters, policy information, budgets, and the layer matrix. It
+`stats` reports counters, policy information, and the producers with their budgets. It
 uses the normal service open path, so do not substitute it for diagnostic opening
-when investigating an absent or older database. `verify-audit` needs the existing
-matching key and returns `5` for a broken chain or an open/key failure.
+when investigating an absent or older database.
 
 ## Full-text maintenance
 
@@ -47,61 +48,19 @@ re-ingestion.
 Schedule it with enough free disk and a backup; do not treat it as a guaranteed
 secure erase of storage media or external copies.
 
-## Layer reset and re-ingestion
+## Re-ingestion
 
-**Reset removes derived state.** `reindex layer` is a DB-only reset, not a
-completed rebuild. For example, after deciding to regenerate gazetteer links:
+There is no per-producer reset: `reindex layer` and `forget --layer` are removed,
+with no alias. Generated links change when their producer runs again, for example:
 
 ```bash
-kaban reindex layer gazetteer
 kaban ingest docs/ --link gazetteer
 ```
 
-Replace `docs/` with the intended source paths. Generated links remain absent
-between the reset and successful explicit ingestion with that layer enabled. No
-background rebuild is scheduled. Human and other-layer state is retained.
-Inspect the ingestion report for blocked, failed, or skipped work.
-
-`forget --layer` is different: it rejects existing machine claims while keeping
-their history. It is not the repair command for a derived index you want rebuilt.
-
-## Export, sync, and import
-
-| Operation | Effect |
-| --- | --- |
-| `kaban export --format markdown` | Prints JSON containing a managed block of accepted exportable records |
-| `kaban export --write AGENTS.md` | Creates or replaces Kaban's managed block; preserves text outside it |
-| `kaban sync --repo /path/to/repo` | Imports advanced record files, writes stale records/tombstones and digests under `.kaban/` |
-| `kaban sync --stage --repo /path/to/repo` | Also stages `.kaban/` changes; does not commit |
-| `kaban import --repo /path/to/repo` | Full record import into the bound workspace, without writing repository files |
-
-Use `import`, not the retired `rebuild` spelling. **Import is a database mutation**:
-its absence pass can tombstone previously serialized records whose file deletion
-is recorded in Git. Sync can rewrite files and move the old pre-engine layout;
-review local changes before committing. `--deadline 60` bounds a sync run; if it
-expires, the next sync continues from completed work.
-
-Serialization is transport for supported records, not a full database backup.
-It does not restore every graph edge or code-reference node into a fresh store.
-Protect `.kaban/` as data and review what will enter repository history.
-
-### Resolve conflicts deliberately
-
-Equal revisions with different content produce a conflict instead of silently
-choosing a winner. `stats` counts conflicts and `doctor` reports them. Inspect
-both versions before selecting one:
-
-```bash
-kaban resolve RECORD_ID --take db
-# Alternative, not a second step:
-kaban resolve RECORD_ID --take file
-```
-
-Replace `RECORD_ID` with the actual conflicted record ID. **Both choices mutate
-state and replace the losing representation**: `db` rewrites the file from the
-database, while `file` imports the file and reserializes it. The revision advances
-above both versions. Forbidden governance transitions are still refused. If a
-file write fails, the conflict remains pending; do not call it resolved.
+Replace `docs/` with the intended source paths. A producer rerun deletes only the
+links it wrote; links another producer or an author wrote first are kept. No
+background rebuild is scheduled. Inspect the ingestion report for blocked, failed,
+or skipped work.
 
 ## Policy changes
 
@@ -121,7 +80,7 @@ export can emit a clean result.
 There is no full-store `kaban backup` command. Use a SQLite-consistent backup
 procedure, not a live copy of just `kaban.db`:
 
-1. For a cold backup, stop all server, CLI, hook-sync, and other processes that
+1. For a cold backup, stop all server, CLI, hook, and other processes that
    can access the store. Prevent new hook jobs while making the copy. If you
    cannot quiesce them, use SQLite's supported online backup mechanism instead.
 2. Preserve the database and any remaining `-wal`/`-shm` sidecars together from
@@ -133,21 +92,23 @@ procedure, not a live copy of just `kaban.db`:
    protected/encrypted backup destination.
 4. Restore into an isolated location while clients are stopped. Restore the
    matching keys and use explicit paths; do not overwrite the only surviving
-   copy while investigating damage. Run `doctor` and `verify-audit` against the
+   copy while investigating damage. Run `doctor` against the
    restored store before reconnecting clients.
 
 Losing the audit key is not fixed by generating another one. Restore the matching
 key from your protected backup or preserve the failure evidence for recovery.
-Normal service opening may migrate an older database; diagnose it before doing
-that when you need to preserve its original state.
+A restored database of an older schema version cannot be served: every open
+refuses it and leaves its files unchanged, and no upgrade path exists. Keep it as
+an archive and create a fresh project to re-ingest into.
 
 ## Destructive operations
 
-**Do not use purge, layer forgetting, or file deletion as generic troubleshooting.**
+**Do not use purge or file deletion as generic troubleshooting.**
 
 `kaban forget RECORD_ID --mode purge` removes the record's content, index entries,
-and edges while retaining a purged identity. A later sync writes a tombstone that
-can propagate the purge to other clones. There is no ordinary undo operation.
+and edges while retaining a purged identity. The purge is local to this database:
+copies, backups and other clones keep their own data and are not told about it.
+There is no ordinary undo operation.
 
 Purge does not remove old Git commits, prior backups, caches, or agent transcripts.
 If a live credential was exposed, rotate it through its issuing system; removing

@@ -8,7 +8,6 @@ expression: v
   "results": [
     {
       "created_at": "<ts>",
-      "governance": "none",
       "id": "<id-0>",
       "kind": "Fact",
       "lifecycle": "active",
@@ -27,7 +26,6 @@ expression: v
     },
     {
       "created_at": "<ts>",
-      "governance": "proposed",
       "id": "<id-1>",
       "kind": "Failure",
       "lifecycle": "active",
@@ -51,7 +49,6 @@ expression: v
     },
     {
       "created_at": "<ts>",
-      "governance": "none",
       "id": "<id-2>",
       "kind": "Idea",
       "lifecycle": "active",

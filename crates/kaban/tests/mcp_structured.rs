@@ -15,7 +15,7 @@
 mod common;
 
 use common::{Scratch, Server};
-use kaban_core::{Actor, MemoryStore, NewNode, WorkspaceId, WriteCtx};
+use kaban_core::{Actor, IngestStore, MemoryStore, NewNode, RescanAction, WorkspaceId, WriteCtx};
 use kaban_policy::Policy;
 use kaban_store_sqlite::SqliteStore;
 use serde_json::{Value, json};
@@ -38,15 +38,16 @@ phrases:\n  - { term: \"Project Nightjar\", id: codename-nightjar }\n";
 /// Workspace bound by the server and stamped on the seeded nodes.
 const WORKSPACE: &str = "det";
 
-/// Write the test policy, seed one Fact with `text` stamped with that policy's version (so the
-/// server's startup rescan leaves it alone), and start a server bound to the same workspace.
+/// Write the test policy, seed one Fact with `text` and record that policy as the database's
+/// rescan marker (so the server's startup rescan leaves it alone), and start a server bound to
+/// the same workspace.
 fn server_with_seeded_text(s: &Scratch, text: &str) -> Server {
     let policy = s.0.join("policy.yaml");
     std::fs::write(&policy, POLICY).unwrap();
     let version = Policy::load(&policy).unwrap().effective_hash().to_owned();
     {
         let store = SqliteStore::open(&s.db(), &s.home().join("keys")).unwrap();
-        let ctx = WriteCtx::new(version, WorkspaceId::new(WORKSPACE), Actor::Agent);
+        let ctx = WriteCtx::new(WorkspaceId::new(WORKSPACE), Actor::Agent);
         store
             .remember(
                 NewNode {
@@ -59,6 +60,16 @@ fn server_with_seeded_text(s: &Scratch, text: &str) -> Server {
                 &ctx,
             )
             .unwrap();
+        // a complete walk records the marker
+        let mut at = kaban_core::RescanCursor::Start;
+        while at != kaban_core::RescanCursor::Done {
+            at = store
+                .rescan(&version, at, 100, &mut |_: &kaban_core::Node| {
+                    RescanAction::Keep
+                })
+                .unwrap()
+                .cursor;
+        }
     }
     Server::start_with(
         s,

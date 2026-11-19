@@ -1,5 +1,5 @@
 // kaban hooks for pi 0.87.1 (core-spec F8, F8b, F13; core-plan C4.5 as amended by M4-7, M4-21,
-// M4-24, M4-32; C5.3 as amended by M5-20). Load with `pi -e /path/to/kaban-hooks.ts` or copy into
+// M4-24, M4-32). Load with `pi -e /path/to/kaban-hooks.ts` or copy into
 // `~/.pi/agent/extensions/`. See README.md in this directory.
 //
 //   pi event                 kaban hook (spawn, envelope on stdin)   what reaches the model
@@ -9,9 +9,6 @@
 //     bash
 //   agent_before_settle  =>  kaban hook stop          --host pi  ->  one continuation
 //                                                                    (custom_message, continue)
-//   session_shutdown     =>  kaban sync --json --deadline 60 (detached, ->  nothing (the .kaban/*.md
-//                            own session, no descriptor inherited,        flush; never --stage)
-//                            never awaited; bounded by kaban itself)
 //
 // Rules: kaban is spawned with the envelope on stdin, never in argv (M4-21: `pi.exec` has no
 // stdin and argv would show error text to `ps`); every spawn has a 2 s kill timer and kaban's
@@ -24,23 +21,10 @@
 // to stdout, so `--print --mode json` streams stay intact; no process is started in the
 // extension factory. `kaban hook` never creates a database: point KABAN_DB (and KABAN_HOME,
 // KABAN_WORKSPACE) at the same values as the kaban MCP server entry.
-//
-// session_shutdown (M5-20, R5-9): `kaban sync --json --deadline <s>` is started with
-// `spawn(..., {detached: true, stdio: "ignore"})` and `unref()` and is never awaited, so pi's
-// shutdown is not delayed and pi's exit does not kill the flush (`pi.exec` and `runHook` would
-// pipe the child's output and await it, killing it on their 2 s timeout, and a timer in this
-// extension dies with pi; neither can bound a flush that outlives the host). The bound is the
-// deadline kaban honours itself: at `KABAN_SYNC_DEADLINE` seconds (default 60; digits only,
-// anything else falls back to 60) the sync prints a fixed line and exits 4, and the next sync
-// continues. Set KABAN_HOOK_SYNC=0 to skip the sync.
 import { spawn } from "node:child_process";
 
 const KABAN_BIN = process.env.KABAN_BIN ?? "kaban";
 const HOOK_TIMEOUT_MS = 2000;
-/** Seconds the detached `kaban sync` may run (R5-9); a fixed, digits-only argv value. */
-const SYNC_DEADLINE_S = /^[0-9]{1,5}$/.test(process.env.KABAN_SYNC_DEADLINE ?? "")
-  ? (process.env.KABAN_SYNC_DEADLINE as string)
-  : "60";
 const MAX_OUTPUT_BYTES = 64 * 1024;
 const MAX_TRACKED_COMMANDS = 64;
 
@@ -216,24 +200,5 @@ export default function (pi: any) {
       entries: [{ type: "custom_message", customType: "kaban-stop", content: doc.reason, display: true }],
       continue: true,
     };
-  });
-
-  pi.on("session_shutdown", async (_event: any, ctx: any) => {
-    if (process.env.KABAN_HOOK_SYNC === "0") return;
-    const cwd = ctx?.cwd ?? process.cwd();
-    try {
-      const env: NodeJS.ProcessEnv = { ...process.env };
-      if (!env.KABAN_DB) env.KABAN_DB = `${cwd}/kaban.db`;
-      // fully detached: own session, no inherited descriptor, not awaited, not tracked; the
-      // wall-clock bound is kaban's own `--deadline` (R5-9), since nothing here outlives pi
-      const child = spawn(KABAN_BIN, ["sync", "--json", "--deadline", SYNC_DEADLINE_S], {
-        cwd,
-        env,
-        detached: true,
-        stdio: "ignore",
-      });
-      child.on("error", () => {});
-      child.unref();
-    } catch {}
   });
 }

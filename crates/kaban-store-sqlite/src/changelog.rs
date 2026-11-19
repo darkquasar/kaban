@@ -124,18 +124,6 @@ pub(crate) fn record_terminal(tx: &Connection, ctx: &kaban_core::WriteCtx) -> Re
     Ok(())
 }
 
-/// `max(seq) - min(last_seq)` over the registered projections; 0 without consumers or rows.
-pub(crate) fn lag(conn: &Connection) -> Result<i64> {
-    let lag: i64 = conn.query_row(
-        "SELECT CASE WHEN (SELECT count(*) FROM projections) = 0 THEN 0
-                     ELSE max(0, (SELECT COALESCE(max(seq), 0) FROM changes) - (SELECT min(last_seq) FROM projections))
-                END",
-        [],
-        |r| r.get(0),
-    ).sql()?;
-    Ok(lag)
-}
-
 /// `max(seq) - last_seq` of every registered projection, by name (spec 05 SS-21: `doctor`'s
 /// per-consumer retention lag; [`lag`] is its maximum).
 pub(crate) fn lag_by_consumer(conn: &Connection) -> Result<BTreeMap<String, u64>> {

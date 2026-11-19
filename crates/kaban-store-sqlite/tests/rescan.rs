@@ -1,0 +1,215 @@
+//! The policy rescan's freshness (core-spec S4; REC-08): rows carry no policy stamp, so the
+//! change log decides what a run judges. A row another writer changes behind a running walk's
+//! cursor is judged again before the run reports done, and a run after a complete walk judges
+//! only the rows changed since.
+
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // test code: failures are the assertion
+
+use kaban_core::{
+    Actor, IngestStore, Lifecycle, MemoryStore, NewNode, Node, NodeId, Op, RescanAction,
+    RescanCursor, RescanReport, WorkspaceId, WriteBatch, WriteCtx,
+};
+use kaban_store_sqlite::SqliteStore;
+
+fn ctx() -> WriteCtx {
+    WriteCtx::new(WorkspaceId::default(), Actor::Agent)
+}
+
+fn upsert(store: &SqliteStore, id: &NodeId, text: &str) {
+    store
+        .apply_batch(
+            WriteBatch::new(
+                WorkspaceId::default(),
+                vec![Op::UpsertNode {
+                    id: id.clone(),
+                    node: NewNode {
+                        kind: "Fact".into(),
+                        text: text.into(),
+                        ..Default::default()
+                    },
+                }],
+            ),
+            &ctx(),
+        )
+        .unwrap();
+}
+
+/// The policy under test: a node naming the codename is rejected.
+fn judge(n: &Node) -> RescanAction {
+    if n.text.contains("nightjar") {
+        RescanAction::Reject
+    } else {
+        RescanAction::Keep
+    }
+}
+
+/// Run batches of `batch` rows from `at` until done, summing the reports.
+fn run_from(store: &SqliteStore, mut at: RescanCursor, batch: usize) -> RescanReport {
+    let mut total = RescanReport::default();
+    while at != RescanCursor::Done {
+        let report = store.rescan("v2", at, batch, &mut judge).unwrap();
+        at = report.cursor;
+        total += report;
+    }
+    total
+}
+
+#[test]
+fn an_update_behind_a_running_walks_cursor_is_judged_before_the_run_is_done() {
+    // Arrange: three clean nodes
+    let store = SqliteStore::open_memory().unwrap();
+    let ids: Vec<NodeId> = (0..3).map(|_| NodeId::new()).collect();
+    for (i, id) in ids.iter().enumerate() {
+        upsert(&store, id, &format!("clean note {i}"));
+    }
+
+    // Act: the walk judges the first node, then another writer rewrites it behind the cursor
+    let first = store
+        .rescan("v2", RescanCursor::Start, 1, &mut judge)
+        .unwrap();
+    assert_eq!((first.scanned, first.kept), (1, 1), "{first:?}");
+    assert!(matches!(first.cursor, RescanCursor::Nodes(_)), "{first:?}");
+    upsert(&store, &ids[0], "now naming the nightjar codename");
+    let rest = run_from(&store, first.cursor, 1);
+
+    // Assert: the rewritten node was judged again and tombstoned (with one-entry batches the
+    // log lags, so the tombstone write itself may be judged again: idempotent)
+    assert!(rest.rejected >= 1, "{rest:?}");
+    let hidden = store.get(&ids[0], true).unwrap().unwrap();
+    assert_eq!(hidden.lifecycle, Lifecycle::Tombstoned);
+    // the run's own writes are not judged again: a new run has nothing to do
+    let idle = run_from(&store, RescanCursor::Start, 1);
+    assert_eq!(idle.scanned, 0, "{idle:?}");
+}
+
+#[test]
+fn a_run_after_a_complete_walk_judges_only_rows_changed_since() {
+    // Arrange: a complete walk under v2
+    let store = SqliteStore::open_memory().unwrap();
+    for i in 0..4 {
+        upsert(&store, &NodeId::new(), &format!("clean note {i}"));
+    }
+    let walk = run_from(&store, RescanCursor::Start, 100);
+    assert_eq!(walk.scanned, 4, "{walk:?}");
+
+    // Act: a writer under an older policy stores a node v2 rejects
+    let stale = NodeId::new();
+    upsert(&store, &stale, "the nightjar codename from an old process");
+    let next = run_from(&store, RescanCursor::Start, 100);
+
+    // Assert: only the changed row is judged, and it is hidden
+    assert_eq!((next.scanned, next.rejected), (1, 1), "{next:?}");
+    assert!(store.get(&stale, false).unwrap().is_none());
+}
+
+#[test]
+fn a_changed_policy_walks_every_row_again() {
+    let store = SqliteStore::open_memory().unwrap();
+    for i in 0..3 {
+        upsert(&store, &NodeId::new(), &format!("clean note {i}"));
+    }
+    assert_eq!(run_from(&store, RescanCursor::Start, 100).scanned, 3);
+    let mut seen = 0;
+    let mut at = RescanCursor::Start;
+    while at != RescanCursor::Done {
+        let report = store
+            .rescan("v3", at, 2, &mut |_: &Node| {
+                seen += 1;
+                RescanAction::Keep
+            })
+            .unwrap();
+        at = report.cursor;
+    }
+    assert_eq!(seen, 3, "a new policy version re-judges every node");
+}
+
+/// A policy that rejects nothing but counts what it judges.
+fn keep_all(n: &Node) -> RescanAction {
+    let _ = n;
+    RescanAction::Keep
+}
+
+/// Two walks under different policies interleave batch by batch: a row rewritten behind the
+/// v2 walk's cursor before a v3 walk starts is still judged by v2 before v2 reports done (the
+/// v3 start must not move v2's position in the change log).
+#[test]
+fn interleaved_walks_under_different_policies_each_judge_their_own_backlog() {
+    let store = SqliteStore::open_memory().unwrap();
+    let ids: Vec<NodeId> = (0..3).map(|_| NodeId::new()).collect();
+    for (i, id) in ids.iter().enumerate() {
+        upsert(&store, id, &format!("clean note {i}"));
+    }
+
+    // v2 walks the first node; another writer then rewrites it behind v2's cursor
+    let mut v2_at = store
+        .rescan("v2", RescanCursor::Start, 1, &mut judge)
+        .unwrap()
+        .cursor;
+    assert!(matches!(v2_at, RescanCursor::Nodes(_)), "{v2_at:?}");
+    upsert(&store, &ids[0], "now naming the nightjar codename");
+
+    // a v3 walk starts and the two alternate batch by batch until both are done
+    let mut v3_at = RescanCursor::Start;
+    let mut v2_rejected = 0;
+    while v2_at != RescanCursor::Done || v3_at != RescanCursor::Done {
+        if v3_at != RescanCursor::Done {
+            v3_at = store.rescan("v3", v3_at, 1, &mut keep_all).unwrap().cursor;
+        }
+        if v2_at != RescanCursor::Done {
+            let report = store.rescan("v2", v2_at, 1, &mut judge).unwrap();
+            v2_rejected += report.rejected;
+            v2_at = report.cursor;
+        }
+    }
+
+    // v2 judged the rewrite before it reported done
+    assert!(v2_rejected >= 1, "v2 rejected {v2_rejected}");
+    let hidden = store.get(&ids[0], true).unwrap().unwrap();
+    assert_eq!(hidden.lifecycle, Lifecycle::Tombstoned);
+
+    // a v2 run from the start, then nothing is left for v2 until the next write
+    run_from(&store, RescanCursor::Start, 100);
+    assert_eq!(run_from(&store, RescanCursor::Start, 100).scanned, 0);
+}
+
+/// Two walks under the same policy share its walk watermark but not their cursors. Walk A
+/// judges nodes 1 and 2; another writer rewrites node 2 to content the policy rejects; walk B
+/// starts under the same policy, judges node 1 and is abandoned; A resumes and finishes. The
+/// rewrite of node 2 sits behind A's cursor, so A must judge it before it certifies, and a
+/// later run must not report a freshness the rewrite never earned.
+#[test]
+fn a_same_policy_walk_restarted_midway_does_not_hide_a_rewrite_behind_the_older_cursor() {
+    let store = SqliteStore::open_memory().unwrap();
+    let ids: Vec<NodeId> = (0..3).map(|_| NodeId::new()).collect();
+    for (i, id) in ids.iter().enumerate() {
+        upsert(&store, id, &format!("clean note {i}"));
+    }
+
+    // walk A judges nodes 1 and 2
+    let a1 = store
+        .rescan("v2", RescanCursor::Start, 1, &mut judge)
+        .unwrap();
+    let a2 = store.rescan("v2", a1.cursor, 1, &mut judge).unwrap();
+    assert_eq!(a1.scanned + a2.scanned, 2, "{a1:?} {a2:?}");
+    assert!(matches!(a2.cursor, RescanCursor::Nodes(_)), "{a2:?}");
+
+    // another writer rewrites node 2 behind A's cursor
+    upsert(&store, &ids[1], "now naming the nightjar codename");
+
+    // walk B starts under the same policy, judges one batch and is abandoned
+    let b = store
+        .rescan("v2", RescanCursor::Start, 1, &mut judge)
+        .unwrap();
+    assert!(matches!(b.cursor, RescanCursor::Nodes(_)), "{b:?}");
+
+    // A resumes and finishes
+    run_from(&store, a2.cursor, 1);
+
+    // node 2 was judged after its rewrite, before the policy was certified
+    let rewritten = store.get(&ids[1], true).unwrap().unwrap();
+    assert_eq!(rewritten.lifecycle, Lifecycle::Tombstoned, "{rewritten:?}");
+    // and a later run reports freshness only once nothing is left unjudged
+    run_from(&store, RescanCursor::Start, 1);
+    assert_eq!(run_from(&store, RescanCursor::Start, 1).scanned, 0);
+    assert!(store.get(&ids[1], false).unwrap().is_none());
+}

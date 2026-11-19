@@ -1,6 +1,7 @@
 //! The dedicated read connection and the `cg` attach (CG-JOIN v1 §2 SO-4, §7 SO-10, §11;
 //! engine-plan E2.6): `attach_is_read_only`, `attach_switches_on_commit_change`,
-//! `snapshot_symbols_pages_non_external` and the eight-process concurrent attach (E2.6b,
+//! `snapshot_symbols_pages_non_external`, the `coderefs_by_symbol` predicates and index plan
+//! (G1-F10) and the eight-process concurrent attach (E2.6b,
 //! `#[ignore]`, run by the clean-room's `--run-ignored only -E 'test(multi_process)'` step).
 //! The fixture is the §10 builder, shared with the `kaban-api` suites through `#[path]`;
 //! admission is `validate_for_attach` (v4's), the store only ever sees the core-owned
@@ -24,9 +25,9 @@ use cg_fixture::{
 use common::{Scratch, created, ctx};
 use kaban_codegraph::{SnapshotError, validate_for_attach};
 use kaban_core::{
-    Actor, AnchorPredicates, GovernedSet, IngestStore, MemoryStore, NewNode, NodeId, Op,
-    RememberOutcome, SNAPSHOT_SYMBOL_PAGE, SnapshotAttach, StoreError, SymbolPage, WorkspaceFilter,
-    WorkspaceId, WriteBatch, WriteCtx,
+    Actor, AnchorPredicates, IngestStore, MemoryStore, NewNode, NodeId, Op, RememberOutcome,
+    SNAPSHOT_SYMBOL_PAGE, SnapshotAttach, StoreError, SymbolPage, WorkspaceFilter, WorkspaceId,
+    WriteBatch, WriteCtx,
 };
 use kaban_store_sqlite::SqliteStore;
 use serde_json::json;
@@ -384,8 +385,7 @@ fn coderef(
     if let Some(scope) = scope {
         props["snapshot_commit"] = json!(scope);
     }
-    let ctx = WriteCtx::new("pv", WorkspaceId::new(workspace), Actor::Agent)
-        .with_governed(GovernedSet::shipped());
+    let ctx = WriteCtx::new(WorkspaceId::new(workspace), Actor::Agent);
     match store
         .remember(
             NewNode {
@@ -490,6 +490,100 @@ fn coderefs_by_symbol_applies_every_predicate() {
     let lower = AFERO_KEY.replace("MemMapFs#", "memmapfs#");
     assert_eq!(ids(&without, &lower), vec![off_by_case.clone()]);
     let _ = other_scope;
+}
+
+/// The `coderefs_by_symbol` shape after its `SELECT` list (the `commit: None`, `Only(ws)`
+/// case: no scope clause, OWN-83 (1)), mirrored from `anchors.rs` `coderefs_by_symbol` (the
+/// `format!` at the `let sql`; the comment above it names this constant). The production
+/// statement is `pub(crate)` and builds its clauses from the predicates, so an integration
+/// test cannot share it; the two change together.
+const CODEREFS_BY_SYMBOL_SHAPE: &str = "FROM node_anchor a CROSS JOIN node c ON c.rid = a.rid \
+     WHERE a.anchor_kind = 'symbol' AND a.key = ?1 AND a.repo = ?2 \
+     AND a.workspace_id = ?3 AND c.kind = 'CodeRef' AND c.lifecycle = 'active' ORDER BY c.rid";
+
+/// The `EXPLAIN QUERY PLAN` detail rows of `SELECT c.id {shape}` on a read-only second
+/// connection (the projection does not move the plan: `node` is reached by rowid either way).
+fn plan_of(s: &Scratch, shape: &str, ws: &str) -> Vec<String> {
+    let conn =
+        rusqlite::Connection::open_with_flags(s.db(), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap();
+    let mut st = conn
+        .prepare(&format!("EXPLAIN QUERY PLAN SELECT c.id {shape}"))
+        .unwrap();
+    st.query_map(rusqlite::params![AFERO_KEY, "kaban", ws], |r| {
+        r.get::<_, String>(3)
+    })
+    .unwrap()
+    .collect::<rusqlite::Result<_>>()
+    .unwrap()
+}
+
+/// G1-F10 verify (E2.6c): the plan of the `coderefs_by_symbol` shape names the
+/// `node_anchor_key` index on an empty store and on one holding 100 symbol anchors; the
+/// assertion is on the plan, not on the SQL text. The store never runs `ANALYZE`, so the
+/// planner has no `sqlite_stat1` to go on and the statement itself has to drive from
+/// `node_anchor` (`CROSS JOIN`).
+///
+/// The negative case is the pre-E2.6c shape, a plain `JOIN`: on the same store the planner
+/// drives it from `node_kind` and never reaches `node_anchor_key`, which is the defect the
+/// `CROSS JOIN` removes. Should a later bundled SQLite plan the plain `JOIN` from the index
+/// too, that assertion is the one to drop: the pin would then be belt and braces. The rows
+/// are unchanged by the join order: the store returns the one wanted row among the 100.
+#[test]
+fn coderefs_by_symbol_uses_the_anchor_index() {
+    let s = Scratch::new("e26-attach", "anchor-index");
+    let store = SqliteStore::open(&s.db(), &s.keys()).unwrap();
+    let ws = WorkspaceId::default();
+    let plain_join = CODEREFS_BY_SYMBOL_SHAPE.replacen("CROSS JOIN", "JOIN", 1);
+
+    // 0 rows: the empty store is where a plain `JOIN` has nothing to guide it
+    let plan = plan_of(&s, CODEREFS_BY_SYMBOL_SHAPE, ws.as_str());
+    assert!(
+        plan.iter().any(|row| row.contains("node_anchor_key")),
+        "empty store: the plan does not use the anchor index: {plan:?}"
+    );
+    let old = plan_of(&s, &plain_join, ws.as_str());
+    assert!(
+        !old.iter().any(|row| row.contains("node_anchor_key")),
+        "empty store: the plain JOIN shape now uses the anchor index; the CROSS JOIN pin can be revisited: {old:?}"
+    );
+
+    // 100 rows: 99 other symbols and the one under test; still no statistics
+    for i in 0..99 {
+        coderef(
+            &store,
+            ws.as_str(),
+            "kaban",
+            &format!("{AFERO_KEY}{i}"),
+            None,
+        );
+    }
+    let wanted = coderef(&store, ws.as_str(), "kaban", AFERO_KEY, None);
+    let plan = plan_of(&s, CODEREFS_BY_SYMBOL_SHAPE, ws.as_str());
+    assert!(
+        plan.iter().any(|row| row.contains("node_anchor_key")),
+        "100 rows: the plan does not use the anchor index: {plan:?}"
+    );
+    let old = plan_of(&s, &plain_join, ws.as_str());
+    assert!(
+        !old.iter().any(|row| row.contains("node_anchor_key")),
+        "100 rows: the plain JOIN shape now uses the anchor index; the CROSS JOIN pin can be revisited: {old:?}"
+    );
+
+    // the same rows through the store
+    let only = WorkspaceFilter::Only(ws.as_str().to_owned());
+    let p = AnchorPredicates {
+        workspace: &only,
+        repo: "kaban",
+        commit: None,
+    };
+    let got: Vec<String> = store
+        .coderefs_by_symbol(&p, AFERO_KEY)
+        .unwrap()
+        .into_iter()
+        .map(|n| n.id)
+        .collect();
+    assert_eq!(got, vec![wanted]);
 }
 
 /// Contract §11 `snapshot_symbols_pages_non_external` (SO-10): over 10,000 symbols of which

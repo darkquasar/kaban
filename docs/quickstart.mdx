@@ -1,6 +1,6 @@
 ---
 title: "Quickstart"
-description: "Install both binaries, configure a workspace, and remember an accepted Decision."
+description: "Install both binaries, configure a workspace, and remember a Decision."
 ---
 
 The commands below are instructions, not a recorded execution. Use a trusted
@@ -50,9 +50,10 @@ Use a project-specific database name and workspace consistently across your CLI,
 MCP server and optional hooks. `mkdir -m` sets modes only for newly created
 directories; inspect existing parents instead of assuming they are private.
 Kaban creates the database on ordinary first open and keeps audit keys under
-`KABAN_HOME/keys/`. An existing database can migrate when opened by a newer binary;
-keep protected backups and read the [maintenance guide](operations/maintenance.mdx)
-before upgrading important data.
+`KABAN_HOME/keys/`. A database of an older schema version is refused, never migrated:
+the error names the version found and the version this kaban serves, and says that no
+upgrade path exists; create a fresh project and re-ingest. Keep protected backups and
+read the [maintenance guide](operations/maintenance.mdx) before upgrading important data.
 
 Without an explicit workspace, the default is the enclosing repository's root
 directory name, or `default` outside a repository. With no policy path, built-in
@@ -70,7 +71,7 @@ CLI results are JSON. A policy refusal is not a stored record; inspect the resul
 instead of assuming the write succeeded. Keep the returned record IDs for later
 links or inspection. Search is lexical/graph retrieval, not embedding similarity.
 
-## 4. Propose a scoped Decision, then accept it as a person
+## 4. Remember a scoped Decision
 
 ```sh
 kaban remember Decision "Use SQLite for integration storage" \
@@ -79,20 +80,9 @@ kaban remember Decision "Use SQLite for integration storage" \
   --path-scope 'src/storage/**'
 ```
 
-This creates a proposal, not an accepted rule. Read its text, rationale and scope.
-Replace `DECISION_ID` below with the returned Decision ID. **The person who has
-reviewed the proposal runs the acceptance command**, not an agent acting alone:
-
-```sh
-kaban accept DECISION_ID --reason "Reviewed the local integration-storage choice" \
-  --path-scope 'src/storage/**'
-kaban why --path src/storage/db.rs
-```
-
-Quoted globs are passed to Kaban rather than expanded by your shell. Acceptance
-requires a reason and scope for this direct CLI route. The MCP route uses its own
-human-confirmation flow; it must not silently imitate a person's CLI acceptance.
-See [governance](guides/governance.mdx) for the review and supersession lifecycle.
+The Decision is active as soon as it is stored: there is no proposal or acceptance
+step. Quoted globs are passed to Kaban rather than expanded by your shell. Recall the
+Decision by its text with `kaban recall`.
 
 ## 5. Register the stdio server
 

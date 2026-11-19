@@ -1,6 +1,6 @@
 //! Source-bound identity for derived publications.
 
-use crate::{Layer, Node, NodeId, WorkspaceId};
+use crate::{Node, NodeId, Producer, WorkspaceId};
 use serde::{Deserialize, Serialize};
 
 /// Closed shipped producer identity. Source lineage and complete-set generations are not
@@ -18,119 +18,24 @@ impl BuiltinProducer {
         "gazetteer@1"
     }
 
-    /// Logical extractor name. Legacy v1 assertions deliberately retain `extractor_id=None`.
+    /// Logical extractor name.
     #[must_use]
     pub const fn extractor_id(self) -> &'static str {
         "gazetteer"
     }
 
-    /// Version before the store's generation-qualified assertion identity stamping.
+    /// Descriptor version.
     #[must_use]
     pub const fn extractor_version(self) -> &'static str {
         "1"
     }
-
-    /// Recognize the explicit legacy v1 assertion mapping without rewriting its key.
-    #[must_use]
-    pub fn matches_legacy_assertion(
-        self,
-        layer: Layer,
-        id: Option<&str>,
-        version: Option<&str>,
-    ) -> bool {
-        layer == Layer::Gazetteer
-            && id.is_none()
-            && version.is_some_and(|value| {
-                value == "1"
-                    || value.strip_prefix("1:set:").is_some_and(|generation| {
-                        !generation.is_empty()
-                            && generation.bytes().all(|byte| byte.is_ascii_digit())
-                            && generation.parse::<u64>().is_ok()
-                    })
-            })
-    }
 }
 
-/// Trusted maintenance authority derived from the shipped descriptor and effective config.
-/// It cannot be constructed from a user-supplied "current producer" string.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CurrentProducerAuthority(BuiltinProducer);
-
-/// Explicit layer maintenance operation; never a generic owner-wide edge diff.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LayerMaintenance {
-    /// Discard machine projections for a fresh explicit derivation.
-    Reindex,
-    /// Permanently reject existing claims while preserving their immutable history.
-    Forget,
-}
-
-/// Fixed, content-free maintenance refusal categories.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MaintenanceRefusal {
-    /// The requested producer is still the shipped current producer.
-    CurrentProducer,
-    /// Historical claims cannot be bound to a known producer publication safely.
-    UntrackedProducer,
-    /// The layer or producer mapping is unknown or deferred in this release.
-    UnavailableProducer,
-}
-
-/// Bounded maintenance accounting, including a visible zero-write refusal.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RetireReport {
-    /// Committed transactions containing maintenance writes, including state-only resets.
-    pub transactions: u32,
-    /// Artifact and claim rows retired, never canonical node rows.
-    pub rows: u64,
-    /// Fixed reason for a refused request.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub refused: Option<MaintenanceRefusal>,
-    /// Number of historical claims whose mapping could not be established.
-    #[serde(default)]
-    pub untracked: u64,
-}
-
-/// Content-free offline findings about derived publication and sink freshness.
+/// Content-free offline findings about derived publication freshness.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ArtifactDiagnostics {
-    /// Tenant artifacts whose source revision, policy or active lifecycle no longer matches.
+    /// Tenant artifacts whose source revision or active lifecycle no longer matches.
     pub stale_artifacts: u64,
-    /// Tenant Gazetteer artifacts naming a producer other than the shipped current one.
-    pub retired_producers: u64,
-    /// Reserved/global sink cursors behind the global `ChangeLog` head.
-    pub cursors_behind: u64,
-}
-
-impl CurrentProducerAuthority {
-    /// Resolve admitted builtins. `link.default=none` still protects the current Gazetteer:
-    /// an explicit per-run Gazetteer override remains admitted. Deferred layers fail closed.
-    #[must_use]
-    pub fn from_config(config: &crate::config::EngineConfig, layer: Layer) -> Option<Self> {
-        if layer != Layer::Gazetteer
-            || !matches!(config.link.default.as_str(), "none" | "gazetteer")
-            || config
-                .ingest
-                .default_with
-                .as_ref()
-                .is_some_and(|value| !value.is_empty())
-            || config
-                .embed
-                .model
-                .as_ref()
-                .is_some_and(|value| !value.is_empty())
-        {
-            return None;
-        }
-        Some(Self(BuiltinProducer::Gazetteer))
-    }
-
-    /// The closed descriptor authorized by the effective loaded configuration.
-    #[must_use]
-    pub const fn producer(self) -> BuiltinProducer {
-        self.0
-    }
 }
 
 /// An opaque, deterministic derived publication identity.
@@ -177,19 +82,17 @@ impl From<&Node> for SourceRev {
 #[must_use]
 pub fn artifact_key(
     source_rev: &SourceRev,
-    layer: Layer,
+    producer: Producer,
     producer_id: &str,
     config_hash: &str,
-    policy_version: &str,
 ) -> ArtifactKey {
     let mut hash = blake3::Hasher::new_derive_key("kaban.derived-artifact.v1");
     for field in [
         source_rev.content_hash.as_bytes(),
         &source_rev.rev.to_be_bytes(),
-        layer.as_str().as_bytes(),
+        producer.as_str().as_bytes(),
         producer_id.as_bytes(),
         config_hash.as_bytes(),
-        policy_version.as_bytes(),
     ] {
         hash.update(&(field.len() as u64).to_be_bytes());
         hash.update(field);
@@ -204,8 +107,8 @@ pub struct DerivedArtifact {
     pub key: ArtifactKey,
     /// Publication tenant.
     pub workspace_id: WorkspaceId,
-    /// Machine layer; human publications are refused.
-    pub layer: Layer,
+    /// The producer of the publication; authored publications are refused.
+    pub producer: Producer,
     /// Versioned producer identifier.
     pub producer_id: String,
     /// Source storage coordinate, checked inside the transaction.
@@ -214,8 +117,6 @@ pub struct DerivedArtifact {
     pub source_rev: SourceRev,
     /// Effective producer configuration hash.
     pub config_hash: String,
-    /// Existing policy hash, not a numeric policy version.
-    pub policy_version: String,
     /// Publication timestamp in Unix seconds.
     pub published_at: i64,
 }

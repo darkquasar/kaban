@@ -87,7 +87,6 @@ async fn cancellation_leaves_exactly_a_gap_free_prefix_committed() {
                 direction: kaban_core::TraverseDirection::In,
                 max_depth: 1,
                 node_kinds: vec![],
-                governance: vec![],
                 limit: 10,
                 workspace_id: None,
                 ..Default::default()

@@ -20,14 +20,11 @@ use std::process::ExitCode;
 pub(crate) struct Flags {
     /// Node id (omit with --stdin-json)
     id: Option<String>,
-    /// tombstone (default: hidden, never re-proposed) | invalidate (tombstone plus governance
-    /// `invalidated` with an event) | archive | purge (destructive: removes text, index entries
-    /// and edges; the id never reappears)
+    /// tombstone (default: hidden, never re-proposed) | invalidate (the same effect as
+    /// tombstone) | archive | purge (destructive: removes text, index entries and edges; the id
+    /// never reappears)
     #[arg(long)]
     mode: Option<String>,
-    /// Reject this machine layer's claims and clear its DB projections, preserving history
-    #[arg(long,conflicts_with_all=["id","mode"])]
-    layer: Option<String>,
     /// Tombstone the ingested document at this workspace-relative path, with its sections
     /// and chunks (instead of a node id)
     #[cfg(feature = "ingest")]
@@ -44,11 +41,9 @@ struct ForgetDocumentRequest {
 
 impl ToolArgs for Flags {
     const NAME: &'static str = "forget";
+    const WRITES: bool = true;
 
     fn any_given(&self) -> bool {
-        if self.layer.is_some() {
-            return true;
-        }
         #[cfg(feature = "ingest")]
         if self.document.is_some() {
             return true;
@@ -57,15 +52,6 @@ impl ToolArgs for Flags {
     }
 
     fn into_raw(self) -> Result<Value, ExitCode> {
-        if let Some(layer) = self.layer {
-            let mut args = Map::new();
-            args.insert("layer".into(), Value::String(layer));
-            #[cfg(feature = "ingest")]
-            if let Some(document) = self.document {
-                args.insert("document".into(), Value::String(document));
-            }
-            return Ok(Value::Object(args));
-        }
         #[cfg(feature = "ingest")]
         if let Some(document) = self.document {
             let mut args = Map::new();
@@ -88,40 +74,20 @@ impl ToolArgs for Flags {
 /// Forget the node named by the raw request (flags or `--stdin-json`) through the seam and
 /// print the result as JSON.
 pub(crate) fn run(api: &KabanApi, raw: Value, format: Format) -> ExitCode {
-    if raw.get("layer").is_some() {
-        #[derive(serde::Deserialize)]
-        struct Request {
-            layer: kaban_core::Layer,
-            #[serde(default)]
-            document: Option<String>,
-        }
-        return run_write_tool(
-            api,
-            "forget_layer",
-            raw,
-            &[],
-            format,
-            |api, request: Request| api.forget_layer(request.layer, request.document.as_deref()),
-        );
-    }
     #[cfg(feature = "ingest")]
     if raw.get("document").is_some() {
         return run_write_tool(
             api,
             "forget",
             raw,
-            &[],
             format,
             |api, request: ForgetDocumentRequest| {
                 let policy = api.policy_handle();
                 let policy = policy
                     .read()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                let ctx = kaban_core::WriteCtx::new(
-                    api.policy_version(),
-                    api.workspace().clone(),
-                    kaban_core::Actor::Agent,
-                );
+                let ctx =
+                    kaban_core::WriteCtx::new(api.workspace().clone(), kaban_core::Actor::Agent);
                 kaban_ingest::forget_document(
                     api.store().as_ref(),
                     &policy,
@@ -131,12 +97,7 @@ pub(crate) fn run(api: &KabanApi, raw: Value, format: Format) -> ExitCode {
             },
         );
     }
-    run_write_tool(
-        api,
-        "forget",
-        raw,
-        &[],
-        format,
-        |api, request: ForgetRequest| api.forget(request),
-    )
+    run_write_tool(api, "forget", raw, format, |api, request: ForgetRequest| {
+        api.forget(request)
+    })
 }

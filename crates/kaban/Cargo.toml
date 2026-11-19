@@ -22,7 +22,7 @@ ingest = ["dep:kaban-ingest"]
 code-graph = []
 # `bench` (never default) adds `kaban bench cg gen|run` (stage1-plan §18, CG7.3) over the
 # synthetic corpus of `kaban_codegraph::testing`; `binary_sizes` never measures it.
-bench = ["kaban-codegraph/test-support"]
+bench = ["kaban-codegraph/test-support", "kaban-index-graph", "kaban-store-sqlite/failpoints"]
 # `text-index-tantivy` (default on since spec 05 SS-13b, T5.1): since OWN-M the store owns its
 # Tantivy index in every build (`--no-default-features` included; lane T8b), so the feature only
 # enables `kaban bench recall --text-index tantivy` through the store's `text-index-override` and
@@ -38,6 +38,9 @@ kaban-index-tantivy.workspace = true  # the pack admission of a captured index (
 kaban-api.workspace = true
 kaban-codegraph.workspace = true  # `identity::{resolve_common_dir, repo_id}` and `DiscoverProvider` for `serve` (CG5.2)
 kaban-ingest = { workspace = true, optional = true }
+kaban-index-graph = { workspace = true, optional = true }
+# The standalone CLI's pre-main virtual-table bootstrap: implemented by T12, inert until then.
+kaban-vtab = { workspace = true, features = ["process-bootstrap"] }
 rmcp.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
@@ -51,6 +54,7 @@ zeroize.workspace = true      # the codegraph key bytes read by `serve` are zero
 
 [dev-dependencies]
 rusqlite.workspace = true
+sha2.workspace = true        # the byte-for-byte compare of the older-format fixtures (CMP-01)
 tracing-log.workspace = true  # install the `log` bridge explicitly in the RD-1 regression
 insta.workspace = true        # `tools/list` input-schema snapshot (C3.1)
 kaban-index.workspace = true  # publishes the fixture snapshots for `tests/acceptance_north_star.rs` (CG10.2 stop 1 grant)

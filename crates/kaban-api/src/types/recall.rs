@@ -7,12 +7,13 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 /// `recall` input.
-#[allow(clippy::struct_excessive_bools)] // four independent wire switches; EN-F49 adds `include_candidates`
+#[allow(clippy::struct_excessive_bools)] // independent wire switches
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)] // removed keys (`layers`, `include_superseded`) are refused
 pub struct RecallRequest {
-    /// Retrieval sources (fts, fuzzy, reserved sim); absent uses enabled defaults.
+    /// Match modes (`lexical`, `fuzzy`); absent uses the enabled defaults.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub layers: Option<Vec<kaban_core::RecallLayer>>,
+    pub modes: Option<Vec<kaban_core::RecallMode>>,
     /// Also retrieve fuzzy matches when lexical retrieval succeeds.
     #[serde(default)]
     pub fuzzy: bool,
@@ -36,18 +37,10 @@ pub struct RecallRequest {
     pub limit: Option<usize>,
     /// Graph expansion hops 0..2 (default 1).
     pub hops: Option<u8>,
-    /// Also return superseded (archived) records reached through graph expansion. Invalidated
-    /// and tombstoned records never return.
-    #[serde(default)]
-    pub include_superseded: bool,
-    /// Also return archived records of any governance reached through graph expansion.
+    /// Also return archived (for example superseded) records reached through graph expansion.
+    /// Invalidated and tombstoned records never return.
     #[serde(default)]
     pub include_archived: bool,
-    /// Also return candidate records (an `x:` record still under review, a record a
-    /// reconciliation left for review); default false: a candidate neither seeds the result
-    /// nor joins it through graph expansion. `kaban review` and `explain` list them either way.
-    #[serde(default)]
-    pub include_candidates: bool,
     /// Return full text instead of summaries.
     #[serde(default)]
     pub full_text: bool,

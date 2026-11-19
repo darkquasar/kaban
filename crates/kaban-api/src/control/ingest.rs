@@ -176,18 +176,6 @@ pub(super) const ROWS: &[ControlEntry] = &[
     entry(
         "ingest_claim",
         Direction::Response,
-        "brief.uncertain_pairs[].a",
-        Shape::NodeId,
-    ),
-    entry(
-        "ingest_claim",
-        Direction::Response,
-        "brief.uncertain_pairs[].b",
-        Shape::NodeId,
-    ),
-    entry(
-        "ingest_claim",
-        Direction::Response,
         "brief.next[].tool",
         Shape::Enum(&["ingest_next", "ingest_brief"]),
     ),
@@ -248,12 +236,6 @@ pub(super) const ROWS: &[ControlEntry] = &[
         "reconcile",
         Shape::Enum(&["complete", "skipped_cap"]),
     ),
-    entry(
-        "ingest_finish",
-        Direction::Response,
-        "orphans[]",
-        Shape::NodeId,
-    ),
     // spec 05 SS-10: the finish's receipt (identities are UUIDs, SS-27)
     entry(
         "ingest_finish",
@@ -273,7 +255,7 @@ pub(super) const ROWS: &[ControlEntry] = &[
         "receipt.pack_lineage_id",
         Shape::NodeId,
     ),
-    // spec 05 SS-10: the run's receipt (one barrier per ingest run; identities are UUIDs)
+    // spec 05 SS-10: the run's receipt (identities are UUIDs)
     entry(
         "index_docs",
         Direction::Response,
@@ -324,18 +306,6 @@ pub(super) const ROWS: &[ControlEntry] = &[
     ),
     entry(
         "ingest_submit",
-        Direction::Request,
-        "pair_judgements[].pair.a",
-        Shape::NodeId,
-    ),
-    entry(
-        "ingest_submit",
-        Direction::Request,
-        "pair_judgements[].pair.b",
-        Shape::NodeId,
-    ),
-    entry(
-        "ingest_submit",
         Direction::Response,
         "job",
         Shape::Hex { min: 64, max: 64 },
@@ -356,19 +326,7 @@ pub(super) const ROWS: &[ControlEntry] = &[
         "ingest_submit",
         Direction::Response,
         "records[].outcome",
-        Shape::Enum(&["created", "updated", "unchanged", "revision_candidate"]),
-    ),
-    entry(
-        "ingest_submit",
-        Direction::Response,
-        "revision_candidates[].id",
-        Shape::NodeId,
-    ),
-    entry(
-        "ingest_submit",
-        Direction::Response,
-        "revision_candidates[].of",
-        Shape::NodeId,
+        Shape::Enum(&["created", "updated", "unchanged"]),
     ),
     entry(
         "ingest_submit",
@@ -384,8 +342,6 @@ pub(super) const ROWS: &[ControlEntry] = &[
             "unknown_ref",
             "unknown_target",
             "too_large",
-            "not_requested",
-            "duplicate",
         ]),
     ),
     entry(
@@ -484,18 +440,6 @@ pub(super) const ROWS: &[ControlEntry] = &[
         "ingest_brief",
         Direction::Response,
         "about_candidates[].id",
-        Shape::NodeId,
-    ),
-    entry(
-        "ingest_brief",
-        Direction::Response,
-        "uncertain_pairs[].a",
-        Shape::NodeId,
-    ),
-    entry(
-        "ingest_brief",
-        Direction::Response,
-        "uncertain_pairs[].b",
         Shape::NodeId,
     ),
     entry(

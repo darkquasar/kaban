@@ -303,6 +303,20 @@ jobs:
         env:
           KABAN_CI_ARTIFACT_DIR: ${{ runner.temp }}/ci-artifacts-functional
         run: bash scripts/ci/ci.sh functional
+      - name: Check the startup allocator adapter with kaban doctor
+        run: |
+          # one note creates the database doctor needs; only the adapter row decides this step
+          home=$(mktemp -d)
+          kaban="$CARGO_TARGET_DIR/debug/kaban"
+          KABAN_HOME="$home" "$kaban" --db "$home/doctor.db" remember Fact "doctor probe" > /dev/null
+          KABAN_HOME="$home" "$kaban" --json --db "$home/doctor.db" doctor > "$home/doctor.json" || true
+          python3 - "$home/doctor.json" <<'PY'
+          import json, sys
+          checks = json.load(open(sys.argv[1]))['checks']
+          row = next(c for c in checks if c['name'] == 'allocator_adapter')
+          print(row)
+          assert row['ok'] and row['detail'] == 'installed before main', row
+          PY
       - name: Resource and cache summary
         if: ${{ always() }}
         run: |
@@ -621,6 +635,20 @@ jobs:
           time cargo fetch --locked
       - name: Run focused native Mac checks
         run: bash scripts/dev/cargo-slot.sh bash scripts/ci/ci.sh macos
+      - name: Check the startup allocator adapter with kaban doctor
+        run: |
+          # one note creates the database doctor needs; only the adapter row decides this step
+          home=$(mktemp -d)
+          kaban="$CARGO_TARGET_DIR/debug/kaban"
+          KABAN_HOME="$home" "$kaban" --db "$home/doctor.db" remember Fact "doctor probe" > /dev/null
+          KABAN_HOME="$home" "$kaban" --json --db "$home/doctor.db" doctor > "$home/doctor.json" || true
+          python3 - "$home/doctor.json" <<'PY'
+          import json, sys
+          checks = json.load(open(sys.argv[1]))['checks']
+          row = next(c for c in checks if c['name'] == 'allocator_adapter')
+          print(row)
+          assert row['ok'] and row['detail'] == 'installed before main', row
+          PY
       - name: Mac resource and cache summary
         if: ${{ always() }}
         run: |
@@ -651,6 +679,64 @@ jobs:
           install_args: --locked python
       - name: Run helper checks once
         run: bash scripts/ci/ci.sh helpers
+
+  # Memory checker over the one unsafe crate (docs/developer/SAFETY.md). Separate from the
+  # gates below and from the release build; it changes no toolchain.
+  vtab-memcheck:
+    name: kaban-vtab under Valgrind memcheck
+    needs: selection
+    if: ${{ needs.selection.outputs.rust == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    continue-on-error: false
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-vtab-memcheck
+      # Keep the symbol table (the workflow default strips it): suppressions match on names.
+      CARGO_PROFILE_DEV_STRIP: none
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      # --trace-children: the fresh-process tests re-execute the test binary; check the child too.
+      # Only definite leaks fail the run; possible ones (std's main-thread handle) are reported.
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: >-
+        valgrind --error-exitcode=1 --leak-check=full --errors-for-leak-kinds=definite
+        --track-origins=yes --trace-children=yes
+        --suppressions=${{ github.workspace }}/crates/kaban-vtab/tests/valgrind.supp
+      # Valgrind's slowdown breaks wall-clock deadline assertions; these stay in the normal suite.
+      MEMCHECK_FILTER: >-
+        not (test(=a_query_past_the_deadline_is_interrupted_with_the_named_limit)
+        | test(=a_genuine_sqlite_failure_is_not_reported_as_a_limit)
+        | test(=a_deadline_during_a_lock_wait_ends_promptly_as_the_time_limit)
+        | test(=a_cancellation_during_a_lock_wait_ends_promptly_as_cancelled))
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Prepare tool directory
+        run: sudo install -d -o "$(id -u)" -g "$(id -g)" -m 755 "$MISE_DATA_DIR"
+      - name: Install pinned tools (no executable cache)
+        uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4
+        with:
+          version: 2026.10.24
+          cache: false
+          install_args: --locked python aqua:nextest-rs/nextest/cargo-nextest
+      - name: Install Valgrind
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends valgrind
+          valgrind --version
+      - name: Prepare pinned Rust toolchain
+        run: |
+          # Read the owning toolchain file; do not replace it with an image default.
+          channel=$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')
+          rustup toolchain install "$channel" --profile minimal
+          rustc --version && cargo --version
+      - name: Fetch locked dependencies
+        run: cargo fetch --locked
+      # Default features run the embedding-only tests; all features run the bootstrap ones.
+      # Retries absorb timing failures under the slowdown; a memcheck error repeats and fails.
+      - name: Run kaban-vtab tests under memcheck (default features)
+        run: cargo nextest run -p kaban-vtab --locked --no-fail-fast --retries 2 -E "$MEMCHECK_FILTER"
+      - name: Run kaban-vtab tests under memcheck (all features)
+        run: cargo nextest run -p kaban-vtab --locked --all-features --no-fail-fast --retries 2 -E "$MEMCHECK_FILTER"
 
   gates:
     name: Rust gates (scripts/ci/ci.sh)

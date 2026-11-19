@@ -40,13 +40,22 @@ fn a_type_mismatch_on_a_typed_argument_is_refused_without_echo() {
         .unwrap()
         .to_owned();
 
-    for (field, marker, shape) in [
-        ("follow_anchors", "yes-please-ZXQV9", "expected a boolean"),
-        ("max_depth", "very-deep-QWJ7X", "expected"),
+    for (tool, field, marker, shape) in [
+        (
+            "recall",
+            "include_archived",
+            "yes-please-ZXQV9",
+            "expected a boolean",
+        ),
+        ("traverse", "max_depth", "very-deep-QWJ7X", "expected"),
     ] {
-        let mut args = json!({"start_ids": [a]});
+        let mut args = if tool == "recall" {
+            json!({"query": "wombat"})
+        } else {
+            json!({"start_ids": [a]})
+        };
         args[field] = json!(marker);
-        let resp = call(&mut srv, "traverse", &args);
+        let resp = call(&mut srv, tool, &args);
         let failed = resp.get("error").is_some() || resp["result"]["isError"] == json!(true);
         assert!(
             failed,
@@ -86,13 +95,13 @@ fn escaped_quotes_and_mixed_delimiters_in_a_mistyped_value_are_not_echoed() {
 
     let cases: [(&str, String, &str, &str); 4] = [
         (
-            "follow_anchors",
+            "include_archived",
             "yes\"ZXQV9-tail\" please".to_owned(),
             "ZXQV9",
             "expected a boolean",
         ),
         (
-            "follow_anchors",
+            "include_archived",
             format!("`mixed\" {}QWJ7X` \"and` more", '\u{2026}'),
             "QWJ7X",
             "expected a boolean",
@@ -111,9 +120,14 @@ fn escaped_quotes_and_mixed_delimiters_in_a_mistyped_value_are_not_echoed() {
         ),
     ];
     for (case, (field, value, marker, shape)) in cases.into_iter().enumerate() {
-        let mut args = json!({"start_ids": [a]});
+        // the one boolean is `recall`'s; the others are `traverse`'s
+        let (tool, mut args) = if field == "include_archived" {
+            ("recall", json!({"query": "wombat"}))
+        } else {
+            ("traverse", json!({"start_ids": [a]}))
+        };
         args[field] = json!(value);
-        let resp = call(&mut srv, "traverse", &args);
+        let resp = call(&mut srv, tool, &args);
         let failed = resp.get("error").is_some() || resp["result"]["isError"] == json!(true);
         assert!(
             failed,

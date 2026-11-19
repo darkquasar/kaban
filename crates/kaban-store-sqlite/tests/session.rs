@@ -1,7 +1,7 @@
 //! Migration 0003 and the hook session scratch (core-plan C4.3/C4.4 as amended by
 //! `reviews/m4-prep-dispositions.md` M4-13, M4-14, M4-15, M4-17): `session_edits` exists on a
 //! fresh database and on a version-2 database after its next open (with the pre-migration
-//! backup), its rows are recorded, listed and pruned through the role trait, and the briefing,
+//! backup), its rows are recorded, listed and pruned through the role trait, and the
 //! pending-failure and props-update operations behave as the hooks need.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // test code: failures are the assertion
@@ -89,13 +89,13 @@ fn migration_0003_adds_session_edits_to_fresh_and_version_2_databases() {
 #[test]
 fn failure_props_update_and_pending_lookup_stay_inside_the_workspace_and_the_bounds() {
     use kaban_core::{
-        Actor, FailurePatch, GovernanceStore, MemoryStore, NewNode, NodeId, PendingFailuresQuery,
-        PendingScope, RememberOutcome, SessionEdit, SessionEditKind, WorkspaceId, WriteCtx,
+        Actor, FailurePatch, MemoryStore, NewNode, NodeId, PendingFailuresQuery, PendingScope,
+        RememberOutcome, SessionEdit, SessionEditKind, SessionStore, WorkspaceId, WriteCtx,
     };
     let s = Scratch::new("kaban-sess", "ops");
     let store = SqliteStore::open(&s.db(), &s.keys()).unwrap();
-    let ctx_a = WriteCtx::new("pv", WorkspaceId::new("ws-a"), Actor::Agent);
-    let ctx_b = WriteCtx::new("pv", WorkspaceId::new("ws-b"), Actor::Agent);
+    let ctx_a = WriteCtx::new(WorkspaceId::new("ws-a"), Actor::Agent);
+    let ctx_b = WriteCtx::new(WorkspaceId::new("ws-b"), Actor::Agent);
     let remember = |kind: &str, text: &str, ctx: &WriteCtx| -> String {
         match store
             .remember(

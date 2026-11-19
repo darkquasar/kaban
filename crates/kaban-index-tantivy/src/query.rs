@@ -15,10 +15,11 @@
 //! it once. A prefix is never a ranking difference in membership: it expands to every term of
 //! the dictionary under it, like FTS5's `token*` ([`expansions`]).
 
-use crate::schema::{ACTIVE, CONTENT, Fields, KIND, REVISION, RID};
+use crate::schema::{ACTIVE, CONTENT, Fields, RID};
 use crate::{Error, Result};
 use kaban_core::config::Recall;
 use kaban_core::ident::{QueryClass, classify};
+use kaban_core::query_budget::QueryBudget;
 use kaban_core::text_index::{MatchMode, Searched, SeedFilter, TextHit, TextQuery};
 use kaban_core::{Ontology, stored_name};
 use std::cmp::Reverse;
@@ -41,6 +42,14 @@ const MAX_OPERANDS: usize = 64;
 const MAX_FUZZY_TERMS: usize = 32;
 /// Tokens shorter than this are not fuzzy-matched (a trigram needs three characters).
 const MIN_FUZZY_CHARS: usize = 3;
+/// The dictionary terms [`expansions`] visits between two budget checks (PC-17).
+const TERM_BATCH: u32 = 1024;
+
+#[cfg(test)]
+thread_local! {
+    /// The dictionary terms [`expansions`] visited: the tests count them.
+    pub(crate) static TERMS_VISITED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
 
 /// Effective `[text, summary, tags, ident_terms]` weights.
 type Columns = [f32; 4];
@@ -208,8 +217,14 @@ fn prefix_end(prefix: &[u8]) -> Option<Vec<u8>> {
 /// of them, at least one. `PhrasePrefixQuery` cuts its expansion per segment at
 /// `max_expansions` (50 by default, which silently drops lexemes and lets a filtered-out
 /// workspace's terms consume the budget); set from the dictionary, the cut is never reached,
-/// so a prefix matches every term under it whatever the segment layout.
-fn expansions(searcher: &Searcher, field: Field, prefix: &[u8]) -> Result<u32> {
+/// so a prefix matches every term under it whatever the segment layout. The scan checks
+/// `budget` every [`TERM_BATCH`] terms (PC-17).
+fn expansions(
+    searcher: &Searcher,
+    field: Field,
+    prefix: &[u8],
+    budget: &QueryBudget,
+) -> Result<u32> {
     let end = prefix_end(prefix);
     let mut most: u32 = 1;
     for segment in searcher.segment_readers() {
@@ -221,6 +236,11 @@ fn expansions(searcher: &Searcher, field: Field, prefix: &[u8]) -> Result<u32> {
         let mut stream = range.into_stream()?;
         let mut count: u32 = 0;
         while stream.advance() {
+            if count.is_multiple_of(TERM_BATCH) {
+                budget.check()?;
+            }
+            #[cfg(test)]
+            TERMS_VISITED.set(TERMS_VISITED.get() + 1);
             count = count.saturating_add(1);
         }
         most = most.max(count);
@@ -235,6 +255,7 @@ fn operand_on(
     field: Field,
     tokens: &[String],
     prefix: bool,
+    budget: &QueryBudget,
 ) -> Result<Box<dyn Query>> {
     let terms: Vec<Term> = tokens
         .iter()
@@ -247,7 +268,7 @@ fn operand_on(
         (1, false) => Box::new(TermQuery::new(last, IndexRecordOption::WithFreqs)),
         (_, false) => Box::new(PhraseQuery::new(terms)),
         (_, true) => {
-            let under = expansions(searcher, field, last.serialized_value_bytes())?;
+            let under = expansions(searcher, field, last.serialized_value_bytes(), budget)?;
             let mut query = PhrasePrefixQuery::new(terms);
             query.set_max_expansions(under);
             Box::new(query)
@@ -264,6 +285,7 @@ fn content(
     ops: &[Operand],
     occur: Occur,
     weights: Columns,
+    budget: &QueryBudget,
 ) -> Result<Option<Box<dyn Query>>> {
     let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
     for op in ops {
@@ -276,7 +298,7 @@ fn content(
             per_field.push((
                 Occur::Should,
                 Box::new(BoostQuery::new(
-                    operand_on(searcher, *field, &tokens, op.prefix)?,
+                    operand_on(searcher, *field, &tokens, op.prefix, budget)?,
                     weight,
                 )),
             ));
@@ -289,6 +311,7 @@ fn content(
 /// The lexical query: the per-kind weight profiles as disjoint branches (a kind term at
 /// constant score selects the branch), the default profile for every other kind, then the
 /// filters. An identifier query doubles the `ident_terms` weight, as `recall.rs` does.
+#[allow(clippy::too_many_arguments)] // the query's parts and the budget its prefix scans check
 fn lexical(
     searcher: &Searcher,
     fields: &Fields,
@@ -297,6 +320,7 @@ fn lexical(
     occur: Occur,
     identifier: bool,
     filter: &SeedFilter<'_>,
+    budget: &QueryBudget,
 ) -> Result<Option<Box<dyn Query>>> {
     let boost = |mut w: Columns| {
         if identifier {
@@ -304,7 +328,15 @@ fn lexical(
         }
         w
     };
-    let Some(default) = content(searcher, fields, ops, occur, boost(weights.defaults))? else {
+    let Some(default) = content(
+        searcher,
+        fields,
+        ops,
+        occur,
+        boost(weights.defaults),
+        budget,
+    )?
+    else {
         return Ok(None);
     };
     let text: Box<dyn Query> = if weights.profiles.is_empty() {
@@ -313,7 +345,7 @@ fn lexical(
         let mut branches: Vec<(Occur, Box<dyn Query>)> = Vec::new();
         let mut others: Vec<(Occur, Box<dyn Query>)> = vec![(Occur::Must, default)];
         for (kind, profile) in &weights.profiles {
-            if let Some(q) = content(searcher, fields, ops, occur, boost(*profile))? {
+            if let Some(q) = content(searcher, fields, ops, occur, boost(*profile), budget)? {
                 branches.push((
                     Occur::Should,
                     Box::new(BooleanQuery::new(vec![
@@ -430,6 +462,8 @@ fn top(
     query: &dyn Query,
     skip: usize,
     want: usize,
+    hidden: &[DocAddress],
+    budget: &QueryBudget,
 ) -> Result<Vec<TextHit>> {
     for segment in searcher.segment_readers() {
         segment
@@ -437,67 +471,66 @@ fn top(
             .i64(RID)
             .map_err(|_| Error::Corrupt("rid column"))?;
     }
-    let order =
-        TopDocs::with_limit(want)
-            .and_offset(skip)
-            .tweak_score(|segment: &SegmentReader| {
-                // the same readers as above: opened there, this cannot fail; `None` stays `None`
-                let rid = segment.fast_fields().i64(RID).ok();
-                move |doc: DocId, score: Score| {
-                    (score, Reverse(rid.as_ref().and_then(|c| c.first(doc))))
-                }
-            });
+    // a hidden document takes a place in the collected order at most once each: collect past
+    // them from the start, then cut the page from what stays
+    let collect = want.saturating_add(skip).saturating_add(hidden.len());
+    // the collector's buffers (Tantivy keeps twice the limit while it collects one segment,
+    // the limit per collected segment, and twice the limit again to merge them) and the page
+    let mut charge = budget.reserve(0)?;
+    let entries = collect.saturating_mul(searcher.segment_readers().len().saturating_add(4));
+    crate::kbx_dir::charge(&mut charge, entries.saturating_mul(size_of::<Collected>()))?;
+    let mut page: Vec<TextHit> = crate::kbx_dir::charged_vec(&mut charge, want.min(collect))?;
+    let order = TopDocs::with_limit(collect).tweak_score(|segment: &SegmentReader| {
+        // the same readers as above: opened there, this cannot fail; `None` stays `None`
+        let rid = segment.fast_fields().i64(RID).ok();
+        move |doc: DocId, score: Score| (score, Reverse(rid.as_ref().and_then(|c| c.first(doc))))
+    });
     let statistics = SharedIdf {
         searcher,
         content: fields.content,
     };
-    searcher
-        .search_with_statistics_provider(query, &order, &statistics)?
+    budget.check()?;
+    let collected: Vec<Collected> =
+        searcher.search_with_statistics_provider(query, &order, &statistics)?;
+    budget.check()?;
+    for ((score, Reverse(rid)), _) in collected
         .into_iter()
-        .map(|((score, Reverse(rid)), address)| hit(searcher, address, rid, score))
-        .collect()
+        .filter(|(_, address)| hidden.binary_search(address).is_err())
+        .skip(skip)
+        .take(want)
+    {
+        page.push(hit(rid, score)?);
+    }
+    Ok(page)
 }
 
-/// A hit from the fast columns of its segment: no document store is read, and a document
-/// without one of its keys is [`Error::Corrupt`].
-fn hit(
-    searcher: &Searcher,
-    address: DocAddress,
-    rid: Option<i64>,
-    score: Score,
-) -> Result<TextHit> {
-    let rid = rid.ok_or(Error::Corrupt("rid"))?;
-    let fast = searcher.segment_reader(address.segment_ord).fast_fields();
-    let revision = fast
-        .i64(REVISION)?
-        .first(address.doc_id)
-        .ok_or(Error::Corrupt("revision"))?;
-    let kinds = fast.str(KIND)?.ok_or(Error::Corrupt("kind"))?;
-    let ord = kinds
-        .term_ords(address.doc_id)
-        .next()
-        .ok_or(Error::Corrupt("kind"))?;
-    let mut kind = String::new();
-    if !kinds.ord_to_str(ord, &mut kind)? {
-        return Err(Error::Corrupt("kind"));
-    }
+/// One collected document: its sort key and its address.
+type Collected = ((Score, Reverse<Option<i64>>), DocAddress);
+
+/// A hit: the `rid` from its segment's fast column (a document without one is
+/// [`Error::Corrupt`]) and its score (TXT-05: nothing else).
+fn hit(rid: Option<i64>, score: Score) -> Result<TextHit> {
     Ok(TextHit {
-        rid,
-        revision,
+        rid: rid.ok_or(Error::Corrupt("rid"))?,
         score: f64::from(score),
-        kind,
     })
 }
 
-/// Run `q` against `searcher`. Lexical: the AND expression first, widened to OR when it holds
-/// fewer than `sufficient` hits in all; the decision is made on the unpaged result (the strict
-/// collection reaches at least `sufficient` hits from the start when they exist), so every page
-/// of one query comes from one expression and a continuation never repeats a hit.
-pub(crate) fn run(
+/// Run `q` against `searcher` without the documents of `hidden` (sorted: a catalog snapshot's
+/// documents that a newer tombstone hides, spec 11 T7): they never take a place in the order
+/// or a page. Lexical: the AND expression first, widened to OR when it holds fewer than
+/// `sufficient` hits in all; the decision is made on the unpaged result (the strict collection
+/// reaches at least `sufficient` hits from the start when they exist), so every page of one
+/// query comes from one expression and a continuation never repeats a hit. The
+/// collector and the page are charged on `budget` while they are built; the page returned is
+/// the caller's to charge.
+pub(crate) fn run_hiding(
     fields: &Fields,
     weights: &Weights,
     searcher: &Searcher,
     q: &TextQuery<'_>,
+    hidden: &[DocAddress],
+    budget: &QueryBudget,
 ) -> Result<Searched> {
     if q.limit == 0 {
         return Ok(Searched::Hits {
@@ -521,6 +554,7 @@ pub(crate) fn run(
                 Occur::Must,
                 identifier,
                 &q.filter,
+                budget,
             )?
             else {
                 return Ok(empty);
@@ -534,6 +568,8 @@ pub(crate) fn run(
                 strict.as_ref(),
                 0,
                 through.max(q.sufficient),
+                hidden,
+                budget,
             )?;
             if strict_hits.len() >= q.sufficient {
                 strict_hits.into_iter().skip(q.skip).collect()
@@ -546,8 +582,17 @@ pub(crate) fn run(
                     Occur::Should,
                     identifier,
                     &q.filter,
+                    budget,
                 )? {
-                    Some(widened) => top(searcher, fields, widened.as_ref(), q.skip, q.limit + 1)?,
+                    Some(widened) => top(
+                        searcher,
+                        fields,
+                        widened.as_ref(),
+                        q.skip,
+                        q.limit + 1,
+                        hidden,
+                        budget,
+                    )?,
                     None => strict_hits.into_iter().skip(q.skip).collect(),
                 }
             }
@@ -556,7 +601,15 @@ pub(crate) fn run(
             let Some(query) = fuzzy(searcher, fields, q.text, &q.filter)? else {
                 return Ok(empty);
             };
-            top(searcher, fields, query.as_ref(), q.skip, q.limit + 1)?
+            top(
+                searcher,
+                fields,
+                query.as_ref(),
+                q.skip,
+                q.limit + 1,
+                hidden,
+                budget,
+            )?
         }
     };
     let exhausted = found.len() <= q.limit;
@@ -569,9 +622,10 @@ pub(crate) fn run(
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // test code: failures are the assertion
 mod tests {
-    use super::{Operand, Weights, operands, run};
+    use super::{Operand, Weights, operands, run_hiding};
     use crate::analyzers::register;
     use crate::schema::{ACTIVE, Fields, schema};
+    use kaban_core::query_budget::{BudgetExceeded, Limit, QueryBudget};
     use kaban_core::text_index::{MatchMode, Searched, SeedFilter, TextQuery};
     use kaban_core::{RecallQuery, config::Recall};
     use tantivy::{Index, TantivyDocument};
@@ -611,7 +665,7 @@ mod tests {
         limit: usize,
     ) -> (Vec<(i64, f64)>, bool) {
         let searcher = index.reader().unwrap().searcher();
-        match run(
+        match run_hiding(
             fields,
             weights,
             &searcher,
@@ -623,6 +677,8 @@ mod tests {
                 sufficient,
                 skip,
             },
+            &[],
+            &QueryBudget::new(u64::MAX, None),
         )
         .unwrap()
         {
@@ -765,5 +821,63 @@ mod tests {
         assert_eq!(index.searchable_segment_ids().unwrap().len(), 1);
         assert_eq!(both(), before, "the same page after the merge");
         assert_eq!(rids(&in_ws("quok*", "other"), 100).len(), 50);
+    }
+
+    /// PC-17 (T7 end review M2): a prefix's dictionary scan checks the budget every batch of
+    /// terms, so a search cancelled before it runs returns the cancellation having visited at
+    /// most one batch of the dictionary.
+    #[test]
+    fn a_cancelled_prefix_search_visits_at_most_one_batch_of_dictionary_terms() {
+        // Arrange: 5,000 terms under one prefix; the budget is cancelled before the search
+        let (index, fields, weights) = raw_index();
+        let mut writer = index.writer_with_num_threads(1, 32 << 20).unwrap();
+        for n in 0..5_000 {
+            writer
+                .add_document(doc(&fields, n, "default", &format!("quok{n:05}")))
+                .unwrap();
+        }
+        writer.commit().unwrap();
+        let searcher = index.reader().unwrap().searcher();
+        let budget = QueryBudget::new(u64::MAX, None);
+        budget.cancel();
+        let q = RecallQuery {
+            query: "quok*".into(),
+            ..Default::default()
+        };
+        super::TERMS_VISITED.set(0);
+
+        // Act
+        let outcome = run_hiding(
+            &fields,
+            &weights,
+            &searcher,
+            &TextQuery {
+                text: &q.query,
+                mode: MatchMode::Lexical,
+                filter: SeedFilter::of(&q),
+                limit: 10,
+                sufficient: 10,
+                skip: 0,
+            },
+            &[],
+            &budget,
+        );
+
+        // Assert
+        assert!(
+            matches!(
+                outcome,
+                Err(crate::Error::Budget(BudgetExceeded {
+                    limit: Limit::Cancelled,
+                    ..
+                }))
+            ),
+            "expected the budget's cancellation, got {outcome:?}"
+        );
+        let visited = super::TERMS_VISITED.get();
+        assert!(
+            visited <= u64::from(super::TERM_BATCH),
+            "dictionary terms visited after the cancellation: {visited}"
+        );
     }
 }

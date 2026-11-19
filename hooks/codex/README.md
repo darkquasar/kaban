@@ -18,7 +18,7 @@ answers within 2 s.
 | `config.hooks.toml` | the same entries as `[[hooks.<Event>]]` tables for `$CODEX_HOME/config.toml` (**verified live**: Codex 0.149.1 fires hooks registered this way, round-2 session s2); use one of the two files, never both |
 | `_run.sh` | shared wrapper: `--host codex`, GNU `timeout 2` when present, `|| exit 0`, `KABAN_DB` default `$PWD/kaban.db` |
 | `session-start.sh` | `SessionStart` -> briefing as `hookSpecificOutput.additionalContext` (consumed by the model: observed 3/3 in round 1, 2/2 in round 2) |
-| `pre-tool-use.sh` | `PreToolUse` matcher `^apply_patch$\|^Edit$\|^Write$` -> the records governing the files named in the patch headers (`*** Add File:` / `*** Update File:` in `tool_input.command`) as `additionalContext` (consumed: observed 3/3 and 2/2); kaban never blocks an edit |
+| `pre-tool-use.sh` | `PreToolUse` matcher `^apply_patch$\|^Edit$\|^Write$` -> records the files named in the patch headers (`*** Add File:` / `*** Update File:` in `tool_input.command`) as the session's attempted edits and injects nothing; kaban never blocks an edit |
 | `post-tool-use.sh` | `PostToolUse` matcher `^Bash$` -> success evidence for a pending Failure of the session; see "The Bash failure path" below |
 | `subagent-stop.sh` | `SubagentStop` -> an Episode from `last_assistant_message` (**unverified live**: the event never fired in the captured sessions; the field name is by analogy with `Stop`) |
 | `stop.sh` | `Stop` -> the one-time "how was it fixed" prompt as `{"decision":"block","reason":…}` (the channel Codex delivers to the model; `systemMessage` does not reach it, observed) |
@@ -53,7 +53,7 @@ answers within 2 s.
 | Event | Fields kaban reads | Output |
 |---|---|---|
 | `SessionStart` | `session_id` | `hookSpecificOutput.additionalContext` (briefing, at most 5 items) |
-| `PreToolUse` (`apply_patch`) | `session_id`, `tool_name`, the `*** Add File:` / `*** Update File:` headers of `tool_input.command`; `tool_input.file_path` if an `Edit`/`Write` tool ever exposes one (**unverified**: the model used `apply_patch` in every session) | `hookSpecificOutput.additionalContext` (`why` for each path, 3 records per path) or `{}` |
+| `PreToolUse` (`apply_patch`) | `session_id`, `tool_name`, the `*** Add File:` / `*** Update File:` headers of `tool_input.command`; `tool_input.file_path` if an `Edit`/`Write` tool ever exposes one (**unverified**: the model used `apply_patch` in every session) | `{}` |
 | `PostToolUse` (`Bash`) | `session_id`, `tool_input.command`, `tool_response` (a plain **string**) | `{}` |
 | `SubagentStop` | `session_id`, `last_assistant_message` (**unverified**) | `{}` |
 | `Stop` | `session_id`, `stop_hook_active` | `{"decision":"block","reason":…}` once per session when the session has a pending Failure, else `{}` |

@@ -11,18 +11,17 @@ use anyhow::{Context, Result, bail, ensure};
 use clap::Args;
 use kaban_api::{
     ApiConfig, EdgeFilter, ForgetRequest, KabanApi, LinkRequest, RecallRequest, RememberRequest,
-    RememberStatus, TraverseRequest, WhyRequest, WhyTarget,
+    RememberStatus, TraverseRequest,
 };
 use kaban_core::{
-    Actor, ActorId, ForgetMode, Governance, GraphStore, NewEvent, NodeId, TraverseDirection,
-    WorkspaceId, WriteCtx, config::EngineConfig,
+    ActorId, ForgetMode, GraphStore, NodeId, TraverseDirection, WorkspaceId, config::EngineConfig,
 };
 use kaban_policy::Policy;
 use kaban_store_sqlite::SqliteStore;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use super::corpus::{Corpus, Kind, Life, RELS, SEED, WORKSPACES, fixture_repo};
+use super::corpus::{Corpus, Life, RELS, SEED, WORKSPACES, fixture_repo};
 use super::recall_classes::{Fixtures, JudgedQuery, Pair, QueryClass, edge_precision, ndcg_at_10};
 
 /// Recall runs require a new database; `--n` is small only for harness checks.
@@ -33,9 +32,9 @@ pub(crate) struct RecallArgs {
         default_value = "exact_id,error_string,natural_language,identifier"
     )]
     pub classes: String,
-    /// Semicolon-separated layer sets (`fts`, `fuzzy`); sim is unavailable.
-    #[arg(long, default_value = "fts;fts,fuzzy")]
-    pub layers: String,
+    /// Semicolon-separated recall mode sets (`lexical`, `fuzzy`).
+    #[arg(long, default_value = "lexical;lexical,fuzzy")]
+    pub modes: String,
     /// Verify the effective configured RRF selection; never override it per request.
     #[arg(long)]
     pub fusion: Option<String>,
@@ -56,7 +55,7 @@ pub(crate) struct RecallArgs {
     #[arg(long)]
     pub out: Option<PathBuf>,
     /// Measure one EN-N3 layer set in this fresh process instead of the recall evaluation:
-    /// l0, l0+trigram, l0+gazetteer-run, l0+l3-brief, or l0+l2-query (deferred row)
+    /// l0, l0+gazetteer-run or l0+l3-brief
     #[arg(long, value_name = "LAYER_SET")]
     pub measure: Option<String>,
 }
@@ -178,36 +177,34 @@ fn classes(input: &str) -> Result<BTreeSet<QueryClass>> {
     Ok(result)
 }
 
-fn layer_sets(input: &str) -> Result<Vec<Vec<kaban_core::RecallLayer>>> {
-    use kaban_core::RecallLayer;
+fn mode_sets(input: &str) -> Result<Vec<Vec<kaban_core::RecallMode>>> {
+    use kaban_core::RecallMode;
     let mut result = Vec::new();
     let mut names = BTreeSet::new();
     for set in input.split(';') {
-        let mut layers = Vec::new();
+        let mut modes = Vec::new();
         for name in set.split(',') {
-            let layer = match name {
-                "fts" => RecallLayer::Fts,
-                "fuzzy" => RecallLayer::Fuzzy,
-                "sim" | "embed" => bail!("not_available_in_this_release: sim/embed"),
-                _ => bail!("unknown recall layer"),
+            let mode = match name {
+                "lexical" => RecallMode::Lexical,
+                "fuzzy" => RecallMode::Fuzzy,
+                _ => bail!("unknown recall mode"),
             };
-            ensure!(!layers.contains(&layer), "duplicate recall layer");
-            layers.push(layer);
+            ensure!(!modes.contains(&mode), "duplicate recall mode");
+            modes.push(mode);
         }
         ensure!(
-            layers.contains(&RecallLayer::Fts),
-            "evaluation requires fts"
+            modes.contains(&RecallMode::Lexical),
+            "evaluation requires lexical"
         );
-        layers.sort_by_key(|layer| match layer {
-            RecallLayer::Fts => 0,
-            RecallLayer::Fuzzy => 1,
-            RecallLayer::Sim => 2,
+        modes.sort_by_key(|mode| match mode {
+            RecallMode::Lexical => 0,
+            RecallMode::Fuzzy => 1,
         });
         ensure!(
-            names.insert(serde_json::to_string(&layers)?),
-            "duplicate layer set"
+            names.insert(serde_json::to_string(&modes)?),
+            "duplicate mode set"
         );
-        result.push(layers);
+        result.push(modes);
     }
     Ok(result)
 }
@@ -261,7 +258,6 @@ pub(super) fn materialize(
     n: usize,
     edges_per_node: usize,
     corpus: &mut Corpus,
-    commit: &str,
 ) -> Result<SourceMap> {
     let catalog: BTreeMap<_, _> = fixtures
         .sources
@@ -271,7 +267,6 @@ pub(super) fn materialize(
     let mut map = SourceMap::default();
     let mut by_ws: Vec<Vec<String>> = vec![Vec::new(); WORKSPACES.len()];
     let mut lifecycle = Vec::new();
-    let mut decisions = Vec::new();
     for ordinal in 0..n {
         let (spec, request) = super::runner::corpus_request(corpus, ordinal);
         let stable = format!("corpus:{ordinal}");
@@ -296,30 +291,11 @@ pub(super) fn materialize(
             .position(|(name, _)| *name == spec.workspace)
             .context("unknown corpus workspace")?;
         by_ws[ws].push(out.id.clone());
-        if spec.kind == Kind::Decision && spec.accepted {
-            decisions.push((out.id.clone(), spec.workspace));
-        }
         match spec.life {
             Life::Active => {}
             Life::Archived => lifecycle.push((out.id, ForgetMode::Archive)),
             Life::Tombstoned => lifecycle.push((out.id, ForgetMode::Tombstone)),
         }
-    }
-    for (id, workspace) in decisions {
-        store.transition(
-            &NodeId::parse(&id)?,
-            Governance::Accepted,
-            NewEvent {
-                reason: "bench-accept".into(),
-                commit_sha: Some(commit.into()),
-                ..Default::default()
-            },
-            &WriteCtx::new(
-                api.policy_version(),
-                WorkspaceId::new(workspace),
-                Actor::Agent,
-            ),
-        )?;
     }
     for ordinal in 0..n
         .checked_mul(edges_per_node)
@@ -380,7 +356,7 @@ pub(crate) fn evaluate(
     fixtures: &Fixtures,
     map: &SourceMap,
     selected: &BTreeSet<QueryClass>,
-    layers: &[kaban_core::RecallLayer],
+    modes: &[kaban_core::RecallMode],
 ) -> Result<Value> {
     let reverse = map.reverse();
     let mut rows = Vec::new();
@@ -396,8 +372,8 @@ pub(crate) fn evaluate(
         let text = query_text(query, map)?;
         let response = api.recall(RecallRequest {
             query: text.clone(),
-            layers: Some(layers.to_vec()),
-            fuzzy: layers.contains(&kaban_core::RecallLayer::Fuzzy),
+            modes: Some(modes.to_vec()),
+            fuzzy: modes.contains(&kaban_core::RecallMode::Fuzzy),
             workspace_id: Some(query.workspace.clone()),
             limit: Some(10),
             ..Default::default()
@@ -426,7 +402,7 @@ pub(crate) fn evaluate(
             "unavailable": scores.len() - available.len(), "mean_ndcg_at_10":
                 (!available.is_empty()).then(|| available.iter().sum::<f64>() / available.len() as f64) })
     }).collect();
-    Ok(json!({ "layers": layers, "status": "evaluated", "queries": rows, "classes": classes }))
+    Ok(json!({ "modes": modes, "status": "evaluated", "queries": rows, "classes": classes }))
 }
 
 /// Actual gazetteer-projected MENTIONS only; no candidate judgment is emitted as a prediction.
@@ -456,7 +432,7 @@ pub(crate) fn evaluate_edges(
             max_depth: Some(1),
             limit: Some(500),
             edge_filter: Some(EdgeFilter {
-                layers: vec!["gazetteer".into()],
+                producers: vec!["gazetteer".into()],
                 ..Default::default()
             }),
             ..Default::default()
@@ -482,7 +458,7 @@ pub(crate) fn evaluate_edges(
     }
     let precision = edge_precision(&fixtures.edges, &predictions)?;
     Ok(
-        json!({ "layer": "gazetteer", "rel": "MENTIONS", "precision": precision.precision,
+        json!({ "producer": "gazetteer", "rel": "MENTIONS", "precision": precision.precision,
         "coverage": precision.coverage, "judged": precision.judged, "predicted": precision.predicted,
         "judged_predicted": precision.judged_predicted, "correct": precision.correct,
         "unjudged": precision.unjudged, "duplicates": precision.duplicates,
@@ -531,12 +507,12 @@ fn paired(
         ..Default::default()
     };
     let mut fts = request.clone();
-    fts.layers = Some(vec![kaban_core::RecallLayer::Fts]);
+    fts.modes = Some(vec![kaban_core::RecallMode::Lexical]);
     fts.fuzzy = false;
     let mut fused = request;
-    fused.layers = Some(vec![
-        kaban_core::RecallLayer::Fts,
-        kaban_core::RecallLayer::Fuzzy,
+    fused.modes = Some(vec![
+        kaban_core::RecallMode::Lexical,
+        kaban_core::RecallMode::Fuzzy,
     ]);
     let traverse = TraverseRequest {
         start_ids: vec![map.resolve("ws1", "corpus:0")?.into()],
@@ -547,21 +523,14 @@ fn paired(
         rels: vec!["RELATES_TO".into()],
         ..Default::default()
     };
-    let why = WhyRequest {
-        targets: vec![WhyTarget::Path("src/checkout/cart.rs".into())],
-        limit: Some(10),
-        ..Default::default()
-    };
     for _ in 0..warmup {
         api.recall(fts.clone())?;
         api.recall(fused.clone())?;
         api.traverse(traverse.clone())?;
-        api.why(why.clone())?;
     }
     let mut fts_us = Vec::new();
     let mut fused_us = Vec::new();
     let mut traverse_us = Vec::new();
-    let mut why_us = Vec::new();
     let mut rounds = Vec::new();
     for round in 0..samples {
         if round % 2 == 0 {
@@ -574,7 +543,6 @@ fn paired(
             rounds.push("fused_first");
         }
         traverse_us.push(timed(|| Ok(api.traverse(traverse.clone())?))?);
-        why_us.push(timed(|| Ok(api.why(why.clone())?))?);
     }
     let requests = json!([fts, fused]);
     let fts = super::report::raw_series(&fts_us);
@@ -589,8 +557,7 @@ fn paired(
     Ok(
         json!({ "samples": samples, "warmup": warmup, "round_order": rounds,
         "recall_fts": fts, "recall_fused": fused, "traverse": traversal,
-        "traverse_request": traverse, "why": super::report::raw_series(&why_us),
-        "why_informational": true, "n2": gates, "recall_requests": requests }),
+        "traverse_request": traverse, "n2": gates, "recall_requests": requests }),
     )
 }
 
@@ -661,7 +628,7 @@ fn recall(
     args: &RecallArgs,
 ) -> Result<Value> {
     let selected = classes(&args.classes)?;
-    let sets = layer_sets(&args.layers)?;
+    let sets = mode_sets(&args.modes)?;
     let k = check_fusion(args.fusion.as_deref(), engine)?;
     let fixtures = load(
         &args.sources,
@@ -689,20 +656,14 @@ fn recall(
     let store = SqliteStore::open_as(db, keys, actor)?.with_recall_config(engine.recall.clone())?;
     let sqlite = Arc::new(store);
     let mut corpus = Corpus::new(SEED);
-    let commit = fixture_repo(&fixture, &corpus)?;
+    fixture_repo(&fixture, &corpus)?;
     let config = ApiConfig {
         workspace: WorkspaceId::new("ws1"),
         repo_root: Some(fixture),
         repo: Some("bench-fixture-repo".into()),
         ..Default::default()
     };
-    let api = KabanApi::with_config(
-        sqlite.clone(),
-        policy,
-        sqlite.signer(),
-        None,
-        config.clone(),
-    );
+    let api = KabanApi::with_config(sqlite.clone(), policy, sqlite.signer(), config.clone());
     let map = materialize(
         &api,
         sqlite.as_ref(),
@@ -710,11 +671,10 @@ fn recall(
         args.n,
         args.edges_per_node,
         &mut corpus,
-        &commit,
     )?;
     let rows = sets
         .iter()
-        .map(|layers| evaluate(&api, &fixtures, &map, &selected, layers))
+        .map(|modes| evaluate(&api, &fixtures, &map, &selected, modes))
         .collect::<Result<Vec<_>>>()?;
     let samples = args.samples.max(30).max(engine.bench.min_samples as usize);
     // the fuzzy layer of the fused request is the store's own index's
@@ -730,7 +690,7 @@ fn recall(
         args.n,
         json!({ "mode": "recall", "text_index": "tantivy",
         "selected_classes": selected.iter().map(|class| class_name(*class)).collect::<Vec<_>>(),
-        "selected_layer_sets": sets, "effective_config": engine, "effective_fusion": format!("rrf({k})"),
+        "selected_mode_sets": sets, "effective_config": engine, "effective_fusion": format!("rrf({k})"),
         "minimum_queries": (engine.recall.judged_min_queries as usize).max(100),
         "minimum_samples": (engine.bench.min_samples as usize).max(30),
         "corpus": { "seed": format!("{SEED:#x}"), "notes": args.n, "edges_per_node": args.edges_per_node,
@@ -738,7 +698,7 @@ fn recall(
         "fixtures": { "sources_sha256": hash(&args.sources)?, "queries_sha256": hash(&args.judged)?,
             "edges_sha256": hash(&args.edge_judged)?, "query_count": fixtures.queries.len(),
             "query_counts_by_class": query_counts, "edge_count": fixtures.edges.len() },
-        "layer_sets": rows, "paired": timing,
+        "mode_sets": rows, "paired": timing,
         "availability": { "fuzzy": "text_index", "sim": "not_available_in_this_release", "embed": "not_available_in_this_release", "cc": "not_available_in_this_release" },
         "quality_informational": true }),
         "recall",
@@ -776,7 +736,6 @@ fn edges(
         sqlite.clone(),
         policy,
         sqlite.signer(),
-        None,
         ApiConfig {
             workspace: WorkspaceId::new("ws1"),
             ..Default::default()
@@ -867,10 +826,7 @@ fn publish(result: &Value, out: Option<&Path>) -> Result<ExitCode> {
 mod tests {
     use super::super::recall_classes::{EdgeJudgment, Source};
     use super::*;
-    use kaban_core::{
-        BatchAssertion, BatchSubject, ClaimClass, Fixed, IngestStore, Layer, Method, Rank,
-        WriteBatch,
-    };
+    use kaban_core::{Actor, IngestStore, Op, WriteBatch, WriteCtx};
 
     fn fixtures() -> Fixtures {
         Fixtures::load(
@@ -888,7 +844,6 @@ mod tests {
             store.clone(),
             Policy::empty(),
             store.signer(),
-            None,
             ApiConfig {
                 workspace: WorkspaceId::new("ws1"),
                 ..Default::default()
@@ -908,7 +863,6 @@ mod tests {
             5,
             0,
             &mut Corpus::new(SEED),
-            "0123456789abcdef0123456789abcdef0123456789",
         )
         .unwrap();
         assert_eq!(
@@ -932,7 +886,7 @@ mod tests {
             &fixtures,
             &map,
             &classes("identifier").unwrap(),
-            &[kaban_core::RecallLayer::Fts],
+            &[kaban_core::RecallMode::Lexical],
         )
         .unwrap();
         assert_eq!(result["queries"].as_array().unwrap().len(), 25);
@@ -960,7 +914,7 @@ mod tests {
                 &fixtures,
                 &map,
                 &classes("exact_id").unwrap(),
-                &[kaban_core::RecallLayer::Fts]
+                &[kaban_core::RecallMode::Lexical]
             )
             .is_err()
         );
@@ -975,18 +929,7 @@ mod tests {
             .find(|source| source.id == "corpus:0")
             .unwrap()
             .text = "different".into();
-        assert!(
-            materialize(
-                &api,
-                store.as_ref(),
-                &bad,
-                5,
-                0,
-                &mut Corpus::new(SEED),
-                "unused"
-            )
-            .is_err()
-        );
+        assert!(materialize(&api, store.as_ref(), &bad, 5, 0, &mut Corpus::new(SEED),).is_err());
         let (store, api) = service();
         assert!(
             materialize(
@@ -996,7 +939,6 @@ mod tests {
                 2,
                 0,
                 &mut Corpus::new(SEED),
-                "unused"
             )
             .is_err()
         );
@@ -1023,7 +965,6 @@ mod tests {
             5,
             0,
             &mut Corpus::new(SEED),
-            "unused",
         )
         .unwrap();
         let id = map.resolve("ws1", "w:architecture").unwrap();
@@ -1062,34 +1003,18 @@ mod tests {
         let src = NodeId::parse(map.resolve("ws1", "from").unwrap()).unwrap();
         let mut batch = WriteBatch::new(WorkspaceId::new("ws1"), vec![]);
         for target in ["correct", "wrong", "unknown"] {
-            batch.assertions.push(BatchAssertion {
-                subject: BatchSubject::Edge {
-                    src: src.clone(),
-                    rel: "MENTIONS".into(),
-                    dst: NodeId::parse(map.resolve("ws1", target).unwrap()).unwrap(),
-                },
-                claim_class: ClaimClass::Edge,
-                predicate: None,
-                object: None,
-                value: json!({"method":"exact", "offset":0, "len":3, "score":9000}),
-                layer: Layer::Gazetteer,
-                method: Method::Exact,
-                extractor_id: None,
-                extractor_version: Some("1".into()),
-                source_id: Some("synthetic".into()),
-                lineage_id: format!("synthetic:{target}"),
-                raw_score: Fixed(9000),
-                rank: Rank::Normal,
-                rank_reason: None,
-                calibration_version: 0,
-                supersedes: None,
+            batch.ops.push(Op::UpsertEdge {
+                src: src.clone(),
+                dst: NodeId::parse(map.resolve("ws1", target).unwrap()).unwrap(),
+                rel: "MENTIONS".into(),
+                props: Some(
+                    json!({"producer": "gazetteer", "method": "exact", "offset": 0,
+                    "len": 3, "score": 9000, "source_id": "synthetic"}),
+                ),
             });
         }
         store
-            .apply_batch(
-                batch,
-                &WriteCtx::new(api.policy_version(), WorkspaceId::new("ws1"), Actor::Agent),
-            )
+            .apply_batch(batch, &WriteCtx::new(WorkspaceId::new("ws1"), Actor::Agent))
             .unwrap();
         api.link(LinkRequest {
             from: src.as_str().into(),
@@ -1140,13 +1065,12 @@ mod tests {
             5,
             1,
             &mut Corpus::new(SEED),
-            "unused",
         )
         .unwrap();
         let result = paired(&api, &fixtures, &map, 30, 1, 5, false).unwrap();
         assert_eq!(result["round_order"][0], "fts_first");
         assert_eq!(result["round_order"][1], "fused_first");
-        for key in ["recall_fts", "recall_fused", "traverse", "why"] {
+        for key in ["recall_fts", "recall_fused", "traverse"] {
             assert_eq!(result[key]["n"], 30);
             assert_eq!(result[key]["us_runs"].as_array().unwrap().len(), 30);
         }

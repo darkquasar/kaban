@@ -13,7 +13,6 @@
 
 use crate::rows::row_typedef;
 use crate::sql_error::SqlResultExt;
-use kaban_core::ontology::resolve::RelEnd;
 use kaban_core::{
     Qualified, Result, StoreError, TypeDeclaration, TypeDef, split_stored, stored_name,
 };
@@ -62,7 +61,7 @@ impl TypeTable {
                 "kind, name, description, from_kinds, to_kinds, directed, props_schema, builtin, NULL, NULL, NULL, NULL, NULL, NULL"
             }
             Self::Qualified => {
-                "kind, name, description, from_kinds, to_kinds, directed, props_schema, builtin, ns, governed, rank, column_weights, extract, display"
+                "kind, name, description, from_kinds, to_kinds, directed, props_schema, builtin, ns, rules, rank, column_weights, extract, display"
             }
         }
     }
@@ -83,8 +82,8 @@ pub(crate) struct TypeRow {
     /// The bare name.
     pub(crate) name: String,
     pub(crate) description: String,
-    /// The declared endpoints as JSON arrays of stored names (`path` literal included for
-    /// `GOVERNS`); written on the 0004 shape.
+    /// The declared endpoints as JSON arrays of stored names (the `path` literal included);
+    /// written on the 0004 shape.
     pub(crate) declared_from: String,
     pub(crate) declared_to: String,
     /// The declared direction; written on the 0004 shape.
@@ -93,11 +92,10 @@ pub(crate) struct TypeRow {
     pub(crate) declared_props_schema: Option<String>,
     /// The parent's stored name.
     pub(crate) is_a: Option<String>,
-    /// JSON array of the mixins' qualified names (`adr:Governed`).
+    /// JSON array of the mixins' qualified names.
     pub(crate) mixins: String,
     pub(crate) fts_fields: Option<String>,
     pub(crate) ident_fields: Option<String>,
-    pub(crate) min_confidence: Option<f64>,
     /// The five JSON declaration columns as canonical JSON text (E1.7 R2, landed in E1.8).
     pub(crate) declaration: [Option<String>; 5],
 }
@@ -121,15 +119,10 @@ fn format_stored(ns: &str, name: &str) -> String {
     }
 }
 
-fn json_ends(ends: &[RelEnd]) -> String {
+fn json_ends(ends: &[Qualified]) -> String {
     serde_json::Value::Array(
         ends.iter()
-            .map(|e| {
-                serde_json::Value::String(match e {
-                    RelEnd::Kind(q) => stored_name(q),
-                    RelEnd::Path => "path".to_owned(),
-                })
-            })
+            .map(|q| serde_json::Value::String(stored_name(q)))
             .collect(),
     )
     .to_string()
@@ -171,7 +164,6 @@ pub(crate) fn builtin_rows() -> Result<&'static [TypeRow]> {
                 .to_string(),
                 fts_fields: json_strings(&k.fts_fields),
                 ident_fields: json_strings(&k.ident_fields),
-                min_confidence: k.min_confidence,
                 declaration: TypeDeclaration::of(k).texts(),
             })
             .chain(ontology.rels.values().map(|r| TypeRow {
@@ -187,7 +179,6 @@ pub(crate) fn builtin_rows() -> Result<&'static [TypeRow]> {
                 mixins: "[]".to_owned(),
                 fts_fields: None,
                 ident_fields: None,
-                min_confidence: None,
                 declaration: Default::default(),
             }))
             .collect();
@@ -236,8 +227,8 @@ pub(crate) fn seed(conn: &Connection, now: &str) -> Result<()> {
 }
 
 /// The declaration columns of a builtin row on the 0004 shape, in [`builtin_values`] order.
-const BUILTIN_COLS: &str = "ns, kind, name, description, is_a, mixins, fts_fields, ident_fields, min_confidence, from_kinds, to_kinds, directed, props_schema, governed, rank, column_weights, extract, display";
-const BUILTIN_BINDS: &str = "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?";
+const BUILTIN_COLS: &str = "ns, kind, name, description, is_a, mixins, fts_fields, ident_fields, from_kinds, to_kinds, directed, props_schema, rules, rank, column_weights, extract, display";
+const BUILTIN_BINDS: &str = "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?";
 
 fn builtin_values(row: &TypeRow) -> Vec<rusqlite::types::Value> {
     use rusqlite::types::Value;
@@ -252,7 +243,6 @@ fn builtin_values(row: &TypeRow) -> Vec<rusqlite::types::Value> {
         text(&row.mixins),
         opt(&row.fts_fields),
         opt(&row.ident_fields),
-        row.min_confidence.map_or(Value::Null, Value::Real),
         text(&row.declared_from),
         text(&row.declared_to),
         Value::Integer(i64::from(row.declared_directed)),
@@ -366,13 +356,13 @@ pub(crate) fn extend(conn: &Connection, def: &TypeDef, now: &str) -> Result<bool
                     return Ok(false);
                 }
             }
-            let [governed, rank, column_weights, extract, display] = def.declaration.texts();
+            let [rules, rank, column_weights, extract, display] = def.declaration.texts();
             conn.execute(
-                "INSERT INTO schema_type(ns, kind, name, description, from_kinds, to_kinds, directed, props_schema, builtin, created_at, governed, rank, column_weights, extract, display) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)
+                "INSERT INTO schema_type(ns, kind, name, description, from_kinds, to_kinds, directed, props_schema, builtin, created_at, rules, rank, column_weights, extract, display) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)
                  ON CONFLICT(ns, kind, name) DO UPDATE SET description = excluded.description, from_kinds = excluded.from_kinds, to_kinds = excluded.to_kinds, directed = excluded.directed, props_schema = excluded.props_schema,
-                   governed = excluded.governed, rank = excluded.rank, column_weights = excluded.column_weights, extract = excluded.extract, display = excluded.display
+                   rules = excluded.rules, rank = excluded.rank, column_weights = excluded.column_weights, extract = excluded.extract, display = excluded.display
                  WHERE schema_type.builtin = 0",
-                params![ns, def.kind, bare, def.description, from, to, i64::from(def.directed), schema, now, governed, rank, column_weights, extract, display],
+                params![ns, def.kind, bare, def.description, from, to, i64::from(def.directed), schema, now, rules, rank, column_weights, extract, display],
             )
             .sql()?
         }
@@ -494,18 +484,18 @@ mod tests {
     #[test]
     fn the_builtin_rows_are_the_thirty_shipped_names_sorted_by_kind_and_stored_name() {
         let rows = builtin_rows().unwrap();
-        assert_eq!(rows.len(), 30);
+        assert_eq!(rows.len(), 29);
         assert!(
             rows.windows(2)
                 .all(|w| (w[0].kind, w[0].stored()) < (w[1].kind, w[1].stored()))
         );
         assert!(rows.iter().all(|r| !r.description.is_empty()));
         assert!(rows.iter().all(|r| r.ns == "core" || r.ns == "adr"));
-        let governs = rows
+        let supersedes = rows
             .iter()
-            .find(|r| r.kind == "rel" && r.name == "GOVERNS")
+            .find(|r| r.kind == "rel" && r.name == "SUPERSEDES")
             .unwrap();
-        assert_eq!(governs.declared_to, r#"["CodeRef","path"]"#);
+        assert_eq!(supersedes.declared_to, r#"["Decision"]"#);
     }
 
     #[test]

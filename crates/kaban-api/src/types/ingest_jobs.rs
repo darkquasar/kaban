@@ -46,18 +46,16 @@ pub struct IngestClaimResponse {
     pub lease: Option<IngestLease>,
 }
 
-/// Fixed placement outcomes; governed revisions are candidates, never acceptance.
+/// Fixed placement outcomes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum IngestRecordOutcome {
     /// A new record was committed.
     Created,
-    /// Proposed record content changed.
+    /// Record content changed in place.
     Updated,
     /// Identical content wrote no graph change.
     Unchanged,
-    /// New proposed content for an immutable predecessor.
-    RevisionCandidate,
 }
 
 /// Closed report skip vocabulary. References never convey foreign target information.
@@ -82,10 +80,6 @@ pub enum IngestSkipReason {
     UnknownTarget,
     /// Payload exceeds its ceiling.
     TooLarge,
-    /// Pair was not requested by the authoritative brief.
-    NotRequested,
-    /// Duplicate requested pair judgement.
-    Duplicate,
 }
 
 /// Closed evidence drop vocabulary; invalid evidence does not discard the record.
@@ -124,18 +118,6 @@ pub struct IngestPlacedRecord {
     pub outcome: IngestRecordOutcome,
 }
 
-/// Acceptance-safe candidate and its immutable predecessor.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct IngestRevisionCandidate {
-    /// Gated extractor-local key.
-    pub local_id: String,
-    /// New proposed record identity.
-    pub id: String,
-    /// Accepted, superseded or invalidated predecessor identity.
-    pub of: String,
-}
-
 /// One fixed conversion refusal, with an optional value-free property pointer.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -157,16 +139,6 @@ pub struct IngestEvidenceDropped {
     pub local_id: String,
     /// Fixed evidence refusal.
     pub reason: IngestEvidenceReason,
-}
-
-/// Actual graph `ChangeLog` sequence range of publication.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct IngestChanges {
-    /// First sequence, absent for a graph no-op.
-    pub first_seq: Option<u64>,
-    /// Last sequence, absent for a graph no-op.
-    pub last_seq: Option<u64>,
 }
 
 /// Workspace-scoped finalization request. A handle alone confers no authority.
@@ -210,28 +182,16 @@ pub struct IngestFinishReport {
     pub redactions: u64,
     /// Accumulated named edges.
     pub edges: u64,
-    /// Accumulated newly inserted assertions.
-    pub assertions: u64,
-    /// Proposed revisions, never acceptance.
-    pub revision_candidates: u64,
-    /// Revisions of terminal predecessors.
-    pub predecessor_terminal: u64,
     /// Fixed skip reasons and counts.
     pub skipped: BTreeMap<String, u64>,
     /// Fixed discarded evidence reasons and counts.
     pub evidence_dropped: BTreeMap<String, u64>,
     /// Final reconciliation outcome.
     pub reconcile: IngestReconcileOutcome,
-    /// Machine claims permanently retired.
-    pub retired_assertions: u64,
     /// Omitted owned graph edges deleted.
     pub deleted_edges: u64,
-    /// Proposed omitted records; informational, never tombstoned.
-    pub orphans: Vec<String>,
-    /// Actual first/last graph sequence across successful submits and reconciliation.
-    pub changes: IngestChanges,
-    /// The finish's receipt (spec 05 SS-10), with `changes.last_seq` as its position; absent
-    /// only on a report retained before receipts existed.
+    /// The finish's receipt (spec 05 SS-10); absent only on a report retained before receipts
+    /// existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub receipt: Option<super::WriteReceipt>,
 }
@@ -248,15 +208,11 @@ pub struct IngestSubmitReport {
     pub chunk: Option<u32>,
     /// Committed records and actual outcomes.
     pub records: Vec<IngestPlacedRecord>,
-    /// Proposed revisions of immutable predecessors.
-    pub revision_candidates: Vec<IngestRevisionCandidate>,
-    /// Candidates whose predecessor was superseded or invalidated.
-    pub predecessor_terminal: u64,
     /// Fixed conversion refusals.
     pub skipped: Vec<IngestSkipped>,
     /// Evidence references discarded independently of record placement.
     pub evidence_dropped: Vec<IngestEvidenceDropped>,
-    /// Successful redactions audited atomically with this submit.
+    /// Redactions applied atomically with this submit.
     pub redactions: u64,
     /// Actual new records.
     pub created: u32,
@@ -266,10 +222,6 @@ pub struct IngestSubmitReport {
     pub unchanged: u32,
     /// Successfully named edge triples.
     pub edges: u64,
-    /// Actual newly inserted assertion rows.
-    pub assertions: u32,
-    /// Actual graph sequence range.
-    pub changes: IngestChanges,
 }
 
 /// Extractor dialect: instructions only, never model execution.
@@ -323,7 +275,7 @@ pub struct RecordDraft {
     /// Optional source-supported tags.
     #[serde(default)]
     pub tags: Vec<String>,
-    /// Optional confidence, never acceptance evidence.
+    /// Optional confidence, stored as the score of the record's edges.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confidence: Option<f64>,
     /// Ontology-restricted properties, with all internal properties excluded.
@@ -368,35 +320,6 @@ pub struct LinkDraft {
     pub to_id: String,
 }
 
-/// Exact counterpart of the core ER pair reference.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct PairRef {
-    /// First requested node.
-    pub a: String,
-    /// Second requested node.
-    pub b: String,
-}
-
-/// Exact counterpart of core ER judgement; no invented confidence or authority.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct PairJudgement {
-    /// Pair requested by this brief.
-    pub pair: PairRef,
-    /// Whether the external judge considers it one entity.
-    pub same: bool,
-}
-
-impl From<PairJudgement> for kaban_core::PairJudgement {
-    fn from(value: PairJudgement) -> Self {
-        Self {
-            pair: kaban_core::PairRef::new(&value.pair.a, &value.pair.b),
-            same: value.same,
-        }
-    }
-}
-
 /// Canonical `ingest_submit` body, also the sole source of extractor JSON Schema.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -421,9 +344,6 @@ pub struct StructuredReturn {
     /// Existing candidate node ids, not new records.
     #[serde(default)]
     pub about: Vec<String>,
-    /// External pair judgements, normal-rank only; requested pairs only.
-    #[serde(default)]
-    pub pair_judgements: Vec<PairJudgement>,
 }
 
 /// Canonical request name; no separate schema or duplicate payload definition.
@@ -620,7 +540,7 @@ pub struct TypeSuggestion {
     pub candidates: Vec<TypeCandidate>,
     /// Explicit or suggested source type used for kind selection.
     pub chosen: String,
-    /// Advisory warning/explanation; never an acceptance promise.
+    /// Advisory warning or explanation.
     pub note: String,
 }
 
@@ -638,10 +558,8 @@ pub struct TargetSchema {
     pub semantics: String,
     /// Explicit ontology-permitted source/relation/target triples.
     pub allowed_edges: Vec<[String; 3]>,
-    /// Provenance edges added by kaban, never acceptance.
+    /// Provenance edges added by kaban.
     pub kaban_adds: Vec<[String; 3]>,
-    /// Governed records remain proposed.
-    pub governance: String,
 }
 
 /// Published ingestion bounds, including the full serialized result ceiling.
@@ -670,7 +588,7 @@ pub struct HandlingPlan {
     pub submit: String,
     /// Published byte/record ceilings.
     pub limits: IngestLimits,
-    /// Current-policy-gated dialect and governance instructions.
+    /// Current-policy-gated dialect and write-contract instructions.
     pub instructions: Vec<String>,
 }
 
@@ -748,9 +666,6 @@ pub struct IngestBrief {
     /// Existing candidate identities suitable for explicit about references.
     #[serde(default)]
     pub about_candidates: Vec<AboutCandidate>,
-    /// Explicit uncertain pairs, never inferred acceptance.
-    #[serde(default)]
-    pub uncertain_pairs: Vec<PairRef>,
     /// Suggested explicit continuation tool calls.
     pub next: Vec<IngestNextCall>,
 }
@@ -763,7 +678,7 @@ pub struct AboutCandidate {
     pub id: String,
     /// Loaded target kind; content, not a control.
     pub kind: String,
-    /// Advisory matcher score, never acceptance evidence.
+    /// Advisory matcher score.
     pub score: f64,
 }
 

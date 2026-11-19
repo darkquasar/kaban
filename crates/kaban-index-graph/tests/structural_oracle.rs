@@ -1,0 +1,916 @@
+//! Steps 2 and 3 (T9): the structural functions equal a plain breadth-first oracle over the edge
+//! list of base + layers + sediment (GRA-01 structural class), as sets and in their defined
+//! order; multi-hop results report every node once and every edge met once (GRA-08); caps are
+//! checked before any neighbour access and a hub cannot widen a capped request (GRA-04).
+
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // test code: failures are the assertion
+
+mod oracle;
+
+use std::collections::BTreeSet;
+
+use kaban_index_graph::{
+    Attr, Base, Caps, Direction, EdgeOp, GraphError, Layer, LocalId, NodeOp, OpKind, Reached,
+    Records, RelId, RelSelection, RowCap, View, build_base, closure, common_neighbours, degree,
+    expand, meet, reachable, refuse_not_planned, reverse_closure, seal, shortest_path, topo_order,
+    wcc,
+};
+use oracle::structural::{Expected, Graph};
+use oracle::{Fixture, IDS, Rng, budget, chain, view};
+use tantivy::directory::OwnedBytes;
+
+const SEEDS: u64 = 6;
+
+fn node(id: u32) -> NodeOp {
+    NodeOp {
+        node: LocalId(id),
+        kind: OpKind::Add,
+    }
+}
+
+fn edge(src: u32, rel: u16, dst: u32) -> EdgeOp {
+    EdgeOp {
+        src: LocalId(src),
+        rel: RelId(rel),
+        dst: LocalId(dst),
+        kind: OpKind::Add,
+        attr: Attr::default(),
+    }
+}
+
+fn caps(depth: u8, rows: u32) -> Caps {
+    Caps { depth, rows }
+}
+
+fn selections() -> Vec<RelSelection> {
+    vec![
+        RelSelection::All,
+        RelSelection::only(vec![RelId(0), RelId(40_000)]),
+        RelSelection::only(vec![RelId(7)]),
+    ]
+}
+
+fn cap_grid() -> Vec<Caps> {
+    vec![
+        caps(1, 1_000),
+        caps(2, 1_000),
+        caps(4, 1_000),
+        caps(255, 1_000),
+        caps(3, 1),
+        caps(3, 7),
+        caps(2, 40),
+    ]
+}
+
+/// Source sets: single nodes, absent ids, duplicates and several sources.
+fn source_sets(rng: &mut Rng) -> Vec<Vec<LocalId>> {
+    let mut id = || LocalId(u32::try_from(rng.below(u64::from(IDS) + 5)).unwrap());
+    vec![
+        vec![id()],
+        vec![id()],
+        vec![id(), id(), id()],
+        {
+            let a = id();
+            vec![a, id(), a]
+        },
+        Vec::new(),
+    ]
+}
+
+/// The GRA-08 fixture: main(1)>parse(2), parse>log(3), log>parse, split over a base, a layer and
+/// the sediment.
+struct Gra08 {
+    base: Base,
+    layers: Vec<Layer>,
+    sediment: Vec<Records>,
+}
+
+fn gra08() -> Gra08 {
+    let base = Base::open(
+        OwnedBytes::new(build_base(
+            &Records {
+                nodes: vec![node(1), node(2), node(3)],
+                edges: vec![edge(1, 0, 2)],
+                ..Records::default()
+            },
+            0,
+        )),
+        &oracle::budget(),
+    )
+    .unwrap();
+    let layer = seal(
+        &view::<Records>(Some(&base), &[], &[]),
+        &Records {
+            edges: vec![edge(2, 0, 3)],
+            ..Records::default()
+        },
+    );
+    Gra08 {
+        base,
+        layers: vec![Layer::open(OwnedBytes::new(layer), &oracle::budget()).unwrap()],
+        sediment: vec![Records {
+            edges: vec![edge(3, 0, 2)],
+            ..Records::default()
+        }],
+    }
+}
+
+fn ids(v: &[(u32, u16, u32)]) -> Vec<(LocalId, RelId, LocalId)> {
+    v.iter()
+        .map(|&(s, r, d)| (LocalId(s), RelId(r), LocalId(d)))
+        .collect()
+}
+
+fn edge_set(r: &Reached) -> BTreeSet<(LocalId, RelId, LocalId)> {
+    r.edges.iter().copied().collect()
+}
+
+#[test]
+fn gra08_every_node_once_at_its_first_depth_and_every_edge_once() {
+    let g = gra08();
+    let v = view(Some(&g.base), &g.layers, &g.sediment);
+    let b = budget();
+    let got = expand(
+        &v,
+        &[LocalId(1)],
+        &RelSelection::All,
+        Direction::Out,
+        caps(3, 100),
+        &b,
+    )
+    .unwrap();
+    assert_eq!(got.nodes, vec![(LocalId(2), 1), (LocalId(3), 2)]);
+    let mut edges = got.edges.clone();
+    edges.sort_unstable();
+    assert_eq!(
+        edges,
+        ids(&[(1, 0, 2), (2, 0, 3), (3, 0, 2)]),
+        "each edge once"
+    );
+    assert!(!got.truncated);
+    let via_closure = closure(&v, &[LocalId(1)], &RelSelection::All, caps(3, 100), &b).unwrap();
+    assert_eq!(*via_closure, *got);
+
+    // Backwards from parse: main and log at depth 1, and the same three edges once each.
+    let back = reverse_closure(&v, &[LocalId(2)], &RelSelection::All, caps(3, 100), &b).unwrap();
+    assert_eq!(back.nodes, vec![(LocalId(1), 1), (LocalId(3), 1)]);
+    let mut edges = back.edges.clone();
+    edges.sort_unstable();
+    assert_eq!(edges, ids(&[(1, 0, 2), (2, 0, 3), (3, 0, 2)]));
+
+    // Ignoring direction the reciprocal pair parse<>log stays two edges, each reported once.
+    let both = expand(
+        &v,
+        &[LocalId(2)],
+        &RelSelection::All,
+        Direction::Both,
+        caps(3, 100),
+        &b,
+    )
+    .unwrap();
+    assert_eq!(both.nodes, vec![(LocalId(1), 1), (LocalId(3), 1)]);
+    assert_eq!(both.edges.len(), 3, "{:?}", both.edges);
+    assert_eq!(
+        edge_set(&both),
+        ids(&[(1, 0, 2), (2, 0, 3), (3, 0, 2)])
+            .into_iter()
+            .collect()
+    );
+}
+
+/// `got` equals `want`: nodes exactly (order included), edges exactly as a set without a cut,
+/// and as a subset with every kept node reached by a reported edge with a cut; never a
+/// duplicate edge.
+fn assert_reached(got: &Reached, want: &Expected, dir: Direction, ctx: &str) {
+    assert_eq!(got.nodes, want.nodes, "{ctx}: nodes");
+    assert_eq!(got.truncated, want.truncated, "{ctx}: truncated");
+    let set = edge_set(got);
+    assert_eq!(set.len(), got.edges.len(), "{ctx}: an edge reported twice");
+    if want.truncated {
+        assert!(
+            set.is_subset(&want.edges),
+            "{ctx}: edges outside the result"
+        );
+        for &(n, d) in &got.nodes {
+            let parent = |m: LocalId| want.depth.get(&m.0) == Some(&(d - 1));
+            let linked = set.iter().any(|&(s, _, t)| match dir {
+                Direction::Out => t == n && parent(s),
+                Direction::In => s == n && parent(t),
+                Direction::Both => (t == n && parent(s)) || (s == n && parent(t)),
+            });
+            assert!(linked, "{ctx}: {n:?}@{d} has no edge from depth {}", d - 1);
+        }
+    } else {
+        assert_eq!(set, want.edges, "{ctx}: edges");
+    }
+}
+
+fn graphs(f: &Fixture) -> Vec<(RelSelection, Graph)> {
+    selections()
+        .into_iter()
+        .map(|r| {
+            let g = f.oracle.graph(&r);
+            (r, g)
+        })
+        .collect()
+}
+
+#[test]
+fn expand_closure_and_reverse_closure_equal_the_oracle() {
+    let b = budget();
+    for seed in 0..SEEDS {
+        let f = chain(seed, |r| r);
+        let v = f.view();
+        let mut rng = Rng::new(seed + 1000);
+        let sources = source_sets(&mut rng);
+        for (rels, g) in &graphs(&f) {
+            for c in cap_grid() {
+                for src in &sources {
+                    for dir in [Direction::Out, Direction::In, Direction::Both] {
+                        let ctx = format!("seed {seed} {rels:?} {c:?} {src:?} {dir:?}");
+                        let got = expand(&v, src, rels, dir, c, &b).unwrap();
+                        let want = g.expand(src, dir, c.depth, c.rows);
+                        assert_reached(&got, &want, dir, &ctx);
+                    }
+                    let out = expand(&v, src, rels, Direction::Out, c, &b).unwrap();
+                    assert_eq!(*closure(&v, src, rels, c, &b).unwrap(), *out);
+                    let inc = expand(&v, src, rels, Direction::In, c, &b).unwrap();
+                    assert_eq!(*reverse_closure(&v, src, rels, c, &b).unwrap(), *inc);
+                }
+            }
+        }
+    }
+}
+
+/// Pairs of ids, absent ones and equal ones included.
+fn pairs(rng: &mut Rng, n: usize) -> Vec<(u32, u32)> {
+    let mut id = || u32::try_from(rng.below(u64::from(IDS) + 3)).unwrap();
+    let mut v: Vec<(u32, u32)> = (0..n).map(|_| (id(), id())).collect();
+    let same = id();
+    v.push((same, same));
+    v
+}
+
+/// Compare a crate outcome with the oracle's: the same answer, or a refusal naming the same cap
+/// with that cap's value (C5: a cut search never reads as a complete answer).
+fn assert_outcome<T: PartialEq + std::fmt::Debug>(
+    got: Result<T, GraphError>,
+    want: Result<T, &'static str>,
+    c: Caps,
+    ctx: &str,
+) {
+    match want {
+        Ok(want) => assert_eq!(got.unwrap(), want, "{ctx}"),
+        Err(cap) => {
+            let max = if cap == "rows" {
+                u64::from(c.rows)
+            } else {
+                u64::from(c.depth)
+            };
+            assert_eq!(
+                got.err(),
+                Some(GraphError::CapExceeded { limit: cap, max }),
+                "{ctx}: refused naming {cap}"
+            );
+        }
+    }
+}
+
+#[test]
+fn reachable_and_shortest_path_equal_the_oracle() {
+    let b = budget();
+    for seed in 0..SEEDS {
+        let f = chain(seed, |r| r);
+        let v = f.view();
+        let mut rng = Rng::new(seed + 2000);
+        for (rels, g) in &graphs(&f) {
+            for c in cap_grid() {
+                for (s, d) in pairs(&mut rng, 25) {
+                    let ctx = format!("seed {seed} {rels:?} {c:?} {s}->{d}");
+                    let (src, dst) = (LocalId(s), LocalId(d));
+                    let got = reachable(&v, src, dst, rels, c, &b);
+                    let want = g.reachable(s, d, c.depth, c.rows);
+                    assert_outcome(got, want, c, &format!("{ctx}: reachable"));
+                    let path = shortest_path(&v, src, dst, rels, c, &b)
+                        .map(|p| p.map(|p| p.value().clone()));
+                    let want = g.shortest_path(s, d, c.depth, c.rows);
+                    assert_outcome(path, want, c, &format!("{ctx}: path"));
+                }
+            }
+        }
+    }
+}
+
+/// 1 > {2, 3, 4}, 4 > 9, 3 > 5 > 6, and an isolated 7.
+fn fan() -> [Records; 1] {
+    [Records {
+        nodes: [1, 2, 3, 4, 5, 6, 7, 9].map(node).to_vec(),
+        edges: vec![
+            edge(1, 0, 2),
+            edge(1, 0, 3),
+            edge(1, 0, 4),
+            edge(4, 0, 9),
+            edge(3, 0, 5),
+            edge(5, 0, 6),
+        ],
+        ..Records::default()
+    }]
+}
+
+fn refused(limit: &'static str, max: u64) -> GraphError {
+    GraphError::CapExceeded { limit, max }
+}
+
+#[test]
+fn a_rows_cut_never_reads_as_unreachable() {
+    let rs = fan();
+    let v = view(None, &[], &rs);
+    let (b, all) = (budget(), RelSelection::All);
+    let r = |dst: u32, c: Caps| reachable(&v, LocalId(1), LocalId(dst), &all, c, &b);
+    // Rows 2 keeps {2, 3} of level one: 4 is dropped and 9 lies behind it.
+    for dst in [4, 9, 7] {
+        assert_eq!(
+            r(dst, caps(3, 2)).err(),
+            Some(refused("rows", 2)),
+            "dst {dst}"
+        );
+    }
+    assert_eq!(r(2, caps(3, 2)), Ok(true), "a kept node is reached");
+    assert_eq!(r(3, caps(3, 2)), Ok(true), "a kept node is reached");
+    // Uncut: everything 1 reaches lies within depth 3 and 6 rows.
+    assert_eq!(r(9, caps(3, 6)), Ok(true));
+    assert_eq!(
+        r(7, caps(3, 6)),
+        Ok(false),
+        "a settled search says unreachable"
+    );
+}
+
+#[test]
+fn a_depth_bound_with_nodes_beyond_it_is_refused_not_false() {
+    let rs = fan();
+    let v = view(None, &[], &rs);
+    let (b, all) = (budget(), RelSelection::All);
+    let r = |dst: u32, c: Caps| reachable(&v, LocalId(1), LocalId(dst), &all, c, &b);
+    // Depth 2 reaches 5 but not 6, which lies one hop past the bound.
+    assert_eq!(r(6, caps(2, 100)).err(), Some(refused("depth", 2)));
+    assert_eq!(r(7, caps(2, 100)).err(), Some(refused("depth", 2)));
+    assert_eq!(r(5, caps(2, 100)), Ok(true));
+    // Depth 3 sees everything: 7 is settled as unreachable.
+    assert_eq!(r(7, caps(3, 100)), Ok(false));
+    // A last level whose lists only lead back to seen nodes is no cut: 1 <-> 2.
+    let ring = [Records {
+        nodes: [1, 2, 3].map(node).to_vec(),
+        edges: vec![edge(1, 0, 2), edge(2, 0, 1)],
+        ..Records::default()
+    }];
+    let v = view(None, &[], &ring);
+    assert_eq!(
+        reachable(&v, LocalId(1), LocalId(3), &all, caps(1, 10), &b),
+        Ok(false)
+    );
+}
+
+#[test]
+fn shortest_path_refuses_when_a_cut_hides_the_path() {
+    let rs = fan();
+    let v = view(None, &[], &rs);
+    let (b, all) = (budget(), RelSelection::All);
+    let p = |dst: u32, c: Caps| {
+        shortest_path(&v, LocalId(1), LocalId(dst), &all, c, &b)
+            .map(|p| p.map(|p| p.value().clone()))
+    };
+    // The path 1 > 4 > 9 runs through 4, which rows 2 drops.
+    assert_eq!(p(9, caps(4, 2)).err(), Some(refused("rows", 2)));
+    assert_eq!(p(7, caps(4, 2)).err(), Some(refused("rows", 2)));
+    // 1 > 3 > 5 > 6 is three hops: depth 2 cannot settle it.
+    assert_eq!(p(6, caps(2, 100)).err(), Some(refused("depth", 2)));
+    // A cut at the level where dst is kept hides nothing: every shallower level is complete.
+    assert_eq!(p(3, caps(4, 2)), Ok(Some(vec![LocalId(1), LocalId(3)])));
+    assert_eq!(
+        p(6, caps(3, 100)),
+        Ok(Some(vec![LocalId(1), LocalId(3), LocalId(5), LocalId(6)]))
+    );
+    assert_eq!(p(7, caps(3, 100)), Ok(None), "settled: no path");
+}
+
+#[test]
+fn meet_refuses_when_a_cut_could_hide_a_minimum() {
+    let (b, all) = (budget(), RelSelection::All);
+    // Both 1 and 2 point to 3 and 4: rows 1 keeps only 3 on each side, yet 4 ties with it.
+    let twin = [Records {
+        nodes: [1, 2, 3, 4].map(node).to_vec(),
+        edges: vec![edge(1, 0, 3), edge(1, 0, 4), edge(2, 0, 3), edge(2, 0, 4)],
+        ..Records::default()
+    }];
+    let v = view(None, &[], &twin);
+    let m = |c: Caps| meet(&v, LocalId(1), LocalId(2), &all, c, &b).map(|r| r.value().clone());
+    assert_eq!(m(caps(1, 1)).err(), Some(refused("rows", 1)));
+    assert_eq!(m(caps(1, 2)), Ok(vec![LocalId(3), LocalId(4)]));
+    // 1 > 3 > 5 and 2 > 4 > 5: depth 1 finds no common node, but one lies past the bound.
+    let far = [Records {
+        nodes: [1, 2, 3, 4, 5].map(node).to_vec(),
+        edges: vec![edge(1, 0, 3), edge(3, 0, 5), edge(2, 0, 4), edge(4, 0, 5)],
+        ..Records::default()
+    }];
+    let v = view(None, &[], &far);
+    let m = |c: Caps| meet(&v, LocalId(1), LocalId(2), &all, c, &b).map(|r| r.value().clone());
+    assert_eq!(m(caps(1, 10)).err(), Some(refused("depth", 1)));
+    assert_eq!(m(caps(2, 10)), Ok(vec![LocalId(5)]));
+    // 1 > 2 > 7 > 8: the minimum 2 (summed depth 1) is below anything past depth 1, so it is
+    // the exact answer although both searches stop short of the whole graph.
+    let line = [Records {
+        nodes: [1, 2, 7, 8].map(node).to_vec(),
+        edges: vec![edge(1, 0, 2), edge(2, 0, 7), edge(7, 0, 8)],
+        ..Records::default()
+    }];
+    let v = view(None, &[], &line);
+    let got = meet(&v, LocalId(1), LocalId(2), &all, caps(1, 10), &b).map(|r| r.value().clone());
+    assert_eq!(got, Ok(vec![LocalId(2)]));
+}
+
+#[test]
+fn wcc_flags_rows_left_out() {
+    let three = [Records {
+        nodes: [1, 2, 3].map(node).to_vec(),
+        edges: vec![edge(2, 0, 3)],
+        ..Records::default()
+    }];
+    let v = view(None, &[], &three);
+    let (b, all) = (budget(), RelSelection::All);
+    let got = wcc(&v, &all, RowCap(2), &b).unwrap();
+    assert_eq!(
+        got.rows,
+        vec![(LocalId(1), LocalId(1)), (LocalId(2), LocalId(2))]
+    );
+    assert!(got.truncated, "a third member exists");
+    let got = wcc(&v, &all, RowCap(3), &b).unwrap();
+    assert_eq!(got.rows.len(), 3);
+    assert!(!got.truncated, "exactly the cap is not a cut");
+}
+
+#[test]
+fn shortest_path_breaks_ties_by_the_lowest_id() {
+    // 1>5>9 and 1>3>9 and 1>7>9: three paths of two hops; 3 is the lowest middle node. A longer
+    // path through 2 does not win.
+    let r = Records {
+        nodes: [1, 2, 3, 5, 7, 8, 9].map(node).to_vec(),
+        edges: vec![
+            edge(1, 0, 5),
+            edge(1, 0, 7),
+            edge(1, 0, 3),
+            edge(5, 0, 9),
+            edge(3, 0, 9),
+            edge(7, 0, 9),
+            edge(1, 0, 2),
+            edge(2, 0, 8),
+            edge(8, 0, 9),
+        ],
+        ..Records::default()
+    };
+    let rs = [r];
+    let v = view(None, &[], &rs);
+    let b = budget();
+    let path = shortest_path(
+        &v,
+        LocalId(1),
+        LocalId(9),
+        &RelSelection::All,
+        caps(4, 100),
+        &b,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(*path, vec![LocalId(1), LocalId(3), LocalId(9)]);
+    assert!(path.bytes() > 0, "the returned path is charged");
+}
+
+#[test]
+fn degree_and_common_neighbours_equal_the_oracle() {
+    let b = budget();
+    for seed in 0..SEEDS {
+        let f = chain(seed, |r| r);
+        let v = f.view();
+        let mut rng = Rng::new(seed + 3000);
+        for (rels, g) in &graphs(&f) {
+            for id in 0..IDS + 3 {
+                for dir in [Direction::Out, Direction::In, Direction::Both] {
+                    let got = degree(&v, LocalId(id), rels, dir, &b).unwrap();
+                    let want = u32::try_from(g.degree(id, dir)).unwrap();
+                    assert_eq!(got, want, "seed {seed} {rels:?} degree {id} {dir:?}");
+                }
+            }
+            for (a, c) in pairs(&mut rng, 40) {
+                for dir in [Direction::Out, Direction::In, Direction::Both] {
+                    let got = common_neighbours(&v, LocalId(a), LocalId(c), rels, dir, &b).unwrap();
+                    assert_eq!(
+                        *got,
+                        g.common(a, c, dir),
+                        "seed {seed} {rels:?} common {a} {c} {dir:?}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn meet_equals_the_oracle() {
+    let b = budget();
+    for seed in 0..SEEDS {
+        let f = chain(seed, |r| r);
+        let v = f.view();
+        let mut rng = Rng::new(seed + 4000);
+        for (rels, g) in &graphs(&f) {
+            for c in cap_grid() {
+                for (x, y) in pairs(&mut rng, 15) {
+                    let got = meet(&v, LocalId(x), LocalId(y), rels, c, &b);
+                    let ctx = format!("seed {seed} {rels:?} {c:?} meet {x} {y}");
+                    if let Ok(got) = &got {
+                        assert!(got.len() <= c.rows as usize, "{ctx}: the result is capped");
+                    }
+                    let got = got.map(|r| r.value().clone());
+                    assert_outcome(got, g.meet(x, y, c.depth, c.rows), c, &ctx);
+                }
+            }
+        }
+    }
+}
+
+/// Edges forced forward (src < dst) so the graph is acyclic.
+fn forward(mut r: Records) -> Records {
+    for e in &mut r.edges {
+        if e.src > e.dst {
+            std::mem::swap(&mut e.src, &mut e.dst);
+        }
+        if e.src == e.dst {
+            e.dst = LocalId(e.dst.0 + 1);
+        }
+    }
+    r
+}
+
+fn check_topo(f: &Fixture, ctx: &str, b: &kaban_core::query_budget::QueryBudget) -> (u32, u32) {
+    let v = f.view();
+    let mut rng = Rng::new(7);
+    let (mut ordered, mut cycles) = (0, 0);
+    for (rels, g) in &graphs(f) {
+        for c in cap_grid() {
+            for src in source_sets(&mut rng) {
+                let ctx = format!("{ctx} {rels:?} {c:?} {src:?}");
+                let got = topo_order(&v, &src, rels, c, b);
+                let Some(set) = g.topo_set(&src, c.depth, c.rows) else {
+                    assert!(
+                        matches!(got, Err(GraphError::CapExceeded { limit: "rows", .. })),
+                        "{ctx}: a cut set is refused: {got:?}"
+                    );
+                    continue;
+                };
+                if g.has_cycle(&set) {
+                    let Err(GraphError::Cycle { node }) = got else {
+                        panic!("{ctx}: a cycle is refused: {got:?}");
+                    };
+                    assert!(g.on_cycle(&set, node.0), "{ctx}: {node:?} is on a cycle");
+                    cycles += 1;
+                } else {
+                    let got = got.unwrap();
+                    assert!(got.len() <= c.rows as usize, "{ctx}: the result is capped");
+                    assert!(g.is_topo_order(&set, &got), "{ctx}: {:?}", *got);
+                    ordered += 1;
+                }
+            }
+        }
+    }
+    (ordered, cycles)
+}
+
+#[test]
+fn topo_order_is_valid_on_acyclic_views_and_names_a_cycle_otherwise() {
+    let b = budget();
+    let mut totals = (0, 0);
+    for seed in 0..SEEDS {
+        let dag = chain(seed, forward);
+        let (o, c) = check_topo(&dag, &format!("dag seed {seed}"), &b);
+        assert_eq!(c, 0, "dag seed {seed}: forward edges make no cycle");
+        totals.0 += o;
+        let cyclic = chain(seed, |r| r);
+        let (o, c) = check_topo(&cyclic, &format!("seed {seed}"), &b);
+        totals.0 += o;
+        totals.1 += c;
+    }
+    assert!(
+        totals.0 > 50 && totals.1 > 50,
+        "both outcomes exercised: {totals:?}"
+    );
+}
+
+#[test]
+fn a_self_loop_is_a_cycle() {
+    let rs = [Records {
+        nodes: vec![node(1), node(2)],
+        edges: vec![edge(1, 0, 2), edge(2, 0, 2)],
+        ..Records::default()
+    }];
+    let v = view(None, &[], &rs);
+    let got = topo_order(
+        &v,
+        &[LocalId(1)],
+        &RelSelection::All,
+        caps(3, 10),
+        &budget(),
+    );
+    assert_eq!(
+        got.map(|o| o.value().clone()),
+        Err(GraphError::Cycle { node: LocalId(2) })
+    );
+}
+
+#[test]
+fn wcc_equals_the_oracle_with_the_lowest_member_as_component() {
+    let b = budget();
+    for seed in 0..SEEDS {
+        let f = chain(seed, |r| r);
+        let v = f.view();
+        for (rels, g) in &graphs(&f) {
+            for cap in [1, 10, 10_000] {
+                let got = wcc(&v, rels, RowCap(cap), &b).unwrap();
+                let (rows, truncated) = g.wcc(cap);
+                assert_eq!(got.rows, rows, "seed {seed} {rels:?} cap {cap}");
+                assert_eq!(got.truncated, truncated, "seed {seed} {rels:?} cap {cap}");
+            }
+        }
+    }
+}
+
+#[test]
+fn unplanned_functions_are_refused_by_name() {
+    for name in [
+        "betweenness",
+        "louvain",
+        "all_paths",
+        "k_core",
+        "articulation_points",
+        "label_propagation",
+    ] {
+        assert_eq!(
+            refuse_not_planned(name),
+            GraphError::NotPlanned { function: name },
+            "{name}"
+        );
+    }
+    // Any other name is not one of the refused functions: it is reported as unknown.
+    for name in ["", "Louvain", "pagerank", "betweenness "] {
+        assert_eq!(
+            refuse_not_planned(name),
+            GraphError::NotPlanned {
+                function: "unknown"
+            },
+            "{name:?}"
+        );
+    }
+}
+
+// ---- Step 3: caps --------------------------------------------------------------------------
+
+/// A present hub (node 0) with `n` outgoing edges to present nodes 1..=n.
+fn hub_view_records(n: u32) -> Vec<Records> {
+    vec![Records {
+        nodes: (0..=n).map(node).collect(),
+        edges: (1..=n).map(|m| edge(0, 0, m)).collect(),
+        ..Records::default()
+    }]
+}
+
+fn is_missing(r: &Result<impl std::fmt::Debug, GraphError>, limit: &str) -> bool {
+    matches!(r, Err(GraphError::CapMissing { limit: l }) if *l == limit)
+}
+
+#[test]
+fn a_missing_cap_is_refused_before_any_neighbour_access() {
+    let rs = hub_view_records(50);
+    let v = view(None, &[], &rs);
+    // The accessor checks the budget before its first read, so under a cancelled budget any
+    // neighbour access would refuse as cancelled: a cap refusal here came before any access.
+    // (The crate's unit tests also count the units of each such call: none.)
+    let b = budget();
+    b.cancel();
+    let all = RelSelection::All;
+    let src = [LocalId(0)];
+    let (a, z) = (LocalId(0), LocalId(7));
+    for (bad, limit) in [
+        (caps(0, 10), "depth"),
+        (caps(3, 0), "rows"),
+        (caps(0, 0), "depth"),
+    ] {
+        assert!(is_missing(
+            &expand(&v, &src, &all, Direction::Both, bad, &b),
+            limit
+        ));
+        assert!(is_missing(&closure(&v, &src, &all, bad, &b), limit));
+        assert!(is_missing(&reverse_closure(&v, &src, &all, bad, &b), limit));
+        assert!(is_missing(&reachable(&v, a, z, &all, bad, &b), limit));
+        assert!(is_missing(&shortest_path(&v, a, z, &all, bad, &b), limit));
+        assert!(is_missing(&meet(&v, a, z, &all, bad, &b), limit));
+        assert!(is_missing(&topo_order(&v, &src, &all, bad, &b), limit));
+    }
+    assert!(is_missing(&wcc(&v, &all, RowCap(0), &b), "rows"));
+    // Sanity: the same call with caps reaches the budget and refuses.
+    assert!(matches!(
+        expand(&v, &src, &all, Direction::Out, caps(1, 10), &b),
+        Err(GraphError::BudgetExceeded {
+            limit: "cancelled",
+            ..
+        })
+    ));
+}
+
+#[test]
+fn a_hub_cannot_widen_a_capped_expand() {
+    let rs = hub_view_records(10_000);
+    let v = view(None, &[], &rs);
+    let b = budget();
+    let got = expand(
+        &v,
+        &[LocalId(0)],
+        &RelSelection::All,
+        Direction::Out,
+        caps(2, 200),
+        &b,
+    )
+    .unwrap();
+    assert_eq!(got.nodes.len(), 200);
+    assert!(got.truncated);
+    let want: Vec<(LocalId, u8)> = (1..=200).map(|m| (LocalId(m), 1)).collect();
+    assert_eq!(got.nodes, want, "the lowest ids at the first depth");
+    assert_eq!(got.edges.len(), 200, "one edge per kept node");
+    // Exactly the cap without more nodes is not a cut.
+    let rs = hub_view_records(200);
+    let v = view(None, &[], &rs);
+    let got = expand(
+        &v,
+        &[LocalId(0)],
+        &RelSelection::All,
+        Direction::Out,
+        caps(2, 200),
+        &b,
+    )
+    .unwrap();
+    assert_eq!(got.nodes.len(), 200);
+    assert!(!got.truncated);
+}
+
+#[test]
+fn structural_functions_hold_no_budget_after_returning_unless_the_result_lives() {
+    let fixture = chain(2, |r| r);
+    let graph: View<'_> = fixture.view();
+    let b = kaban_core::query_budget::QueryBudget::new(u64::MAX, None);
+    let r = expand(
+        &graph,
+        &[LocalId(3)],
+        &RelSelection::All,
+        Direction::Both,
+        caps(3, 50),
+        &b,
+    )
+    .unwrap();
+    assert_ne!(r.nodes.len(), 0);
+    assert_eq!(b.live_bytes(), r.bytes(), "only the result stays charged");
+    assert!(r.bytes() > 0);
+    drop(r);
+    assert_eq!(b.live_bytes(), 0);
+    let w = wcc(&graph, &RelSelection::All, RowCap(1000), &b).unwrap();
+    assert_eq!(b.live_bytes(), w.bytes());
+    let (components, hold) = w.into_parts();
+    assert_ne!(components.rows.len(), 0);
+    drop(components);
+    assert!(b.live_bytes() > 0, "the hold keeps the charge");
+    drop(hold);
+    assert_eq!(b.live_bytes(), 0);
+}
+
+/// END-MED-02: `rows` bounds the result of `topo_order` (sources included) and of `meet` (the
+/// equal minima), checked directly rather than through the search oracle.
+#[test]
+fn rows_bounds_the_results_of_topo_order_and_meet() {
+    let b = budget();
+    let isolated = [Records {
+        nodes: (1..=3).map(node).collect(),
+        ..Records::default()
+    }];
+    let v = view(None, &[], &isolated);
+    let all = RelSelection::All;
+    let three: Vec<LocalId> = (1..=3).map(LocalId).collect();
+    let got = topo_order(&v, &three, &all, caps(1, 1), &b);
+    assert!(
+        matches!(
+            got,
+            Err(GraphError::CapExceeded {
+                limit: "rows",
+                max: 1
+            })
+        ),
+        "three isolated sources, rows 1: {got:?}"
+    );
+    let got = topo_order(&v, &three, &all, caps(1, 3), &b).unwrap();
+    assert_eq!(*got, three, "exactly rows is not a cut");
+
+    // Oversized source sets: five present sources (and absent ones, which are ignored).
+    let five = [Records {
+        nodes: (1..=5).map(node).collect(),
+        ..Records::default()
+    }];
+    let v = view(None, &[], &five);
+    let src: Vec<LocalId> = (1..=8).map(LocalId).collect();
+    let got = topo_order(&v, &src, &all, caps(2, 4), &b);
+    assert!(
+        matches!(got, Err(GraphError::CapExceeded { limit: "rows", .. })),
+        "five present sources, rows 4: {got:?}"
+    );
+    assert_eq!(topo_order(&v, &src, &all, caps(2, 5), &b).unwrap().len(), 5);
+
+    // Reciprocal A <-> B: both meet at summed depth one.
+    let pair = [Records {
+        nodes: vec![node(1), node(2)],
+        edges: vec![edge(1, 0, 2), edge(2, 0, 1)],
+        ..Records::default()
+    }];
+    let v = view(None, &[], &pair);
+    let got = meet(&v, LocalId(1), LocalId(2), &all, caps(1, 1), &b);
+    assert!(
+        matches!(
+            got,
+            Err(GraphError::CapExceeded {
+                limit: "rows",
+                max: 1
+            })
+        ),
+        "two equal minima, rows 1: {got:?}"
+    );
+    let got = meet(&v, LocalId(1), LocalId(2), &all, caps(1, 2), &b).unwrap();
+    assert_eq!(*got, vec![LocalId(1), LocalId(2)]);
+}
+
+/// Directed common neighbours on a named fixture: X calls log and fmt, log calls Y, Y calls fmt.
+#[test]
+fn common_neighbours_follow_the_asked_direction() {
+    let (x, y, fmt, log) = (1, 2, 3, 4);
+    let rs = [Records {
+        nodes: [x, y, fmt, log].into_iter().map(node).collect(),
+        edges: vec![
+            edge(x, 0, log),
+            edge(log, 0, y),
+            edge(x, 0, fmt),
+            edge(y, 0, fmt),
+        ],
+        ..Records::default()
+    }];
+    let v = view(None, &[], &rs);
+    let b = budget();
+    let all = RelSelection::All;
+    let common = |dir| {
+        common_neighbours(&v, LocalId(x), LocalId(y), &all, dir, &b)
+            .unwrap()
+            .to_vec()
+    };
+    assert_eq!(
+        common(Direction::Out),
+        vec![LocalId(fmt)],
+        "things both X and Y call"
+    );
+    assert_eq!(
+        common(Direction::In),
+        Vec::<LocalId>::new(),
+        "nothing calls both"
+    );
+    assert_eq!(
+        common(Direction::Both),
+        vec![LocalId(fmt), LocalId(log)],
+        "direction ignored"
+    );
+}
+
+/// POST-LOW-03: a cap that cuts a search before it settles, and a cap an answer does not fit,
+/// read neutrally and name the cap and its value (the cap was not "above" anything).
+#[test]
+fn cap_refusals_name_the_cap_without_reading_as_above() {
+    let rs = vec![Records {
+        nodes: (0..=4).map(node).collect(),
+        edges: (0..4).map(|n| edge(n, 0, n + 1)).collect(),
+        ..Records::default()
+    }];
+    let v = view(None, &[], &rs);
+    let b = budget();
+    let all = RelSelection::All;
+    // A search cut at depth 2 cannot settle whether 4 is reachable.
+    let cut = reachable(&v, LocalId(0), LocalId(4), &all, caps(2, 100), &b).unwrap_err();
+    assert_eq!(
+        cut.to_string(),
+        "the depth cap of 2 does not cover the request"
+    );
+    // The complete order has 5 nodes, more than a rows cap of 3 admits.
+    let admit = topo_order(&v, &[LocalId(0)], &all, caps(8, 3), &b).unwrap_err();
+    assert_eq!(
+        admit.to_string(),
+        "the rows cap of 3 does not cover the request"
+    );
+}

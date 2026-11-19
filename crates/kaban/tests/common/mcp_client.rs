@@ -3,9 +3,8 @@
 //! working directory; the code-graph provider resolves the repository from the server's
 //! `cwd` (`main.rs` `repo_root`), so the acceptance tests need a server started inside the
 //! scratch fixture repository. This client also keeps every byte the server wrote to stdout
-//! (not only the JSON it parsed) and declares form elicitation at `initialize`, so a Decision
-//! is accepted in place with `confirm: true` (M3-15), and it computes the snapshot directory
-//! the server will read with the same key and rule as `kaban serve` (`codegraph.rs`).
+//! (not only the JSON it parsed), and it computes the snapshot directory the server will read
+//! with the same key and rule as `kaban serve` (`codegraph.rs`).
 //!
 //! Included from a test file with `#[path = "common/mcp_client.rs"] mod mcp_client;` beside
 //! `mod common;` (`common/mod.rs` is not owned by CG10.2 and declares no submodule).
@@ -37,8 +36,6 @@ pub(crate) struct Spawn<'a> {
     pub(crate) policy: Option<&'a Path>,
     /// `--workspace`.
     pub(crate) workspace: &'a str,
-    /// `--audit-export`, when set.
-    pub(crate) audit_export: Option<&'a Path>,
 }
 
 /// One line the server wrote to stdout: the raw text and, when it parsed, the message.
@@ -48,7 +45,7 @@ struct Line {
 }
 
 /// A kaban server over stdio started in a chosen working directory, traced
-/// (`RUST_LOG=trace`, stderr captured), declaring form elicitation.
+/// (`RUST_LOG=trace`, stderr captured).
 pub(crate) struct McpClient {
     child: Child,
     rx: mpsc::Receiver<Line>,
@@ -73,7 +70,7 @@ pub(crate) struct Finished {
 }
 
 impl McpClient {
-    /// Start `kaban --db <db> [--policy <p>] --workspace <ws> [--audit-export <e>]` in `cwd`
+    /// Start `kaban --db <db> [--policy <p>] --workspace <ws>` in `cwd`
     /// and complete the MCP handshake.
     pub(crate) fn start(spawn: &Spawn<'_>) -> Self {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_kaban"));
@@ -88,9 +85,6 @@ impl McpClient {
             .stderr(Stdio::piped());
         if let Some(p) = spawn.policy {
             cmd.args(["--policy", p.to_str().unwrap()]);
-        }
-        if let Some(e) = spawn.audit_export {
-            cmd.args(["--audit-export", e.to_str().unwrap()]);
         }
         let mut child = cmd.spawn().unwrap();
         let mut err = child.stderr.take().unwrap();
@@ -121,7 +115,7 @@ impl McpClient {
         };
         let id = c.request(
             "initialize",
-            &json!({"protocolVersion": "2025-11-25", "capabilities": {"elicitation": {}}, "clientInfo": {"name": "t", "version": "0"}}),
+            &json!({"protocolVersion": "2025-11-25", "capabilities": {}, "clientInfo": {"name": "t", "version": "0"}}),
         );
         let init = c
             .response(id, DEADLINE)
@@ -152,16 +146,6 @@ impl McpClient {
         self.wait_for(timeout, |v| {
             v.get("method").is_none() && v["id"] == json!(id)
         })
-    }
-
-    /// Wait for a request the server sends to the client (`method` set).
-    pub(crate) fn server_request(&mut self, method: &str, timeout: Duration) -> Option<Value> {
-        self.wait_for(timeout, |v| v["method"] == json!(method))
-    }
-
-    /// Answer a server request with `result`.
-    pub(crate) fn reply(&mut self, request: &Value, result: &Value) {
-        self.send(&json!({"jsonrpc": "2.0", "id": request["id"], "result": result}));
     }
 
     fn wait_for(&mut self, timeout: Duration, pred: impl Fn(&Value) -> bool) -> Option<Value> {
@@ -210,38 +194,6 @@ impl McpClient {
             .as_str()
             .unwrap()
             .to_owned()
-    }
-
-    /// `accept` of a Decision through the elicitation path (M3-15): the server asks, the
-    /// client confirms, the record is accepted in place (`signer_kind: human-via-chat`).
-    pub(crate) fn accept_confirmed(
-        &mut self,
-        id: &str,
-        reason: &str,
-        path_scope: &[&str],
-    ) -> Value {
-        let call_id = self.request(
-            "tools/call",
-            &json!({"name": "accept", "arguments": {"id": id, "reason": reason, "path_scope": path_scope}}),
-        );
-        let ask = self
-            .server_request("elicitation/create", DEADLINE)
-            .expect("the server elicits a confirmation for a Decision");
-        self.reply(
-            &ask,
-            &json!({"action": "accept", "content": {"confirm": true}}),
-        );
-        let resp = self.response(call_id, DEADLINE).expect("accept answered");
-        self.responses.push(resp.clone());
-        assert_ne!(
-            resp["result"]["isError"],
-            json!(true),
-            "accept {id}: {resp}"
-        );
-        let body: Value =
-            serde_json::from_str(resp["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
-        assert_eq!(body["status"], json!("accepted"), "{body}");
-        body
     }
 
     /// Close stdin, wait for the exit and hand back every channel.

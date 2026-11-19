@@ -3,8 +3,11 @@
 # R4-4). No pi, no model, no credentials: a fake `pi` object fires invented events at the
 # extension (test-pi-extension.mjs, loaded with jiti as pi does), a recording shim in front of
 # the static binary (container/kaban-rec.sh) keeps every envelope the extension sends (tmpfs), and the test asserts the
-# M4-7 intake allowlist on those envelopes plus the W2-D2 behaviour. Also runs node's syntax
-# check (`--experimental-strip-types --check`) on the extension.
+# M4-7 intake allowlist on those envelopes plus the hook behaviour without governance (no
+# `session_shutdown` handler, no briefed or injected Decision, the pending Failure briefed in a
+# second session). The seeded Decision only creates the database (hooks never create one) and
+# must stay out of every message. Also runs node's syntax check (`--experimental-strip-types
+# --check`) on the extension.
 #
 #   bash scripts/hooks-live/test-pi-extension.sh --kaban <static kaban binary>
 #
@@ -37,8 +40,7 @@ printf "# scratch\n" > README.md && git add README.md && git commit -q -m init
 SENT="KBN-DEC-$(head -c 4 /dev/urandom | od -An -tx1 | tr -d " \n")"
 seed="$(/opt/kaban/kaban --json remember Decision "$SENT: notes.txt holds exactly one line; never append a second line to it." --path-scope notes.txt --importance 0.9 --props "{\"rationale\":\"fake-pi test seed\"}" 2>/dev/null)"
 id="$(printf "%s" "$seed" | jq -r ".id // empty")"
-acc="$(/opt/kaban/kaban --json accept "$id" --reason seed --path-scope notes.txt 2>/dev/null)"
-echo "{\"seeded\": $([ -n "$id" ] && echo true || echo false), \"accepted\": $(printf "%s" "$acc" | jq -c "(.node.governance == \"accepted\")" 2>/dev/null || echo false)}"
+echo "{\"seeded\": $([ -n "$id" ] && echo true || echo false)}"
 : > /capture/envelopes.jsonl
 JITI="$(ls /usr/local/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/jiti/lib/jiti.mjs 2>/dev/null || ls /usr/local/share/npm-global/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/jiti/lib/jiti.mjs)"
 node --experimental-strip-types --check /work/hooks/pi/kaban-hooks.ts 2>/dev/null; node_rc=$?

@@ -215,6 +215,20 @@ pub(crate) fn decode(stored: &[u8]) -> std::result::Result<Vec<u8>, CodecError> 
     }
 }
 
+/// The length [`decode`] returns for `stored`, read from its tag and header alone (nothing is
+/// decoded): what a reader charges before it decodes. `None` when the header does not say.
+pub(crate) fn decoded_len(stored: &[u8]) -> Option<u64> {
+    let (tag, payload) = stored.strip_prefix(&MAGIC)?.split_at_checked(2)?;
+    match tag[0] {
+        0 => payload
+            .get(..4)
+            .and_then(|b| b.try_into().ok())
+            .map(|b| u64::from(u32::from_le_bytes(b))),
+        FORMAT_VERSION => get_frame_content_size(payload).ok().flatten(),
+        _ => None,
+    }
+}
+
 fn decompress(frame: &[u8]) -> std::result::Result<Vec<u8>, CodecError> {
     let size = match get_frame_content_size(frame) {
         Ok(Some(size)) if size <= MAX_BODY => size,

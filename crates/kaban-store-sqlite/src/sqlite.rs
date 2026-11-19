@@ -1,93 +1,114 @@
-//! `SqliteStore`: the spike's `GraphStore` implementation plus the M1 audit chain
-//! (`audit_table`), key handling and `db_id` in `index_meta`.
+//! `SqliteStore`: the spike's `GraphStore` implementation, key handling and `db_id` in
+//! `index_meta`.
 //!
 //! Module map (OWN-79): this file keeps the store type, its fields and `lock`, construction
-//! and migration (`open*`, `assemble`, `init_schema`), the shared link and governance
-//! machinery (`LinkEffect`, `link_in`, `edge_rule`, `state_of`, `govern`, `mark_target`, the
-//! RID helpers, `NodeState`, `Tenant`), the query helpers (`fts_expr`, `WS_COL`,
-//! `in_workspace`), the code-graph attach (`cg_read`) and every role-trait impl, which
-//! forwards the moved bodies:
+//! and migration (`open*`, `assemble`, `init_schema`), the shared link machinery
+//! (`LinkEffect`, `link_in`, `edge_rule`, `state_of`, `mark_target`, the RID helpers,
+//! `NodeState`, `Tenant`), the query helpers (`fts_expr`, `WS_COL`, `in_workspace`), the
+//! code-graph attach (`cg_read`) and every role-trait impl, which forwards the moved bodies:
 //! - `nodes.rs`: the `remember` workflow, node placement and upsert, the content hashes;
-//! - `claims.rs`: rescans, deprecation, replay, forget, purge, reactivation;
-//! - `batch.rs`: the `apply_batch` transaction, the edge diff and `check_layer_edges`;
-//! - `governance.rs`: the governance transition, the `governing` lookup and the
-//!   `supersession_chain` walk (v4 CG5.3).
+//! - `forget.rs`: forget, purge, reactivation;
+//! - `rescan.rs`: the policy rescan;
+//! - `batch.rs`: the `apply_batch` transaction and the edge diff.
 
 #[path = "artifacts.rs"]
 pub(crate) mod artifacts;
 mod batch;
-mod claims;
-mod governance;
+mod forget;
 mod nodes;
+mod rescan;
 
 use crate::anchors;
-use crate::audit_table;
-use crate::candidates;
+use crate::catalog::Catalog;
+use crate::catalog::class::ExtentClass;
 use crate::changelog;
-use crate::confirmations;
 use crate::connection::{CgRead, LiveGuard, NoFileBacking, prepare_database_files};
 use crate::connection::{database_file_modes, open_existing_as_is};
 use crate::doctor;
-use crate::events;
+use crate::edge_write::{self, EdgeWrite};
 use crate::leases;
 use crate::ontology::{self, valid_stored_label, valid_stored_rel};
 use crate::recall;
-use crate::reconcile::{self, persist, project};
 use crate::rows::{NODE_COLS, bad_enum, row_edge, row_node};
 use crate::schema::{MigrationReport, Migrator, configure_connection};
 use crate::session;
 use crate::sql_error::SqlResultExt;
-use crate::tantivy::{self, Attach, Attached, SharedConnection};
+use crate::tantivy::{Attached, SharedConnection};
 use crate::traverse;
-use kaban_core::Result;
+use kaban_core::query_budget::QueryBudget;
+use kaban_core::text_index::{Searched, TextQuery, TextSnapshot};
 use kaban_core::{
-    ActorId, AuditEntry, AuditStore, AuditVerification, BatchReport, Change, ChangeLogStore,
-    Confirmation, DiscoveredRules, Edge, Event, FailurePatch, ForgetMode, ForgetOutcome,
-    Governance, GovernanceStore, GovernedSet, GoverningQuery, Hit, IndexMeta, IngestStore, Lease,
-    LeaseStore, Lifecycle, LinkReq, MemoryStore, Method, NewConfirmation, NewEvent, NewNode, Node,
-    NodeId, Ontology, Owner, PendingFailuresQuery, RecallQuery, Reconciler, RememberOutcome,
-    RescanAction, RescanReport, SchemaStore, SessionEdit, SessionEditKind, StoreError,
-    TraverseQuery, TraverseResult, TypeDef, WorkspaceId, WriteBatch, WriteCtx, new_id, now_iso,
+    ActorId, BatchReport, Change, ChangeLogStore, Edge, FailurePatch, ForgetMode, ForgetOutcome,
+    Hit, IndexMeta, IngestStore, Lease, LeaseStore, Lifecycle, LinkReq, MemoryStore, Method,
+    NewNode, Node, NodeId, Ontology, PendingFailuresQuery, RecallQuery, RememberOutcome,
+    RescanCursor, RescanJudge, RescanReport, RuleSet, SchemaStore, SessionEdit, SessionEditKind,
+    SessionStore, StoreError, TraverseQuery, TraverseResult, TypeDef, WorkspaceId, WriteBatch,
+    WriteCtx, new_id, now_iso,
 };
 use kaban_core::{AnchorPredicates, SnapshotAttach, SnapshotSymbol, SymbolPage};
-use kaban_core::{Chain, ChainDirection, WorkspaceFilter};
 use kaban_core::{
     DatabaseFileModes, DocumentIndexSummary, FailedDocumentRow, MaintenanceOutcome,
     StoreCapabilities,
 };
+use kaban_core::{Durability, Result};
 use kaban_policy::{AuditSigner, KeySigner};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
+use std::time::Duration;
 
-pub(crate) use nodes::content_hash;
+/// The memory ceiling of one recall's text reads (its pin and the pending packs it copies).
+const RECALL_MEMORY_BYTES: u64 = 256 << 20;
+/// The deadline of one recall's text reads.
+const RECALL_DEADLINE: Duration = Duration::from_secs(30);
+
+/// The shipped ontology, resolved once per process (the store crate holds no loaded user
+/// ontology; the service passes one through `SqliteStore::with_ontology`).
+fn shipped_ontology() -> Arc<Ontology> {
+    static SHIPPED: std::sync::OnceLock<Arc<Ontology>> = std::sync::OnceLock::new();
+    Arc::clone(SHIPPED.get_or_init(|| {
+        // the shipped bytes always resolve (a `kaban-core` test asserts it)
+        #[allow(clippy::expect_used)]
+        Arc::new(kaban_core::shipped::resolved().expect("the shipped ontology resolves"))
+    }))
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A test's pause in an open on this thread after its schema and seeds are committed and
+    /// before they are published into the main file (the two-first-openers interleaving).
+    pub(crate) static BEFORE_PUBLICATION: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
 
 /// How long a hook's connection waits for a lock (M4-6): well inside the host's 2 s budget,
 /// unlike the server's 5 s.
 const HOOK_BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
 
+/// The `index_meta` key written once the project's HMAC key file exists ([`SqliteStore::open_as`]).
+const KEY_RECORDED: &str = "hmac_key";
+
 /// The rel whose edge invalidates (tombstones) its target (OD-4). The ontology's `on_link`
 /// vocabulary has `archive_target` only (engine-spec §3.1), so this side effect is still keyed
-/// by name; [`GovernedSet::archives_on_link`] decides the archive side effect.
+/// by name; [`RuleSet::archives_on_link`] decides the archive side effect.
 const INVALIDATES_REL: &str = "INVALIDATES";
 
 /// The lifecycle side effect a new edge has on its target (EN-F4 `on_link`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LinkEffect {
-    /// `on_link: archive_target` (`SUPERSEDES` in `adr.yaml`): the target becomes `superseded`
-    /// when governed, `archived` otherwise.
+    /// `on_link: archive_target` (`SUPERSEDES` in `adr.yaml`): an active target becomes
+    /// `archived`.
     ArchiveTarget,
-    /// [`INVALIDATES_REL`]: the target becomes `invalidated` when governed, `tombstoned`
-    /// otherwise.
+    /// [`INVALIDATES_REL`]: an active target becomes `tombstoned`.
     InvalidateTarget,
 }
 
 impl LinkEffect {
-    /// The effect of a `rel` edge under `governed`, if any.
-    fn of(governed: &GovernedSet, rel: &str) -> Option<Self> {
-        if governed.archives_on_link(rel) {
+    /// The effect of a `rel` edge under `rules`, if any.
+    fn of(rules: &RuleSet, rel: &str) -> Option<Self> {
+        if rules.archives_on_link(rel) {
             Some(Self::ArchiveTarget)
         } else if rel == INVALIDATES_REL {
             Some(Self::InvalidateTarget)
@@ -95,14 +116,7 @@ impl LinkEffect {
             None
         }
     }
-    /// The governance a governed target takes.
-    fn governance(self) -> Governance {
-        match self {
-            Self::ArchiveTarget => Governance::Superseded,
-            Self::InvalidateTarget => Governance::Invalidated,
-        }
-    }
-    /// The lifecycle a non-governed active target takes.
+    /// The lifecycle an active target takes.
     fn lifecycle(self) -> Lifecycle {
         match self {
             Self::ArchiveTarget => Lifecycle::Archived,
@@ -111,48 +125,35 @@ impl LinkEffect {
     }
 }
 
-/// SQLite graph store. One connection guarded by a mutex (single writer per process). Audit
-/// rows are chained with `signer` inside the same transactions as the writes. Recall's seeds
-/// come from the store's own text index (the Tantivy adapter it opens, admits or rebuilds at
-/// its open and projects its commits into, spec 05 OWN-M; `crate::tantivy`) or, for an open
-/// that attaches none and a database below the FTS5 retirement (spec 05 SS-16), from the
-/// in-database FTS5 index the write path still maintains there.
+/// SQLite graph store. One connection guarded by a mutex (single writer per process). Each
+/// write commits its rows and their change-log entries in one transaction; `signer` holds the
+/// database's HMAC key (keyed identities and `input_hmac` stubs). Recall's seeds come from the
+/// store's own text index over the catalog (spec 11 T7; `crate::tantivy`).
 #[derive(Debug)]
 pub struct SqliteStore {
-    /// The projector thread of a serving store (`crate::projector_thread`; [`Self::serving`]),
-    /// `None` for every other store. Declared first: it stops and joins, releasing lease and
-    /// lock, before the index and the connection it works over close.
-    pub(crate) projector: Option<crate::projector_thread::ProjectorThread>,
     /// The seed index ordinary recall searches (spec 05 SS-07): the store's own adapter
-    /// (`crate::tantivy`, set by every open that found or built one), or an injected one
-    /// ([`Self::with_text_index`]); `None` only for an open that attaches nothing (a
-    /// diagnosis of a database without an index, a pack, a fixture below the change log),
-    /// where the in-database FTS5 index serves below the retirement (SS-16) and nothing above.
-    /// Declared first: a file store's adapter closes its read-only connection before `conn`
-    /// closes, so the last connection out checkpoints and removes the WAL as it always did.
-    pub(crate) text_index: Option<Attached>,
-    /// Shared with the in-memory adapter's `Rows` (`crate::tantivy`), never lent across an
-    /// adapter call: the lock order is this lock, then the adapter.
+    /// (`crate::tantivy`), or an injected one ([`Self::with_text_index`]).
+    pub(crate) text_index: Attached,
+    /// Never lent across an adapter call: the lock order is this lock, then the adapter.
     conn: SharedConnection,
+    /// The catalog of the database (spec 11 KER-07): every writer transaction of the store
+    /// opens in its commit entry, whose capture triggers live on `conn`.
+    catalog: Catalog,
     db_id: String,
     signer: Arc<dyn AuditSigner>,
     migration: MigrationReport,
-    /// The reconciliation policy of this store (engine-spec EN-E9): the injected
-    /// `Reconciler`, the ontology and priors its thresholds come from.
-    reconcile: reconcile::Setup,
+    /// The ontology this store ranks and projects under (the shipped one until
+    /// [`Self::with_ontology`]).
+    ontology: Arc<Ontology>,
+    /// The ontology rules every write decides archive-on-link rels by: the shipped set, or the
+    /// service's loaded set once it published one ([`SchemaStore::adopt_rules`]).
+    rules: RwLock<Arc<RuleSet>>,
+    /// The recall configuration this store ranks under.
+    recall: kaban_core::config::Recall,
     /// The dedicated read connection the code-graph snapshot is attached on (CG-JOIN v1 §2
     /// SO-4; E2.6): opened lazily by the first `attach_snapshot`, closed by `detach_snapshot`
     /// and at drop (declared before `_live`, so it closes before the registration goes).
     cg_read: Mutex<Option<CgRead>>,
-    /// The lease owner of this store's projections (`crate::tantivy::owner`).
-    pub(crate) owner: String,
-    /// How long a projection on the store's own account may run (`crate::tantivy::PUBLISH_BUDGET`;
-    /// a hook's share for a hook open).
-    pub(crate) publish_budget: std::time::Duration,
-    /// This store's session position (`crate::tantivy`; astra, projection research): the
-    /// change-log head after its last commit, 0 while it wrote nothing. A read of this store
-    /// drains only while the index does not cover it; a close publishes toward it.
-    pub(crate) receipt: std::sync::atomic::AtomicU64,
     /// The database file, `None` for an in-memory store (which has no second connection to
     /// open and refuses an attach).
     path: Option<std::path::PathBuf>,
@@ -161,29 +162,18 @@ pub struct SqliteStore {
     _live: Option<LiveGuard>,
 }
 
-/// A store with pending work closes after one bounded projection (spec 05 OWN-M (d): a
-/// one-shot command's exit publishes what it wrote); an in-memory index dies with its store.
-impl Drop for SqliteStore {
-    fn drop(&mut self) {
-        if self.path.is_some() {
-            self.publish_pending();
-        }
-    }
-}
-
 #[cfg(feature = "text-index-override")]
 impl SqliteStore {
     /// Route ordinary recall's lexical and fuzzy seed searches through `index` in place of the
     /// store's own adapter (spec 05 SS-07): the graph expansion, the fusion, the
     /// materialization and the final order stay this store's. The feature exists for the
-    /// adapter goldens, a scripted fake and the bench; the store projects nothing into an
-    /// injected index (its publication is the injector's).
+    /// adapter goldens, a scripted fake and the bench.
     #[must_use]
     pub fn with_text_index(
         mut self,
         index: Box<dyn kaban_core::text_index::TextIndex + Send + Sync>,
     ) -> Self {
-        self.text_index = Some(Attached::Override(index));
+        self.text_index = Attached::Override(index);
         self
     }
 }
@@ -192,7 +182,7 @@ impl SqliteStore {
     /// This adapter's capabilities (spec 05 SS-23): a VACUUM reclaims a purge's freed pages
     /// (`kaban doctor --optimize --vacuum`; the post-commit hygiene does not, so a purge still
     /// reports the residue, SS-03), and SQLite serializes the writers of several processes on
-    /// one file itself (shared mode B, SS-21: no daemon, no projector for FTS5). Read by the
+    /// one file itself (shared mode B, SS-21: no daemon). Read by the
     /// purge report (`purge_cleanup`) and by the shared-open admission of `connection.rs`
     /// (`admit_open`, reached by every writable open: ordinary, hook, diagnostic and pack
     /// source), nowhere else.
@@ -208,86 +198,78 @@ impl SqliteStore {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    /// The connection as the in-memory adapter shares it (`crate::tantivy`).
+    /// The store's shared connection (the recall unit tests and the catalog's test helpers).
+    #[cfg(any(test, feature = "failpoints"))]
     pub(crate) fn connection(&self) -> &SharedConnection {
         &self.conn
     }
 
-    /// The seed index behind the text-search seam, when one is attached.
-    pub(crate) fn seed_index(
+    /// The database's catalog (spec 11 KER-07).
+    pub(crate) fn catalog(&self) -> &Catalog {
+        &self.catalog
+    }
+
+    /// Run `f` over the text of the latest catalog generation under one recall budget.
+    fn with_text_snapshot<T>(
         &self,
-    ) -> Option<&(dyn kaban_core::text_index::TextIndex + Send + Sync)> {
-        self.text_index.as_ref().map(Attached::text_index)
+        f: impl FnOnce(&TextSnapshot<'_>, &QueryBudget) -> Result<T>,
+    ) -> Result<T> {
+        let budget = QueryBudget::new(RECALL_MEMORY_BYTES, Some(RECALL_DEADLINE));
+        self.catalog
+            .with_text(&self.conn, &budget, |at| f(at, &budget))
     }
 
-    /// The store's own Tantivy adapter (spec 05 OWN-M), `None` for an open that attached
-    /// nothing, a pack's captured index or an injected index: the seam the adapter suites of
-    /// this crate's tests read the composed index through.
-    #[must_use]
-    pub fn text_index_adapter(&self) -> Option<Arc<kaban_index_tantivy::TantivyIndex>> {
-        self.text_index
-            .as_ref()
-            .and_then(Attached::tantivy)
-            .cloned()
+    /// The text index's seed candidates for `query` at the latest catalog generation, before
+    /// any revalidation against the rows (spec 11 T7, TXT-06): what a recall seeds from.
+    ///
+    /// # Errors
+    /// The pin's, the budget's or the index's error.
+    pub fn search_text(&self, query: &TextQuery<'_>) -> Result<Searched> {
+        let index = self.seed_index();
+        self.with_text_snapshot(|at, budget| index.search(at, query, budget))
     }
 
-    /// The ontology this store reconciles, ranks and projects under.
+    /// The seed index behind the text-search seam.
+    pub(crate) fn seed_index(&self) -> &(dyn kaban_core::text_index::TextIndex + Send + Sync) {
+        self.text_index.text_index()
+    }
+
+    /// Rebuild the memory graph from the canonical rows, through the catalog's graph class
+    /// (spec 11 7.2.7, `kaban reindex graph`).
+    ///
+    /// # Errors
+    /// The class's rebuild error.
+    pub fn reindex_graph(&self) -> Result<()> {
+        self.rebuild_class(ExtentClass::GraphBase)
+    }
+
+    /// Rebuild the catalog class that owns the `of` extents from the rows, through its
+    /// `IndexClass::rebuild` on the writer connection.
+    fn rebuild_class(&self, of: ExtentClass) -> Result<()> {
+        let class = self
+            .catalog
+            .classes()
+            .into_iter()
+            .find(|class| class.classes().contains(&of))
+            .ok_or_else(|| StoreError::NotFound(format!("index class {}", of.as_str())))?;
+        class.rebuild(&self.catalog, &mut self.lock())
+    }
+
+    /// The ontology this store ranks and projects under.
     pub(crate) fn ontology(&self) -> &Ontology {
-        self.reconcile.ontology()
+        &self.ontology
     }
 
     /// The recall configuration this store ranks under.
     pub(crate) fn recall_config(&self) -> &kaban_core::config::Recall {
-        &self.reconcile.recall
+        &self.recall
     }
 
     /// Rank the store's own adapter with the ontology and recall configuration bound now.
     fn configure_index(&self) {
-        if let Some(index) = self.text_index.as_ref().and_then(Attached::adapter) {
+        if let Some(index) = self.text_index.tantivy() {
             index.configure(self.ontology(), self.recall_config());
         }
-    }
-
-    /// The same store serving (spec 05 SS-21; `serving` is what the binary knows: this
-    /// process is the server): one persistent projector thread competes for the `text-index`
-    /// lease and, as the elected publisher, publishes every process's commits as they land,
-    /// this store's within their window or at its barrier. A store that does not serve, an
-    /// in-memory store (its publication runs inline, synchronously) and a pack (immutable)
-    /// start no thread. Call after the configuration seams: the thread ranks with what the
-    /// index is configured with when it starts.
-    ///
-    /// # Errors
-    /// The thread's observation connection or the thread itself could not be started.
-    pub fn serving(mut self, serving: bool) -> Result<Self> {
-        if !serving {
-            return Ok(self);
-        }
-        let (Some(db), Some(index)) = (
-            self.path.clone(),
-            self.text_index
-                .as_ref()
-                .and_then(Attached::tantivy)
-                .cloned(),
-        ) else {
-            return Ok(self);
-        };
-        self.projector = Some(crate::projector_thread::ProjectorThread::start(
-            index,
-            Arc::clone(&self.conn),
-            &db,
-        )?);
-        Ok(self)
-    }
-
-    /// This store as the index component of a pack build (spec 05 SS-18;
-    /// `crate::pack::BuildRequest::index`): `Some` when the store owns a Tantivy index whose
-    /// projection the builder may hold and drain, `None` for a store with nothing to capture.
-    #[must_use]
-    pub fn text_index_component(&self) -> Option<&dyn crate::pack::TextIndexComponent> {
-        self.text_index
-            .as_ref()
-            .and_then(Attached::tantivy)
-            .map(|_| self as &dyn crate::pack::TextIndexComponent)
     }
 
     pub(crate) fn cg_read(&self) -> std::sync::MutexGuard<'_, Option<CgRead>> {
@@ -341,7 +323,7 @@ impl SqliteStore {
     }
 
     /// Stable database identity (`UUIDv7` in `index_meta`, created at first open); names the
-    /// audit key file.
+    /// HMAC key file.
     pub fn db_id(&self) -> &str {
         &self.db_id
     }
@@ -357,7 +339,7 @@ impl SqliteStore {
         crate::stamp::bind(conn, actor)
     }
 
-    /// The signer behind this database's audit chain (also used for `input_hmac` stubs).
+    /// The signer over this database's HMAC key (keyed identities and `input_hmac` stubs).
     pub fn signer(&self) -> Arc<dyn AuditSigner> {
         Arc::clone(&self.signer)
     }
@@ -367,49 +349,92 @@ impl SqliteStore {
         &self.migration
     }
 
-    /// The same store deciding its conflict groups with `reconciler` instead of
-    /// `WeightedVoteV1` (engine-spec EN-E9: the trait is the only entry; test injection).
-    #[must_use]
-    pub fn with_reconciler(mut self, reconciler: Box<dyn Reconciler>) -> Self {
-        self.reconcile.set_reconciler(reconciler);
-        self
-    }
-
-    /// The same store reconciling against `ontology` (the service's loaded ontology: its
-    /// thresholds, governed semantics and `priors` block) instead of the shipped one. The
-    /// injected reconciler and the `[er]` section are kept (RW5-1): order with
-    /// [`Self::with_reconciler`] and [`Self::with_er_priors`] does not matter.
+    /// The same store ranking and projecting under `ontology` (the service's loaded ontology)
+    /// instead of the shipped one. A changed `fts_fields` or `ident_fields` declaration is
+    /// another projection (SS-09): the text is rebuilt under it here, through the text class
+    /// under the maintenance budget, before the store serves a search.
     ///
     /// # Errors
-    /// A `priors` value outside `[0, 1]` or an unknown priors key.
+    /// Backend errors redeploying the identifier projection or rebuilding the index.
     pub fn with_ontology(mut self, ontology: Arc<Ontology>) -> Result<Self> {
-        self.reconcile.set_ontology(ontology)?;
-        {
-            let mut conn = self.write();
-            let tx = conn
-                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-                .sql()?;
-            crate::ident::deploy(&tx, self.reconcile.ontology(), false)?;
-            tx.commit().sql()?;
+        self.rules = RwLock::new(Arc::new(RuleSet::from_ontology(&ontology)));
+        self.ontology = ontology;
+        let changed = {
+            let mut conn = self.lock();
+            self.catalog.commit(&mut conn, Durability::Normal, |txn| {
+                crate::ident::deploy(txn.conn(), &self.ontology, false)
+            })?
+        };
+        if changed {
+            self.rebuild_class(ExtentClass::TextTier)?;
         }
-        // a redeployed projection is another binding (SS-09): the index is rebuilt under it
-        // here (the write's own publication never rebuilds), then ranks with the new weights
-        self.catch_up()?;
         self.configure_index();
         Ok(self)
     }
 
-    /// The same store scoring entity resolution with `er` (E2.10 boundary review BR-7): the
-    /// startup seam for the loaded `EngineConfig.er`. The caller validates the section once with
-    /// `kaban_core::ErPriors::from_config`, so the error category (`er_unknown_field`,
-    /// `er_probability_out_of_range`, `er_threshold_invalid`) and the field path
-    /// (`m.<field>`, `possible_threshold`) are reported from the config loader, never from the
-    /// store; a store never sees an invalid section. Order with [`Self::with_ontology`] does not
-    /// matter: each keeps the other's setting.
-    #[must_use]
-    pub fn with_er_priors(mut self, er: kaban_core::ErPriors) -> Self {
-        self.reconcile.set_er(er);
-        self
+    /// Bind the `[catalog]` settings (spec 11 7.6): the compaction policy, the checkpoint
+    /// interval and the maintenance budget every later [`Self::compact`] runs under.
+    ///
+    /// # Errors
+    /// `StoreError::InvalidName` naming the refused key (`CatalogCfg::validate`).
+    pub fn with_catalog_config(mut self, catalog: kaban_core::config::CatalogCfg) -> Result<Self> {
+        if let Err(e) = catalog.validate() {
+            let key = match e {
+                kaban_core::config::ConfigError::Range { path } => path,
+                _ => "catalog".into(),
+            };
+            return Err(StoreError::InvalidName(key, "invalid_configuration"));
+        }
+        self.catalog.configure(catalog);
+        Ok(self)
+    }
+
+    /// Compact the catalog under the configured maintenance budget (spec 11 KER-07, 7.6):
+    /// seal and fold every class by policy, reclaim what no pin reaches, vacuum SQLite's free
+    /// pages a bounded step and tick the checkpoint when its interval elapsed. The connection
+    /// is locked per step, so the store's writes and reads proceed while a merge runs.
+    ///
+    /// # Errors
+    /// SQLite, container and storage errors; a unit refused by its budget is a skip.
+    pub fn compact(&self) -> Result<crate::CompactReport> {
+        let budget = self.catalog.maintenance_budget();
+        self.catalog.compact(&self.conn, budget)
+    }
+
+    /// The bounded checkpoint a one-shot write command runs after its acknowledgement (spec 11
+    /// KER-09): one checkpoint tick when the `[catalog]` `checkpoint_interval_ms` has elapsed
+    /// since this store's last one (always in a fresh process), `None` otherwise.
+    ///
+    /// # Errors
+    /// The tick's errors (`StoreError::StorageFatal` for a failed sync, SQLite errors).
+    pub fn checkpoint_if_due(&self) -> Result<Option<crate::CheckpointReport>> {
+        self.catalog.checkpoint_if_due(&self.lock())
+    }
+
+    /// Recover the catalog after a crash (stale claims, unpublished ranges): see
+    /// `catalog::recover`.
+    ///
+    /// # Errors
+    /// SQLite, lock and container errors.
+    pub fn recover_catalog(&self) -> Result<crate::RecoverReport> {
+        self.catalog.recover(&mut self.lock())
+    }
+
+    /// The catalog's cheap summary (counts, newest generations, views needing a reimport,
+    /// the refused units of the last compaction): no container scan, no hashing.
+    ///
+    /// # Errors
+    /// SQLite errors.
+    pub fn catalog_status(&self) -> Result<crate::CatalogStatus> {
+        self.catalog.status(&self.lock())
+    }
+
+    /// Verify the catalog's rows, chains, ranges and hashes: see `catalog::recover`.
+    ///
+    /// # Errors
+    /// SQLite and container errors.
+    pub fn verify_catalog(&self) -> Result<crate::VerifyReport> {
+        self.catalog.verify(&self.lock())
     }
 
     /// Bind validated recall settings.
@@ -419,20 +444,24 @@ impl SqliteStore {
         recall.effective_rrf_k().map_err(|_| {
             StoreError::InvalidName("recall.fusion".into(), "invalid_configuration")
         })?;
-        self.reconcile.recall = recall;
+        self.recall = recall;
         self.configure_index();
         Ok(self)
     }
 }
 
 impl SqliteStore {
-    /// Open (creating if missing) the database at `path`, apply the baseline schema and open or
-    /// create the audit key `keys_dir/<db-id>.key` (0600, `O_EXCL`; concurrent openers reuse).
-    /// The writer is the default `local`; a production open is [`Self::open_as`].
+    /// Open (creating if missing) the database at `path`, apply the baseline schema and open
+    /// the HMAC key `keys_dir/<db-id>.key`, created with the project (0600, `O_EXCL`;
+    /// concurrent first openers reuse) and required of it afterwards. The writer is the
+    /// default `local`; a production open is [`Self::open_as`].
     ///
     /// # Errors
-    /// SQLite open/DDL errors, or `StoreError::Audit` when the key cannot be read or created
-    /// (including a key file of the wrong length).
+    /// `StoreError::SchemaUnsupported` for a file of another kaban version and
+    /// `StoreError::NotAKabanProject` for a file with no kaban schema beside a non-empty `-wal`
+    /// (spec 11 CMP-01: refused before anything is created or written), SQLite open/DDL
+    /// errors, or `StoreError::Audit` when the key cannot be read or created (including a key
+    /// file of the wrong length, and a missing key of an existing project).
     pub fn open(path: &Path, keys_dir: &Path) -> Result<Self> {
         Self::open_as(path, keys_dir, &ActorId::default())
     }
@@ -444,27 +473,56 @@ impl SqliteStore {
     /// # Errors
     /// As [`Self::open`].
     pub fn open_as(path: &Path, keys_dir: &Path, actor: &ActorId) -> Result<Self> {
-        let (conn, db_id, report, live) = Self::open_file(path, actor, Self::CAPABILITIES)?;
-        let has_chain: bool = conn
-            .query_row("SELECT EXISTS(SELECT 1 FROM audit)", [], |r| r.get(0))
-            .sql()?;
-        // a database that already carries a chain must never get a fresh key: that would fork
-        // the chain silently, so a lost key is a startup error, not a new beginning
-        let signer = if has_chain {
-            KeySigner::open_existing(keys_dir, &db_id)
-        } else {
-            KeySigner::open_or_create(keys_dir, &db_id)
-        }
-        .map_err(|e| StoreError::Audit(Box::new(e)))?;
-        Self::assemble(
+        let (mut conn, db_id, report, live) = Self::open_file(path, actor, Self::CAPABILITIES)?;
+        // the catalog attaches first (the key record commits through it), but its artefacts
+        // are created only once the key is admitted: a refused project gains none
+        let mut catalog = Catalog::open_as_is(path, &mut conn)?;
+        let signer = Self::project_key(&catalog, &mut conn, keys_dir, &db_id)?;
+        catalog.open_writable(&mut conn)?;
+        Ok(Self::assemble(
             conn,
+            catalog,
             db_id,
             Arc::new(signer),
             report,
             Some(live),
             Some(path),
-        )
-        .with_index_attached(Attach::Own)
+        ))
+    }
+    /// The database's HMAC key: created with the project, required ever after. A project
+    /// that has recorded its key (`index_meta` `KEY_RECORDED`) must never get a fresh one:
+    /// that would silently change every keyed identity it stores, so a lost key is a startup
+    /// error. Until the record exists the key is opened or created (`O_EXCL`; concurrent first
+    /// openers reuse the winner's), and the record is written only once the key file is in
+    /// place, so a crash or a racing opener in between never leaves a project without a key.
+    fn project_key(
+        catalog: &Catalog,
+        conn: &mut Connection,
+        keys_dir: &Path,
+        db_id: &str,
+    ) -> Result<KeySigner> {
+        let recorded: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM index_meta WHERE key = ?1)",
+                [KEY_RECORDED],
+                |r| r.get(0),
+            )
+            .sql()?;
+        if recorded {
+            return KeySigner::open_existing(keys_dir, db_id)
+                .map_err(|e| StoreError::Audit(Box::new(e)));
+        }
+        let signer = KeySigner::open_or_create(keys_dir, db_id)
+            .map_err(|e| StoreError::Audit(Box::new(e)))?;
+        catalog.commit(conn, Durability::Normal, |txn| {
+            txn.conn()
+                .execute(
+                    "INSERT OR IGNORE INTO index_meta(key, value) VALUES (?1, 'created')",
+                    [KEY_RECORDED],
+                )
+                .sql()
+        })?;
+        Ok(signer)
     }
     /// Open for verification: the key must already exist (never created here) and the
     /// database is read as it is: no migration, no backup, no seeding (MD-28). A file from a
@@ -476,12 +534,14 @@ impl SqliteStore {
     /// when the key is missing or malformed or the database carries no `db_id` (nothing to
     /// verify).
     pub fn open_existing_key(path: &Path, keys_dir: &Path, actor: &ActorId) -> Result<Self> {
-        let (conn, live) = prepare_database_files(path, Self::CAPABILITIES)?;
+        let (mut conn, live) = prepare_database_files(path, Self::CAPABILITIES)?;
         configure_connection(&conn)?;
         crate::stamp::bind(&conn, actor)?;
         let version = Migrator::check(&conn)?;
         // the bodies are served only under their own dictionary (SS-17, t7-4)
         crate::body_codec::verify(&conn)?;
+        // a project another opener created after this open's probe: published first (CMP-01)
+        live.publish(&conn)?;
         let db_id: Option<String> = conn
             .query_row(
                 "SELECT value FROM index_meta WHERE key = 'db_id'",
@@ -496,22 +556,23 @@ impl SqliteStore {
         let signer = KeySigner::open_existing(keys_dir, &db_id)
             .map_err(|e| StoreError::Audit(Box::new(e)))?;
         let report = MigrationReport::unchanged(version);
-        Self::assemble(
+        let catalog = Catalog::open_as_is(path, &mut conn)?;
+        Ok(Self::assemble(
             conn,
+            catalog,
             db_id,
             Arc::new(signer),
             report,
             Some(live),
             Some(path),
-        )
-        .with_index_attached(Attach::Existing)
+        ))
     }
     /// Open for `kaban doctor` (core-spec §7; M4-19): the database is read as it is, so the
     /// report describes what is on disk. Nothing is created (a missing file is an error, not a
     /// new database), no file mode is tightened (the modes are `stat`ed first and returned
-    /// with the store), no migration, backup or seed runs, and the audit key is never created:
-    /// it must already exist, like [`Self::open_existing_key`] (a fresh key would let a gated
-    /// rejection during the report write a row the real key cannot verify). A file from a
+    /// with the store), no migration, backup or seed runs, and the HMAC key is never created:
+    /// it must already exist, like [`Self::open_existing_key`] (a fresh key would change the
+    /// keyed identities the report computes). A file from a
     /// newer kaban is refused. The store's `migration()` reports the version found. `actor`
     /// is the writer, as for every open ([`Self::open_as`]).
     ///
@@ -537,12 +598,14 @@ impl SqliteStore {
         capabilities: StoreCapabilities,
     ) -> Result<(Self, DatabaseFileModes)> {
         let modes = database_file_modes(path)?;
-        let (conn, live) = open_existing_as_is(path, capabilities)?;
+        let (mut conn, live) = open_existing_as_is(path, capabilities)?;
         configure_connection(&conn)?;
         crate::stamp::bind(&conn, actor)?;
         let version = Migrator::check(&conn)?;
         // the bodies are served only under their own dictionary (SS-17, t7-4)
         crate::body_codec::verify(&conn)?;
+        // a project another opener created after this open's probe: published first (CMP-01)
+        live.publish(&conn)?;
         let db_id: Option<String> = conn
             .query_row(
                 "SELECT value FROM index_meta WHERE key = 'db_id'",
@@ -557,15 +620,16 @@ impl SqliteStore {
         let signer = KeySigner::open_existing(keys_dir, &db_id)
             .map_err(|e| StoreError::Audit(Box::new(e)))?;
         let report = MigrationReport::unchanged(version);
+        let catalog = Catalog::open_as_is(path, &mut conn)?;
         let store = Self::assemble(
             conn,
+            catalog,
             db_id,
             Arc::new(signer),
             report,
             Some(live),
             Some(path),
-        )
-        .with_index_attached(Attach::Existing)?;
+        );
         Ok((store, modes))
     }
     /// Open for a host hook (core-plan C4.3 as amended by M4-6; review R4-2): a hook fired in a
@@ -599,13 +663,17 @@ impl SqliteStore {
         actor: &ActorId,
         capabilities: StoreCapabilities,
     ) -> Result<Self> {
-        let (conn, live) = open_existing_as_is(path, capabilities)?;
+        let (mut conn, live) = open_existing_as_is(path, capabilities)?;
         configure_connection(&conn)?;
         crate::stamp::bind(&conn, actor)?;
         conn.busy_timeout(HOOK_BUSY_TIMEOUT).sql()?;
         let version = Migrator::check(&conn)?;
         // a hook writes bodies: only under the dictionary the database records (SS-17, t7-4)
         crate::body_codec::verify(&conn)?;
+        // a project another opener created after this open's probe: published first
+        // (CMP-01), then the hook's own lock wait again
+        live.publish(&conn)?;
+        conn.busy_timeout(HOOK_BUSY_TIMEOUT).sql()?;
         let db_id: Option<String> = conn
             .query_row(
                 "SELECT value FROM index_meta WHERE key = 'db_id'",
@@ -620,30 +688,36 @@ impl SqliteStore {
         let signer = KeySigner::open_existing(keys_dir, &db_id)
             .map_err(|e| StoreError::Audit(Box::new(e)))?;
         let report = MigrationReport::unchanged(version);
-        let mut store = Self::assemble(
+        let catalog = Catalog::open_as_is(path, &mut conn)?;
+        Ok(Self::assemble(
             conn,
+            catalog,
             db_id,
             Arc::new(signer),
             report,
             Some(live),
             Some(path),
-        );
-        // a hook's write publishes its own page within its watchdog's share, or leaves the
-        // receipt pending (spec 05 SS-10)
-        store.publish_budget = tantivy::HOOK_PUBLISH_BUDGET;
-        store.with_index_attached(Attach::Existing)
+        ))
     }
     /// Open the database at `path` with an explicit signer (the key is managed by the caller).
     ///
     /// # Errors
     /// SQLite open/DDL errors.
     pub fn open_with_signer(path: &Path, signer: Arc<dyn AuditSigner>) -> Result<Self> {
-        let (conn, db_id, report, live) =
+        let (mut conn, db_id, report, live) =
             Self::open_file(path, &ActorId::default(), Self::CAPABILITIES)?;
-        Self::assemble(conn, db_id, signer, report, Some(live), Some(path))
-            .with_index_attached(Attach::Own)
+        let catalog = Catalog::open(path, &mut conn)?;
+        Ok(Self::assemble(
+            conn,
+            catalog,
+            db_id,
+            signer,
+            report,
+            Some(live),
+            Some(path),
+        ))
     }
-    /// An in-memory store with an ephemeral random audit key (tests); the writer is `local`.
+    /// An in-memory store with an ephemeral random HMAC key (tests); the writer is `local`.
     ///
     /// # Errors
     /// SQLite DDL errors or a failing OS random source.
@@ -658,8 +732,16 @@ impl SqliteStore {
         let mut conn = Connection::open_in_memory().sql()?;
         let (db_id, report) = Self::init_schema(&mut conn, actor)?;
         let signer = KeySigner::ephemeral().map_err(|e| StoreError::Audit(Box::new(e)))?;
-        Self::assemble(conn, db_id, Arc::new(signer), report, None, None)
-            .with_index_attached(Attach::Own)
+        let catalog = Catalog::in_memory(&mut conn)?;
+        Ok(Self::assemble(
+            conn,
+            catalog,
+            db_id,
+            Arc::new(signer),
+            report,
+            None,
+            None,
+        ))
     }
     /// Open the database file with owner-only permissions (core-spec S5; see
     /// [`prepare_database_files`] for the file rules), then create or check its schema and
@@ -672,48 +754,46 @@ impl SqliteStore {
     ) -> Result<(Connection, String, MigrationReport, LiveGuard)> {
         let (mut conn, live) = prepare_database_files(path, capabilities)?;
         let (db_id, report) = Self::init_schema(&mut conn, actor)?;
+        #[cfg(test)]
+        if let Some(seam) = BEFORE_PUBLICATION.with(|seam| seam.borrow_mut().take()) {
+            seam();
+        }
+        // a created project, or one another opener created while this one was admitted,
+        // ends with its version in the main file (spec 11 CMP-01): a reader of the main file
+        // alone (the refusal probe) never mistakes it for empty
+        live.publish(&conn)?;
         Ok((conn, db_id, report, live))
     }
-    /// The store over a configured connection whose writer is bound.
+    /// The store over a configured connection whose writer is bound, admitted and published,
+    /// and its catalog, attached to that connection.
     pub(crate) fn assemble(
         conn: Connection,
+        catalog: Catalog,
         db_id: String,
         signer: Arc<dyn AuditSigner>,
         migration: MigrationReport,
         live: Option<LiveGuard>,
         path: Option<&Path>,
     ) -> Self {
+        let ontology = shipped_ontology();
+        let recall = kaban_core::config::Recall::default();
+        let text_index = Attached::Tantivy(Arc::new(kaban_index_tantivy::TantivyIndex::new(
+            &ontology, &recall,
+        )));
         Self {
+            text_index,
             conn: Arc::new(Mutex::new(conn)),
+            catalog,
             db_id,
             signer,
             migration,
-            reconcile: reconcile::Setup::shipped(),
+            ontology,
+            rules: RwLock::new(RuleSet::shipped()),
+            recall,
             cg_read: Mutex::new(None),
-            projector: None,
-            text_index: None,
-            owner: tantivy::owner(),
-            publish_budget: tantivy::PUBLISH_BUDGET,
-            receipt: std::sync::atomic::AtomicU64::new(0),
             path: path.map(Path::to_path_buf),
             _live: live,
         }
-    }
-    /// The assembled store with its text index (spec 05 OWN-M; `crate::tantivy`): a file
-    /// store's index beside the database, admitted or rebuilt as `attach` says, then caught
-    /// up to the head; an in-memory store's RAM index, built. A database below the change
-    /// log (schema 0004; an older fixture opened at its version) has nothing to project from
-    /// and keeps its in-database index.
-    fn with_index_attached(mut self, attach: Attach) -> Result<Self> {
-        let index = match self.path.clone() {
-            Some(db) => self.open_file_index(&db, attach)?,
-            None => Some(self.open_memory_index()?),
-        };
-        self.text_index = index.map(Attached::Tantivy);
-        if attach == Attach::Own {
-            self.catch_up()?;
-        }
-        Ok(self)
     }
     /// Configure the connection, bind its writer (SS-26), create the schema on a fresh
     /// database or refuse one at another version (spec 05 OWN-P, [`Migrator`]), seed builtin
@@ -766,16 +846,13 @@ impl SqliteStore {
     /// R3-3): an id from another workspace is `NotFound`, so no cross-workspace edge and no
     /// `SUPERSEDES`/`INVALIDATES` side effect on another tenant's node can happen (S6, F17).
     ///
-    /// Since E2.2 (engine-spec EN-F9) the edge is not written here: the call is a human claim
-    /// (`layer = human`, `method` as the caller says, the caller's confidence as the raw
-    /// score, the gated props as the value), recorded as an `assertion` row and projected
-    /// through the reconciliation of its triple, so `link`, the inline links of `remember`
-    /// and the M5 import all produce one human assertion and one edge. A store below schema
-    /// 0004 (fixtures) writes the edge directly, as before.
+    /// The edge is written under the `authored` producer (`method` as the caller says, the
+    /// caller's confidence as the score, the gated props as the value) and the first-writer
+    /// rule: a triple another producer wrote first keeps that producer's row, and the stored
+    /// row is returned. A store below schema 0004 (fixtures) has no producer column.
     #[allow(clippy::too_many_arguments)] // the one transactional edge write; every caller passes all of them
     fn link_in(
         conn: &Connection,
-        setup: &reconcile::Setup,
         tenant: &Tenant<'_>,
         src: &str,
         dst: &str,
@@ -789,7 +866,7 @@ impl SqliteStore {
         if srid == drid {
             return Err(StoreError::SelfLink(src.to_string()));
         }
-        Self::edge_rule(conn, tenant.governed, rel, &skind, &dkind)?;
+        Self::edge_rule(conn, rel, &skind, &dkind)?;
         let now = now_iso();
         let props = props.unwrap_or_else(|| json!({}));
         // an existing (src, dst, rel) is refreshed, not created (review R1-8)
@@ -800,40 +877,25 @@ impl SqliteStore {
                 |r| r.get(0),
             )
             .sql()?;
-        if reconcile::engine_tables(conn)? {
-            reconcile::human_edge(
-                conn,
-                setup,
-                tenant.ws,
-                reconcile::HumanEdge {
-                    src: srid,
-                    dst: drid,
-                    rel,
-                    confidence,
-                    props,
-                    method,
-                    actor: tenant.actor,
-                },
-                persist::now_unix(),
-            )?;
-        } else {
-            project::write_edge(
-                conn,
-                &project::EdgeWrite {
-                    src: srid,
-                    dst: drid,
-                    rel,
-                    confidence,
-                    props: &project::owned_props(Some(&props), Owner::Human),
-                    layer: None,
-                    method: None,
-                    score: None,
-                    source_id: None,
-                    offset: None,
-                    len: None,
-                },
-            )?;
-        }
+        let scoring = edge_write::scoring_columns(conn)?;
+        edge_write::write_edge(
+            conn,
+            &EdgeWrite {
+                src: srid,
+                dst: drid,
+                rel,
+                confidence,
+                props: &props,
+                producer: kaban_core::Producer::Authored,
+                method: scoring.then_some(method),
+                // an authored link scores its confidence, 1.0 when it names none (EN-F46
+                // `edge_filter.min_score`)
+                score: scoring.then(|| confidence.unwrap_or(1.0)),
+                source_id: None,
+                offset: None,
+                len: None,
+            },
+        )?;
         let edge = conn
             .query_row(
                 "SELECT e.id, s.id, d.id, e.rel, e.confidence, e.created_at, e.props FROM edge e JOIN node s ON s.rid=e.src JOIN node d ON d.rid=e.dst WHERE e.src=? AND e.dst=? AND e.rel=?",
@@ -842,40 +904,23 @@ impl SqliteStore {
             )
             .optional()
             .sql()?
-            // the claim's group has no winner (a zero-confidence claim): nothing materialised
-            .ok_or_else(|| StoreError::ClaimRejected(rel.to_owned()))?;
-        if let Some(effect) = LinkEffect::of(tenant.governed, rel) {
-            Self::mark_target(conn, tenant, dst, effect, rel, src, &now)?;
+            .ok_or_else(|| StoreError::NotFound(rel.to_owned()))?;
+        if let Some(effect) = LinkEffect::of(&tenant.rules, rel) {
+            Self::mark_target(conn, dst, effect, &now)?;
         }
         Ok((edge, !existed))
     }
     /// The declaration of `rel` applied to an edge between a node of `skind` and one of
     /// `dkind` (`UnknownRel`, `EndpointNotAllowed`); the one judgement every edge write
-    /// shares: `link`, the inline links of `remember`, a batch's structural edges and the
-    /// `edge` claims of a batch (E1.7a RE2-8).
-    pub(crate) fn edge_rule(
-        conn: &Connection,
-        governed: &GovernedSet,
-        rel: &str,
-        skind: &str,
-        dkind: &str,
-    ) -> Result<()> {
+    /// shares: `link`, the inline links of `remember` and a batch's edges (E1.7a RE2-8).
+    pub(crate) fn edge_rule(conn: &Connection, rel: &str, skind: &str, dkind: &str) -> Result<()> {
         let def =
             Self::rel_def(conn, rel)?.ok_or_else(|| StoreError::UnknownRel(rel.to_string()))?;
-        // the declared endpoints, and the `GOVERNS` source rule (engine-spec EN-F4, E1.5): the
-        // source is a record of a kind that governs paths in the tenant's set. Judged here, in
-        // the one transactional edge write, so `link`, the inline links of `remember` and every
-        // other producer agree (E1.7a RE2-8); both endpoints are already known to be the
+        // the declared endpoints, enforced as data for every rel (E1.8, E1.7 R1). Judged here,
+        // in the one transactional edge write, so `link`, the inline links of `remember` and
+        // every other producer agree (E1.7a RE2-8); both endpoints are already known to be the
         // tenant's, so no existence leaks across workspaces
-        // E1.8 (E1.7 R1): the declared lists are enforced as data for every rel; for `GOVERNS`
-        // the source side is the dynamic `governs_paths` rule alone (a user ontology's
-        // governing kind is not in the shipped `from:` list, which stays documentary on the
-        // row; coordinator decision 2026-10-26), the `to:` list stays enforced
-        let from_allowed = if rel == GOVERNS_REL {
-            governed.governs_paths(skind)
-        } else {
-            def.from_kinds.is_empty() || def.from_kinds.iter().any(|k| k == skind)
-        };
+        let from_allowed = def.from_kinds.is_empty() || def.from_kinds.iter().any(|k| k == skind);
         if !from_allowed || (!def.to_kinds.is_empty() && !def.to_kinds.iter().any(|k| k == dkind)) {
             return Err(StoreError::EndpointNotAllowed {
                 rel: rel.into(),
@@ -889,15 +934,13 @@ impl SqliteStore {
     fn state_of(conn: &Connection, id: &str) -> Result<NodeState> {
         let st = conn
             .query_row(
-                "SELECT rid, kind, lifecycle, governance, workspace_id FROM node WHERE id=? AND lifecycle <> 'purged'",
+                "SELECT rid, lifecycle, workspace_id FROM node WHERE id=? AND lifecycle <> 'purged'",
                 [id],
                 |r| {
                     Ok((
                         r.get::<_, i64>(0)?,
                         r.get::<_, String>(1)?,
                         r.get::<_, String>(2)?,
-                        r.get::<_, String>(3)?,
-                        r.get::<_, String>(4)?,
                     ))
                 },
             )
@@ -905,103 +948,18 @@ impl SqliteStore {
             .ok_or_else(|| StoreError::NotFound(id.to_string()))?;
         Ok(NodeState {
             rid: st.0,
-            id: id.to_owned(),
-            kind: st.1,
-            lifecycle: Lifecycle::parse(&st.2)
-                .ok_or_else(|| bad_enum(2, &st.2))
+            lifecycle: Lifecycle::parse(&st.1)
+                .ok_or_else(|| bad_enum(1, &st.1))
                 .sql()?,
-            governance: Governance::parse(&st.3)
-                .ok_or_else(|| bad_enum(3, &st.3))
-                .sql()?,
-            workspace_id: st.4,
+            workspace_id: st.2,
         })
-    }
-    /// The strict governance transition of core-spec §4 on an active governed record, with its
-    /// event in the same transaction: `accepted` records `accepted_commit`, the event's path
-    /// scope and the process repo identity when `repo` is still unset (M3-23), `superseded`
-    /// also archives, `invalidated` also tombstones (`valid_to` set). Every path bumps `rev`
-    /// (D4). Returns the event's `seq`.
-    fn govern(
-        conn: &Connection,
-        governed: &GovernedSet,
-        st: &NodeState,
-        to: Governance,
-        ev: &NewEvent,
-        repo: Option<&str>,
-        now: &str,
-    ) -> Result<i64> {
-        governed.governance_transition(&st.kind, st.governance, to)?;
-        if st.lifecycle != Lifecycle::Active {
-            return Err(kaban_core::InvalidTransition::NotActive(st.lifecycle).into());
-        }
-        match to {
-            Governance::Accepted => {
-                let path_scope = if ev.path_scope.is_empty() {
-                    None
-                } else {
-                    Some(serde_json::to_string(&ev.path_scope)?)
-                };
-                conn.execute(
-                    "UPDATE node SET governance='accepted', accepted_commit=?1, path_scope=COALESCE(?2, path_scope), repo=COALESCE(repo, ?5), updated_at=?3, rev=rev+1 WHERE rid=?4",
-                    params![ev.commit_sha, path_scope, now, st.rid, repo],
-                ).sql()?;
-            }
-            Governance::Superseded | Governance::Invalidated => {
-                let lifecycle = if to == Governance::Superseded {
-                    Lifecycle::Archived
-                } else {
-                    Lifecycle::Tombstoned
-                };
-                conn.execute(
-                    "UPDATE node SET governance=?1, lifecycle=?2, valid_to=?3, updated_at=?3, rev=rev+1 WHERE rid=?4",
-                    params![to.as_str(), lifecycle.as_str(), now, st.rid],
-                ).sql()?;
-            }
-            // `none` and `proposed` are never targets; the table above has already refused them
-            _ => {
-                return Err(kaban_core::InvalidTransition::Governance {
-                    from: st.governance,
-                    to,
-                }
-                .into());
-            }
-        }
-        events::append(conn, &st.id, &st.workspace_id, to.as_str(), ev)
     }
     /// The `on_link` side effect of a `rel` edge on its target (MD-7 as decided in wave A Q1 =
     /// option B; EN-F4: `archive_target` rels such as `SUPERSEDES`, plus [`INVALIDATES_REL`]).
-    /// Governed targets (the tenant's set) take the strict §4 transition through
-    /// [`Self::govern`]: an archive effect on a proposed record fails the whole link.
-    /// Non-governed active targets are archived or tombstoned (OD-4), each with an event;
-    /// non-active targets stay untouched.
-    fn mark_target(
-        conn: &Connection,
-        tenant: &Tenant<'_>,
-        dst: &str,
-        effect: LinkEffect,
-        rel: &str,
-        src: &str,
-        now: &str,
-    ) -> Result<()> {
+    /// An active target is archived or tombstoned (OD-4); a non-active target stays
+    /// untouched.
+    fn mark_target(conn: &Connection, dst: &str, effect: LinkEffect, now: &str) -> Result<()> {
         let st = Self::state_of(conn, dst)?;
-        let to = effect.governance();
-        let ev = NewEvent {
-            reason: format!("{rel} edge from {src}"),
-            signer_kind: tenant.actor.clone().into(),
-            ..Default::default()
-        };
-        if tenant.governed.contains(&st.kind) {
-            // the table refuses superseded, invalidated and (for an archive effect) proposed
-            // targets whatever their lifecycle; a non-active proposed/accepted target is left
-            // untouched
-            tenant
-                .governed
-                .governance_transition(&st.kind, st.governance, to)?;
-            if st.lifecycle == Lifecycle::Active {
-                Self::govern(conn, tenant.governed, &st, to, &ev, None, now)?;
-            }
-            return Ok(());
-        }
         if st.lifecycle != Lifecycle::Active {
             return Ok(());
         }
@@ -1011,8 +969,6 @@ impl SqliteStore {
             params![lifecycle.as_str(), now, st.rid],
         )
         .sql()?;
-        candidates::recount_stats(conn, &st.workspace_id, &st.kind)?;
-        events::append(conn, &st.id, &st.workspace_id, to.as_str(), &ev)?;
         Ok(())
     }
     /// Row id and kind of a non-purged node (a purged id names nothing any more, D3).
@@ -1049,10 +1005,7 @@ impl SqliteStore {
 /// The state of a stored node that transitions read before writing.
 struct NodeState {
     rid: i64,
-    id: String,
-    kind: String,
     lifecycle: Lifecycle,
-    governance: Governance,
     workspace_id: String,
 }
 
@@ -1065,30 +1018,31 @@ pub(crate) fn in_workspace(node: &Node, ws: Option<&str>) -> bool {
     ws.is_none_or(|ws| node.workspace_id == ws)
 }
 
-/// Who writes, and in which workspace: every endpoint of an edge write is resolved inside
-/// `ws` (R3-3) and the `SUPERSEDES`/`INVALIDATES` event on the target is signed by `actor`.
-/// The rel whose source must govern paths (the shipped `adr:GOVERNS`, stored bare).
-const GOVERNS_REL: &str = "GOVERNS";
-
+/// In which workspace a write lands: every endpoint of an edge write is resolved inside `ws`
+/// (R3-3).
 struct Tenant<'a> {
     ws: &'a str,
-    actor: &'a kaban_core::Actor,
-    /// The governed kinds and `on_link` rels this write decides by (`ctx.governed`, EN-F4).
-    governed: &'a GovernedSet,
-    /// The discovered-labels policy and cap this write places undeclared labels by
-    /// (`ctx.discovered`, EN-F5).
-    discovered: &'a DiscoveredRules,
+    /// The ontology rules (`on_link` rels) this write decides by (EN-F4).
+    rules: Arc<RuleSet>,
 }
 
-impl<'a> Tenant<'a> {
-    /// The tenant of a write context in workspace `ws`.
-    fn of(ctx: &'a WriteCtx, ws: &'a str) -> Self {
-        Self {
+impl SqliteStore {
+    /// The tenant of a write in workspace `ws`, deciding by this store's ontology.
+    fn tenant<'a>(&'a self, ws: &'a str) -> Tenant<'a> {
+        Tenant {
             ws,
-            actor: &ctx.actor,
-            governed: &ctx.governed,
-            discovered: &ctx.discovered,
+            rules: self.rules(),
         }
+    }
+
+    /// The ontology rules writes decide by now.
+    pub(crate) fn rules(&self) -> Arc<RuleSet> {
+        Arc::clone(
+            &self
+                .rules
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
     }
 }
 
@@ -1138,25 +1092,21 @@ impl MemoryStore for SqliteStore {
         props: Option<Value>,
         ctx: &WriteCtx,
     ) -> Result<Edge> {
-        let mut conn = self.write();
-        let tx = conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .sql()?;
-        audit_table::append(&tx, self.signer.as_ref(), &ctx.audit)?;
-        let (e, _) = Self::link_in(
-            &tx,
-            &self.reconcile,
-            &Tenant::of(ctx, ctx.workspace_id.as_str()),
-            src.as_str(),
-            dst.as_str(),
-            rel,
-            confidence,
-            props,
-            Method::Link,
-        )?;
-        changelog::record_terminal(&tx, ctx)?;
-        tx.commit().sql()?;
-        Ok(e)
+        let mut conn = self.lock();
+        self.catalog.commit(&mut conn, ctx.durability, |txn| {
+            let (e, _) = Self::link_in(
+                txn.conn(),
+                &self.tenant(ctx.workspace_id.as_str()),
+                src.as_str(),
+                dst.as_str(),
+                rel,
+                confidence,
+                props,
+                Method::Link,
+            )?;
+            changelog::record_terminal(txn.conn(), ctx)?;
+            Ok(e)
+        })
     }
     fn recall(&self, q: &RecallQuery) -> Result<Vec<Hit>> {
         self.recall_eligible(q, &|_| true)
@@ -1168,63 +1118,26 @@ impl MemoryStore for SqliteStore {
         q: &RecallQuery,
         eligible: &dyn Fn(&Node) -> bool,
     ) -> Result<Vec<Hit>> {
-        // this store's own commits are read back (spec 05 OWN-M): its receipt position is
-        // published first when the index does not cover it, bounded, with no lock held
-        self.publish_before_read();
-        // the attached adapter may read the store back (an in-memory adapter shares this
-        // connection): recall takes the lock per statement and never across an adapter call
-        // a store with no index attached has nothing to seed from: refused, never empty
-        let index = self.seed_index().ok_or(StoreError::TextIndexUnavailable)?;
-        recall::recall_with(
-            &recall::Access(&self.conn),
-            self.reconcile.ontology(),
-            &self.reconcile.recall,
-            q,
-            index,
-            eligible,
-        )
-    }
-    /// The attached index's watermark (spec 05 SS-10). A store with nothing attached has no
-    /// watermark to read: the barrier then acknowledges `not_yet_searchable` and doctor
-    /// reports the index as not checked, rather than either claiming currency.
-    fn text_visible(&self) -> Result<kaban_core::text_index::Visibility> {
-        self.seed_index()
-            .ok_or(StoreError::TextIndexUnavailable)?
-            .visible()
-    }
-    /// The barrier's drain (spec 05 SS-10, OWN-M): this store's pending commits toward
-    /// `target` within the caller's deadline (`crate::tantivy`).
-    fn text_publish(&self, target: u64, deadline: std::time::Instant) -> Result<()> {
-        self.publish_until(target, deadline)
+        // recall takes the lock per statement and never across an adapter call
+        let index = self.seed_index();
+        self.with_text_snapshot(|at, budget| {
+            recall::recall_with(
+                &recall::Access(&self.conn),
+                &self.ontology,
+                &self.recall,
+                q,
+                index,
+                at,
+                budget,
+                eligible,
+            )
+        })
     }
     fn traverse(&self, q: &TraverseQuery) -> Result<TraverseResult> {
-        // lock order main then read (E2.7 default 2): `attach_snapshot` and `snapshot_symbols`
-        // take the read slot alone, so no path takes the two reversed
-        let conn = self.lock();
-        let cg = self.cg_read();
-        traverse::traverse(&conn, cg.as_ref(), q)
-    }
-    fn explain_group(&self, group_key: &str) -> Result<kaban_core::Explanation> {
-        crate::explain::explain_group(&self.lock(), &self.reconcile, group_key)
-    }
-    fn claim_group(&self, key: &str) -> Result<String> {
-        crate::explain::claim_group(&self.lock(), key)
-    }
-    fn claim_group_in(&self, workspace: &str, key: &str) -> Result<String> {
-        crate::explain::claim_group_in(&self.lock(), workspace, key)
-    }
-    fn review_rows(
-        &self,
-        workspace: &str,
-        subject: Option<&NodeId>,
-    ) -> Result<Vec<kaban_core::ReviewRow>> {
-        candidates::review_rows(&self.lock(), workspace, subject)
-    }
-    fn proposed_nodes_in(&self, workspace: &str, offset: usize, limit: usize) -> Result<Vec<Node>> {
-        crate::explain::proposed_nodes_in(&self.lock(), workspace, offset, limit)
+        traverse::traverse(&self.lock(), q)
     }
     fn chunk_covering(&self, workspace: &str, path: &str, offset: u64) -> Result<Option<Node>> {
-        crate::explain::chunk_covering(&self.lock(), workspace, path, offset)
+        crate::recall::chunk_covering(&self.lock(), workspace, path, offset)
     }
     fn forget(&self, id: &NodeId, mode: ForgetMode, ctx: &WriteCtx) -> Result<ForgetOutcome> {
         self.forget_impl(id, mode, ctx)
@@ -1312,53 +1225,7 @@ impl MemoryStore for SqliteStore {
         };
         anchors::snapshot_symbols(cg, commit, page)
     }
-    fn unmerge(
-        &self,
-        workspace: &str,
-        id: &NodeId,
-        reason: &str,
-        ctx: &WriteCtx,
-    ) -> Result<kaban_core::UnmergeOutcome> {
-        let mut conn = self.write();
-        let tx = conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .sql()?;
-        let outcome = crate::reconcile::er::unmerge(
-            &tx,
-            &self.reconcile,
-            workspace,
-            id.as_str(),
-            reason,
-            crate::reconcile::persist::now_unix(),
-        )?;
-        crate::audit_table::append(&tx, self.signer.as_ref(), &ctx.audit)?;
-        changelog::record_terminal(&tx, ctx)?;
-        tx.commit().sql()?;
-        Ok(outcome)
-    }
-    fn canonical_of(&self, workspace: &str, id: &NodeId) -> Result<Option<NodeId>> {
-        let conn = self.lock();
-        // a store without the engine tables has no redirects (the same guard as `recall`)
-        if !crate::reconcile::engine_tables(&conn)? {
-            return Ok(None);
-        }
-        // the join drops a `canonical_rid NULL` row (a purged canonical): no redirect
-        conn.query_row(
-            "SELECT c.id FROM node_identity ni \
-             JOIN node n ON n.rid = ni.rid \
-             JOIN node c ON c.rid = ni.canonical_rid \
-             WHERE n.id = ?1 AND n.workspace_id = ?2",
-            rusqlite::params![id.as_str(), workspace],
-            |r| r.get::<_, String>(0),
-        )
-        .optional()
-        .sql()?
-        .map(|c| NodeId::parse(&c).map_err(Into::into))
-        .transpose()
-    }
     fn stats(&self, workspace_id: Option<&str>) -> Result<Value> {
-        // the cursors (`changes_lag`) follow this process's own publication (spec 05 OWN-M)
-        self.publish_before_read();
         let conn = self.lock();
         // node counts inside the workspace; an edge counts when both endpoints are inside
         // (review R1-5); the file size is global and labelled as such
@@ -1401,11 +1268,7 @@ impl MemoryStore for SqliteStore {
                 |r| r.get(0),
             )
             .sql()?;
-        // the `ChangeLog` lag is database-wide like the file size (F11: max(seq) - min(last_seq));
-        // `outbox_lag` is the EN-E10b deprecated alias of `changes_lag`, same value, removed in 3.2
-        let changes_lag = changelog::lag(&conn)?;
-        // v3 superset (M3-26): the engine, the migrated schema version and the open conflicts
-        // (F13), all database-wide
+        // v3 superset (M3-26): the engine and the migrated schema version, database-wide
         let schema_version: i64 = conn
             .query_row(
                 "SELECT value FROM index_meta WHERE key = ?",
@@ -1416,14 +1279,10 @@ impl MemoryStore for SqliteStore {
             .sql()?
             .and_then(|v| v.parse().ok())
             .unwrap_or(0);
-        let conflicts: i64 = conn
-            .query_row("SELECT count(*) FROM conflicts", [], |r| r.get(0))
-            .sql()?;
         Ok(json!({
             "nodes": nodes, "edges": edges, "by_kind": by_kind, "by_rel": by_rel, "db_bytes": page,
-            "changes_lag": changes_lag, "outbox_lag": changes_lag,
-            "engine": "sqlite", "schema_version": schema_version, "conflicts": conflicts,
-            "scope": { "workspace": workspace_id.unwrap_or(WorkspaceId::ALL), "db_bytes": "global", "changes_lag": "global", "outbox_lag": "global" },
+            "engine": "sqlite", "schema_version": schema_version,
+            "scope": { "workspace": workspace_id.unwrap_or(WorkspaceId::ALL), "db_bytes": "global" },
         }))
     }
 }
@@ -1431,6 +1290,12 @@ impl MemoryStore for SqliteStore {
 impl SchemaStore for SqliteStore {
     fn schema(&self) -> Result<Vec<TypeDef>> {
         ontology::all_defs(&self.lock())
+    }
+    fn adopt_rules(&self, rules: Arc<RuleSet>) {
+        *self
+            .rules
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = rules;
     }
     fn schema_extend(&self, def: TypeDef) -> Result<TypeDef> {
         match def.kind.as_str() {
@@ -1461,7 +1326,7 @@ impl SchemaStore for SqliteStore {
                 "a description is required",
             ));
         }
-        let conn = self.lock();
+        let mut conn = self.lock();
         for k in def.from_kinds.iter().chain(def.to_kinds.iter()) {
             if !Self::kind_exists(&conn, k)? {
                 return Err(StoreError::UnknownKind(k.clone()));
@@ -1475,105 +1340,22 @@ impl SchemaStore for SqliteStore {
             name: ontology::normalise_stored(&def.name),
             ..def
         };
-        if !ontology::extend(&conn, &def, &now_iso())? {
+        let extended = self.catalog.commit(&mut conn, Durability::Normal, |txn| {
+            ontology::extend(txn.conn(), &def, &now_iso())
+        })?;
+        if !extended {
             return Err(StoreError::Builtin(def.name));
         }
         Ok(def)
     }
 }
 
-impl GovernanceStore for SqliteStore {
-    fn pruning_protection_get(
-        &self,
-        target: &kaban_core::PruningTarget,
-        ctx: &WriteCtx,
-    ) -> Result<kaban_core::PruningProtection> {
-        self.protection(target, ctx, None)
-    }
-    fn pruning_protection_set(
-        &self,
-        target: &kaban_core::PruningTarget,
-        ctx: &WriteCtx,
-    ) -> Result<kaban_core::PruningProtection> {
-        self.protection(target, ctx, Some(true))
-    }
-    fn pruning_protection_clear(
-        &self,
-        target: &kaban_core::PruningTarget,
-        ctx: &WriteCtx,
-    ) -> Result<kaban_core::PruningProtection> {
-        self.protection(target, ctx, Some(false))
-    }
-    fn transition(
-        &self,
-        id: &NodeId,
-        to: Governance,
-        ev: NewEvent,
-        ctx: &WriteCtx,
-    ) -> Result<(Node, u64)> {
-        self.transition_impl(id, to, ev, ctx)
-    }
-    fn is_candidate(&self, id: &NodeId) -> Result<bool> {
-        let conn = self.lock();
-        match Self::rid_of(&conn, id.as_str()) {
-            Ok((rid, _)) => candidates::is_candidate(&conn, rid),
-            Err(StoreError::NotFound(_)) => Ok(false),
-            Err(e) => Err(e),
-        }
-    }
-    fn confirmation_create(&self, c: NewConfirmation) -> Result<()> {
-        let mut conn = self.write();
-        let tx = conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .sql()?;
-        confirmations::create(&tx, &c)?;
-        tx.commit().sql()?;
-        Ok(())
-    }
-    fn confirmation_consume(
-        &self,
-        token_hash: &str,
-        node_id: &NodeId,
-    ) -> Result<Option<Confirmation>> {
-        let mut conn = self.write();
-        let tx = conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .sql()?;
-        let row = confirmations::consume(&tx, token_hash, node_id.as_str())?;
-        tx.commit().sql()?;
-        Ok(row)
-    }
-    fn confirmation_prune(&self) -> Result<u64> {
-        let mut conn = self.write();
-        let tx = conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .sql()?;
-        let n = confirmations::prune(&tx)?;
-        tx.commit().sql()?;
-        Ok(n)
-    }
-    fn governing(&self, q: &GoverningQuery) -> Result<Vec<Node>> {
-        self.governing_impl(q)
-    }
-    fn events(&self, node: &NodeId) -> Result<Vec<Event>> {
-        let conn = self.lock();
-        events::list(&conn, node.as_str())
-    }
-    fn supersession_chain(
-        &self,
-        id: &NodeId,
-        direction: ChainDirection,
-        limit: usize,
-        ws: &WorkspaceFilter,
-    ) -> Result<Chain> {
-        self.supersession_chain_impl(id, direction, limit, ws)
-    }
-
-    // --- Hook session scratch, briefing and failure pairing (C4.3/C4.4; `session.rs`) ---
-
+impl SessionStore for SqliteStore {
     fn session_edit_record(&self, edit: &SessionEdit) -> Result<()> {
-        let conn = self.lock();
-        session::record(&conn, edit)
+        let mut conn = self.lock();
+        self.catalog.commit(&mut conn, Durability::Normal, |txn| {
+            session::record(txn.conn(), edit)
+        })
     }
     fn session_edits(
         &self,
@@ -1586,12 +1368,10 @@ impl GovernanceStore for SqliteStore {
         session::list(&conn, session_id, kind, after_ts, limit)
     }
     fn session_edits_prune(&self, older_than_ts: i64, limit: usize) -> Result<u64> {
-        let conn = self.lock();
-        session::prune(&conn, older_than_ts, limit)
-    }
-    fn briefing(&self, workspace_id: &str, kinds: &[&str], limit: usize) -> Result<Vec<Node>> {
-        let conn = self.lock();
-        session::briefing(&conn, kinds, workspace_id, limit)
+        let mut conn = self.lock();
+        self.catalog.commit(&mut conn, Durability::Normal, |txn| {
+            session::prune(txn.conn(), older_than_ts, limit)
+        })
     }
     fn pending_failures(&self, q: &PendingFailuresQuery) -> Result<Vec<Node>> {
         let conn = self.lock();
@@ -1603,46 +1383,18 @@ impl GovernanceStore for SqliteStore {
         patch: &FailurePatch,
         ctx: &WriteCtx,
     ) -> Result<Node> {
-        let mut conn = self.write();
-        let tx = conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .sql()?;
-        audit_table::append(&tx, self.signer.as_ref(), &ctx.audit)?;
-        let node = session::update_failure_props(
-            &tx,
-            id.as_str(),
-            ctx.workspace_id.as_str(),
-            patch,
-            &now_iso(),
-        )?;
-        changelog::record_terminal(&tx, ctx)?;
-        tx.commit().sql()?;
-        Ok(node)
-    }
-}
-
-impl AuditStore for SqliteStore {
-    fn audit_append(&self, entries: &[AuditEntry]) -> Result<()> {
-        let mut conn = self.write();
-        let tx = conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .sql()?;
-        audit_table::append(&tx, self.signer.as_ref(), entries)?;
-        tx.commit().sql()?;
-        Ok(())
-    }
-    fn audit_append_read(&self, entries: &[AuditEntry]) -> Result<()> {
-        let mut conn = self.write();
-        let tx = conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .sql()?;
-        audit_table::append_read(&tx, self.signer.as_ref(), entries)?;
-        tx.commit().sql()?;
-        Ok(())
-    }
-    fn audit_verify(&self) -> Result<AuditVerification> {
-        let conn = self.lock();
-        audit_table::verify(&conn, self.signer.as_ref())
+        let mut conn = self.lock();
+        self.catalog.commit(&mut conn, ctx.durability, |txn| {
+            let node = session::update_failure_props(
+                txn.conn(),
+                id.as_str(),
+                ctx.workspace_id.as_str(),
+                patch,
+                &now_iso(),
+            )?;
+            changelog::record_terminal(txn.conn(), ctx)?;
+            Ok(node)
+        })
     }
 }
 
@@ -1655,69 +1407,49 @@ impl ChangeLogStore for SqliteStore {
         changelog::head(&self.lock())
     }
     fn changes_ack(&self, consumer: &str, upto: u64, fence: u64) -> Result<()> {
-        let mut conn = self.write();
+        let mut conn = self.lock();
         // a write path: BEGIN IMMEDIATE like every other (N4, prep brief risk 7)
-        let tx = conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .sql()?;
-        changelog::ack(&tx, consumer, upto, fence)?;
-        tx.commit().sql()?;
-        Ok(())
+        self.catalog.commit(&mut conn, Durability::Normal, |txn| {
+            changelog::ack(txn.conn(), consumer, upto, fence)
+        })
     }
     fn changes_register(&self, consumer: &str, fence: u64) -> Result<u64> {
-        let mut conn = self.write();
-        let tx = conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .sql()?;
-        let cursor = changelog::register(&tx, consumer, fence)?;
-        tx.commit().sql()?;
-        Ok(cursor)
+        let mut conn = self.lock();
+        self.catalog.commit(&mut conn, Durability::Normal, |txn| {
+            changelog::register(txn.conn(), consumer, fence)
+        })
     }
     fn changes_lag_by_consumer(&self) -> Result<std::collections::BTreeMap<String, u64>> {
         changelog::lag_by_consumer(&self.lock())
     }
     fn changes_prune(&self, tail: u64) -> Result<u64> {
-        // the prune floor is the slowest cursor: this process's own publication first
-        self.publish_before_read();
-        let mut conn = self.write();
-        let tx = conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .sql()?;
-        let deleted = changelog::prune(&tx, tail)?;
-        tx.commit().sql()?;
-        Ok(deleted)
+        let mut conn = self.lock();
+        self.catalog.commit(&mut conn, Durability::Normal, |txn| {
+            changelog::prune(txn.conn(), tail)
+        })
     }
 }
 
 impl LeaseStore for SqliteStore {
     fn lease_acquire(&self, name: &str, owner: &str, ttl_s: u32) -> Result<Option<Lease>> {
-        let mut conn = self.write();
+        let mut conn = self.lock();
         // one BEGIN IMMEDIATE per acquisition (core-spec F15): the fence increment and the
         // read-back are atomic against every other process
-        let tx = conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .sql()?;
-        let lease = leases::acquire(&tx, name, owner, ttl_s)?;
-        tx.commit().sql()?;
-        Ok(lease)
+        self.catalog.commit(&mut conn, Durability::Normal, |txn| {
+            leases::acquire(txn.conn(), name, owner, ttl_s)
+        })
     }
     fn lease_renew(&self, lease: &Lease, ttl_s: u32) -> Result<()> {
-        let mut conn = self.write();
-        let tx = conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .sql()?;
-        leases::renew(&tx, lease, ttl_s)?;
-        tx.commit().sql()?;
-        Ok(())
+        let mut conn = self.lock();
+        self.catalog.commit(&mut conn, Durability::Normal, |txn| {
+            leases::renew(txn.conn(), lease, ttl_s)
+        })
     }
     fn lease_release(&self, lease: &Lease) -> Result<()> {
-        let mut conn = self.write();
-        let tx = conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .sql()?;
-        leases::release(&tx, lease)?;
-        tx.commit().sql()?;
-        Ok(())
+        let mut conn = self.lock();
+        self.catalog.commit(&mut conn, Durability::Normal, |txn| {
+            leases::release(txn.conn(), lease)
+        })
     }
 }
 
@@ -1743,13 +1475,10 @@ impl IngestStore for SqliteStore {
         crate::jobs::pending(&self.lock(), workspace, dialect, prefix, limit)
     }
     fn job_claim(&self, request: kaban_core::JobClaimRequest) -> Result<Option<kaban_core::Lease>> {
-        let mut conn = self.write();
-        let tx = conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .sql()?;
-        let lease = crate::jobs::claim(&tx, request)?;
-        tx.commit().sql()?;
-        Ok(lease)
+        let mut conn = self.lock();
+        self.catalog.commit(&mut conn, Durability::Normal, |txn| {
+            crate::jobs::claim(txn.conn(), request)
+        })
     }
     fn job_holder(
         &self,
@@ -1758,28 +1487,22 @@ impl IngestStore for SqliteStore {
         fence: Option<u64>,
         renew: bool,
     ) -> Result<()> {
-        let mut conn = self.write();
-        let tx = conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .sql()?;
-        let row = crate::jobs::get(&tx, job, workspace)?
-            .ok_or_else(|| StoreError::NotFound("job_revoked".into()))?;
-        crate::jobs::holder(&tx, &row, fence, renew)?;
-        tx.commit().sql()
+        let mut conn = self.lock();
+        self.catalog.commit(&mut conn, Durability::Normal, |txn| {
+            let row = crate::jobs::get(txn.conn(), job, workspace)?
+                .ok_or_else(|| StoreError::NotFound("job_revoked".into()))?;
+            crate::jobs::holder(txn.conn(), &row, fence, renew)
+        })
     }
     fn jobs_exhausted(&self, workspace: &WorkspaceId, attempts: u32) -> Result<u64> {
         crate::jobs::exhausted(&self.lock(), workspace, attempts)
     }
-    fn jobs_reindex(
-        &self,
-        layer: kaban_core::Layer,
-        limit: u32,
-        ctx: &WriteCtx,
-    ) -> Result<kaban_core::RetireReport> {
-        self.jobs_reindex_impl(layer, limit, ctx)
-    }
     fn jobs_prune(&self, workspace: &WorkspaceId, now: i64, limit: u32) -> Result<u32> {
-        crate::jobs::prune(&self.lock(), workspace, now, limit)
+        // the leases and the jobs go in one commit (atomic since spec 11 T5)
+        let mut conn = self.lock();
+        self.catalog.commit(&mut conn, Durability::Normal, |txn| {
+            crate::jobs::prune(txn.conn(), workspace, now, limit)
+        })
     }
     fn job_submit(
         &self,
@@ -1793,25 +1516,19 @@ impl IngestStore for SqliteStore {
         self.job_submit_impl(request, ctx, accumulate)
     }
     fn job_open(&self, job: &kaban_core::IngestJob) -> Result<kaban_core::IngestJob> {
-        let mut conn = self.write();
-        let tx = conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .sql()?;
-        let row = crate::jobs::open(&tx, job)?;
-        tx.commit().sql()?;
-        Ok(row)
+        let mut conn = self.lock();
+        self.catalog.commit(&mut conn, Durability::Normal, |txn| {
+            crate::jobs::open(txn.conn(), job)
+        })
     }
     fn job_open_checked(
         &self,
         request: kaban_core::JobOpenRequest,
     ) -> Result<kaban_core::IngestJob> {
-        let mut conn = self.write();
-        let tx = conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .sql()?;
-        let row = crate::jobs::open_checked(&tx, &request)?;
-        tx.commit().sql()?;
-        Ok(row)
+        let mut conn = self.lock();
+        self.catalog.commit(&mut conn, Durability::Normal, |txn| {
+            crate::jobs::open_checked(txn.conn(), &request)
+        })
     }
     fn job_get(
         &self,
@@ -1821,54 +1538,16 @@ impl IngestStore for SqliteStore {
         crate::jobs::get(&self.lock(), job, workspace)
     }
     fn job_mark_stale(&self, job: &kaban_core::JobId, workspace: &WorkspaceId) -> Result<bool> {
-        crate::jobs::mark_stale(&self.lock(), job, workspace)
-    }
-    fn retire_producer(
-        &self,
-        authority: kaban_core::CurrentProducerAuthority,
-        old_producer: &str,
-        batch_rows: u32,
-        ctx: &WriteCtx,
-    ) -> Result<kaban_core::RetireReport> {
-        artifacts::retire_producer(
-            &mut self.write(),
-            &artifacts::MaintenanceContext {
-                setup: &self.reconcile,
-                signer: self.signer.as_ref(),
-                write: ctx,
-            },
-            authority,
-            old_producer,
-            batch_rows,
-        )
+        let mut conn = self.lock();
+        self.catalog.commit(&mut conn, Durability::Normal, |txn| {
+            crate::jobs::mark_stale(txn.conn(), job, workspace)
+        })
     }
     fn artifact_diagnostics(
         &self,
         workspace: &WorkspaceId,
-        authority: kaban_core::CurrentProducerAuthority,
     ) -> Result<kaban_core::ArtifactDiagnostics> {
-        doctor::artifact_diagnostics(&self.lock(), workspace, authority)
-    }
-    fn maintain_layer(
-        &self,
-        authority: kaban_core::CurrentProducerAuthority,
-        operation: kaban_core::LayerMaintenance,
-        document_path: Option<&str>,
-        batch_rows: u32,
-        ctx: &WriteCtx,
-    ) -> Result<kaban_core::RetireReport> {
-        artifacts::maintain_layer(
-            &mut self.write(),
-            &artifacts::MaintenanceContext {
-                setup: &self.reconcile,
-                signer: self.signer.as_ref(),
-                write: ctx,
-            },
-            authority,
-            operation,
-            document_path,
-            batch_rows,
-        )
+        doctor::artifact_diagnostics(&self.lock(), workspace)
     }
     fn artifact_source(
         &self,
@@ -1883,12 +1562,10 @@ impl IngestStore for SqliteStore {
     fn gazetteer_set_fresh(&self, document: &NodeId, workspace: &WorkspaceId) -> Result<bool> {
         artifacts::set_fresh(&self.lock(), document, workspace)
     }
-    /// The rebuild of the store's text index from the canonical rows; a store with nothing
-    /// attached is refused.
+    /// The rebuild of the store's text index from the canonical rows, through the catalog's
+    /// text class (spec 11 7.2.7).
     fn reindex_text(&self) -> Result<u64> {
-        self.seed_index()
-            .ok_or(StoreError::TextIndexUnavailable)?
-            .rebuild()?;
+        self.rebuild_class(ExtentClass::TextTier)?;
         self.lock()
             .query_row(
                 "SELECT count(*) FROM node WHERE lifecycle = 'active'",
@@ -1904,60 +1581,11 @@ impl IngestStore for SqliteStore {
     fn rescan(
         &self,
         policy_version: &str,
+        at: RescanCursor,
         batch: usize,
-        f: &mut dyn FnMut(&Node) -> RescanAction,
+        judge: &mut dyn RescanJudge,
     ) -> Result<RescanReport> {
-        self.rescan_impl(policy_version, batch, f)
-    }
-    fn rescan_assertions(
-        &self,
-        policy_version: &str,
-        f: &mut dyn FnMut(&kaban_core::Assertion, &mut Vec<AuditEntry>) -> Option<Value>,
-    ) -> Result<RescanReport> {
-        self.rescan_assertions_impl(policy_version, f)
-    }
-    fn deprecate_assertion(
-        &self,
-        key: &str,
-        reason: &str,
-        ctx: &WriteCtx,
-    ) -> Result<kaban_core::AssertionStatus> {
-        self.deprecate_assertion_impl(key, reason, ctx)
-    }
-    fn resolve_winner(
-        &self,
-        workspace: &str,
-        node: &NodeId,
-        value: &str,
-        group: Option<&str>,
-        ctx: &WriteCtx,
-    ) -> Result<String> {
-        candidates::resolve_winner(
-            &mut self.write(),
-            &self.reconcile,
-            self.signer.as_ref(),
-            workspace,
-            node,
-            value,
-            group,
-            ctx,
-        )
-    }
-    fn priors_obs_bump(&self, node: &NodeId, outcome: kaban_core::PriorsOutcome) -> Result<u32> {
-        let mut conn = self.write();
-        let tx = conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .sql()?;
-        let (rid, _) = Self::rid_of(&tx, node.as_str())?;
-        let counted = crate::explain::priors_obs_bump(&tx, rid, outcome)?;
-        tx.commit().sql()?;
-        Ok(counted)
-    }
-    fn priors_obs(&self) -> Result<Vec<kaban_core::PriorsObs>> {
-        crate::explain::priors_obs(&self.lock(), &self.reconcile)
-    }
-    fn unresolved_groups(&self, workspace: &str) -> Result<Vec<String>> {
-        crate::explain::unresolved_groups(&self.lock(), workspace)
+        self.rescan_impl(policy_version, at, batch, judge)
     }
     fn index_meta(&self) -> Result<IndexMeta> {
         let conn = self.lock();
@@ -2071,12 +1699,14 @@ impl IngestStore for SqliteStore {
         Ok(summary)
     }
     fn set_index_meta(&self, key: &str, value: &str) -> Result<()> {
-        let conn = self.lock();
-        conn.execute(
-            "INSERT INTO index_meta(key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            params![key, value],
-        ).sql()?;
-        Ok(())
+        let mut conn = self.lock();
+        self.catalog.commit(&mut conn, Durability::Normal, |txn| {
+            txn.conn().execute(
+                "INSERT INTO index_meta(key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                params![key, value],
+            ).sql()?;
+            Ok(())
+        })
     }
 
     // C4.2 doctor checks (M4-19): see `doctor.rs`
@@ -2084,104 +1714,20 @@ impl IngestStore for SqliteStore {
         let conn = self.lock();
         doctor::integrity_check(&conn)
     }
-    /// The text index's check: the attached adapter is sound when it serves a payload (a
-    /// watermark at 0, an index built over an empty history, is one; an adapter serving none
-    /// is a finding, T6 review t6-5); a store with nothing attached is refused.
+    /// The text index's check: its tiers and packs are catalog extents and sediment, which
+    /// the catalog's verification checks (`catalog_verify`), so nothing is left to check here.
     fn fts_integrity_check(&self) -> Result<MaintenanceOutcome> {
-        use kaban_core::text_index::Visibility;
-        let index = self.seed_index().ok_or(StoreError::TextIndexUnavailable)?;
-        Ok(match index.visible()? {
-            Visibility::Unavailable => MaintenanceOutcome::Failed(vec![
-                "the attached text index serves no payload: not built, or not of this database"
-                    .into(),
-            ]),
-            Visibility::Current | Visibility::Through(_) => MaintenanceOutcome::Ok,
-        })
+        Ok(MaintenanceOutcome::Ok)
     }
     fn vacuum(&self) -> Result<MaintenanceOutcome> {
         let conn = self.lock();
-        doctor::vacuum(&conn)
+        // VACUUM cannot run in a transaction: the catalog's one admitted exception
+        self.catalog.outside_commit(|| doctor::vacuum(&conn))
     }
     /// The explicit maintenance pass (spec 05 SS-03): the database hygiene (the TRUNCATE
-    /// checkpoint). The store's own adapter merges its segments as it commits, so it has
-    /// nothing to run; a store with nothing attached is refused.
+    /// checkpoint). The text index's packs are sealed by compaction, so it has nothing to run.
     fn optimize_fts(&self) -> Result<MaintenanceOutcome> {
-        if self.text_index.is_none() {
-            return Err(StoreError::TextIndexUnavailable);
-        }
         doctor::optimize_fts(&self.lock())
-    }
-    fn kind_stats(&self, workspace: &WorkspaceId) -> Result<Vec<kaban_core::KindStat>> {
-        let conn = self.lock();
-        candidates::kind_stats(&conn, workspace.as_str())
-    }
-    fn promote_kind(
-        &self,
-        workspace: &WorkspaceId,
-        from: &str,
-        to: &kaban_core::Qualified,
-        actor: &kaban_core::Actor,
-    ) -> Result<kaban_core::PromoteReport> {
-        // human-only (EN-F5): judged before the transaction opens
-        if *actor != kaban_core::Actor::HumanCli {
-            return Err(StoreError::HumanOnly("promote"));
-        }
-        let to_stored = kaban_core::stored_name(to);
-        let ev = NewEvent {
-            reason: to_stored.clone(),
-            path_scope: Vec::new(),
-            signer: None,
-            signer_kind: actor.clone().into(),
-            host: None,
-            session_id: None,
-            commit_sha: None,
-        };
-        let mut conn = self.write();
-        let tx = conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .sql()?;
-        let report = candidates::promote(&tx, workspace.as_str(), from, to, &ev, &now_iso())?;
-        tx.commit().sql()?;
-        Ok(report)
-    }
-    fn prune_kinds(
-        &self,
-        workspace: &WorkspaceId,
-        below: &kaban_core::config::PromoteWhen,
-        older_than: std::time::Duration,
-        dry_run: bool,
-    ) -> Result<kaban_core::PruneReport> {
-        let mut conn = self.write();
-        let tx = conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .sql()?;
-        let report = candidates::prune(
-            &tx,
-            workspace.as_str(),
-            below,
-            older_than,
-            dry_run,
-            &now_iso(),
-        )?;
-        tx.commit().sql()?;
-        Ok(report)
-    }
-    fn resolve_symbol(
-        &self,
-        workspace: &str,
-        node: &NodeId,
-        key: &str,
-        ctx: &WriteCtx,
-    ) -> Result<()> {
-        reconcile::resolve_symbol(
-            &mut self.write(),
-            &self.reconcile,
-            self.signer.as_ref(),
-            workspace,
-            node,
-            key,
-            ctx,
-        )
     }
 }
 
@@ -2189,27 +1735,3 @@ impl IngestStore for SqliteStore {
 // test code: failures are the assertion
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests;
-
-/// Entity resolution (E2.10): the one pass E2.11's tool and the ingest hook call.
-impl SqliteStore {
-    /// Resolve `workspace` once (engine-spec EN-F51 (1)-(5)): block, score and decide every pair
-    /// the blocks name, write the `identity` claims and the `node_identity` rows of the `Match`
-    /// pairs, leave the `Possible` pairs as `merge` candidates, in one write transaction.
-    ///
-    /// # Errors
-    /// Backend errors (the transaction is rolled back).
-    pub fn er_resolve(&self, workspace: &str) -> Result<kaban_core::ErReport> {
-        let mut conn = self.write();
-        let tx = conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .sql()?;
-        let report = crate::reconcile::er::resolve(
-            &tx,
-            &self.reconcile,
-            workspace,
-            crate::reconcile::persist::now_unix(),
-        )?;
-        tx.commit().sql()?;
-        Ok(report)
-    }
-}

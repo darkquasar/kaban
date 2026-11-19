@@ -9,13 +9,15 @@
 //! brings the parent `Section` (`PART_OF`) and the Decisions linked `EVIDENCE_FOR` is the
 //! ordinary hop 1 over every relationship; `kinds: ["Chunk"]` keeps chunks only.
 
-use crate::candidates;
 use crate::rows::{NODE_COLS, row_node};
 use crate::sql_error::SqlResultExt;
 use crate::sqlite::{WS_COL, in_workspace};
 use kaban_core::ident::{QueryClass, classify};
 use kaban_core::ontology::meta::RankHints;
-use kaban_core::text_index::{MatchMode, Searched, SeedFilter, TextHit, TextIndex, TextQuery};
+use kaban_core::query_budget::QueryBudget;
+use kaban_core::text_index::{
+    MatchMode, Searched, SeedFilter, TextHit, TextIndex, TextQuery, TextSnapshot,
+};
 use kaban_core::{Hit, Lifecycle, Node, RecallQuery, Result, StoreError};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::Value;
@@ -42,19 +44,16 @@ impl Access<'_> {
 const CODEREF_MATCH: &str = "json_extract(c.props, '$.relative_path') = ? AND (? IS NULL OR json_extract(c.props, '$.name_path') = ?) AND (? IS NULL OR json_extract(c.props, '$.repo') = ?)";
 
 /// The revalidation predicates of a [`SeedFilter`] (spec 05 SS-11): what the index may have
-/// matched is re-checked against the current row under them, with the candidate exclusion of
-/// EN-F49, inside the statement so `LIMIT` never starves a filtered recall.
+/// matched is re-checked against the current row under them, inside the statement so `LIMIT` never starves a filtered recall.
 struct Predicates {
     sql: String,
     binds: Vec<Box<dyn rusqlite::ToSql>>,
 }
 
 impl Predicates {
-    fn of(conn: &Connection, f: &SeedFilter<'_>) -> Result<Self> {
+    fn of(f: &SeedFilter<'_>) -> Self {
         // the index holds active rows only, the predicate guards against a stale index
         let mut sql = String::from("n.lifecycle = 'active'");
-        // EN-F49: candidates (`node_candidate` rows) never seed or join a recall unless asked
-        sql.push_str(&candidates::exclusion_sql(conn, "n", f.read)?);
         let mut binds: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
         if !f.kinds.is_empty() {
             sql.push_str(" AND n.kind IN (");
@@ -92,50 +91,55 @@ impl Predicates {
                 binds.push(Box::new(opt.clone()));
             }
         }
-        Ok(Self { sql, binds })
+        Self { sql, binds }
     }
 }
 
 /// The seeds of one mode (spec 05 SS-11): pages of `page` hits from `view` (one pinned
 /// generation for the whole recall), every hit re-read from SQLite in one statement per page
-/// and kept only when its row exists at the revision the index saw and still passes the
-/// lifecycle, kind, workspace, tag, code-ref and candidate predicates. [`Seeds::fill`]
+/// and kept, with the revision and kind its row has then (TXT-05: a hit carries identity and
+/// score only), when its row still passes the lifecycle, kind, workspace, tag, code-ref and
+/// candidate predicates. [`Seeds::fill`]
 /// continues retrieval where the last fill stopped, until its target of eligible seeds is
 /// kept or the candidates are exhausted (no skip cap: a fixed oversample is insufficient), so
 /// the recall asks for more when a later rejection stage (canonical resolution, the read
 /// gate) leaves the deliverable page short. An index that cannot answer the mode seeds
 /// nothing.
 ///
-/// A revision mismatch is dropped, not re-ranked: the projector re-indexes the row within one
-/// page. Excerpts are never taken from here: the caller materializes every returned `rid`
-/// from the current row.
+/// Excerpts are never taken from here: the caller materializes every returned `rid` from the
+/// current row.
 struct Seeds {
-    /// The revalidation statement: `(rid, rev)` of the page's rows that pass the predicates.
+    /// The revalidation statement: `(rid, rev, kind)` of the page's rows that pass the
+    /// predicates.
     sql: String,
     predicates: Predicates,
     mode: MatchMode,
     page: usize,
-    kept: Vec<TextHit>,
+    kept: Vec<Seed>,
     skip: usize,
     /// No further candidate: the index said so, cannot answer the mode, or the mode is not
     /// in play for this recall.
     exhausted: bool,
 }
 
+/// One kept seed: the hit's record with the revision and kind its row had when it was
+/// revalidated (the fusion drops it when the row changed since, and seeds the per-kind
+/// expansion hints from the kind).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Seed {
+    rid: i64,
+    revision: i64,
+    kind: String,
+}
+
 impl Seeds {
-    fn new(
-        conn: &Connection,
-        q: &RecallQuery,
-        mode: MatchMode,
-        page: usize,
-        in_play: bool,
-    ) -> Result<Self> {
-        let predicates = Predicates::of(conn, &SeedFilter::of(q))?;
+    fn new(q: &RecallQuery, mode: MatchMode, page: usize, in_play: bool) -> Self {
+        let predicates = Predicates::of(&SeedFilter::of(q));
         let sql = format!(
-            "SELECT n.rid, n.rev FROM node n WHERE n.rid IN (SELECT value FROM json_each(?1)) AND {}",
+            "SELECT n.rid, n.rev, n.kind FROM node n WHERE n.rid IN (SELECT value FROM json_each(?1)) AND {}",
             predicates.sql
         );
-        Ok(Self {
+        Self {
             sql,
             predicates,
             mode,
@@ -143,14 +147,19 @@ impl Seeds {
             kept: Vec::new(),
             skip: 0,
             exhausted: !in_play,
-        })
+        }
     }
 
     /// Retrieve until `target` eligible seeds are kept or the candidates are exhausted. Each
-    /// page is searched with no connection held and revalidated under one statement's lock.
+    /// page is reserved on `budget` before it is searched (the search hands it over
+    /// uncharged), searched with no connection held and revalidated under one statement's
+    /// lock.
+    #[allow(clippy::too_many_arguments)] // the snapshot and its budget travel with every page
     fn fill(
         &mut self,
         view: &dyn TextIndex,
+        at: &TextSnapshot<'_>,
+        budget: &QueryBudget,
         q: &RecallQuery,
         target: usize,
         sufficient: usize,
@@ -158,14 +167,21 @@ impl Seeds {
     ) -> Result<()> {
         let filter = SeedFilter::of(q);
         while self.kept.len() < target && !self.exhausted {
-            let page = view.search(&TextQuery {
-                text: &q.query,
-                mode: self.mode,
-                filter,
-                limit: self.page,
-                sufficient,
-                skip: self.skip,
-            })?;
+            let _page = budget.reserve(
+                u64::try_from(self.page.saturating_mul(size_of::<TextHit>())).unwrap_or(u64::MAX),
+            )?;
+            let page = view.search(
+                at,
+                &TextQuery {
+                    text: &q.query,
+                    mode: self.mode,
+                    filter,
+                    limit: self.page,
+                    sufficient,
+                    skip: self.skip,
+                },
+                budget,
+            )?;
             let Searched::Hits { hits, exhausted } = page else {
                 self.exhausted = true;
                 return Ok(());
@@ -185,27 +201,31 @@ impl Seeds {
                     .map(|b| b.as_ref() as &dyn rusqlite::ToSql),
             );
             let conn = access.conn();
-            let current: HashMap<i64, i64> = conn
+            let mut current: HashMap<i64, (i64, String)> = conn
                 .prepare_cached(&self.sql)
                 .sql()?
                 .query_map(binds.as_slice(), |r| {
-                    Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
+                    Ok((r.get::<_, i64>(0)?, (r.get(1)?, r.get(2)?)))
                 })
                 .sql()?
                 .collect::<rusqlite::Result<_>>()
                 .sql()?;
             drop(conn);
-            self.kept.extend(
-                hits.into_iter()
-                    .filter(|hit| current.get(&hit.rid) == Some(&hit.revision)),
-            );
+            self.kept.extend(hits.into_iter().filter_map(|hit| {
+                let (revision, kind) = current.remove(&hit.rid)?;
+                Some(Seed {
+                    rid: hit.rid,
+                    revision,
+                    kind,
+                })
+            }));
             self.exhausted = exhausted;
         }
         Ok(())
     }
 
     /// The first `target` eligible seeds kept so far.
-    fn first(&self, target: usize) -> &[TextHit] {
+    fn first(&self, target: usize) -> &[Seed] {
         &self.kept[..self.kept.len().min(target)]
     }
 }
@@ -260,65 +280,47 @@ fn chunk_card(mut node: Node) -> Node {
 /// continues (SS-11) until `limit` deliverable results are filled, counted after every
 /// rejection stage (revalidation, lifecycle, workspace, kind and tag, canonical resolution
 /// and `eligible`: the caller's read gate), or the candidates of every mode in play are
-/// exhausted, all through one pinned generation.
+/// exhausted, all through one pinned catalog generation (`at`, searched under `budget`).
+#[allow(clippy::too_many_arguments)] // the recall's inputs and the one snapshot it reads
 pub(crate) fn recall_with(
     access: &Access<'_>,
     ontology: &kaban_core::Ontology,
     config: &kaban_core::config::Recall,
     q: &RecallQuery,
     index: &dyn TextIndex,
+    at: &TextSnapshot<'_>,
+    budget: &QueryBudget,
     eligible: &dyn Fn(&Node) -> bool,
 ) -> Result<Vec<Hit>> {
-    let permits = |layer| {
-        q.layers
-            .as_ref()
-            .is_none_or(|layers| layers.contains(&layer))
-    };
-    if q.layers
-        .as_ref()
-        .is_some_and(|layers| layers.contains(&kaban_core::RecallLayer::Sim))
-    {
-        return Err(StoreError::InvalidName(
-            "sim".into(),
-            "not_available_in_this_release",
-        ));
-    }
+    let permits = |mode| q.modes.as_ref().is_none_or(|modes| modes.contains(&mode));
     let limit = if q.limit == 0 { 10 } else { q.limit.min(100) };
     let seed_k = (limit * 5).clamp(20, 100);
     let k =
         f64::from(config.effective_rrf_k().map_err(|_| {
             StoreError::InvalidName("recall.fusion".into(), "invalid_configuration")
         })?);
-    // one pinned generation for every page of this recall (SS-11), taken with no connection
-    // held; the filters travel with every seed search so LIMIT never starves a filtered recall
-    let view = index.pin()?;
-    let (mut lexical, mut fuzzy) = {
-        let conn = access.conn();
-        (
-            Seeds::new(
-                &conn,
-                q,
-                MatchMode::Lexical,
-                seed_k,
-                permits(kaban_core::RecallLayer::Fts),
-            )?,
-            Seeds::new(
-                &conn,
-                q,
-                MatchMode::Fuzzy,
-                seed_k,
-                permits(kaban_core::RecallLayer::Fuzzy),
-            )?,
-        )
-    };
+    // one pinned catalog generation for every page of this recall (SS-11, the caller's `at`);
+    // the filters travel with every seed search so LIMIT never starves a filtered recall
+    let mut lexical = Seeds::new(
+        q,
+        MatchMode::Lexical,
+        seed_k,
+        permits(kaban_core::RecallMode::Lexical),
+    );
+    let mut fuzzy = Seeds::new(
+        q,
+        MatchMode::Fuzzy,
+        seed_k,
+        permits(kaban_core::RecallMode::Fuzzy),
+    );
     let mut target = seed_k;
     loop {
         // 1) lexical candidates, revalidated and refilled (an unavailable index seeds nothing)
-        lexical.fill(view.as_ref(), q, target, limit, access)?;
+        lexical.fill(index, at, budget, q, target, limit, access)?;
         // the fuzzy seeds join on request, or when the lexical ones are empty
         let fuzzy_in_play = q.fuzzy || lexical.kept.is_empty();
         if fuzzy_in_play {
-            fuzzy.fill(view.as_ref(), q, target, limit, access)?;
+            fuzzy.fill(index, at, budget, q, target, limit, access)?;
         }
         let out = fuse(
             &access.conn(),
@@ -347,8 +349,8 @@ fn fuse(
     ontology: &kaban_core::Ontology,
     k: f64,
     q: &RecallQuery,
-    lexical: &[TextHit],
-    fuzzy: Option<&[TextHit]>,
+    lexical: &[Seed],
+    fuzzy: Option<&[Seed]>,
     limit: usize,
     eligible: &dyn Fn(&Node) -> bool,
 ) -> Result<Vec<Hit>> {
@@ -374,11 +376,9 @@ fn fuse(
         entry.1.push(format!("tri:{}", rank + 1));
     }
     let hops = q.hops.min(2);
-    // EN-F49 as one predicate for the frontier and for a resolved canonical (E2.10b BR-5)
-    let exclude = candidates::exclusion_sql(conn, "n", q.filters)?;
     // archived rows (superseded records, archived notes) join the frontier and the result only
     // on request; invalidated records are tombstoned (F5) and never return (M3-12)
-    let archived_ok = q.include_superseded || q.include_archived;
+    let archived_ok = q.include_archived;
     if hops > 0 {
         let mut frontier: Vec<(i64, f64, usize)> = lexical
             .iter()
@@ -388,9 +388,9 @@ fn fuse(
             .collect();
         // the workspace (review R1-5) and lifecycle (review R2-4) predicates apply while
         // the frontier is built: a neighbour outside the workspace, tombstoned or purged,
-        // or archived without `include_superseded` / `include_archived` (M3-12: the same
-        // frontier rule), is never scored and never expanded from
-        let graph_sql: Vec<[String; 2]> = lexical.iter().take(20).map(|TextHit { kind, .. }| {
+        // or archived without `include_archived` (M3-12), is never scored and never expanded
+        // from
+        let graph_sql: Vec<[String; 2]> = lexical.iter().take(20).map(|Seed { kind, .. }| {
             std::array::from_fn(|index| {
                 let rels = match rank_hints(ontology, kind) {
                     Some(hints) => hints.expand_rels.iter().map(String::as_str).collect::<Vec<_>>(),
@@ -403,7 +403,7 @@ fn fuse(
                     format!(" AND x.rel IN ({})", rels.into_iter().map(sql_literal).collect::<Vec<_>>().join(","))
                 };
                 format!(
-            "SELECT x.nb, x.rel FROM (SELECT e.dst AS nb, e.rel FROM edge e WHERE e.src=?1 UNION ALL SELECT e.src, e.rel FROM edge e WHERE e.dst=?1) x JOIN node n ON n.rid = x.nb WHERE (?2 IS NULL OR {WS_COL} = ?2) AND (n.lifecycle = 'active' OR (?3 AND n.lifecycle = 'archived')){exclude}{rel_filter} ORDER BY x.nb LIMIT 200"
+            "SELECT x.nb, x.rel FROM (SELECT e.dst AS nb, e.rel FROM edge e WHERE e.src=?1 UNION ALL SELECT e.src, e.rel FROM edge e WHERE e.dst=?1) x JOIN node n ON n.rid = x.nb WHERE (?2 IS NULL OR {WS_COL} = ?2) AND (n.lifecycle = 'active' OR (?3 AND n.lifecycle = 'archived')){rel_filter} ORDER BY x.nb LIMIT 200"
                 )
             })
         }).collect();
@@ -448,50 +448,12 @@ fn fuse(
     let mut st = conn
         .prepare_cached(&format!("SELECT {NODE_COLS} FROM node WHERE rid=?"))
         .sql()?;
-    // EN-F51 (5): a merged node reads as its canonical, returned once (the first, highest
-    // ranked, occurrence keeps its score) and only when the canonical itself passes the
-    // workspace and candidate checks below; a `canonical_rid NULL` row (purged canonical,
-    // `persist::purge_claims_of_node`) is no redirect; a store without the engine tables has none
-    let redirects = crate::reconcile::engine_tables(conn)?;
-    let mut identity = if redirects {
-        Some(
-            conn.prepare_cached("SELECT canonical_rid FROM node_identity WHERE rid = ?1")
-                .sql()?,
-        )
-    } else {
-        None
-    };
-    // EN-F49 re-applied to the resolved canonical (E2.10b BR-5): the hit passed the exclusion
-    // as itself; the node it reads as may still be a candidate, and a visible alias never
-    // exposes one (`include_candidates` empties the predicate, so nothing is checked)
-    let mut canonical_visible = if redirects && !exclude.is_empty() {
-        Some(
-            conn.prepare_cached(&format!("SELECT 1 FROM node n WHERE n.rid = ?1{exclude}"))
-                .sql()?,
-        )
-    } else {
-        None
-    };
     let identifier = classify(&q.query) == QueryClass::Identifier;
     let mut seen: HashSet<i64> = HashSet::new();
     let mut out: Vec<Hit> = Vec::new();
     for (hit, s, mut why) in ranked {
-        let rid = match identity.as_mut() {
-            Some(st) => st
-                .query_row([hit], |r| r.get::<_, Option<i64>>(0))
-                .optional()
-                .sql()?
-                .flatten()
-                .unwrap_or(hit),
-            None => hit,
-        };
+        let rid = hit;
         if !seen.insert(rid) {
-            continue;
-        }
-        if rid != hit
-            && let Some(st) = canonical_visible.as_mut()
-            && st.query_row([rid], |_| Ok(())).optional().sql()?.is_none()
-        {
             continue;
         }
         let Some(node) = st.query_row([rid], row_node).optional().sql()? else {
@@ -547,20 +509,61 @@ fn fuse(
     Ok(out)
 }
 
+/// The most chunks of one path a `<path>:<offset>` lookup examines
+/// (`MemoryStore::chunk_covering`, RW2-6): the path's chunks in id order up to this many are
+/// the candidates, so one document's size bounds the cost and the other documents never
+/// enter it. A document split into more chunks than this answers from its first
+/// `MAX_SPAN_SCAN` only.
+pub(crate) const MAX_SPAN_SCAN: usize = 4096;
+
+/// The active chunk of `ws` from `path` covering byte `offset`
+/// (`MemoryStore::chunk_covering`): the path's first `MAX_SPAN_SCAN` chunks by id are the
+/// candidates (the inner select), the covering one with the lowest id is decoded; no other
+/// row is read into a `Node`.
+pub(crate) fn chunk_covering(
+    conn: &Connection,
+    ws: &str,
+    path: &str,
+    offset: u64,
+) -> Result<Option<kaban_core::Node>> {
+    let offset = i64::try_from(offset).unwrap_or(i64::MAX);
+    let bound = i64::try_from(MAX_SPAN_SCAN).unwrap_or(i64::MAX);
+    let mut st = conn
+        .prepare_cached(&format!(
+            "SELECT {NODE_COLS} FROM (
+               SELECT n.* FROM node n WHERE n.kind = 'Chunk' AND {WS_COL} = ?1 AND n.lifecycle = 'active'
+                 AND json_extract(n.props, '$.path') = ?2 ORDER BY n.id LIMIT ?4) n
+             WHERE json_extract(n.props, '$.byte_start') <= ?3 AND json_extract(n.props, '$.byte_end') > ?3
+             ORDER BY n.id LIMIT 1"
+        ))
+        .sql()?;
+    st.query_row(params![ws, path, offset, bound], row_node)
+        .optional()
+        .sql()
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // test code: failures are the assertion
 mod tests {
     use super::{Access, recall_with};
+    use kaban_core::query_budget::QueryBudget;
     use kaban_core::text_index::TextHit;
+    use kaban_core::text_index::TextSnapshot;
     use kaban_core::text_index::fake::FakeIndex;
     use kaban_core::{ForgetMode, MemoryStore, NewNode, Node, NodeId, RecallQuery, WriteCtx};
 
+    /// An empty catalog snapshot: the scripted index answers without one.
+    fn snapshot() -> TextSnapshot<'static> {
+        TextSnapshot {
+            generation: 0,
+            kbx: std::path::Path::new(""),
+            tiers: &[],
+            sediment: &[],
+        }
+    }
+
     fn ctx(ws: &str) -> WriteCtx {
-        WriteCtx::new(
-            "v1",
-            kaban_core::WorkspaceId::new(ws),
-            kaban_core::Actor::Agent,
-        )
+        WriteCtx::new(kaban_core::WorkspaceId::new(ws), kaban_core::Actor::Agent)
     }
 
     fn created(store: &crate::SqliteStore, ws: &str, text: &str) -> Node {
@@ -582,39 +585,32 @@ mod tests {
         }
     }
 
-    /// `(rid, rev)` of `node`.
-    fn row(store: &crate::SqliteStore, node: &Node) -> (i64, i64) {
+    /// The `rid` of `node`.
+    fn row(store: &crate::SqliteStore, node: &Node) -> i64 {
         store
             .lock()
-            .query_row("SELECT rid, rev FROM node WHERE id = ?1", [&node.id], |r| {
-                Ok((r.get(0)?, r.get(1)?))
+            .query_row("SELECT rid FROM node WHERE id = ?1", [&node.id], |r| {
+                r.get(0)
             })
             .unwrap()
     }
 
-    fn hit(rid: i64, revision: i64) -> TextHit {
-        TextHit {
-            rid,
-            revision,
-            score: 1.0,
-            kind: "Fact".into(),
-        }
+    fn hit(rid: i64) -> TextHit {
+        TextHit { rid, score: 1.0 }
     }
 
-    /// SS-11: every hit is re-read from SQLite. A hit whose revision the index saw is not the
-    /// current one (stale), a tombstoned record (revoked) and a record of another workspace
-    /// are excluded; the current, active, in-workspace one is returned.
+    /// SS-11: every hit is re-read from SQLite. A tombstoned record (revoked), a record of
+    /// another workspace and a row that does not exist are excluded; the current, active,
+    /// in-workspace one is returned.
     #[test]
-    fn stale_revoked_and_cross_workspace_hits_are_excluded() {
+    fn revoked_missing_and_cross_workspace_hits_are_excluded() {
         let store = crate::SqliteStore::open_memory().unwrap();
         let valid = created(&store, "ws1", "quokka valid");
-        let stale = created(&store, "ws1", "quokka stale");
         let revoked = created(&store, "ws1", "quokka revoked");
         let elsewhere = created(&store, "ws2", "quokka elsewhere");
-        let (valid_rid, valid_rev) = row(&store, &valid);
-        let (stale_rid, stale_rev) = row(&store, &stale);
-        let (revoked_rid, revoked_rev) = row(&store, &revoked);
-        let (elsewhere_rid, elsewhere_rev) = row(&store, &elsewhere);
+        let valid_rid = row(&store, &valid);
+        let revoked_rid = row(&store, &revoked);
+        let elsewhere_rid = row(&store, &elsewhere);
         store
             .forget(
                 &NodeId::parse(&revoked.id).unwrap(),
@@ -624,10 +620,10 @@ mod tests {
             .unwrap();
         let index = FakeIndex {
             lexical: Some(vec![
-                hit(stale_rid, stale_rev - 1),
-                hit(revoked_rid, revoked_rev),
-                hit(elsewhere_rid, elsewhere_rev),
-                hit(valid_rid, valid_rev),
+                hit(1_000_000),
+                hit(revoked_rid),
+                hit(elsewhere_rid),
+                hit(valid_rid),
             ]),
             ..Default::default()
         };
@@ -645,6 +641,8 @@ mod tests {
             &config,
             &q,
             &index,
+            &snapshot(),
+            &QueryBudget::new(u64::MAX, None),
             &|_| true,
         )
         .unwrap();
@@ -662,10 +660,9 @@ mod tests {
         let valid: Vec<Node> = (0..3)
             .map(|i| created(&store, "default", &format!("quokka valid {i}")))
             .collect();
-        let mut scripted: Vec<TextHit> = (0..2_500).map(|i| hit(1_000_000 + i, 1)).collect();
+        let mut scripted: Vec<TextHit> = (0..2_500).map(|i| hit(1_000_000 + i)).collect();
         for node in &valid {
-            let (rid, rev) = row(&store, node);
-            scripted.push(hit(rid, rev));
+            scripted.push(hit(row(&store, node)));
         }
         let index = FakeIndex {
             lexical: Some(scripted),
@@ -684,6 +681,8 @@ mod tests {
             &config,
             &q,
             &index,
+            &snapshot(),
+            &QueryBudget::new(u64::MAX, None),
             &|_| true,
         )
         .unwrap();
@@ -708,10 +707,7 @@ mod tests {
         let scripted: Vec<TextHit> = hidden
             .iter()
             .chain(std::iter::once(&shown))
-            .map(|node| {
-                let (rid, rev) = row(&store, node);
-                hit(rid, rev)
-            })
+            .map(|node| hit(row(&store, node)))
             .collect();
         let index = FakeIndex {
             lexical: Some(scripted),
@@ -732,6 +728,8 @@ mod tests {
             &config,
             &q,
             &index,
+            &snapshot(),
+            &QueryBudget::new(u64::MAX, None),
             &eligible,
         )
         .unwrap();
@@ -744,11 +742,7 @@ mod tests {
     #[test]
     fn an_unavailable_index_yields_an_empty_recall_not_an_error() {
         let store = crate::SqliteStore::open_memory().unwrap();
-        let ctx = WriteCtx::new(
-            "v1",
-            kaban_core::WorkspaceId::default(),
-            kaban_core::Actor::Agent,
-        );
+        let ctx = WriteCtx::new(kaban_core::WorkspaceId::default(), kaban_core::Actor::Agent);
         let note = NewNode {
             kind: "Failure".into(),
             text: "linker could not find libssl".into(),
@@ -768,6 +762,8 @@ mod tests {
             &config,
             &q,
             &FakeIndex::default(),
+            &snapshot(),
+            &QueryBudget::new(u64::MAX, None),
             &|_| true,
         );
         assert!(hits.unwrap().is_empty());

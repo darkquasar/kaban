@@ -16,8 +16,8 @@ mod mcp_client;
 
 use common::Scratch;
 use kaban_core::{
-    Actor, ChangeLogStore, ForgetMode, IngestStore, LeaseStore, MemoryStore, NewNode, NodeId,
-    RememberOutcome, WorkspaceId, WriteCtx,
+    Actor, ForgetMode, IngestStore, MemoryStore, NewNode, NodeId, RememberOutcome, WorkspaceId,
+    WriteCtx,
 };
 use kaban_store_sqlite::SqliteStore;
 use serde_json::Value;
@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 fn ctx() -> WriteCtx {
-    WriteCtx::new("v1", WorkspaceId::default(), Actor::Agent)
+    WriteCtx::new(WorkspaceId::default(), Actor::Agent)
 }
 
 fn note(text: &str) -> NewNode {
@@ -117,7 +117,6 @@ fn stale_identifier_marker_requires_explicit_reindex_and_doctor_never_repairs_it
                 .unwrap()
                 .contains("kaban reindex text")
         );
-        assert_eq!(check(&value, "audit")["ok"], true);
         assert_eq!(store.index_meta().unwrap().entries, metadata);
         assert_eq!(
             serde_json::to_value(store.get(&ids[0], false).unwrap()).unwrap(),
@@ -154,10 +153,12 @@ fn engine_overrides_are_reported_and_invalid_config_never_creates_a_database() {
     let s = Scratch::new("kaban-doctor", "engine-config");
     std::fs::create_dir_all(s.home()).unwrap();
     let path = s.home().join("config.yaml");
-    // ... the retired trigram key among them (spec 05 OWN-M): an unknown key like any other
+    // ... the retired trigram key and the removed `budget` section (PC-16: `text.build_rss_mb`
+    // replaced `budget.l0_rss_mb`, no alias) among them: an unknown key like any other
     for yaml in [
-        "budget:\n  l0_rss_mb: 0\n",
-        "budget:\n  unknown: 1\n",
+        "text:\n  build_rss_mb: 0\n",
+        "text:\n  unknown: 1\n",
+        "budget:\n  l0_rss_mb: 321\n",
         "index:\n  trigram: true\n",
     ] {
         std::fs::write(&path, yaml).unwrap();
@@ -168,25 +169,25 @@ fn engine_overrides_are_reported_and_invalid_config_never_creates_a_database() {
     }
     std::fs::remove_file(&path).unwrap();
     seed(&s, &["diagnostic config test"]);
-    std::fs::write(&path, "budget:\n  l0_rss_mb: 321\n").unwrap();
+    std::fs::write(&path, "text:\n  build_rss_mb: 321\n").unwrap();
     let out = doctor(&s, &s.db(), &[]);
     assert_eq!(out.status.code(), Some(0), "{out:?}");
     let value = report(&out);
     let rows = value["budgets"].as_array().unwrap();
-    assert_eq!(rows.len(), 8);
+    assert_eq!(rows.len(), 7);
     let row = rows
         .iter()
-        .find(|row| row["key"] == "budget.l0_rss_mb")
+        .find(|row| row["key"] == "text.build_rss_mb")
         .unwrap();
     assert_eq!(row["effective"], 321);
     assert_eq!(row["source"], "config");
     assert_eq!(row["cap_lifted"], false);
     assert_eq!(
-        check(&value, "layer_embed")["detail"],
+        check(&value, "producer_git_history")["detail"],
         "not_available_in_this_release"
     );
     assert_eq!(
-        check(&value, "layer_extractors")["detail"],
+        check(&value, "producer_extractor")["detail"],
         "explicit_selection_only"
     );
 }
@@ -215,29 +216,6 @@ fn a_healthy_database_passes_and_a_corrupted_fts_shadow_table_fails_deterministi
             "doctor checks the index against itself",
         ],
     );
-    // spec 05 SS-21: a consumer registered at the head (SS-06) that one more write leaves
-    // behind; doctor reports its retention lag by name (the rows of that write)
-    let lag = {
-        let store = SqliteStore::open(&s.db(), &s.home().join("keys")).unwrap();
-        let lease = store
-            .lease_acquire("export", "doctor-test", 60)
-            .unwrap()
-            .unwrap();
-        let cursor = store.changes_register("export", lease.fence).unwrap();
-        store.lease_release(&lease).unwrap();
-        created(
-            store
-                .remember(note("one write after the consumer registered"), &[], &ctx())
-                .unwrap(),
-        );
-        let head = store
-            .changes_read(cursor, 10_000)
-            .unwrap()
-            .last()
-            .map_or(cursor, |c| c.seq);
-        head - cursor
-    };
-    assert!(lag > 0, "the write left the consumer behind");
     // the key must already exist: a fresh home gets no key created for this database
     let other = s.0.join("other-home");
     let out = Command::new(env!("CARGO_BIN_EXE_kaban"))
@@ -261,41 +239,35 @@ fn a_healthy_database_passes_and_a_corrupted_fts_shadow_table_fails_deterministi
     assert_eq!(
         names,
         [
+            // spec 11 QRY-07: this binary's startup constructor installed the allocator adapter
+            "allocator_adapter",
             "db_modes",
             "integrity",
             "fts_integrity",
+            // spec 11 T6: the catalog's structural verification and its effective budget
+            "catalog_verify",
+            "catalog_budget",
             "claim_exhausted",
             "stale_artifacts",
-            "retired_producers",
-            "reconcile_cursor_lag",
             "schema_version",
-            // engine-plan E2.0 (EN-E10b): `changes_lag` with the deprecated alias row
-            "changes_lag",
-            "outbox_lag",
-            "conflicts",
-            // spec 05 SS-21: the retention lag of every registered consumer, by name
-            "consumer_lag",
-            // spec 05 SS-21: the text index, its payload watermark and its lag behind the
-            // canonical head (OWN-M: every database serves its own Tantivy index)
+            // the text index: a catalog class, searchable at commit (spec 11 T7), no lag rows
             "text_index",
-            "text_index_watermark",
-            "text_index_lag",
             "ident_terms_version",
-            "layer_fts",
-            "layer_gazetteer",
-            "layer_embed",
-            "layer_extractors",
-            "key_file",
-            "audit",
-            // engine-plan E1.8 (EN-F5): the discovered-kinds facts of the bound workspace
-            "discovered",
-            // engine-plan E2.0 (OWN-65): `unstamped` events per reason
-            "unstamped",
-            // engine-plan E2.4 (EN-F12b): the unresolved conflict groups of the workspace
-            "unresolved",
+            // PC-16: one row per producer, in `stats.producers` order
+            "producer_authored",
+            "producer_hook_events",
+            "producer_document_ingest",
+            "producer_gazetteer",
+            "producer_extractor",
+            "producer_scip_import",
+            "producer_git_history",
             // engine-plan E3.11 Step 6: CodeRef anchors the current snapshot no longer holds
             "stale_anchors"
         ]
+    );
+    assert_eq!(
+        check(&healthy, "allocator_adapter")["detail"],
+        "installed before main"
     );
     // no codegraph key in this home: nothing to inspect, nothing called renamed or created
     assert_eq!(
@@ -317,20 +289,14 @@ fn a_healthy_database_passes_and_a_corrupted_fts_shadow_table_fails_deterministi
         check(&healthy, "schema_version")["detail"],
         kaban_store_sqlite::LATEST_SCHEMA_VERSION.to_string()
     );
-    assert_eq!(
-        check(&healthy, "consumer_lag")["detail"],
-        format!("export: {lag}; text-index: 0"),
-        "{healthy}"
-    );
-    assert_eq!(check(&healthy, "audit")["detail"], "0 entries");
-    assert_eq!(check(&healthy, "text_index")["detail"], "tantivy");
+    assert_eq!(check(&healthy, "text_index")["detail"], "catalog");
 }
 
-/// OWN-P: doctor on a database at another schema version prints the refusal with its
-/// guidance and exits 4 (request-shaped: the file is the wrong input for this kaban); no
-/// report document, nothing modified.
+/// OWN-P, spec 11 CMP-01: doctor on a database at another schema version reports the refusal
+/// without failing (exit 0): the report's `schema_version` check fails with the refusal's
+/// text, naming both versions and the way out; nothing is modified.
 #[test]
-fn doctor_on_a_database_at_another_schema_version_prints_the_refusal_and_exits_4() {
+fn doctor_on_a_database_at_another_schema_version_reports_the_refusal_and_exits_0() {
     let s = Scratch::new("kaban-doctor", "other-schema");
     seed(&s, &["a note of the last ladder release"]);
     let older = kaban_store_sqlite::LATEST_SCHEMA_VERSION - 1;
@@ -342,17 +308,18 @@ fn doctor_on_a_database_at_another_schema_version_prints_the_refusal_and_exits_4
         )
         .unwrap();
     let out = doctor(&s, &s.db(), &[]);
-    assert_eq!(out.status.code(), Some(4), "{out:?}");
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let refused = report(&out);
+    assert_eq!(refused["ok"], false, "{refused}");
+    let row = check(&refused, "schema_version");
+    assert_eq!(row["ok"], false, "{row}");
+    let detail = row["detail"].as_str().unwrap();
     assert!(
-        out.stdout.is_empty(),
-        "no report on a refused open: {out:?}"
-    );
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains(&format!("schema version {older}"))
-            && stderr.contains("re-ingest")
-            && !stderr.contains("retired"),
-        "the refusal names the version and the way out: {stderr}"
+        detail.contains(&format!("schema version {older}"))
+            && detail.contains(&kaban_store_sqlite::LATEST_SCHEMA_VERSION.to_string())
+            && detail.contains("no upgrade path exists; create a fresh project and re-ingest")
+            && !detail.contains("retired"),
+        "the refusal names both versions and the way out: {detail}"
     );
     let version: String = rusqlite::Connection::open(s.db())
         .unwrap()
@@ -405,14 +372,12 @@ fn fts_integrity_passes_with_archived_and_tombstoned_rows_and_vacuum_is_its_own_
     assert_eq!(check(&v, "fts_integrity")["ok"], true, "{v}");
     assert_eq!(check(&v, "integrity")["ok"], true, "{v}");
     assert_eq!(check(&v, "vacuum")["ok"], true, "{v}");
-    // the seven checks, the E2.0 `outbox_lag` alias row of `changes_lag` (EN-E10b, until 3.2),
-    // the E1.8 `discovered` line, the E2.0 `unstamped` line (OWN-65), the E2.4 `unresolved`
-    // line, the three artifact/cursor checks, the E3.11 `stale_anchors` line, the spec 05
-    // SS-21 `consumer_lag`, `text_index`, `text_index_watermark` and `text_index_lag` lines
-    // and the vacuum line
-    assert_eq!(v["checks"].as_array().unwrap().len(), 27);
-    // the store's own projector is a registered consumer at the head (spec 05 OWN-M)
-    assert_eq!(check(&v, "consumer_lag")["detail"], "text-index: 0");
+    // the checks without the governance, audit and lag rows (REC-08): the stale-artifact
+    // check (`retired_producers` went with layer retirement, OD-P1), the E3.11 `stale_anchors`
+    // line, the `text_index` line, one line per producer (seven, PC-16), the spec 11 T6
+    // `catalog_verify` and `catalog_budget` lines, the vacuum line and the `allocator_adapter`
+    // line
+    assert_eq!(v["checks"].as_array().unwrap().len(), 20);
     // without the flag there is no vacuum line
     let v = report(&doctor(&s, &s.db(), &[]));
     assert!(
@@ -529,9 +494,9 @@ fn doctor_in(s: &Scratch, cwd: &Path) -> Value {
 }
 
 /// Rows of the tables a write would touch.
-fn write_counts(db: &Path) -> [i64; 3] {
+fn write_counts(db: &Path) -> [i64; 1] {
     let conn = rusqlite::Connection::open(db).unwrap();
-    ["changes", "events", "audit"].map(|t| {
+    ["changes"].map(|t| {
         conn.query_row(&format!("SELECT count(*) FROM {t}"), [], |r| r.get(0))
             .unwrap()
     })
@@ -571,8 +536,7 @@ fn a_symbol_renamed_away_in_the_current_snapshot_is_listed_stale() {
 
     // the bound workspace and repository identity are the root's name (M3-23)
     let store = SqliteStore::open(&s.db(), &s.home().join("keys")).unwrap();
-    let ctx =
-        WriteCtx::new("v1", WorkspaceId::new("repo"), Actor::Agent).with_repo(Some("repo".into()));
+    let ctx = WriteCtx::new(WorkspaceId::new("repo"), Actor::Agent);
     let coderef = |symbol: &str| -> String {
         let node = NewNode {
             kind: "CodeRef".into(),

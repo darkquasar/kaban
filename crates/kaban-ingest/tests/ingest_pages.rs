@@ -38,7 +38,6 @@ fn persisted_fixture_with(
         rig.store.clone(),
         kaban_policy::Policy::empty(),
         rig.store.signer(),
-        None,
     );
     let document = rig.document("a.md").unwrap();
     let props: kaban_ingest::DocumentProps =
@@ -257,7 +256,6 @@ async fn next_foreign_unknown_and_invalid_selectors_never_deliver_source() {
         rig.store.clone(),
         kaban_policy::Policy::empty(),
         rig.store.signer(),
-        None,
         ApiConfig {
             workspace: WorkspaceId::new("foreign"),
             ..ApiConfig::default()
@@ -501,12 +499,7 @@ async fn next_survives_store_close_and_reopen_without_a_process_cache() {
     drop(store);
     let db = db.unwrap();
     let store = std::sync::Arc::new(SqliteStore::open(&db, &root.join("store/keys")).unwrap());
-    let api = KabanApi::new(
-        store.clone(),
-        kaban_policy::Policy::empty(),
-        store.signer(),
-        None,
-    );
+    let api = KabanApi::new(store.clone(), kaban_policy::Policy::empty(), store.signer());
     let restarted = next(&api, &root, &job, 0, 0, PageBudget::default())
         .await
         .unwrap();

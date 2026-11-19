@@ -166,7 +166,7 @@ struct Takeover<'a> {
 
 impl Sink for Takeover<'_> {
     fn id(&self) -> SinkId {
-        SinkId::EXPORT
+        SinkId("export")
     }
     fn consume(&mut self, changes: &[Change]) -> Result<Ack> {
         self.seen.extend(changes.iter().map(|c| c.seq));
@@ -182,7 +182,7 @@ struct Failing;
 
 impl Sink for Failing {
     fn id(&self) -> SinkId {
-        SinkId::EXPORT
+        SinkId("export")
     }
     fn consume(&mut self, _changes: &[Change]) -> Result<Ack> {
         Err(StoreError::BadLink)
@@ -213,8 +213,8 @@ fn a_recording_sink_and_a_no_op_sink_produce_identical_acks_over_one_sequence() 
     // Arrange
     let log = FakeLog::with_rows(7);
     let lease = log.acquire("export");
-    let mut recording = Recording::new(SinkId::EXPORT);
-    let mut noop = Noop(SinkId::EXPORT);
+    let mut recording = Recording::new(SinkId("export"));
+    let mut noop = Noop(SinkId("export"));
 
     // Act
     let acks_recording = drain(&log, &mut recording, &lease, 0, 3);
@@ -235,13 +235,13 @@ fn acks_advance_only_the_acking_sinks_cursor_and_two_sinks_do_not_share_cursors(
     // Arrange
     let log = FakeLog::with_rows(5);
     let export = log.acquire("export");
-    let reconcile = log.acquire("reconcile");
-    let mut a = Recording::new(SinkId::EXPORT);
-    let mut b = Recording::new(SinkId::RECONCILE);
+    let second_lease = log.acquire("second");
+    let mut a = Recording::new(SinkId("export"));
+    let mut b = Recording::new(SinkId("second"));
 
     // Act
     let first = run_sink(&log, &mut a, &export, 0, 2).unwrap();
-    let second = run_sink(&log, &mut b, &reconcile, 0, 10).unwrap();
+    let second = run_sink(&log, &mut b, &second_lease, 0, 10).unwrap();
 
     // Assert
     assert_eq!(
@@ -254,7 +254,7 @@ fn acks_advance_only_the_acking_sinks_cursor_and_two_sinks_do_not_share_cursors(
     );
     assert_eq!(second.acked, Some(5));
     assert_eq!(log.cursor("export"), Some(2), "a's ack moved a only");
-    assert_eq!(log.cursor("reconcile"), Some(5));
+    assert_eq!(log.cursor("second"), Some(5));
     assert_eq!(a.seen, [1, 2]);
     assert_eq!(b.seen, [1, 2, 3, 4, 5]);
 }
@@ -266,13 +266,13 @@ fn a_stopped_sink_resumes_from_its_ack() {
     // Arrange
     let log = FakeLog::with_rows(6);
     let lease = log.acquire("export");
-    let mut before = Recording::new(SinkId::EXPORT);
+    let mut before = Recording::new(SinkId("export"));
     run_sink(&log, &mut before, &lease, 0, 4).unwrap();
     drop(before);
     let resume_from = log.cursor("export").unwrap();
 
     // Act
-    let mut after = Recording::new(SinkId::EXPORT);
+    let mut after = Recording::new(SinkId("export"));
     let acks = drain(&log, &mut after, &lease, resume_from, 4);
     let idle = run_sink(&log, &mut after, &lease, 6, 4).unwrap();
 
@@ -292,7 +292,7 @@ fn a_lost_lease_is_reported_and_the_cursor_does_not_move() {
     // Arrange
     let log = FakeLog::with_rows(3);
     let old = log.acquire("export");
-    run_sink(&log, &mut Noop(SinkId::EXPORT), &old, 0, 1).unwrap();
+    run_sink(&log, &mut Noop(SinkId("export")), &old, 0, 1).unwrap();
     assert_eq!(log.cursor("export"), Some(1));
     let mut sink = Takeover {
         log: &log,
@@ -319,7 +319,7 @@ fn a_lost_lease_is_reported_and_the_cursor_does_not_move() {
     );
     let new = sink.successor.take().unwrap();
     assert_eq!(new.fence, old.fence + 1);
-    let mut replay = Recording::new(SinkId::EXPORT);
+    let mut replay = Recording::new(SinkId("export"));
     let again = run_sink(&log, &mut replay, &new, 1, 10).unwrap();
     assert_eq!(
         replay.seen, sink.seen,

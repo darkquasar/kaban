@@ -192,8 +192,8 @@ if [ -n "$kaban_bin" ]; then
     jq -e '.failure_recorded==true and .recall.count >= 1 and (.recall.failures|any(.has_command and .has_error_text))' "$dir/recipes-verdict.json"
   check "pi/$session: kaban-calls argv words are vocabulary only (unknown flag counted, not kept)" \
     bash -c '! grep -q KBNCANARY "$1/kaban-calls.jsonl" && jq -e "select(.argv[1]==\"recall\") | .free_args >= 1" "$1/kaban-calls.jsonl" | grep -q true' _ "$dir"
-  check "pi/$session: kaban-calls saw the seed (remember, accept) and the four planted calls (two recall, two hook); the verdict counts the two hook calls" \
-    bash -c 'jq -e -s "([.[] | select(.argv[1]==\"remember\")] | length) == 1 and ([.[] | select(.argv[1]==\"accept\")] | length) == 1 and ([.[] | select(.argv[1]==\"recall\")] | length) == 2 and ([.[] | select(.argv[0]==\"hook\")] | length) == 2" "$1/kaban-calls.jsonl" && jq -e ".hook_calls == 2 and .hook_calls_by_event == {\"post-tool-use\": 1, \"stop\": 1}" "$1/recipes-verdict.json"' _ "$dir"
+  check "pi/$session: kaban-calls saw the seed (remember) and the four planted calls (two recall, two hook); the verdict counts the two hook calls" \
+    bash -c 'jq -e -s "([.[] | select(.argv[1]==\"remember\")] | length) == 1 and ([.[] | select(.argv[1]==\"accept\")] | length) == 0 and ([.[] | select(.argv[1]==\"recall\")] | length) == 2 and ([.[] | select(.argv[0]==\"hook\")] | length) == 2" "$1/kaban-calls.jsonl" && jq -e ".hook_calls == 2 and .hook_calls_by_event == {\"post-tool-use\": 1, \"stop\": 1}" "$1/recipes-verdict.json"' _ "$dir"
 fi
 
 if [ "$fail" -eq 0 ]; then say "ALL OK"; else say "FAILURES"; fi

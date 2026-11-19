@@ -7,7 +7,7 @@
 
 mod common;
 
-use common::{Scratch, fact};
+use common::fact;
 use kaban_api::{
     ApiError, KabanApi, LinkRequest, LinkSpec, RememberRequest, RememberStatus, TraverseRequest,
 };
@@ -18,7 +18,7 @@ use std::sync::Arc;
 fn api() -> KabanApi {
     let store = Arc::new(SqliteStore::open_memory().unwrap());
     let signer = store.signer();
-    KabanApi::new(store, Policy::empty(), signer, None)
+    KabanApi::new(store, Policy::empty(), signer)
 }
 
 #[test]
@@ -172,28 +172,14 @@ fn links_created_counts_inserted_edges_not_refreshed_ones() {
     assert_eq!(t.edges.len(), 1, "{t:?}");
 }
 
-/// The `runbooks` fixture ontology loaded into the service's registry (engine-plan E1.5): the
-/// scratch directory is the containment root, the file is copied beneath it.
-fn with_runbooks(s: &Scratch, api: KabanApi) -> KabanApi {
-    let registry = Arc::new(kaban_api::OntologyRegistry::new(Some(s.0.clone())).unwrap());
-    let api = api.with_registry(registry);
-    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../kaban-core/fixtures/ontology/runbooks.yaml");
-    let target = s.0.join("runbooks.yaml");
-    std::fs::copy(fixture, &target).unwrap();
-    api.registry().load_file(&api, &target).unwrap();
-    api
-}
-
-/// E1.5 (core-spec §4, engine-spec EN-F4): a `GOVERNS` edge starts at a governing kind
-/// (`governs_paths: true` in the registry: the shipped Decision and Convention, a loaded
-/// `Runbook`); from a kind that does not govern paths it is `EndpointNotAllowed`, and a source
-/// in another workspace stays `NotFound` (no existence leak, R3-3) whatever its kind.
+/// E1.8 (E1.7 R1): a link is judged by the declared endpoints: `CAUSED_BY` starts at a
+/// `Failure`; from a `Fact` it is `EndpointNotAllowed`, and a source in another workspace stays
+/// `NotFound` (no existence leak, R3-3) whatever its kind. `GOVERNS` is no rel any more (path
+/// scoping is gone, PC-20): linking one is `UnknownRel`.
 #[test]
-fn a_governs_edge_starts_at_a_governing_kind_and_a_fact_is_refused() {
+fn a_link_starts_at_a_declared_source_kind_and_a_fact_is_refused() {
     // Arrange
-    let s = Scratch::new("kaban-dedup", "governs");
-    let api = with_runbooks(&s, api());
+    let api = api();
     let remember = |kind: &str, text: &str, ws: Option<&str>| -> String {
         api.remember(RememberRequest {
             kind: kind.into(),
@@ -206,32 +192,41 @@ fn a_governs_edge_starts_at_a_governing_kind_and_a_fact_is_refused() {
         .id
     };
     let code = remember("CodeRef", "src/queue.rs", None);
-    let runbook = remember("runbooks:Runbook", "rotate the queue", None);
+    let failure = remember("Failure", "the queue stalled", None);
     let decision = remember("Decision", "the queue stays on sqlite", None);
     let fact = remember("Fact", "the queue is a table", None);
     let elsewhere = remember("Fact", "a fact of another workspace", Some("other"));
-    let governs = |from: &str| LinkRequest {
+    let caused_by = |from: &str| LinkRequest {
         from: from.into(),
-        rel: "GOVERNS".into(),
+        rel: "CAUSED_BY".into(),
         to: code.clone(),
         confidence: None,
         props: None,
     };
 
     // Act
-    let from_runbook = api.link(governs(&runbook));
-    let from_decision = api.link(governs(&decision));
-    let from_fact = api.link(governs(&fact));
-    let from_elsewhere = api.link(governs(&elsewhere));
+    let from_failure = api.link(caused_by(&failure));
+    let from_fact = api.link(caused_by(&fact));
+    let from_elsewhere = api.link(caused_by(&elsewhere));
+    let governs = api.link(LinkRequest {
+        rel: "GOVERNS".into(),
+        ..caused_by(&decision)
+    });
 
     // Assert
-    assert_eq!(from_runbook.unwrap().rel, "GOVERNS");
-    assert_eq!(from_decision.unwrap().rel, "GOVERNS");
+    assert_eq!(from_failure.unwrap().rel, "CAUSED_BY");
+    assert!(
+        matches!(
+            governs,
+            Err(ApiError::Store(kaban_core::StoreError::UnknownRel(_)))
+        ),
+        "{governs:?}"
+    );
     match from_fact {
         Err(ApiError::Store(kaban_core::StoreError::EndpointNotAllowed { rel, from, to })) => {
             assert_eq!(
                 (rel.as_str(), from.as_str(), to.as_str()),
-                ("GOVERNS", "Fact", "CodeRef")
+                ("CAUSED_BY", "Fact", "CodeRef")
             );
         }
         other => panic!("expected EndpointNotAllowed, got {other:?}"),

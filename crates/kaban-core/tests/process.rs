@@ -382,9 +382,12 @@ fn a_sample_blocking_past_the_deadline_does_not_delay_the_deadline_kill() {
     let grandchild = Descendant::armed(pidfile);
     let deadline = Duration::from_millis(200);
     let mut s = spec(Exec::Path(wrapper), &[], &scratch.0, deadline);
+    // the sample blocks far past the deadline: a kill that waited for it would take 5 s, while the
+    // 1 s bound below leaves a loaded runner a wide margin
+    let blocked = Duration::from_secs(5);
     let sampling = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     s.monitors.push(Box::new(SlowSample {
-        sleep: deadline * 2,
+        sleep: blocked,
         interval: Duration::from_millis(10),
         started: std::sync::Arc::clone(&sampling),
     }));
@@ -397,8 +400,8 @@ fn a_sample_blocking_past_the_deadline_does_not_delay_the_deadline_kill() {
     );
     assert_eq!(outcome.killed, Some(KillReason::Deadline), "{outcome:?}");
     assert!(
-        took < deadline + Duration::from_millis(50),
-        "the sample delayed the kill: took {took:?}"
+        took < deadline + Duration::from_secs(1),
+        "the sample delayed the kill: took {took:?} with the sample blocked for {blocked:?}"
     );
     assert!(
         grandchild.dead_within(GRACE),
@@ -472,14 +475,15 @@ fn a_monitor_erroring_on_its_second_sample_kills_within_two_intervals() {
     }));
     let outcome = run(s).unwrap();
     assert_eq!(outcome.killed, Some(KillReason::Monitor { class: "quota" }));
-    // two intervals plus the poll and kill slack (OWN-11 margins under parallel load)
+    // not before the second sample, and the monitor's kill, far before the 5 s deadline's (a
+    // loose bound: a loaded runner stretches the poll and kill slack well past one interval)
     assert!(
         outcome.wall >= interval * 2,
         "killed too early: {:?}",
         outcome.wall
     );
     assert!(
-        outcome.wall < interval * 2 + Duration::from_millis(50),
+        outcome.wall < interval * 2 + Duration::from_secs(1),
         "took {:?}",
         outcome.wall
     );

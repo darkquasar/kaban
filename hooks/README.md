@@ -31,50 +31,13 @@ Events and what they do:
 
 | `kaban hook <event>` | Reads | Writes | Prints |
 |---|---|---|---|
-| `session-start` | nothing from the envelope but `session_id` | prunes `session_edits` older than 7 days (bounded) | the briefing (at most 5 items: accepted Decisions and Conventions by importance, plus the workspace's pending Failures) as `additionalContext` |
-| `pre-tool-use` | the edited path(s) | a `session_edits` row per path (the attempted edit) | the records governing each path (`why`, 3 per path) as `additionalContext`; `{}` when none govern |
+| `session-start` | nothing from the envelope but `session_id` | prunes `session_edits` older than 7 days (bounded) | the briefing (at most 2 of the workspace's pending Failures) as `additionalContext`; `{}` when none is pending |
+| `pre-tool-use` | the edited path(s) | a `session_edits` row per path (the attempted edit) | `{}` |
 | `post-tool-use-failure` | `tool_input.command`, the error field | a `Failure { pending_fix: true, command, error_text, stack_head }` with the session id | `{}` |
 | `post-tool-use` | `tool_input.command`, the response | a success of a command whose keyed fingerprint matches a pending Failure of the session appends `props.evidence_runs[] = {ts, files_edited_since}` (the paths of the session's `edit` rows since the failure; evidence, not a conclusion); on Codex and pi a reported failure is captured like `post-tool-use-failure` | `{}` |
 | `subagent-stop` | `last_assistant_message` (the field observed live, M4-31; `summary` accepted as a fallback) | an `Episode` | `{}` |
 | `stop` | `session_id`, Claude's `stop_hook_active` | one `prompted` marker per session | with pending Failures in the session and no marker yet: the one-time prompt, `{"decision":"block","reason":"kaban: how was \"<command>\" fixed? Failure <id>. Reply … `kaban hook fix` … or link FIXED_BY … or say 'unresolved'."}` on every host (live capture: Codex delivers `decision: block` to the model and not `systemMessage`, M4-16 switch applied); otherwise `{}`. Exit 0 either way: the host reads the decision from the JSON. |
 | `fix` | `{"failure_id","fix"}` (the agent's reply, from stdin) | an `Improvement` with the fix text linked `FIXED_BY` from the Failure, then `props.fix` and `pending_fix: false` on the Failure | `{"status":"fixed","failure_id","improvement_id","pending_fix":false}`; an unknown id or a refused text prints `{}` with a stderr line |
-| `post-commit` | nothing: this event has no envelope and never reads stdin (git sends no JSON and may leave stdin on a terminal, M5-14); `--stdin-json` is accepted and ignored, `--host` is irrelevant | `commit_sha = HEAD` on every node of the bound workspace that no commit stamped yet (`repo` unset or this repository's), with `rev + 1`, so the next `sync` re-serializes the record with its provenance; each node is stamped once (M5-15, OWN-23: no `changes(paths)` rows, no currency cache) | `{"stamped": n}`; outside a repository or without `HEAD`, `{}` with a fixed stderr line |
-
-**Stop and SubagentStop also flush the files (M5-20).** After the hook call, the Claude Code
-and Codex `stop.sh`/`subagent-stop.sh` wrappers start `kaban sync --json --deadline 60` **fully
-detached** (`setsid`, every descriptor on `/dev/null`, backgrounded, never `--stage`), and the
-pi extension does the same at `session_shutdown` (`spawn` with `detached: true`, `stdio:
-"ignore"`, not awaited). The hook's stdout therefore stays exactly one JSON document and the
-host never waits for the sync; the `.kaban/<ontology>/<dir>/<id>.md` records and the digests
-`.kaban/<ontology>/INDEX.md` (the shipped ontology: `.kaban/adr/decisions/`, `.kaban/adr/INDEX.md`)
-appear in the repository a moment later and are committed by the next commit (or by the
-`pre-commit` hook below). `KABAN_HOOK_SYNC=0` turns the flush off.
-
-**The detached sync has a deadline on every host (R5-9).** Two layers bound it, so a
-pathological import cannot leave an orphaned sync behind and repeated Stop events cannot pile
-processes up:
-
-1. `kaban sync --deadline <s>` (env `KABAN_SYNC_DEADLINE`, the recipes pass 60) is a hard
-   wall-clock bound inside the process: at the deadline it prints
-   `kaban sync: the deadline passed; the run stopped, the next sync continues` on stderr and
-   exits 4. Partial state is safe (files land by rename, the store is transactional, the
-   repository lock is released with the process) and the next sync picks up the dirty set.
-   This layer holds wherever the binary runs, including macOS and a pi that has already exited.
-2. The shell kills the sync's whole process group a few seconds later, so a git descendant dies
-   with it: on Linux `setsid timeout -k 5 <deadline + 5>`; on macOS (no `setsid`, no GNU
-   `timeout`) a job-control subshell (`set -m`) gives the sync its own process group and a
-   sleeper kills that group after the grace period (the supervisor cancels the sleeper when
-   the sync ends first). Only fixed strings and a digits-only number reach argv.
-
-The hook path still exits 0 and returns at once whatever the sync does; the sync's own exit
-status is never the hook's. Offline proof: `scripts/hooks-live/test-stop-sync.sh` (a fake
-`kaban` that forks a child and sleeps 30 s on `sync`: the wrappers exit 0 in about 0.1 s with
-one JSON document, the fake sees `sync --json --deadline 60`, `/dev/null` on fds 0 to 2 and its
-own session; with `KABAN_SYNC_DEADLINE=1` the fake and its child are gone within the grace
-period on the Linux path, on the macOS fallback (exercised by hiding `setsid` and `timeout`,
-where the fake runs in its own process group) and after three Stop events in a row), plus
-`crates/kaban/tests/cli_sync.rs` for the in-process deadline (a sync stalled behind the
-repository lock exits 4 with the fixed line in about 1 s, nothing written).
 
 A Failure is *pending* while it is active, has no outgoing `FIXED_BY` edge and its
 `pending_fix` is not `false`; a `FIXED_BY` edge made through the MCP `link` tool therefore
@@ -109,59 +72,6 @@ Offline verification shipped with this recipe: `jq` parses `settings.hooks.json`
 passes on every script, and the handler tests under `crates/kaban/tests/hook_*.rs` run the
 binary on the invented envelopes in `crates/kaban/tests/fixtures/hooks/claude-code/`. The live
 verification against a Claude Code session is the Docker lane's (owner decision M4-22).
-
-## git hooks (`hooks/git/`)
-
-```
-  git commit
-    | pre-commit  ==> kaban sync --stage --json   writes .kaban/<ontology>/<dir>/<id>.md,
-    |                                             .kaban/<ontology>/INDEX.md, .kaban/.gitignore
-    |                                             and stages them (this commit); the first run
-    |                                             moves a pre-engine .kaban/<dir>/ tree (git mv)
-    | (commit object written)
-    | post-commit ==> kaban hook post-commit      commit_sha = HEAD on the unstamped records
-    v                                             (re-serialized by the next sync, one commit later)
-```
-
-Files: `git/pre-commit`, `git/post-commit` (plain bash, executable, no arguments).
-
-**Install** with one of:
-
-- `git config core.hooksPath hooks/git` inside the repository (every hook of the directory;
-  the two files are the only ones), or
-- `cp hooks/git/pre-commit hooks/git/post-commit .git/hooks/` (keep them executable). If
-  `.git/hooks/pre-commit` already exists, call this one from it (`bash hooks/git/pre-commit`)
-  since git runs one script per hook name.
-
-**Environment.** Both hooks run `kaban` from `PATH`, or `KABAN_BIN=/path/to/kaban`; the
-database is `KABAN_DB` (default `kaban.db` in the repository root, where git runs hooks), the
-audit keys `KABAN_HOME` (default `~/.kaban`), the workspace `KABAN_WORKSPACE` (default: the root
-directory's name). Set them to the values the MCP server entry uses, for example through
-`direnv` or the shell profile: git does not read `.env` files. Keep `kaban.db*` out of the
-commit (`sync` writes `.kaban/.gitignore` for a database inside `.kaban/`; a root-level
-`kaban.db` needs a root `.gitignore` line).
-
-**Exit-0 contract.** Both hooks end with `exit 0` on every path: a missing binary (checked with
-`command -v` first), a missing database (hooks never create one), a held lock, a slow sync
-(`timeout 10` where GNU `timeout` exists) or any error never aborts or delays a commit beyond
-the bound. stdin, stdout and stderr are detached (`</dev/null >/dev/null 2>&1`), so `git commit`
-prints only git's own output. Proof: `crates/kaban/tests/hook_post_commit.rs` runs both hooks
-through `core.hooksPath` over a temporary repository (the commit contains `.kaban/adr/INDEX.md`
-with the accepted Decision, the session's note carries the commit's sha, a second commit
-leaves the digest byte-identical, a commit with a missing `KABAN_BIN` succeeds).
-
-**Partial commits (accepted residual, M5-29).** For `git commit <paths>` git builds the commit
-from a temporary index; `sync --stage` stages into the real index (kaban's git runner drops
-`GIT_INDEX_FILE` by design, R-C3.2-4), so the serialization written during a partial commit
-lands in the **next** commit. Nothing is lost: the files are in the working tree and staged.
-The same holds for `git commit --only` and `--include`. A plain `git commit` or
-`git commit -a` includes them in the triggering commit.
-
-**What is not covered.** `git commit --no-verify` skips both hooks (run `kaban sync --stage`
-yourself). A merge commit made by `git merge` runs `pre-merge-commit`, not `pre-commit`
-(`git merge --no-commit` followed by `git commit` runs it). The stamp is idempotent: however
-many times `post-commit` fires, a record is stamped once. Bare repositories have no working
-tree and no `.kaban/`.
 
 ## Codex CLI and pi: the handler variants
 

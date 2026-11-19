@@ -8,8 +8,8 @@ use crate::graph::{ExistingDocument, ingest_batch, reconcile_failed_batch};
 use crate::ids::PIPELINE_VERSION;
 use crate::model::{DocStatus, IngestError, SourceId};
 use kaban_core::{
-    Actor, AuditEntry, BatchReport, GraphStore, NewNode, NodeId, Op, OutcomeKind, WorkspaceId,
-    WriteBatch, WriteCtx,
+    Actor, BatchReport, GraphStore, NewNode, NodeId, Op, OutcomeKind, WorkspaceId, WriteBatch,
+    WriteCtx,
 };
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -34,8 +34,6 @@ pub struct Prepared<G = ()> {
     /// The ops to apply in one transaction. Empty ops mean "unchanged, skip": the committer
     /// writes nothing and counts the document as skipped.
     pub batch: WriteBatch,
-    /// Audit rows to append in the same transaction.
-    pub audit: Vec<AuditEntry>,
     /// Why the preparer wrote nothing, when it did not (`batch.ops` is then empty).
     pub skip: Option<SkipReason>,
 }
@@ -86,7 +84,6 @@ impl Prepared {
                     node,
                 }],
             ),
-            audit: Vec::new(),
             skip: None,
         }
     }
@@ -249,7 +246,6 @@ pub(crate) async fn run(
     mut rx: mpsc::Receiver<Dispatched>,
     gauge: Arc<QueueGauge>,
     workspace: WorkspaceId,
-    policy_version: String,
     dry_run: bool,
 ) -> Result<CommitStats, IngestError> {
     let mut stats = CommitStats::default();
@@ -259,15 +255,7 @@ pub(crate) async fn run(
         gauge.received(rx.len());
         pending.insert(item.prepared.seq, item);
         while let Some(Dispatched { prepared, slot }) = pending.remove(&next) {
-            commit_one(
-                &store,
-                prepared,
-                &workspace,
-                &policy_version,
-                dry_run,
-                &mut stats,
-            )
-            .await?;
+            commit_one(&store, prepared, &workspace, dry_run, &mut stats).await?;
             drop(slot); // committed: the window place is free (RD-4)
             next += 1;
         }
@@ -287,9 +275,8 @@ pub(crate) async fn run(
 
 async fn commit_one(
     store: &Arc<dyn GraphStore>,
-    mut item: Prepared,
+    item: Prepared,
     workspace: &WorkspaceId,
-    policy_version: &str,
     dry_run: bool,
     stats: &mut CommitStats,
 ) -> Result<(), IngestError> {
@@ -321,18 +308,7 @@ async fn commit_one(
     // source/generation guard has admitted this batch.
     let mut document_counts = CommitStats::default();
     document_counts.fold_document_props(&item.batch);
-    let mut ctx = WriteCtx::new(policy_version, workspace.clone(), Actor::Agent);
-    ctx.audit = std::mem::take(&mut item.audit);
-    if item.status == DocStatus::Blocked
-        || ctx.audit.iter().any(|entry| {
-            matches!(
-                entry.op,
-                kaban_core::AuditOp::Reject | kaban_core::AuditOp::Redact
-            )
-        })
-    {
-        ctx.removal_intent = kaban_core::RemovalIntent::Policy;
-    }
+    let ctx = WriteCtx::new(workspace.clone(), Actor::Agent);
     let store = Arc::clone(store);
     let report = tokio::task::spawn_blocking(move || {
         // RD2-7: a failure batch reconciles against the stored child inventory here, at the

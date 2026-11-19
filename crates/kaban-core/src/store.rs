@@ -14,25 +14,21 @@ use crate::changelog::Change;
 use crate::error::{Result, StoreError};
 
 mod anchors;
-mod audit;
 mod changelog;
-mod governance;
 mod graph;
 mod ingest;
 mod jobs;
 mod lease;
 mod memory;
 mod schema;
-mod sync;
+mod session;
 mod types;
 
 pub use anchors::{
     AnchorPredicates, AttachHandle, SNAPSHOT_SYMBOL_PAGE, SnapshotAttach, SnapshotSymbol,
     SymbolPage,
 };
-pub use audit::AuditStore;
 pub use changelog::ChangeLogStore;
-pub use governance::{Chain, ChainDirection, GovernanceStore, PruningProtection, PruningTarget};
 pub use graph::GraphStore;
 pub use ingest::{DocumentIndexSummary, FailedDocumentRow, IngestStore, MaintenanceOutcome};
 pub use jobs::{
@@ -43,8 +39,8 @@ pub use jobs::{
 pub use lease::LeaseStore;
 pub use memory::MemoryStore;
 pub use schema::SchemaStore;
-pub use sync::{ImportedPurge, SyncStore, UnstampedCounts, UnstampedReason};
-pub use types::{DatabaseFileModes, ReviewRow};
+pub use session::SessionStore;
+pub use types::DatabaseFileModes;
 
 /// What a store adapter can do beyond the portable contract (spec 05 SS-23): one `const` per
 /// adapter, declared where the adapter is, read by exactly two consumers, the purge report

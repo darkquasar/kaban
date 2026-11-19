@@ -1,7 +1,7 @@
 //! `forget`.
 
 use super::WriteReceipt;
-use kaban_core::{ForgetMode, Governance, Lifecycle};
+use kaban_core::{ForgetMode, Lifecycle};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -10,9 +10,9 @@ use serde::{Deserialize, Serialize};
 pub struct ForgetRequest {
     /// Node id.
     pub id: String,
-    /// tombstone (default: hidden, never re-proposed) | invalidate (tombstone plus governance
-    /// `invalidated` with an event) | archive | purge (destructive: removes text, index entries
-    /// and edges; the id never reappears)
+    /// tombstone (default: hidden, never re-proposed) | invalidate (the same effect as
+    /// tombstone) | archive | purge (destructive: removes text, index entries and edges; the id
+    /// never reappears)
     pub mode: Option<ForgetMode>,
 }
 
@@ -25,10 +25,6 @@ pub struct ForgetResponse {
     pub mode: ForgetMode,
     /// Lifecycle after the call.
     pub lifecycle: Lifecycle,
-    /// Governance after the call.
-    pub governance: Governance,
-    /// Outbox position of the write (F11).
-    pub outbox_seq: u64,
     /// A purge committed: the content is unavailable to every read from now on.
     pub revoked: bool,
     /// The purge's freed pages were reclaimed by this call; the post-commit cleanup (index

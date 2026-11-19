@@ -5,7 +5,7 @@ description: "Ingest local text explicitly, link known mentions, and hand struct
 
 Document ingestion and structured extraction are separate steps. Plain ingestion
 makes local text searchable. Structured extraction lets a user-run agent or script
-propose typed records from that text. Kaban does not load a model, execute an
+produce typed records from that text. Kaban does not load a model, execute an
 extractor or schedule background model jobs.
 
 ## Start with Markdown or text
@@ -22,7 +22,7 @@ kaban recall 'storage transaction' --full-text
 
 The run creates `Document`, `Section` and `Chunk` nodes with deterministic identities.
 Markdown headings supply structure; chunks are the retrieval-sized pieces, not
-accepted Decisions. Paths, titles and text are policy-gated. Read the run's counters
+Decisions. Paths, titles and text are policy-gated. Read the run's counters
 and per-document failures: an overall successful CLI exit does not mean every file
 was indexed successfully.
 
@@ -51,7 +51,7 @@ kaban ingest docs --link gazetteer
 The gazetteer matches known names/aliases to existing graph targets and creates
 mention links in plain ingestion. It is explicit by default, not a model that
 discovers new facts. Inspect ambiguity and coverage rather than equating a text
-match with an accepted claim. Optional symbol sources depend on an available code
+match with a verified fact. Optional symbol sources depend on an available code
 snapshot. `--symbols` lifts only the gazetteer automaton cap; it is not needed for
 the basic workflow and does not lift other resource budgets.
 
@@ -82,10 +82,13 @@ kaban ingest job finish JOB --json
 `extractor-return.json` must contain a real extractor result matching the brief's
 schema, including the matching `job`; it is not supplied by this guide. Your agent
 or script reads the slices and writes that JSON outside Kaban. Submit validates and
-atomically publishes permitted records/claims/edges; inspect skipped items and
-dropped evidence in its report. Governed output is proposed or a revision candidate,
-not automatic acceptance. Finish reconciles the successful submissions and returns
-the retained final report, preserving human and other-layer edges.
+atomically publishes the permitted records and edges; inspect skipped items and
+dropped evidence in its report. Published output is active at once: there is no
+proposal or acceptance step, so review the report before relying on it. An edge that
+already exists keeps the producer that wrote it first; a later submission does not
+take it over. Finish reconciles the successful submissions and returns the retained
+final report: it removes only the edges this extractor produced earlier and no
+longer submitted, and leaves authored edges and other producers' edges in place.
 
 Source or ontology changes can stale a job; obtain a current brief instead of
 reusing stale results. Handles are workspace-scoped identifiers, not capabilities.

@@ -1,0 +1,318 @@
+//! Step 1 (T9): the one extent format and the merged view equal an edge-list oracle over a base,
+//! three sealed layers and sediment records; every neighbour list is ascending (GRA-06); a fold
+//! that omits a node drops it, its edges and its facts from the bytes (DEL-06, COD-01).
+
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // test code: failures are the assertion
+
+mod oracle;
+
+use kaban_index_graph::{
+    Base, Direction, EdgeOp, GraphError, Layer, LocalId, NodeOp, OpKind, Records, RelId,
+    RelSelection, View, build_base, fold, seal,
+};
+use oracle::{
+    Fixture, IDS, Oracle, Rng, budget, chain, nodes, random_records, rows, selected, view,
+};
+use tantivy::directory::OwnedBytes;
+
+const SEEDS: u64 = 16;
+
+fn open_base(bytes: Vec<u8>) -> Base {
+    Base::open(OwnedBytes::new(bytes), &oracle::budget()).expect("base opens")
+}
+
+fn fixture(seed: u64) -> Fixture {
+    chain(seed, |r| r)
+}
+
+fn selections() -> Vec<RelSelection> {
+    vec![
+        RelSelection::All,
+        RelSelection::only(vec![RelId(40_000), RelId(1)]),
+        RelSelection::only(vec![RelId(7), RelId(0), RelId(7)]),
+        RelSelection::only(Vec::new()),
+    ]
+}
+
+/// Every probe of `view` equals `oracle`, for ids past the generated range too.
+fn assert_view_matches(view: &View<'_>, oracle: &Oracle, ctx: &str) {
+    assert_eq!(nodes(view), oracle.nodes(), "{ctx}: nodes");
+    for id in 0..IDS + 3 {
+        let n = LocalId(id);
+        assert_eq!(view.contains(n), oracle.contains(n), "{ctx}: contains {id}");
+        for key in 0..5 {
+            assert_eq!(
+                view.fact(n, key),
+                oracle.fact(n, key),
+                "{ctx}: fact {id}/{key}"
+            );
+        }
+        for rels in &selections() {
+            for dir in [Direction::Out, Direction::In, Direction::Both] {
+                let got = rows(view, n, rels, dir);
+                let want = oracle.neighbours(n, rels, dir);
+                assert_eq!(got, want, "{ctx}: neighbours {id} {rels:?} {dir:?}");
+                let keys: Vec<_> = got.iter().map(|&(m, r, _)| (m, r)).collect();
+                if dir == Direction::Both {
+                    assert!(
+                        keys.windows(2).all(|w| w[0] <= w[1]),
+                        "{ctx}: {id} both not ascending"
+                    );
+                } else {
+                    assert!(
+                        keys.windows(2).all(|w| w[0] < w[1]),
+                        "{ctx}: {id} {dir:?} not strictly ascending"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn layered_view_equals_the_oracle_on_every_node() {
+    for seed in 0..SEEDS {
+        let f = fixture(seed);
+        let v = view(Some(&f.base), &f.layers, &f.sediment);
+        assert_view_matches(&v, &f.oracle, &format!("seed {seed}"));
+    }
+}
+
+#[test]
+fn sediment_only_view_equals_the_oracle() {
+    for seed in 0..4 {
+        let f = fixture(seed);
+        let v = view(None, &[], &f.all);
+        assert_view_matches(&v, &f.oracle, &format!("sediment seed {seed}"));
+    }
+}
+
+#[test]
+fn every_prefix_of_the_chain_equals_the_oracle() {
+    let f = fixture(3);
+    let mut oracle = Oracle::default();
+    oracle.apply(&f.all[0]);
+    assert_view_matches(
+        &view::<Records>(Some(&f.base), &[], &[]),
+        &oracle,
+        "base only",
+    );
+    for depth in 1..=f.layers.len() {
+        oracle.apply(&f.all[depth]);
+        let v = view::<Records>(Some(&f.base), &f.layers[..depth], &[]);
+        assert_view_matches(&v, &oracle, &format!("depth {depth}"));
+    }
+}
+
+/// The present node with the most edges in the oracle.
+fn busiest(oracle: &Oracle) -> LocalId {
+    oracle
+        .nodes()
+        .into_iter()
+        .max_by_key(|&n| {
+            oracle
+                .neighbours(n, &RelSelection::All, Direction::Both)
+                .len()
+        })
+        .expect("fixture has present nodes")
+}
+
+#[test]
+fn fold_omitting_a_node_drops_it_its_edges_and_its_facts() {
+    for seed in 0..SEEDS {
+        let f = fixture(seed);
+        let v = view(Some(&f.base), &f.layers, &f.sediment);
+        let n = busiest(&f.oracle);
+        assert!(
+            !f.oracle
+                .neighbours(n, &RelSelection::All, Direction::Both)
+                .is_empty(),
+            "seed {seed}: the omitted node has edges"
+        );
+        let folded = open_base(fold(&v, &[n]));
+        let mut purged = f.oracle.clone();
+        purged.purge(n);
+        let ctx = format!("fold seed {seed}");
+        assert_view_matches(&view::<Records>(Some(&folded), &[], &[]), &purged, &ctx);
+
+        // Re-adding the node must not resurrect anything: the bytes no longer hold its edges
+        // or facts, they were not merely hidden by presence.
+        let readd = [Records {
+            nodes: vec![NodeOp {
+                node: n,
+                kind: OpKind::Add,
+            }],
+            ..Records::default()
+        }];
+        purged.apply(&readd[0]);
+        let ctx = format!("fold+readd seed {seed}");
+        assert_view_matches(&view(Some(&folded), &[], &readd), &purged, &ctx);
+    }
+}
+
+#[test]
+fn records_round_trip_through_the_sediment_blob() {
+    for seed in 0..SEEDS {
+        let mut rng = Rng::new(seed);
+        let r = random_records(&mut rng, IDS, 50, 30);
+        let decoded = Records::decode(&r.encode(), &budget()).unwrap();
+        assert_eq!(decoded.records(), &r, "seed {seed}");
+    }
+    let empty = Records::default();
+    let decoded = Records::decode(&empty.encode(), &budget()).unwrap();
+    assert_eq!(decoded.records(), &empty);
+}
+
+#[test]
+fn an_edge_op_encodes_in_27_bytes() {
+    let one = Records {
+        edges: vec![EdgeOp {
+            src: LocalId(u32::MAX),
+            rel: RelId(u16::MAX),
+            dst: LocalId(0),
+            kind: OpKind::Remove,
+            attr: kaban_index_graph::Attr {
+                weight: i64::MIN,
+                ts: i64::MAX,
+            },
+        }],
+        ..Records::default()
+    };
+    let empty = Records::default().encode().len();
+    assert_eq!(one.encode().len() - empty, 27);
+}
+
+fn is_corrupt<T: std::fmt::Debug>(r: &Result<T, GraphError>) -> bool {
+    matches!(r, Err(GraphError::Corrupt(_)))
+}
+
+#[test]
+fn truncated_or_padded_bytes_are_corrupt() {
+    let f = fixture(2);
+    let blob = f.all[1].encode();
+    for len in 0..blob.len() {
+        assert!(
+            is_corrupt(&Records::decode(&blob[..len], &budget())),
+            "records prefix {len}"
+        );
+    }
+    let mut padded = blob.clone();
+    padded.push(0);
+    assert!(
+        is_corrupt(&Records::decode(&padded, &budget())),
+        "records trailing byte"
+    );
+
+    let base_bytes = build_base(&f.all[0], 200);
+    let layer_bytes = seal(&view::<Records>(Some(&f.base), &[], &[]), &f.all[1]);
+    for (name, bytes) in [("base", &base_bytes), ("layer", &layer_bytes)] {
+        assert!(bytes.len() > 64, "{name} has content");
+        for len in (0..bytes.len()).step_by(7).chain([bytes.len() - 1]) {
+            let cut = OwnedBytes::new(bytes[..len].to_vec());
+            let opened = if name == "base" {
+                Base::open(cut, &oracle::budget()).map(|_| ())
+            } else {
+                Layer::open(cut, &oracle::budget()).map(|_| ())
+            };
+            assert!(is_corrupt(&opened), "{name} prefix {len}");
+        }
+        let mut padded = bytes.clone();
+        padded.push(0);
+        let opened = if name == "base" {
+            Base::open(OwnedBytes::new(padded), &oracle::budget()).map(|_| ())
+        } else {
+            Layer::open(OwnedBytes::new(padded), &oracle::budget()).map(|_| ())
+        };
+        assert!(is_corrupt(&opened), "{name} trailing byte");
+    }
+    assert!(
+        is_corrupt(&Layer::open(OwnedBytes::new(base_bytes), &oracle::budget()).map(|_| ())),
+        "a base is not a layer"
+    );
+    assert!(
+        is_corrupt(&Base::open(OwnedBytes::new(layer_bytes), &oracle::budget()).map(|_| ())),
+        "a layer is not a base"
+    );
+}
+
+/// Drop section `tag` from extent bytes, following the documented layout: a 24-byte header with
+/// the section count at offset 20, then 12-byte table entries (tag `u32`, length `u64`), then
+/// the sections in table order.
+fn without_section(bytes: &[u8], tag: u32) -> Vec<u8> {
+    let count = u32::from_le_bytes(bytes[20..24].try_into().unwrap()) as usize;
+    let table: Vec<(u32, usize)> = (0..count)
+        .map(|i| {
+            let at = 24 + 12 * i;
+            let t = u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
+            let len = u64::from_le_bytes(bytes[at + 4..at + 12].try_into().unwrap());
+            (t, usize::try_from(len).unwrap())
+        })
+        .collect();
+    let mut out = bytes[..20].to_vec();
+    let kept = table.iter().filter(|&&(t, _)| t != tag).count();
+    out.extend_from_slice(&u32::try_from(kept).unwrap().to_le_bytes());
+    for &(t, len) in table.iter().filter(|&&(t, _)| t != tag) {
+        out.extend_from_slice(&t.to_le_bytes());
+        out.extend_from_slice(&(len as u64).to_le_bytes());
+    }
+    let mut at = 24 + 12 * count;
+    for &(t, len) in &table {
+        if t != tag {
+            out.extend_from_slice(&bytes[at..at + len]);
+        }
+        at += len;
+    }
+    out
+}
+
+#[test]
+fn an_extent_without_presence_is_corrupt() {
+    let f = fixture(4);
+    let base_bytes = build_base(&f.all[0], 200);
+    let layer_bytes = seal(&view::<Records>(Some(&f.base), &[], &[]), &f.all[1]);
+    // Sanity: dropping nothing keeps the bytes valid.
+    assert!(
+        Base::open(
+            OwnedBytes::new(without_section(&base_bytes, 99)),
+            &oracle::budget()
+        )
+        .is_ok()
+    );
+    assert!(
+        Layer::open(
+            OwnedBytes::new(without_section(&layer_bytes, 99)),
+            &oracle::budget()
+        )
+        .is_ok()
+    );
+    let presence = 1;
+    let base = Base::open(
+        OwnedBytes::new(without_section(&base_bytes, presence)),
+        &oracle::budget(),
+    );
+    assert!(is_corrupt(&base.map(|_| ())), "base without presence");
+    let layer = Layer::open(
+        OwnedBytes::new(without_section(&layer_bytes, presence)),
+        &oracle::budget(),
+    );
+    assert!(is_corrupt(&layer.map(|_| ())), "layer without presence");
+}
+
+#[test]
+fn relation_selection_is_sorted_deduplicated_and_exact() {
+    let empty = RelSelection::only(Vec::new());
+    assert_eq!(empty, RelSelection::Only(Vec::new()));
+    let ids = [65_535, 64, 0, 63, 64, 0, 65_535];
+    let some = RelSelection::only(ids.iter().map(|&r| RelId(r)).collect());
+    assert_eq!(
+        some,
+        RelSelection::Only(vec![RelId(0), RelId(63), RelId(64), RelId(65_535)])
+    );
+    for r in 0..=u16::MAX {
+        let want = ids.contains(&r);
+        assert_eq!(some.contains(RelId(r)), want, "rel {r}");
+        assert_eq!(selected(&some, r), want, "oracle rel {r}");
+        assert!(!empty.contains(RelId(r)), "empty selects {r}");
+        assert!(RelSelection::All.contains(RelId(r)), "all misses {r}");
+    }
+}

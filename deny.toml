@@ -26,6 +26,7 @@ yanked = "deny"
 unmaintained = "all"
 ignore = [
   { id = "RUSTSEC-2026-0192", reason = "ttf-parser is a direct dependency of pdf_oxide 0.3.78 (DI2.1); unmaintained, no CVE; revisit when pdf_oxide moves to skrifa" },
+  { id = "RUSTSEC-2026-0543", reason = "chrono is transitive through pdf_oxide, rmcp and schemars; unmaintained, no CVE, no safe upgrade; revisit when they move off chrono" },
 ]
 
 [bans]

@@ -17,14 +17,10 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 
-use kaban_core::DiscoveredRules;
-use kaban_core::config::{EngineConfig, PromoteWhen};
-use kaban_core::ontology::meta::{
-    DiscoveredPolicyName, Format, Governed, OnLink, Serialize as SerializeTarget, Stamp,
-};
-use kaban_core::ontology::resolve::{RelEnd, ResolvedKind, resolve_with};
+use kaban_core::ontology::meta::Rules;
+use kaban_core::ontology::resolve::{ResolvedKind, resolve_with};
 use kaban_core::{
-    GovernedSet, NamespaceSet, Ns, Ontology, OntologyError, OntologyFile, Qualified, TypeDef,
+    NamespaceSet, Ns, Ontology, OntologyError, OntologyFile, Qualified, RuleSet, TypeDef,
     ValidatorLimits, stored_name,
 };
 use kaban_core::{first_error_text, validate};
@@ -56,22 +52,6 @@ pub const FILE_REDACTED: &str =
 
 /// The tool name the content gate audits ontology loads under.
 const TOOL: &str = "ontology_load";
-
-/// Rows per page when a promotion's group is checked against the target's schema (the
-/// store clamps `list_nodes` to 500).
-const PROMOTE_PAGE: usize = 500;
-
-/// The discovered-labels knobs the service applies (EN-F5; engine-plan E1.8): the rules a
-/// write carries and the prune/promotion thresholds of `ontology prune` and `doctor`.
-#[derive(Debug, Clone, PartialEq)]
-pub struct DiscoveredKnobs {
-    /// Policy and cap (on every [`kaban_core::WriteCtx`]).
-    pub rules: DiscoveredRules,
-    /// Days before an unpromoted candidate kind is prunable.
-    pub prune_after_days: u32,
-    /// Promotion eligibility thresholds.
-    pub promote_when: PromoteWhen,
-}
 
 /// What one load did (the `kaban ontology load` document).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -119,47 +99,10 @@ pub struct KindView {
     pub id: Qualified,
     /// Description.
     pub description: String,
-    /// Governance mixin, when the kind is governed.
-    pub governed: Option<Governed>,
+    /// The kind's `rules` block, when it declares one.
+    pub rules: Option<Rules>,
     /// The merged `props_schema`.
     pub props_schema: Value,
-}
-
-/// Where a governed kind serializes (`governed.serialize` when it is not `none`): the file
-/// lives at `.kaban/<ontology>/<dir>/<id>.md` and carries `ontology: <ontology>@<version>`
-/// (engine-plan E1.6, OWN-46/47).
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct SerializeDir {
-    /// The ontology (namespace) that declares the kind: the first path component under
-    /// `.kaban/`.
-    pub ontology: String,
-    /// The loaded `version` of that ontology (the frontmatter key's version).
-    pub version: u32,
-    /// Directory under `.kaban/<ontology>/`.
-    pub dir: String,
-    /// File format.
-    pub format: Format,
-}
-
-/// One export block (`governed.export`) of a governed kind.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct BlockSpec {
-    /// The ontology (namespace) that declares the kind (`--ontology` selection, the digest's
-    /// directory `.kaban/<ontology>/`).
-    pub ontology: String,
-    /// The stored kind name.
-    pub kind: String,
-    /// Heading, when the file gives one.
-    pub heading: Option<String>,
-    /// Listed in the digest.
-    pub digest: bool,
-    /// Rendered in the marker block.
-    pub marker: bool,
-    /// The record directory under `.kaban/<ontology>/` (the entry links), `None` for a kind
-    /// with `serialize: none`.
-    pub dir: Option<String>,
 }
 
 /// One file the registry holds.
@@ -171,28 +114,6 @@ struct Loaded {
     version: u32,
     hash: String,
     file: OntologyFile,
-    /// The kind names in the order the file declares them (the export block and digest
-    /// section order of EN-F4, "their position in the shipped file"; the parsed
-    /// `OntologyFile.kinds` is a sorted map and has lost it).
-    kind_order: Vec<String>,
-}
-
-/// The `kinds:` keys of an ontology file in declaration order (a YAML mapping keeps it;
-/// `yaml_serde::Mapping` is insertion-ordered). Empty when the text has no `kinds` mapping.
-fn declared_kind_order(text: &str) -> Vec<String> {
-    yaml_serde::from_str::<yaml_serde::Value>(text)
-        .ok()
-        .and_then(|v| {
-            v.get("kinds")
-                .and_then(yaml_serde::Value::as_mapping)
-                .cloned()
-        })
-        .map(|m| {
-            m.keys()
-                .filter_map(|k| k.as_str().map(str::to_owned))
-                .collect()
-        })
-        .unwrap_or_default()
 }
 
 impl Loaded {
@@ -212,38 +133,25 @@ impl Loaded {
 struct State {
     files: Vec<Loaded>,
     ontology: Ontology,
-    /// The governed set of `ontology`, derived once per load (every write context reads it).
-    governed: Arc<GovernedSet>,
+    /// The rule set of `ontology`, derived once per load (every write reads it).
+    rules: Arc<RuleSet>,
 }
 
 impl State {
-    /// The position of a kind in the loaded set: its file's load order, then its declaration
-    /// position in that file (EN-F4 "position in the shipped file"), for the serialization
-    /// and export orders. `None` when no loaded file declares the kind's namespace.
-    fn position(&self, id: &Qualified) -> Option<(usize, usize)> {
-        let (order, file) = self.files.iter().enumerate().find(|(_, f)| f.ns == id.ns)?;
-        let declared = file
-            .kind_order
-            .iter()
-            .position(|k| *k == id.name)
-            .unwrap_or(usize::MAX);
-        Some((order, declared))
-    }
-
     fn new(files: Vec<Loaded>, ontology: Ontology) -> Self {
-        let governed = Arc::new(GovernedSet::from_ontology(&ontology));
+        let rules = Arc::new(RuleSet::from_ontology(&ontology));
         Self {
             files,
             ontology,
-            governed,
+            rules,
         }
     }
 }
 
 /// The registry: the shipped ontologies plus every loaded user file, resolved as one. The
-/// service holds it ([`KabanApi::registry`], engine-plan E1.5) and reads every mixin
-/// decision through it: the governed set of its write contexts, `why`'s governing kinds,
-/// `remember`'s dedup rule and `props_schema`, `accept`'s tier, `link`'s `GOVERNS` endpoints.
+/// service holds it ([`KabanApi::registry`], engine-plan E1.5) and reads every ontology
+/// decision through it: the rule set of its writes, `remember`'s dedup rule and
+/// `props_schema`.
 /// Loads are serialised (one at a time, read-resolve-write-publish as one section); reads
 /// never wait on a load except for the final swap of the published state.
 #[derive(Debug, Clone)]
@@ -292,7 +200,6 @@ fn shipped_state() -> Result<&'static State, ApiError> {
                     version: file.version,
                     hash: blake3_hex(text.as_bytes()),
                     file,
-                    kind_order: declared_kind_order(text),
                 });
             }
             let parsed: Vec<OntologyFile> = files.iter().map(|f| f.file.clone()).collect();
@@ -486,12 +393,13 @@ impl OntologyRegistry {
                 changed,
             });
         }
-        // the service's writes decide governance by the loaded set from here on (EN-F4, E1.4;
-        // the service reads this registry, E1.5)
+        // the service and its store decide by the loaded set from here on (EN-F4, E1.4; the
+        // service reads this registry, E1.5)
         *self
             .inner
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = State::new(files, ontology);
+        api.store.adopt_rules(self.rule_set());
         Ok(reports)
     }
 
@@ -522,263 +430,21 @@ impl OntologyRegistry {
             stored: stored.to_owned(),
             id: k.id.clone(),
             description: k.description.clone(),
-            governed: k.governed.clone(),
+            rules: k.rules.clone(),
             props_schema: k.props_schema.as_value().clone(),
         })
     }
 
-    /// The governance mixin of the kind stored under `stored` (a clone: the registry is
-    /// shared behind a lock).
-    pub fn governed(&self, stored: &str) -> Option<Governed> {
-        self.kind(stored).and_then(|k| k.governed)
+    /// The `rules` block of the kind stored under `stored` (a clone: the registry is shared
+    /// behind a lock).
+    pub fn rules(&self, stored: &str) -> Option<Rules> {
+        self.kind(stored).and_then(|k| k.rules)
     }
 
-    /// The governed kinds and `on_link` rels of everything loaded, as the store decides
-    /// governance by them (engine-plan E1.4; derived once per load, shared by every write
-    /// context).
-    pub fn governed_set(&self) -> Arc<GovernedSet> {
-        Arc::clone(&self.read().governed)
-    }
-
-    /// The discovered-labels knobs of the loaded set (engine-spec EN-F5; engine-plan E1.8):
-    /// the policy of the last loaded namespace declaring a `discovered` block (`review` when
-    /// none does; the shipped `adr.yaml` declares `review`), and that block's `cap`,
-    /// `prune_after_days` and `promote_when` (the `[discovered]` register of `engine` when no
-    /// block is loaded: the register is the default, not the only source). Two loaded
-    /// namespaces declaring different policies are reported once per call by a `warn` with
-    /// the two namespace names (no user bytes); the later one wins.
-    pub fn discovered(&self, engine: &EngineConfig) -> DiscoveredKnobs {
-        let state = self.read();
-        let mut declared: Option<(&Ns, &kaban_core::ontology::meta::DiscoveredPolicy)> = None;
-        for ns in &state.ontology.namespaces {
-            if let Some(block) = state.ontology.discovered.get(ns) {
-                if let Some((earlier, before)) = declared
-                    && before.policy != block.policy
-                {
-                    tracing::warn!(earlier = %earlier, later = %ns, "two loaded namespaces declare different discovered policies; the later one applies");
-                }
-                declared = Some((ns, block));
-            }
-        }
-        match declared {
-            Some((_, block)) => DiscoveredKnobs {
-                rules: DiscoveredRules {
-                    policy: block.policy,
-                    cap: block.cap,
-                },
-                prune_after_days: block.prune_after_days,
-                promote_when: PromoteWhen {
-                    min_count: block.promote_when.min_count,
-                    min_sources: block.promote_when.min_sources,
-                    min_mean_score: block.promote_when.min_mean_score,
-                },
-            },
-            None => DiscoveredKnobs {
-                rules: DiscoveredRules {
-                    policy: DiscoveredPolicyName::Review,
-                    cap: engine.discovered.cap,
-                },
-                prune_after_days: engine.discovered.prune_after_days,
-                promote_when: engine.discovered.promote_when.clone(),
-            },
-        }
-    }
-
-    /// `kaban ontology promote <from> <to>` (EN-F5, human-only): `to` is resolved against the
-    /// loaded set (a bare name in the bare-namespace order, else qualified) and must be a
-    /// declared kind (`unknown_kind` otherwise) the group can take (E1.9a RE3-4: not governed,
-    /// since a governed record starts `proposed` and derives its `dedup` key at write time,
-    /// and every active record of the group satisfies its `props_schema`); the decision is
-    /// this orchestrator's, from the registry, before the store renames in one transaction.
-    ///
-    /// # Errors
-    /// `Invalid("unknown_kind")` when `to` is not a loaded kind; `Store(PromoteTargetIncompatible)`
-    /// when the target is governed or some record of the group fails its schema; store errors
-    /// (`HumanOnly` for an agent actor, `unknown_kind` when `from` is not a counted `x:` kind,
-    /// `PromoteConflict` on a dedup identity collision).
-    pub fn promote(
-        &self,
-        api: &KabanApi,
-        from: &str,
-        to: &str,
-        actor: &kaban_core::Actor,
-    ) -> Result<kaban_core::PromoteReport, ApiError> {
-        let (target, governed, schema) = {
-            let state = self.read();
-            state
-                .ontology
-                .kinds
-                .values()
-                .find(|k| stored_name(&k.id) == to || k.id.to_string() == to)
-                .map(|k| (k.id.clone(), k.governed.is_some(), k.props_schema.clone()))
-        }
-        .ok_or_else(|| {
-            invalid(&OntologyError::UnknownKind {
-                path: "promote.to".to_owned(),
-            })
-        })?;
-        if governed {
-            return Err(kaban_core::StoreError::PromoteTargetIncompatible.into());
-        }
-        // every active record of the group against the target's schema, page by page, before
-        // anything moves (the store lists active rows only: a retired record of the group is
-        // renamed without this check and stays retired)
-        let ws = api.workspace().as_str();
-        let mut offset = 0;
-        loop {
-            let page = api.store.list_nodes(from, ws, offset, PROMOTE_PAGE)?;
-            if page
-                .iter()
-                .any(|node| first_error_text(&validate(&schema, &node.props)).is_some())
-            {
-                return Err(kaban_core::StoreError::PromoteTargetIncompatible.into());
-            }
-            if page.len() < PROMOTE_PAGE {
-                break;
-            }
-            offset += page.len();
-        }
-        Ok(api
-            .store
-            .promote_kind(api.workspace(), from, &target, actor)?)
-    }
-
-    /// `kaban ontology prune [--dry-run]` (EN-F5): the loaded knobs decide the thresholds.
-    ///
-    /// # Errors
-    /// Store errors.
-    pub fn prune(
-        &self,
-        api: &KabanApi,
-        dry_run: bool,
-    ) -> Result<kaban_core::PruneReport, ApiError> {
-        let knobs = self.discovered(api.engine());
-        Ok(api.store.prune_kinds(
-            api.workspace(),
-            &knobs.promote_when,
-            std::time::Duration::from_secs(u64::from(knobs.prune_after_days) * 86_400),
-            dry_run,
-        )?)
-    }
-
-    /// Every rel with an `on_link` side effect, by stored name.
-    pub fn rels_with_on_link(&self) -> Vec<(String, OnLink)> {
-        let state = self.read();
-        state
-            .ontology
-            .rels
-            .values()
-            .filter_map(|r| r.on_link.map(|on| (stored_name(&r.id), on)))
-            .collect()
-    }
-
-    /// The stored names of every loaded kind whose effective `index.stamp` is `commit` (the
-    /// default): the set `SyncStore::stamp_commit` updates (engine-spec §3.1 "Indexing
-    /// meta-config", OWN-65; the shipped `Document`, `Section`, `Chunk` and `Tag` are `none`).
-    /// In the resolver's order (by qualified identity).
-    pub fn stamp_kinds(&self) -> Vec<String> {
-        let state = self.read();
-        state
-            .ontology
-            .kinds
-            .values()
-            .filter(|k| k.stamp() == Stamp::Commit)
-            .map(|k| stored_name(&k.id))
-            .collect()
-    }
-
-    /// The effective stamping policy of the kind stored under `stored`; `None` when the loaded
-    /// files do not declare it (a discovered `x:` kind, for one).
-    pub fn index_policy(&self, stored: &str) -> Option<Stamp> {
-        self.with_kind(stored, ResolvedKind::stamp)
-    }
-
-    /// The stored names of the kinds whose records govern paths (`governs_paths: true`).
-    pub fn governing_kinds(&self) -> Vec<String> {
-        let state = self.read();
-        state
-            .ontology
-            .kinds
-            .values()
-            .filter(|k| k.governed.as_ref().is_some_and(|g| g.governs_paths))
-            .map(|k| stored_name(&k.id))
-            .collect()
-    }
-
-    /// The kinds that serialize to files, with their ontology, its loaded version and their
-    /// directory, in load order of their files then by stored name (the order `sync` walks).
-    pub fn serialized_kinds(&self) -> Vec<(String, SerializeDir)> {
-        let state = self.read();
-        let mut kinds: Vec<((usize, usize), String, SerializeDir)> = state
-            .ontology
-            .kinds
-            .values()
-            .filter_map(|k| {
-                let governed = k.governed.as_ref()?;
-                let position = state.position(&k.id)?;
-                let file = state.files.iter().find(|f| f.ns == k.id.ns)?;
-                match &governed.serialize {
-                    SerializeTarget::Dir(target) => Some((
-                        position,
-                        stored_name(&k.id),
-                        SerializeDir {
-                            ontology: file.ns.to_string(),
-                            version: file.version,
-                            dir: target.dir.to_string(),
-                            format: target.format,
-                        },
-                    )),
-                    SerializeTarget::None(_) => None,
-                }
-            })
-            .collect();
-        kinds.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
-        kinds
-            .into_iter()
-            .map(|(_, kind, dir)| (kind, dir))
-            .collect()
-    }
-
-    /// Whether an ontology named `ns` is loaded at exactly `version` (the frontmatter check of
-    /// `sync`: a file names the version that wrote it, OWN-47).
-    pub fn has_version(&self, ns: &str, version: u32) -> bool {
-        self.read()
-            .files
-            .iter()
-            .any(|f| f.ns.as_str() == ns && f.version == version)
-    }
-
-    /// The export blocks of the governed kinds, in load order of their files then in the
-    /// order the file declares them (EN-F4; the shipped `adr.yaml`: Decision, Convention,
-    /// Failure), then by name.
-    pub fn export_blocks(&self) -> Vec<BlockSpec> {
-        let state = self.read();
-        let mut blocks: Vec<((usize, usize), BlockSpec)> = state
-            .ontology
-            .kinds
-            .values()
-            .filter_map(|k| {
-                let governed = k.governed.as_ref()?;
-                let order = state.position(&k.id)?;
-                let dir = match &governed.serialize {
-                    SerializeTarget::Dir(target) => Some(target.dir.to_string()),
-                    SerializeTarget::None(_) => None,
-                };
-                Some((
-                    order,
-                    BlockSpec {
-                        ontology: k.id.ns.to_string(),
-                        kind: stored_name(&k.id),
-                        heading: governed.export.heading.clone(),
-                        digest: governed.export.digest,
-                        marker: governed.export.marker,
-                        dir,
-                    },
-                ))
-            })
-            .collect();
-        blocks.sort_by(|a, b| (a.0, &a.1.kind).cmp(&(b.0, &b.1.kind)));
-        blocks.into_iter().map(|(_, b)| b).collect()
+    /// The kind rules and `on_link` rels of everything loaded, as the store decides writes by
+    /// them (engine-plan E1.4; derived once per load, shared by every write).
+    pub fn rule_set(&self) -> Arc<RuleSet> {
+        Arc::clone(&self.read().rules)
     }
 }
 
@@ -838,14 +504,12 @@ fn read_and_gate(api: &KabanApi, root: &Path, path: &Path) -> Result<Loaded, Api
     let bytes =
         kaban_policy::read_contained(root, path, MAX_ONTOLOGY_FILE_BYTES).map_err(contain_error)?;
     let text = String::from_utf8(bytes).map_err(|_| malformed_file())?;
-    let mut ctx = api.write_ctx(None);
-    api.gate_joined(&mut ctx, TOOL, "file", &text)?;
+    api.gate_joined(TOOL, "file", &text)?;
     let hash = blake3_hex(text.as_bytes());
     let data: Value = yaml_serde::from_str(&text).map_err(|_| malformed_file())?;
     let mut redactions = Vec::new();
-    api.gate_json(&mut ctx, TOOL, "file", &data, &mut redactions)?;
+    api.gate_json(TOOL, "file", &data, &mut redactions)?;
     if !redactions.is_empty() {
-        api.flush_audit(&mut ctx)?;
         return Err(ApiError::Invalid(FILE_REDACTED.to_owned()));
     }
     let file = OntologyFile::from_yaml(&text).map_err(|e| invalid(&e))?;
@@ -855,7 +519,6 @@ fn read_and_gate(api: &KabanApi, root: &Path, path: &Path) -> Result<Loaded, Api
         version: file.version,
         hash,
         file,
-        kind_order: declared_kind_order(&text),
     })
 }
 
@@ -905,15 +568,7 @@ fn check_builtin_immutable(file: &Loaded) -> Result<(), ApiError> {
 /// the namespace's hash and version. The hash is written last, so a partial write never reads
 /// as a completed load: the next load repeats the upserts.
 fn write_namespace(api: &KabanApi, ontology: &Ontology, file: &Loaded) -> Result<(), ApiError> {
-    let ends = |ends: &[RelEnd]| -> Vec<String> {
-        ends.iter()
-            .filter_map(|end| match end {
-                RelEnd::Kind(q) => Some(stored_name(q)),
-                // the `path` literal has no `schema_type` row before 0004 (as the seeds)
-                RelEnd::Path => None,
-            })
-            .collect()
-    };
+    let ends = |ends: &[Qualified]| -> Vec<String> { ends.iter().map(stored_name).collect() };
     for kind in ontology.kinds.values().filter(|k| k.id.ns == file.ns) {
         api.store.schema_extend(TypeDef {
             kind: "label".into(),
@@ -961,7 +616,7 @@ fn write_namespace(api: &KabanApi, ontology: &Ontology, file: &Loaded) -> Result
 mod tests {
     use super::*;
     use crate::ApiConfig;
-    use kaban_core::{Governance, MemoryStore, NewNode, RememberOutcome};
+    use kaban_core::{MemoryStore, NewNode, RememberOutcome};
     use kaban_policy::Policy;
     use kaban_store_sqlite::SqliteStore;
 
@@ -986,28 +641,14 @@ mod tests {
             Arc::clone(store) as Arc<dyn kaban_core::GraphStore>,
             Policy::empty(),
             store.signer(),
-            None,
             ApiConfig::default(),
         )
     }
 
+    /// E1.4: a load publishes the rule set into the service's registry; before the load the
+    /// service reads the shipped set. A fresh record of a loaded kind is active.
     #[test]
-    fn shipped_yaml_keeps_declaration_order_in_public_export_blocks() {
-        let registry = OntologyRegistry::new(None).unwrap();
-        let kinds: Vec<String> = registry
-            .export_blocks()
-            .into_iter()
-            .map(|block| block.kind)
-            .collect();
-        assert_eq!(kinds, ["Decision", "Convention", "Failure"]);
-    }
-
-    /// E1.4: a load publishes the governed set into the service, so `write_ctx` carries the
-    /// loaded kinds and a user kind with the mixin is `proposed` on write; before the load the
-    /// service decides by the shipped set. (E1.5: the service reads the registry it holds, so
-    /// the registry is handed to the service; the assertions are E1.4's.)
-    #[test]
-    fn a_load_publishes_the_governed_set_the_write_context_carries() {
+    fn a_load_publishes_the_rule_set_into_the_registry() {
         // Arrange
         let scratch = Scratch::new("publish");
         let store = Arc::new(SqliteStore::open_memory().unwrap());
@@ -1017,11 +658,11 @@ mod tests {
             .join("../kaban-core/fixtures/ontology/incidents.yaml");
         let path = scratch.0.join(ONTOLOGY_DIR).join("incidents.yaml");
         std::fs::copy(fixture, &path).unwrap();
-        let before = api.governed();
-        assert!(before.contains("Decision") && !before.contains("incidents:Incident"));
+        let before = api.rules();
+        assert!(before.dedups("Decision") && before.rules("incidents:Incident").is_none());
         assert_eq!(
             *before,
-            *GovernedSet::shipped(),
+            *RuleSet::shipped(),
             "the shipped set before any load"
         );
 
@@ -1029,18 +670,15 @@ mod tests {
         registry.load_file(&api, &path).unwrap();
 
         // Assert
-        let after = api.write_ctx(None).governed;
-        assert!(after.contains("incidents:Incident"));
+        let after = api.rules();
+        assert!(after.rules("incidents:Incident").is_some());
+        assert!(after.dedups("Decision"), "the shipped rules stay");
         assert!(
-            after.contains("Decision"),
-            "the shipped kinds stay governed"
-        );
-        assert!(
-            !after.contains("incidents:Decision"),
-            "no mixin, not governed"
+            after.rules("incidents:Decision").is_none(),
+            "no rules block, no rules"
         );
         assert!(after.archives_on_link("incidents:REPLACES"));
-        assert_eq!(*after, *registry.governed_set());
+        assert_eq!(*after, *registry.rule_set());
         let outcome = store
             .remember(
                 NewNode {
@@ -1055,12 +693,13 @@ mod tests {
         let RememberOutcome::Created(node) = outcome else {
             panic!("fresh store: {outcome:?}");
         };
-        assert_eq!(node.governance, Governance::Proposed);
+        // a fresh record of a loaded kind is active at commit (REC-08, T3)
+        assert_eq!(node.lifecycle, kaban_core::Lifecycle::Active);
     }
 
     /// E1.5: the registry is the one owner of the loaded ontology: a load through the
-    /// service's registry is visible to every clone of the service (the governed set, the
-    /// kind view), and a service built without a registry starts from the shipped files.
+    /// service's registry is visible to every clone of the service (the rule set, the kind
+    /// view), and a service built without a registry starts from the shipped files.
     #[test]
     fn the_service_reads_the_registry_it_holds_and_every_clone_sees_a_load() {
         // Arrange
@@ -1085,59 +724,14 @@ mod tests {
 
         // Assert
         assert!(clone.registry().kind("incidents:Incident").is_some());
-        assert!(clone.governed().contains("incidents:Incident"));
-        assert!(Arc::ptr_eq(&api.governed(), &clone.governed()));
+        assert!(clone.rules().rules("incidents:Incident").is_some());
+        assert!(Arc::ptr_eq(&api.rules(), &clone.rules()));
         assert_eq!(registry.list().len(), kaban_core::shipped::FILES.len() + 1);
     }
 
-    /// E1.5 (core-spec §4, engine-spec EN-F4): the `GOVERNS` sources `link` enforces are the
-    /// governing kinds (`governs_paths: true`), and for the shipped file that set is exactly
-    /// the declared `rels.GOVERNS.from` (Decision, Convention): the rule and the declaration
-    /// agree, and a loaded governing kind joins the set.
-    #[test]
-    fn the_shipped_governs_sources_are_exactly_the_governing_kinds() {
-        // Arrange
-        let scratch = Scratch::new("governs");
-        let store = Arc::new(SqliteStore::open_memory().unwrap());
-        let registry = Arc::new(OntologyRegistry::new(Some(scratch.0.clone())).unwrap());
-        let api = api_over(&store).with_registry(Arc::clone(&registry));
-        let declared: Vec<String> = {
-            let state = registry.read();
-            let governs = state
-                .ontology
-                .rels
-                .values()
-                .find(|r| stored_name(&r.id) == "GOVERNS")
-                .expect("the shipped GOVERNS rel");
-            let mut from: Vec<String> = governs
-                .from
-                .iter()
-                .filter_map(|end| match end {
-                    RelEnd::Kind(q) => Some(stored_name(q)),
-                    RelEnd::Path => None,
-                })
-                .collect();
-            from.sort();
-            from
-        };
-
-        // Act
-        let shipped = registry.governing_kinds();
-        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../kaban-core/fixtures/ontology/runbooks.yaml");
-        let path = scratch.0.join(ONTOLOGY_DIR).join("runbooks.yaml");
-        std::fs::copy(fixture, &path).unwrap();
-        registry.load_file(&api, &path).unwrap();
-        let loaded = registry.governing_kinds();
-
-        // Assert
-        assert_eq!(shipped, declared);
-        assert_eq!(declared, ["Convention", "Decision"]);
-        assert_eq!(loaded, ["Convention", "Decision", "runbooks:Runbook"]);
-    }
-
     /// The hooks' adapter kinds are declared by the shipped `adr.yaml` under their bare names
-    /// (EN-F4: "retained as the adapter kinds"); `Failure` is governed, the other two are not.
+    /// (EN-F4: "retained as the adapter kinds"); `Failure` has display rules, the other two
+    /// do not.
     #[test]
     fn the_shipped_registry_declares_the_hook_adapter_kinds_under_adr() {
         // Arrange
@@ -1159,9 +753,9 @@ mod tests {
             assert_eq!(view.id.ns.as_str(), "adr", "{}", view.stored);
             assert_eq!(view.stored, view.id.name, "a bare stored name");
         }
-        let set = registry.governed_set();
-        assert!(set.contains(kinds.failure));
-        assert!(!set.contains(kinds.episode));
-        assert!(!set.contains(kinds.improvement));
+        let set = registry.rule_set();
+        assert!(set.display(kinds.failure).is_some());
+        assert!(set.display(kinds.episode).is_none());
+        assert!(set.display(kinds.improvement).is_none());
     }
 }

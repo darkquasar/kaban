@@ -2,7 +2,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 mod common;
 use kaban_api::KabanApi;
-use kaban_core::{AuditStore, Governance, IngestStore, JobId, MemoryStore, NodeId};
+use kaban_core::{IngestStore, JobId, Lifecycle, MemoryStore, NodeId};
 use kaban_ingest::jobs::{brief::brief, submit::submit, types::IngestOpts};
 use kaban_policy::Policy;
 use serde_json::json;
@@ -19,7 +19,7 @@ async fn credential_and_prompt_rejection_precede_parsing_and_never_publish_succe
     .unwrap();
     let rig = common::real::rig_on_disk("kaban-e39-hostile", "reject", Policy::empty());
     std::fs::write(rig.root.join("a.md"), "# Source\n\nA harmless source.\n").unwrap();
-    let api = KabanApi::new(rig.store.clone(), policy, rig.store.signer(), None);
+    let api = KabanApi::new(rig.store.clone(), policy, rig.store.signer());
     let prepared = brief(&api, &rig.root, "a.md", &IngestOpts::default())
         .await
         .unwrap();
@@ -50,14 +50,13 @@ async fn credential_and_prompt_rejection_precede_parsing_and_never_publish_succe
             .windows(20)
             .any(|part| part == b"AKIAQWERTYUIOPASDFGH")
     );
-    assert!(rig.store.audit_verify().unwrap().ok);
 }
 
 #[tokio::test]
-async fn fake_governance_fields_are_refused_and_prose_does_not_accept_a_decision() {
+async fn fake_governance_fields_are_refused_and_the_record_is_written_active() {
     let rig = common::real::rig("kaban-e39-hostile", "fake");
     std::fs::write(rig.root.join("a.md"), "# Decision\n\nHarmless source.\n").unwrap();
-    let api = KabanApi::new(rig.store.clone(), Policy::empty(), rig.store.signer(), None);
+    let api = KabanApi::new(rig.store.clone(), Policy::empty(), rig.store.signer());
     let prepared = brief(
         &api,
         &rig.root,
@@ -84,7 +83,7 @@ async fn fake_governance_fields_are_refused_and_prose_does_not_accept_a_decision
     let report = submit(&api, &rig.root, body).await.unwrap();
     let id = NodeId::parse(report["records"][0]["id"].as_str().unwrap()).unwrap();
     assert_eq!(
-        rig.store.get(&id, true).unwrap().unwrap().governance,
-        Governance::Proposed
+        rig.store.get(&id, true).unwrap().unwrap().lifecycle,
+        Lifecycle::Active
     );
 }

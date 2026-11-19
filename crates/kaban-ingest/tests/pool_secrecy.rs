@@ -8,7 +8,7 @@
 mod common;
 
 use common::pool::{Fake, LogBuf, Mode, rig};
-use kaban_core::{AuditStore, ChangeEntity, ChangeLogStore, MemoryStore, NodeId};
+use kaban_core::{ChangeEntity, ChangeLogStore, MemoryStore, NodeId};
 use kaban_ingest::IngestConfig;
 use std::fs;
 use tokio_util::sync::CancellationToken;
@@ -76,7 +76,6 @@ async fn the_report_and_the_trace_log_never_carry_a_path_canary() {
         ids[0].clone()
     };
     let blocked_rev = r.store.get(&blocked_id, true).unwrap().unwrap().rev;
-    let audit_after_first = r.store.audit_verify().unwrap().entries;
 
     // the fake mints a fresh Chunk id per run, so `clean.md` writes again (deterministic chunk
     // ids and the content skip arrive with DI1); the blocked document must not
@@ -94,11 +93,6 @@ async fn the_report_and_the_trace_log_never_carry_a_path_canary() {
         r.store.get(&blocked_id, true).unwrap().unwrap().rev,
         blocked_rev,
         "no rewrite"
-    );
-    assert_eq!(
-        r.store.audit_verify().unwrap().entries,
-        audit_after_first,
-        "no new audit row"
     );
 
     let log = logs.0.lock().unwrap().clone();

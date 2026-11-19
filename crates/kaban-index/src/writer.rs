@@ -31,7 +31,6 @@
 //! ```
 
 use std::collections::BTreeMap;
-use std::fmt;
 use std::path::{Path, PathBuf};
 
 use kaban_codegraph::identity::DirHandle;
@@ -82,32 +81,8 @@ pub fn dir_fsync(fd: BorrowedFd<'_>) -> Result<(), Errno> {
     rustix::fs::fsync(&dir)
 }
 
-/// A 40-hex commit id, validated once.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct Commit(String);
-
-impl Commit {
-    /// Accept exactly 40 lowercase hex digits.
-    #[must_use]
-    pub fn parse(s: &str) -> Option<Self> {
-        let hex = s.len() == 40
-            && s.bytes()
-                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase());
-        hex.then(|| Self(s.to_owned()))
-    }
-
-    /// The hex text.
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl fmt::Display for Commit {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
-}
+/// A 40-hex commit id, validated once: the one commit type of the workspace (spec 11 T5).
+pub use kaban_core::CommitSha as Commit;
 
 /// The provenance facts of G1-S5 (OWN-29), recorded verbatim in `meta`.
 #[derive(Debug, Clone, PartialEq, Eq)]

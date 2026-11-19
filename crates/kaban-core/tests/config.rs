@@ -106,26 +106,6 @@ fn an_absent_file_and_a_file_spelling_every_register_default_both_equal_default(
     // the §15.1 register, key by key (the table the plan asks for)
     let d = EngineConfig::default();
     let table: Vec<(&str, String)> = vec![
-        ("reconcile.tau_type", d.reconcile.tau_type.to_string()),
-        ("reconcile.tau_id", d.reconcile.tau_id.to_string()),
-        ("reconcile.priors", format!("{:?}", d.reconcile.priors)),
-        ("discovered.cap", d.discovered.cap.to_string()),
-        (
-            "discovered.prune_after_days",
-            d.discovered.prune_after_days.to_string(),
-        ),
-        (
-            "discovered.promote_when.min_count",
-            d.discovered.promote_when.min_count.to_string(),
-        ),
-        (
-            "discovered.promote_when.min_sources",
-            d.discovered.promote_when.min_sources.to_string(),
-        ),
-        (
-            "discovered.promote_when.min_mean_score",
-            d.discovered.promote_when.min_mean_score.to_string(),
-        ),
         (
             "ontology.pattern_size_limit_kib",
             d.ontology.pattern_size_limit_kib.to_string(),
@@ -156,21 +136,14 @@ fn an_absent_file_and_a_file_spelling_every_register_default_both_equal_default(
             d.gazetteer.max_chunk_ms.to_string(),
         ),
         ("gazetteer.v4_symbols", d.gazetteer.v4_symbols.to_string()),
-        ("embed.model", format!("{:?}", d.embed.model)),
-        ("embed.dtype", d.embed.dtype.clone()),
-        ("embed.knn_k", d.embed.knn_k.to_string()),
-        ("embed.tau.default", d.embed.tau["default"].to_string()),
         (
-            "embed.scan_window_rows",
-            d.embed.scan_window_rows.to_string(),
+            "extractors.holdout_min_f1",
+            d.extractors.holdout_min_f1.to_string(),
         ),
-        ("embed.max_scan_rss_mb", d.embed.max_scan_rss_mb.to_string()),
         (
-            "embed.min_topk_overlap",
-            d.embed.min_topk_overlap.to_string(),
+            "extractors.holdout_min_spans",
+            d.extractors.holdout_min_spans.to_string(),
         ),
-        ("l3.holdout_min_f1", d.l3.holdout_min_f1.to_string()),
-        ("l3.holdout_min_spans", d.l3.holdout_min_spans.to_string()),
         ("recall.fusion", d.recall.fusion.clone()),
         ("recall.rrf_k", d.recall.rrf_k.to_string()),
         (
@@ -198,12 +171,6 @@ fn an_absent_file_and_a_file_spelling_every_register_default_both_equal_default(
             "ask.template_depth_max",
             d.ask.template_depth_max.to_string(),
         ),
-        ("er.m.title", d.er.m["title"].to_string()),
-        ("er.u.title", d.er.u["title"].to_string()),
-        ("er.m.anchors", d.er.m["anchors"].to_string()),
-        ("er.u.anchors", d.er.u["anchors"].to_string()),
-        ("er.match_threshold", d.er.match_threshold.to_string()),
-        ("er.possible_threshold", d.er.possible_threshold.to_string()),
         ("ingest.finish_cap", d.ingest.finish_cap.to_string()),
         ("ingest.retention_days", d.ingest.retention_days.to_string()),
         ("ingest.claim_ttl_s", d.ingest.claim_ttl_s.to_string()),
@@ -222,32 +189,15 @@ fn an_absent_file_and_a_file_spelling_every_register_default_both_equal_default(
             "ingest.default_with",
             format!("{:?}", d.ingest.default_with),
         ),
-        (
-            "pipeline.retire_batch_rows",
-            d.pipeline.retire_batch_rows.to_string(),
-        ),
         ("link.default", d.link.default.clone()),
-        (
-            "briefing.max_candidates",
-            d.briefing.max_candidates.to_string(),
-        ),
-        ("budget.l0_rss_mb", d.budget.l0_rss_mb.to_string()),
+        ("text.build_rss_mb", d.text.build_rss_mb.to_string()),
         ("bench.min_samples", d.bench.min_samples.to_string()),
         (
             "bench.why_regression_pct",
             d.bench.why_regression_pct.to_string(),
         ),
-        ("why.anchor_prefilter", d.why.anchor_prefilter.to_string()),
     ];
     let expected = [
-        ("reconcile.tau_type", "0.3"),
-        ("reconcile.tau_id", "0.4"),
-        ("reconcile.priors", "None"),
-        ("discovered.cap", "500"),
-        ("discovered.prune_after_days", "90"),
-        ("discovered.promote_when.min_count", "20"),
-        ("discovered.promote_when.min_sources", "3"),
-        ("discovered.promote_when.min_mean_score", "0.7"),
         ("ontology.pattern_size_limit_kib", "1024"),
         ("ontology.golden_strict", "false"),
         ("gazetteer.min_pattern_len", "3"),
@@ -257,15 +207,8 @@ fn an_absent_file_and_a_file_spelling_every_register_default_both_equal_default(
         ("gazetteer.max_automaton_mb", "25"),
         ("gazetteer.max_chunk_ms", "1"),
         ("gazetteer.v4_symbols", "true"),
-        ("embed.model", "None"),
-        ("embed.dtype", "int8"),
-        ("embed.knn_k", "5"),
-        ("embed.tau.default", "0.8"),
-        ("embed.scan_window_rows", "4096"),
-        ("embed.max_scan_rss_mb", "32"),
-        ("embed.min_topk_overlap", "0.9"),
-        ("l3.holdout_min_f1", "0.5"),
-        ("l3.holdout_min_spans", "200"),
+        ("extractors.holdout_min_f1", "0.5"),
+        ("extractors.holdout_min_spans", "200"),
         ("recall.fusion", "rrf(60)"),
         ("recall.rrf_k", "60"),
         ("recall.judged_min_queries", "100"),
@@ -275,12 +218,6 @@ fn an_absent_file_and_a_file_spelling_every_register_default_both_equal_default(
         ("recall.column_weights.ident_terms", "2"),
         ("ask.template_depth", "1"),
         ("ask.template_depth_max", "3"),
-        ("er.m.title", "0.9"),
-        ("er.u.title", "0.01"),
-        ("er.m.anchors", "0.95"),
-        ("er.u.anchors", "0.001"),
-        ("er.match_threshold", "8"),
-        ("er.possible_threshold", "3"),
         ("ingest.finish_cap", "10000"),
         ("ingest.retention_days", "7"),
         ("ingest.claim_ttl_s", "300"),
@@ -290,30 +227,25 @@ fn an_absent_file_and_a_file_spelling_every_register_default_both_equal_default(
         ("ingest.lru_entries", "4"),
         ("ingest.lru_mib", "8"),
         ("ingest.default_with", "None"),
-        ("pipeline.retire_batch_rows", "1000"),
         ("link.default", "none"),
-        ("briefing.max_candidates", "5"),
-        ("budget.l0_rss_mb", "64"),
+        ("text.build_rss_mb", "64"),
         ("bench.min_samples", "30"),
         ("bench.why_regression_pct", "10"),
-        ("why.anchor_prefilter", "true"),
     ];
     assert_eq!(table.len(), expected.len());
     for ((key, got), (ekey, want)) in table.iter().zip(expected.iter()) {
         assert_eq!(key, ekey);
         assert_eq!(got, want, "{key}");
     }
-    assert_eq!(d.er.m.len(), 7);
-    assert_eq!(d.er.u.len(), 7);
 }
 
 #[test]
 fn an_unknown_key_at_any_depth_fails_parse_with_the_field_path_and_never_the_value() {
     let cases = [
         ("unknown_key.yaml", "ontology.pattern_size_limit_kb"),
-        ("unknown_key_depth3.yaml", "discovered.promote_when.min_cnt"),
+        ("unknown_key_depth3.yaml", "index.quota.file_bytez"),
         ("unknown_section.yaml", "ontologies"),
-        ("wrong_type.yaml", "embed.tau.Decision"),
+        ("wrong_type.yaml", "recall.column_weights.text"),
         ("not_a_mapping.yaml", ""),
     ];
     for (file, path) in cases {
@@ -389,55 +321,16 @@ fn the_retired_trigram_keys_are_unknown_keys() {
 }
 
 #[test]
-fn embedding_model_is_reserved_but_absent_null_and_empty_are_admitted() {
-    let path = std::env::temp_dir().join(format!("kaban-embed-model-{}.yaml", std::process::id()));
-    for yaml in [
-        "embed:\n  model:\n    name: test-model\n",
-        "embed:\n  model:\n    name: AKIAQWERTYUIOPASDFGH\n",
-        "embed:\n  model:\n    arbitrary: value\n",
-    ] {
-        std::fs::write(&path, yaml).unwrap();
-        let error = load(&path).unwrap_err();
-        assert_eq!(
-            error,
-            ConfigError::NotAvailable {
-                path: "embed.model"
-            }
-        );
-        assert_eq!(error.to_string(), "not_available_in_this_release");
-    }
-    for yaml in ["{}", "embed:\n  model: null\n", "embed:\n  model: {}\n"] {
-        std::fs::write(&path, yaml).unwrap();
-        assert!(load(&path).is_ok());
-    }
-    std::fs::remove_file(path).unwrap();
-}
-
-#[test]
 fn maps_are_replaced_whole_and_optional_keys_set_show_in_the_overrides() {
     let mut cfg = load(&fixture("maps_replace.yaml")).unwrap();
     assert_eq!(cfg.recall.column_weights.len(), 1);
-    assert_eq!(
-        cfg.embed.model.as_ref().unwrap(),
-        &std::collections::BTreeMap::new()
-    );
-    cfg.embed.model = Some(std::collections::BTreeMap::from([
-        ("name".to_owned(), "potion-base-4M".to_owned()),
-        ("dims".to_owned(), "256".to_owned()),
-    ]));
     assert_eq!(cfg.ingest.default_with.as_deref(), Some(""));
     // Override rendering remains useful for constructed configs; admission separately
     // rejects enrollment in this release.
     cfg.ingest.default_with = Some("gliner".to_owned());
     assert_eq!(
-        cfg.reconcile.priors.as_deref(),
-        Some(std::path::Path::new("/tmp/priors.yaml"))
-    );
-    assert_eq!(
         cfg.effective_overrides(),
         vec![
-            ("embed.model.dims".to_owned(), "256".to_owned()),
-            ("embed.model.name".to_owned(), "potion-base-4M".to_owned()),
             ("ingest.default_with".to_owned(), "gliner".to_owned()),
             (
                 "recall.column_weights.ident_terms".to_owned(),
@@ -449,7 +342,6 @@ fn maps_are_replaced_whole_and_optional_keys_set_show_in_the_overrides() {
             ),
             ("recall.column_weights.tags".to_owned(), "unset".to_owned()),
             ("recall.column_weights.text".to_owned(), "2.0".to_owned()),
-            ("reconcile.priors".to_owned(), "/tmp/priors.yaml".to_owned()),
         ]
     );
 }
@@ -514,5 +406,56 @@ fn index_keys_load_strictly_with_the_plan_defaults_and_show_as_overrides() {
         ConfigError::Range {
             path: "index.deadline_secs".to_owned()
         }
+    );
+}
+
+/// The sections of removed features (`[reconcile]`, `[er]`, `[why]`, `[briefing]`) are
+/// refused like any other unknown key: the error names the section, never a value.
+#[test]
+fn a_removed_feature_section_is_refused_naming_the_section() {
+    for section in [
+        "reconcile",
+        "er",
+        "why",
+        "briefing",
+        "discovered",
+        "embed",
+        "l3",
+        "budget",
+        "pipeline",
+    ] {
+        let path = std::env::temp_dir().join(format!(
+            "kaban-config-removed-{}-{section}.yaml",
+            std::process::id()
+        ));
+        std::fs::write(
+            &path,
+            format!("{section}:\n  secret_value_x: 0.3\nlink:\n  default: none\n"),
+        )
+        .unwrap();
+        let err = load(&path).unwrap_err();
+        assert!(
+            matches!(&err, ConfigError::Parse { path } if path == section),
+            "{section}: {err:?}"
+        );
+        assert!(!err.to_string().contains("secret_value_x"), "{err}");
+        std::fs::remove_file(path).unwrap();
+    }
+}
+
+/// `pipeline.retire_batch_rows` had no reader once layer retirement went (OD-P1), and it was the
+/// only key of `[pipeline]`: a config that still sets it is refused naming the section.
+#[test]
+fn the_retired_pipeline_section_is_refused_naming_it() {
+    let path = std::env::temp_dir().join(format!(
+        "kaban-config-removed-pipeline-{}.yaml",
+        std::process::id()
+    ));
+    std::fs::write(&path, "pipeline:\n  retire_batch_rows: 1000\n").unwrap();
+    let result = load(&path);
+    std::fs::remove_file(&path).unwrap();
+    assert!(
+        matches!(&result, Err(ConfigError::Parse { path }) if path == "pipeline"),
+        "{result:?}"
     );
 }

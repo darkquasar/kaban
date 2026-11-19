@@ -11,10 +11,10 @@ lives with its client; it is not a network daemon.
 flowchart TD
   Agent[Agent MCP client] --> MCP[Stdio adapter]
   Person[Person or script] --> CLI[CLI adapter]
-  MCP --> Service[Service and governance]
+  MCP --> Service[Service]
   CLI --> Service
   Service --> Gate[Policy gates on writes and reads]
-  Gate <--> DB[(SQLite memories, edges and audit; Tantivy text index beside it)]
+  Gate <--> DB[(SQLite memories, edges and change log; Tantivy text index beside it)]
   Docs[Explicit document ingestion] --> Gate
   Host[Optional host extractor outside Kaban] -. uses bounded structured briefs .-> Service
   Repo[Trusted repository] --> Index[Explicit kaban-index and SCIP tool]
@@ -25,28 +25,28 @@ flowchart TD
 ```
 
 The diagram is a conceptual separation, not a claim that every read follows the
-same physical query. Code snapshots have their own producer/reader path; their
-trust and policy handling are not replaced by the memory database's audit chain.
+same physical query. Code snapshots have their own producer/reader path and their
+own trust and policy handling.
 
 ## Canonical records and retrieval
 
-SQLite holds records, typed edges, governance events and an audit chain. The text
-index beside it (Tantivy) is derived retrieval state, projected from the records, not
-the authoritative human decision. Recall can combine lexical matches, the index's
+SQLite holds records, typed edges and the change log. The text index beside it
+(Tantivy) is derived retrieval state, projected from the records; SQLite stays
+authoritative. Recall can combine lexical matches, the index's
 fuzzy (typo-tolerant) matching and bounded graph expansion; embeddings are
-unavailable. There is one storage model (spec 05 OWN-M): opening a store brings the
-database to the current schema in one migration (the in-database FTS5 index, its optional
-trigram table and the cutover marker of earlier releases are dropped, every body is stored
-as an encoded BLOB) and yields a store whose text index exists, admitted as it stands or
-rebuilt from SQLite before the open returns. That migration runs only with the database to
-one process: an open that finds another kaban process using the old-schema database
-refuses with "close the other kaban processes and retry"; concurrent openers of the same
-old database wait for the one that migrates. Older binaries refuse the new schema.
+unavailable. There is one storage model (spec 05 OWN-M) and one schema version (14):
+opening a store creates that schema on a fresh database and yields a store whose text
+index exists, admitted as it stands or rebuilt from SQLite before the open returns. A
+fresh database is created in SQLite's incremental auto-vacuum mode. A database of any
+other version, older or newer, is refused before kaban
+writes anything to it or its directory: the error names the version found and the version
+served and says that no upgrade path exists (create a fresh project and re-ingest). There
+is no migration.
 
-Records carry lifecycle and governance information. A proposed Decision does not
-become accepted just because a search returns it. Human review, acceptance and
-supersession preserve the distinction between a suggestion and an approved rule.
-`why` supplies governing context for a path; it is not an `ask` workflow engine.
+Records carry a lifecycle (active, archived, tombstoned, purged) and the
+producer of every edge. A write is active at once: there is no proposed or review
+state. A `SUPERSEDES` link archives the record it replaces, so recall returns the
+current rule unless archived records are asked for.
 
 The policy checks incoming content and outgoing responses; current policy can
 hide or mask old records too. The database is not encrypted merely because it is
@@ -63,8 +63,9 @@ pipeline is implied by `ingest`.
 Structured ingestion can produce bounded briefs and slices for a host agent or
 an external extractor. `llm` and `gliner` identify instruction dialects, not model
 weights loaded by Kaban. Kaban calls no model and executes no external extractor
-for these briefs. Candidates and machine claims have their own provenance and
-review state; extraction is not acceptance. See [documents](../guides/documents.mdx).
+for these briefs. A submission is written as active records, its edges tagged with
+the extractor producer; extractor output cannot write lifecycle relationships
+(`SUPERSEDES`, `INVALIDATES`, `CONTRADICTS`). See [documents](../guides/documents.mdx).
 
 ## Code snapshots have a separate producer
 
@@ -82,10 +83,8 @@ explains snapshot selection, trust and language/toolchain limits.
 
 ## Files and processes stay distinct
 
-The database is the CLI/MCP machine interface. Explicit sync/import operations
-carry serialized governed records through `.kaban/` files and repository history;
-those files are not a second live personal/global database. Optional host hooks
-open the same existing store and can flush serialization. Neither hooks nor
+The database is the CLI/MCP machine interface; there is no file export or import of
+records. Optional host hooks open the same existing store. Neither hooks nor
 `serve` starts code indexing.
 
 M6's two-store/personal-memory design is cancelled. The delivered architecture is

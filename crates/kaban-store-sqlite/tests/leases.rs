@@ -62,7 +62,7 @@ fn remember(store: &SqliteStore, text: &str) {
                 ..Default::default()
             },
             &[],
-            &WriteCtx::new("pv", WorkspaceId::default(), Actor::Agent),
+            &WriteCtx::new(WorkspaceId::default(), Actor::Agent),
         )
         .unwrap();
 }

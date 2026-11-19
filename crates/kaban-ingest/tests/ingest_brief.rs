@@ -7,8 +7,7 @@ use kaban_core::WorkspaceId;
 use kaban_core::{IngestStore, JobId, MemoryStore, NodeId};
 use kaban_ingest::jobs::next::PageBudget;
 use kaban_ingest::jobs::types::{
-    IngestDialect, JobEnvelope, PairJudgement, PairRef, PreparationOptions, StructuredReturn,
-    job_id,
+    IngestDialect, JobEnvelope, PreparationOptions, StructuredReturn, job_id,
 };
 use kaban_ingest::jobs::{brief::brief, types::IngestOpts};
 use serde_json::json;
@@ -90,24 +89,6 @@ fn canonical_wire_alias_and_schema_preserve_folded_field_names() {
 }
 
 #[test]
-fn pair_conversion_preserves_exact_core_judgement_shape() {
-    let a = NodeId::new().to_string();
-    let b = NodeId::new().to_string();
-    let wire = PairJudgement {
-        pair: PairRef {
-            a: a.clone(),
-            b: b.clone(),
-        },
-        same: false,
-    };
-    let core: kaban_core::PairJudgement = wire.clone().into();
-    assert_eq!(
-        serde_json::to_value(wire).unwrap(),
-        serde_json::to_value(core).unwrap()
-    );
-}
-
-#[test]
 fn v1_job_identity_is_repeatable_and_workspace_source_bound() {
     let workspace = WorkspaceId::new("a");
     let path = kaban_ingest::gate_path(&kaban_policy::Policy::empty(), "a.md").unwrap();
@@ -169,7 +150,6 @@ fn api(rig: &common::real::Rig) -> KabanApi {
         rig.store.clone(),
         kaban_policy::Policy::empty(),
         rig.store.signer(),
-        None,
     )
 }
 
@@ -222,7 +202,7 @@ async fn gazetteer_advice_and_about_use_admitted_hits_without_edges_or_fake_chun
                     ..NewNode::default()
                 },
                 &[],
-                &WriteCtx::new("v1", WorkspaceId::default(), Actor::Agent),
+                &WriteCtx::new(WorkspaceId::default(), Actor::Agent),
             )
             .unwrap();
     }
@@ -235,7 +215,7 @@ async fn gazetteer_advice_and_about_use_admitted_hits_without_edges_or_fake_chun
                 ..NewNode::default()
             },
             &[],
-            &WriteCtx::new("v1", WorkspaceId::new("foreign"), Actor::Agent),
+            &WriteCtx::new(WorkspaceId::new("foreign"), Actor::Agent),
         )
         .unwrap();
     let foreign = match foreign {
@@ -667,7 +647,7 @@ async fn hidden_document_refuses_without_registry_graph_or_canary_persistence() 
         kaban_policy::Policy::from_file(kaban_policy::Policy::parse(b"rules:\n  - id: hidden\n    regex: 'SYNTHETIC-DUMP-[0-9]+'\n    action: reject\n    on_document: skip_file\n").unwrap(), "test".into()).unwrap()
     };
     let rig = common::real::rig_on_disk("kaban-e38-brief", "hidden", policy());
-    let api = KabanApi::new(rig.store.clone(), policy(), rig.store.signer(), None);
+    let api = KabanApi::new(rig.store.clone(), policy(), rig.store.signer());
     std::fs::write(rig.root.join("hidden.md"), format!("# Data\n\n{CANARY}\n")).unwrap();
     assert!(
         brief(&api, &rig.root, "hidden.md", &IngestOpts::default())

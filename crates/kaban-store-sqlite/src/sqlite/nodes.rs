@@ -5,17 +5,13 @@
 //! `redacted_content_hash`) plus `ignored_fields`. Split out of `sqlite.rs` (OWN-79).
 
 use crate::anchors;
-use crate::audit_table;
-use crate::candidates::{self, Placement};
 use crate::changelog;
-use crate::reconcile;
 use crate::rows::{NODE_COLS, row_node};
 use crate::sql_error::SqlResultExt;
 use kaban_core::Result;
 use kaban_core::{
-    BatchReport, Governance, InvalidTransition, Lifecycle, LinkReq, Method, NewNode, Node, NodeId,
-    OntologyError, OutcomeKind, RedactedStrings, RememberOutcome, StoreError, WorkspaceId,
-    WriteCtx, new_id, now_iso,
+    BatchReport, Lifecycle, LinkReq, Method, NewNode, Node, NodeId, OutcomeKind, RedactedStrings,
+    RememberOutcome, StoreError, WorkspaceId, WriteCtx, new_id, now_iso,
 };
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::json;
@@ -39,71 +35,53 @@ impl SqliteStore {
         refs: &[NewNode],
         ctx: &WriteCtx,
     ) -> Result<RememberOutcome> {
-        let policy_version = ctx.policy_version.as_str();
-        let mut conn = self.write();
-        let tx = conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .sql()?;
-        audit_table::append(&tx, self.signer.as_ref(), &ctx.audit)?;
-        let workspace_id = n
-            .workspace_id
-            .as_deref()
-            .unwrap_or(WorkspaceId::DEFAULT)
-            .to_owned();
-        let tenant = Tenant::of(ctx, &workspace_id);
-        // EN-F5: the one-record batch; a refused label is the error, a new kind beyond the
-        // cap is `discovered_cap_reached` with its `n_rejected` increment (and the audit rows)
-        // committed and nothing else written
-        let Some(placement) = Self::place(&tx, &tenant, &n.kind)? else {
-            tx.commit().sql()?;
-            return Err(StoreError::Ontology(OntologyError::DiscoveredCapReached));
-        };
-        let hash = content_hash(&workspace_id, placement.stored_kind(), &n.text);
-        // dedup is on active rows only (OD-16): a tombstone is never returned as `existing`
-        if let Some(existing) = Self::active_by_hash(&tx, &hash)? {
-            // m2 N5: a retry still attaches its links (and refs); metadata differences are
-            // reported, not applied
-            let links_created =
-                Self::attach_links(&tx, &self.reconcile, &tenant, &existing.id, links)?;
-            Self::attach_refs(
-                &tx,
-                &self.reconcile,
-                &tenant,
-                &existing.id,
-                refs,
-                policy_version,
-            )?;
-            let fields_ignored = ignored_fields(&n, &existing);
-            changelog::record_terminal(&tx, ctx)?;
-            tx.commit().sql()?;
-            return Ok(RememberOutcome::Existing {
-                node: existing,
-                links_created,
-                fields_ignored,
-            });
-        }
-        let id = Self::insert_node(&tx, &tenant, &placement, &n, &hash, policy_version)?;
-        // a new node has no edges yet, so every distinct link is an insert; the API reports
-        // the distinct count (review R1-8)
-        Self::attach_links(&tx, &self.reconcile, &tenant, &id, links)?;
-        Self::attach_refs(&tx, &self.reconcile, &tenant, &id, refs, policy_version)?;
-        let node = tx
-            .query_row(
-                &format!("SELECT {NODE_COLS} FROM node WHERE id=?"),
-                [&id],
-                row_node,
-            )
-            .sql()?;
-        changelog::record_terminal(&tx, ctx)?;
-        tx.commit().sql()?;
-        Ok(RememberOutcome::Created(node))
+        let mut conn = self.lock();
+        self.catalog.commit(&mut conn, ctx.durability, |txn| {
+            let tx = txn.conn();
+            let workspace_id = n
+                .workspace_id
+                .as_deref()
+                .unwrap_or(WorkspaceId::DEFAULT)
+                .to_owned();
+            let tenant = self.tenant(&workspace_id);
+            // an undeclared kind is refused before anything is written (PC-14: no discovery)
+            let stored_kind = Self::place(tx, &n.kind)?;
+            let hash = content_hash(&workspace_id, &stored_kind, &n.text);
+            // dedup is on active rows only (OD-16): a tombstone is never returned as `existing`
+            if let Some(existing) = Self::active_by_hash(tx, &hash)? {
+                // m2 N5: a retry still attaches its links (and refs); metadata differences are
+                // reported, not applied
+                let links_created = Self::attach_links(tx, &tenant, &existing.id, links)?;
+                Self::attach_refs(tx, &tenant, &existing.id, refs)?;
+                let fields_ignored = ignored_fields(&n, &existing);
+                changelog::record_terminal(tx, ctx)?;
+                return Ok(RememberOutcome::Existing {
+                    node: existing,
+                    links_created,
+                    fields_ignored,
+                });
+            }
+            let id = Self::insert_node(tx, &tenant, &stored_kind, &n, &hash)?;
+            // a new node has no edges yet, so every distinct link is an insert; the API reports
+            // the distinct count (review R1-8)
+            Self::attach_links(tx, &tenant, &id, links)?;
+            Self::attach_refs(tx, &tenant, &id, refs)?;
+            let node = tx
+                .query_row(
+                    &format!("SELECT {NODE_COLS} FROM node WHERE id=?"),
+                    [&id],
+                    row_node,
+                )
+                .sql()?;
+            changelog::record_terminal(tx, ctx)?;
+            Ok(RememberOutcome::Created(node))
+        })
     }
     /// Create the inline links of a `remember` around node `id`; returns how many edges were
     /// actually inserted (a link that already existed, or a duplicate inside `links`, is
     /// refreshed and not counted; review R1-8).
     fn attach_links(
         conn: &Connection,
-        setup: &reconcile::Setup,
         tenant: &Tenant<'_>,
         id: &str,
         links: &[LinkReq],
@@ -117,7 +95,6 @@ impl SqliteStore {
             };
             let (_, inserted) = Self::link_in(
                 conn,
-                setup,
                 tenant,
                 from,
                 to,
@@ -141,32 +118,27 @@ impl SqliteStore {
         .sql()
     }
     /// Insert a fresh node row from a gated [`NewNode`] in the tenant's workspace under its
-    /// [`Placement`]; returns its id. Governed kinds (the tenant's set, EN-F4) and
-    /// `allow`-placed labels start `proposed`, every other kind has no governance (core-spec
-    /// §4, EN-F5); a discovered placement also writes its `x:` type, stats and candidate rows.
+    /// declared `stored_kind`; returns its id.
     fn insert_node(
         conn: &Connection,
         tenant: &Tenant<'_>,
-        placement: &Placement,
+        stored_kind: &str,
         n: &NewNode,
         hash: &str,
-        policy_version: &str,
     ) -> Result<String> {
         let id = new_id();
         let now = now_iso();
         let tags = serde_json::to_string(&n.tags)?;
         let props = serde_json::to_string(n.props.as_ref().unwrap_or(&json!({})))?;
         let path_scope = serde_json::to_string(&n.path_scope)?;
-        let governance = placement.initial_governance(tenant.governed);
         let bodies = crate::body_codec::Writer::for_connection(conn)?;
         conn.execute(
-            "INSERT INTO node(id,kind,text,summary,tags,confidence,importance,lifecycle,governance,store_scope,path_scope,dup_key,repo,created_at,updated_at,valid_from,session_id,agent_id,workspace_id,props,content_hash,policy_version)
-             VALUES (?,?,?,?,?,?,?,'active',?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            params![id, placement.stored_kind(), bodies.stored(&n.text), n.summary, tags, n.confidence, n.importance, governance.as_str(), n.store_scope.as_str(), path_scope, n.dup_key, n.repo, now, now, n.valid_from, n.session_id, n.agent_id, tenant.ws, props, hash, policy_version],
+            "INSERT INTO node(id,kind,text,summary,tags,confidence,importance,lifecycle,store_scope,path_scope,dup_key,repo,created_at,updated_at,valid_from,session_id,agent_id,workspace_id,props,content_hash)
+             VALUES (?,?,?,?,?,?,?,'active',?,?,?,?,?,?,?,?,?,?,?,?)",
+            params![id, stored_kind, bodies.stored(&n.text), n.summary, tags, n.confidence, n.importance, n.store_scope.as_str(), path_scope, n.dup_key, n.repo, now, now, n.valid_from, n.session_id, n.agent_id, tenant.ws, props, hash],
         ).sql()?;
-        let rid = conn.last_insert_rowid();
-        candidates::record_discovered(conn, tenant.ws, rid, placement, &now)?;
-        Self::maintain_anchors(conn, tenant, rid, placement.stored_kind(), n)?;
+        let rid = addressable_rid(conn)?;
+        Self::maintain_anchors(conn, tenant, rid, stored_kind, n)?;
         Ok(id)
     }
     /// EN-F10: the anchor rows of a node just written from `n` (a store below 0004 has no
@@ -178,7 +150,7 @@ impl SqliteStore {
         stored_kind: &str,
         n: &NewNode,
     ) -> Result<()> {
-        if !reconcile::engine_tables(conn)? {
+        if !crate::edge_write::scoring_columns(conn)? {
             return Ok(());
         }
         let empty = json!({});
@@ -190,43 +162,37 @@ impl SqliteStore {
                 kind: stored_kind,
                 repo: n.repo.as_deref(),
                 props: n.props.as_ref().unwrap_or(&empty),
-                path_scope: &n.path_scope,
             },
-            tenant.governed,
         )?;
         Ok(())
     }
-    /// Place `kind` for the tenant (EN-F5) and admit it under the workspace cap: the
-    /// placement, or `None` when the cap refused a new discovered kind (`n_rejected` moved;
-    /// the caller decides between a skipped record and `discovered_cap_reached`).
-    fn place(conn: &Connection, tenant: &Tenant<'_>, kind: &str) -> Result<Option<Placement>> {
-        let placement = candidates::place_kind(conn, tenant.governed, tenant.discovered, kind)?;
-        match candidates::admit_discovered(conn, tenant.ws, tenant.discovered, &placement)? {
-            candidates::Admission::Admitted => Ok(Some(placement)),
-            candidates::Admission::CapReached => Ok(None),
+    /// The canonical stored spelling of a declared `kind`; an undeclared kind is
+    /// `UnknownKind` (PC-14: undeclared labels are no longer placed as discovered kinds).
+    fn place(conn: &Connection, kind: &str) -> Result<String> {
+        let canonical = crate::ontology::normalise_stored(kind);
+        if crate::ontology::kind_exists(conn, &canonical)? {
+            Ok(canonical)
+        } else {
+            Err(StoreError::UnknownKind(canonical))
         }
     }
     /// Create the `CodeRef` nodes of a `remember` (deduplicated against active nodes by content
     /// hash, in `workspace_id`) and link the note `ABOUT` each of them (M3-2).
     fn attach_refs(
         conn: &Connection,
-        setup: &reconcile::Setup,
         tenant: &Tenant<'_>,
         id: &str,
         refs: &[NewNode],
-        policy_version: &str,
     ) -> Result<()> {
         for r in refs {
-            let placement = Self::place(conn, tenant, &r.kind)?
-                .ok_or(StoreError::Ontology(OntologyError::DiscoveredCapReached))?;
-            let hash = content_hash(tenant.ws, placement.stored_kind(), &r.text);
+            let stored_kind = Self::place(conn, &r.kind)?;
+            let hash = content_hash(tenant.ws, &stored_kind, &r.text);
             let ref_id = match Self::active_by_hash(conn, &hash)? {
                 Some(existing) => existing.id,
-                None => Self::insert_node(conn, tenant, &placement, r, &hash, policy_version)?,
+                None => Self::insert_node(conn, tenant, &stored_kind, r, &hash)?,
             };
             Self::link_in(
                 conn,
-                setup,
                 tenant,
                 id,
                 &ref_id,
@@ -245,26 +211,12 @@ impl SqliteStore {
         tenant: &Tenant<'_>,
         id: &NodeId,
         n: &NewNode,
-        policy_version: &str,
         report: &mut BatchReport,
-    ) -> Result<Option<i64>> {
+    ) -> Result<i64> {
         let ws = tenant.ws;
-        // EN-F5: an undeclared label is placed under the tenant's discovered rules; a refused
-        // label or a new kind beyond the cap skips the record (the batch goes on, the
-        // `n_rejected` increment commits with it)
-        let placement = match Self::place(conn, tenant, &n.kind) {
-            Ok(Some(placement)) => placement,
-            Ok(None) => {
-                report.record(id, &n.kind, OutcomeKind::CapReached);
-                return Ok(None);
-            }
-            Err(StoreError::KindNotAllowed) => {
-                report.record(id, &n.kind, OutcomeKind::KindNotAllowed);
-                return Ok(None);
-            }
-            Err(e) => return Err(e),
-        };
-        let stored_kind = placement.stored_kind();
+        // an undeclared kind refuses the batch (PC-14: no discovery)
+        let stored_kind = Self::place(conn, &n.kind)?;
+        let stored_kind = stored_kind.as_str();
         let now = now_iso();
         let tags = serde_json::to_string(&n.tags)?;
         let props = serde_json::to_string(n.props.as_ref().unwrap_or(&json!({})))?;
@@ -272,7 +224,7 @@ impl SqliteStore {
         let hash = batch_content_hash(ws, id.as_str(), n, &props);
         let stored: Option<StoredNode> = conn
             .query_row(
-                "SELECT rid, content_hash, kind, lifecycle, workspace_id, dup_key, repo, store_scope, governance FROM node WHERE id=?",
+                "SELECT rid, content_hash, kind, lifecycle, workspace_id, dup_key, repo, store_scope FROM node WHERE id=?",
                 [id.as_str()],
                 |r| {
                     Ok(StoredNode {
@@ -284,7 +236,6 @@ impl SqliteStore {
                         dup_key: r.get(5)?,
                         repo: r.get(6)?,
                         store_scope: r.get(7)?,
-                        governance: r.get(8)?,
                     })
                 },
             )
@@ -323,46 +274,28 @@ impl SqliteStore {
                 rid
             }
             None => {
-                let governance = placement.initial_governance(tenant.governed);
                 let bodies = crate::body_codec::Writer::for_connection(conn)?;
                 // EN-E3: `store_scope`, `path_scope`, `dup_key` and `repo` are persisted on
                 // insert and update (before E2.2 the batch path dropped them)
                 conn.execute(
-                    "INSERT INTO node(id,kind,text,summary,tags,confidence,importance,lifecycle,governance,store_scope,path_scope,dup_key,repo,created_at,updated_at,valid_from,session_id,agent_id,workspace_id,props,content_hash,policy_version)
-                     VALUES (?,?,?,?,?,?,?,'active',?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                    params![id.as_str(), stored_kind, bodies.stored(&n.text), n.summary, tags, n.confidence, n.importance, governance.as_str(), n.store_scope.as_str(), path_scope, n.dup_key, n.repo, now, now, n.valid_from, n.session_id, n.agent_id, ws, props, hash, policy_version],
+                    "INSERT INTO node(id,kind,text,summary,tags,confidence,importance,lifecycle,store_scope,path_scope,dup_key,repo,created_at,updated_at,valid_from,session_id,agent_id,workspace_id,props,content_hash)
+                     VALUES (?,?,?,?,?,?,?,'active',?,?,?,?,?,?,?,?,?,?,?,?)",
+                    params![id.as_str(), stored_kind, bodies.stored(&n.text), n.summary, tags, n.confidence, n.importance, n.store_scope.as_str(), path_scope, n.dup_key, n.repo, now, now, n.valid_from, n.session_id, n.agent_id, ws, props, hash],
                 ).sql()?;
-                let rid = conn.last_insert_rowid();
-                candidates::record_discovered(conn, ws, rid, &placement, &now)?;
+                let rid = addressable_rid(conn)?;
                 report.record(id, stored_kind, OutcomeKind::Inserted);
                 rid
             }
-            Some(StoredNode {
-                rid, governance, ..
-            }) => {
-                // EN-F35: unchanged retries above remain no-ops. Any persisted terminal
-                // governance protects content even if the current ontology drops the mixin.
-                let governance = Governance::parse(&governance)
-                    .ok_or_else(|| crate::rows::bad_enum(8, &governance))
-                    .sql()?;
-                if governance != Governance::None && governance != Governance::Proposed {
-                    return Err(InvalidTransition::Governance {
-                        from: governance,
-                        to: Governance::Proposed,
-                    }
-                    .into());
-                }
+            Some(StoredNode { rid, .. }) => {
                 let bodies = crate::body_codec::Writer::for_connection(conn)?;
                 conn.execute(
                     "UPDATE node SET text=?1, summary=?2, tags=?3, confidence=?4, importance=?5, valid_from=?6,
-                         session_id=?7, agent_id=?8, props=?9, content_hash=?10, policy_version=?11,
-                         updated_at=?12, store_scope=?14, path_scope=?15, dup_key=?16, repo=?17, rev=rev+1
-                     WHERE rid=?13",
-                    params![bodies.stored(&n.text), n.summary, tags, n.confidence, n.importance, n.valid_from, n.session_id, n.agent_id, props, hash, policy_version, now, rid, n.store_scope.as_str(), path_scope, n.dup_key, n.repo],
+                         session_id=?7, agent_id=?8, props=?9, content_hash=?10,
+                         updated_at=?11, store_scope=?13, path_scope=?14, dup_key=?15, repo=?16, rev=rev+1
+                     WHERE rid=?12",
+                    params![bodies.stored(&n.text), n.summary, tags, n.confidence, n.importance, n.valid_from, n.session_id, n.agent_id, props, hash, now, rid, n.store_scope.as_str(), path_scope, n.dup_key, n.repo],
                 ).sql()?;
-                // the counters follow a content or source change (EN-F6; E1.9a RE3-7)
                 super::artifacts::invalidate_stale(conn, rid)?;
-                candidates::touch_stats(conn, ws, stored_kind)?;
                 report.record(id, stored_kind, OutcomeKind::Updated);
                 rid
             }
@@ -370,7 +303,7 @@ impl SqliteStore {
         if !(same_hash && same_repo) {
             Self::maintain_anchors(conn, tenant, rid, stored_kind, n)?;
         }
-        Ok(Some(rid))
+        Ok(rid)
     }
 }
 
@@ -385,7 +318,6 @@ struct StoredNode {
     dup_key: Option<String>,
     repo: Option<String>,
     store_scope: String,
-    governance: String,
 }
 
 /// Content identity of a node written by `apply_batch` (WD-7, D-16): sha256 over a
@@ -461,7 +393,6 @@ pub(super) fn redacted_content_hash(id: &str, s: &RedactedStrings) -> String {
         &s.agent_id,
         &s.repo,
         &s.commit_sha,
-        &s.accepted_commit,
         &s.dup_key,
     ] {
         put_opt(f.as_deref());
@@ -498,4 +429,17 @@ fn ignored_fields(req: &NewNode, stored: &Node) -> Vec<String> {
         out.push("props".into());
     }
     out
+}
+
+/// The row id of the node row `conn` just inserted, refused as
+/// [`StoreError::NodeIdCeiling`] above `u32::MAX`, the graph's local id space (spec 11 PC-1).
+/// Every node insert takes its row id here, inside its write transaction, so a refusal rolls
+/// the whole write back, the row-id sequence with it.
+fn addressable_rid(conn: &Connection) -> Result<i64> {
+    let rid = conn.last_insert_rowid();
+    if u32::try_from(rid).is_ok() {
+        Ok(rid)
+    } else {
+        Err(StoreError::NodeIdCeiling { max: u32::MAX })
+    }
 }

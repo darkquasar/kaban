@@ -1,11 +1,10 @@
-//! Gated structured publication: graph, claims, successful audit and accumulation are atomic.
+//! Gated structured publication: graph writes and accumulation are atomic.
 
 use super::types::{JobEnvelope, JobError, StructuredReturn};
 use kaban_api::KabanApi;
 use kaban_core::{
-    BatchAssertion, BatchReport, BatchSubject, ClaimClass, Fixed, Governance, IngestJob, JobId,
-    JobStatus, JobSubmitContract, JobSubmitRequest, JobSubmitStateUpdate, Layer, Lifecycle, Method,
-    NewNode, Node, NodeId, Op, OutcomeKind, Rank, SourceRev, WriteBatch,
+    BatchReport, Fixed, IngestJob, JobId, JobStatus, JobSubmitContract, JobSubmitRequest,
+    JobSubmitStateUpdate, Lifecycle, NewNode, NodeId, Op, OutcomeKind, SourceRev, WriteBatch,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -21,12 +20,6 @@ pub struct SubmitState {
     pub named_records: BTreeSet<NodeId>,
     /// At least one complete union exceeded the configured finish ceiling.
     pub overflow: bool,
-    /// Number of proposed revision candidates across successful submits.
-    pub revision_candidates: u64,
-    /// Revisions of superseded or invalidated predecessors.
-    pub predecessor_terminal: u64,
-    /// Actual newly inserted assertions.
-    pub assertions: u64,
     /// Number of successfully named edges across submits.
     pub edges: u64,
     /// Fixed skip-reason counts; no extractor-controlled keys.
@@ -44,10 +37,9 @@ struct Placed {
     local_id: String,
     id: NodeId,
     kind: String,
+    /// The record's confidence, `1.0` when the submission named none: the raw score of the
+    /// edges it sources or, for evidence citations, receives.
     confidence: f64,
-    predecessor: Option<NodeId>,
-    terminal: bool,
-    props: Value,
 }
 
 fn invalid() -> JobError {
@@ -210,7 +202,7 @@ pub async fn submit(api: &KabanApi, root: &Path, raw: Value) -> Result<Value, Jo
                 .ok_or_else(invalid)?
                 .insert("evidence".into(), json!(evidence));
         }
-        let mut node = gate.node(NewNode {
+        let node = gate.node(NewNode {
             kind: kind.clone(),
             text: draft.text,
             summary: draft.summary,
@@ -224,14 +216,12 @@ pub async fn submit(api: &KabanApi, root: &Path, raw: Value) -> Result<Value, Jo
             skip(&mut skipped, &local, "invalid_props", Some("text"));
             continue;
         }
-        let base = derived_id(
+        // A changed record updates in place; a hidden identity is never revived.
+        let id = derived_id(
             b"kaban-parse/v1/record",
             &[api.workspace().as_str(), &row.source_id, &kind, &local],
         )?;
-        let mut id = base.clone();
-        let mut predecessor = None;
-        let mut terminal = false;
-        if let Some(existing) = api.store().get(&base, true)? {
+        if let Some(existing) = api.store().get(&id, true)? {
             if existing.workspace_id != api.workspace().as_str() {
                 skip(&mut skipped, &local, "unknown_target", None);
                 continue;
@@ -240,57 +230,12 @@ pub async fn submit(api: &KabanApi, root: &Path, raw: Value) -> Result<Value, Jo
                 skip(&mut skipped, &local, "kind_mismatch", None);
                 continue;
             }
-            terminal = matches!(
-                existing.governance,
-                Governance::Superseded | Governance::Invalidated
-            );
-            if existing.lifecycle == Lifecycle::Purged
-                || (!terminal && existing.lifecycle != Lifecycle::Active)
-            {
+            if existing.lifecycle != Lifecycle::Active {
                 skip(&mut skipped, &local, "hidden_exists", None);
                 continue;
             }
-            if matches!(
-                existing.governance,
-                Governance::Accepted | Governance::Superseded | Governance::Invalidated
-            ) {
-                if same_content(&existing, &node) {
-                    // Acceptance metadata is derived internally, never extractor input. Keep
-                    // exact original props so the store's unchanged fast path preserves it.
-                    node.props = Some(existing.props.clone());
-                    node = gate.node(node)?;
-                } else {
-                    let hash = content_hash(api.workspace().as_str(), &base, &node)?;
-                    id = derived_id(b"kaban-parse/v1/revision", &[base.as_str(), &hash])?;
-                    predecessor = Some(base.clone());
-                }
-            }
-        }
-        if id != base
-            && let Some(candidate) = api.store().get(&id, true)?
-        {
-            if candidate.workspace_id != api.workspace().as_str()
-                || candidate.lifecycle != Lifecycle::Active
-                || candidate.kind != kind
-                || !same_content(&candidate, &node)
-            {
-                skip(&mut skipped, &local, "hidden_exists", None);
-                continue;
-            }
-            // A human may have accepted an unchanged candidate since the previous submit.
-            node.props = Some(candidate.props);
-            node = gate.node(node)?;
         }
         let confidence = node.confidence.unwrap_or(1.0);
-        let props = node.props.clone().unwrap_or_else(|| json!({}));
-        if let Some(original) = &predecessor {
-            pending_edges.push(owned_edge(
-                &id,
-                "RELATES_TO",
-                original,
-                json!({"owner":"kaban-parse","role":"revision_candidate"}),
-            ));
-        }
         ops.push(Op::UpsertNode {
             id: id.clone(),
             node,
@@ -300,18 +245,13 @@ pub async fn submit(api: &KabanApi, root: &Path, raw: Value) -> Result<Value, Jo
             "DERIVED_FROM",
             &envelope.document_id,
             json!({
-                "owner":"kaban-parse","mode":row.mode,"with":row.dialect,
+                "mode":row.mode,"with":row.dialect,
                 "pipeline_version":row.pipeline_version,"content_hash":row.content_hash,
                 "chunk_ids":evidence_ids
             }),
         ));
         for chunk in evidence_ids {
-            pending_edges.push(owned_edge(
-                &chunk,
-                "EVIDENCE_FOR",
-                &id,
-                json!({"owner":"kaban-parse"}),
-            ));
+            pending_edges.push(owned_edge(&chunk, "EVIDENCE_FOR", &id, json!({})));
         }
         placed.insert(
             local.clone(),
@@ -320,9 +260,6 @@ pub async fn submit(api: &KabanApi, root: &Path, raw: Value) -> Result<Value, Jo
                 id,
                 kind,
                 confidence,
-                predecessor,
-                terminal,
-                props,
             },
         );
     }
@@ -384,12 +321,7 @@ pub async fn submit(api: &KabanApi, root: &Path, raw: Value) -> Result<Value, Jo
             skip(&mut skipped, &from, "edge_not_allowed", None);
             continue;
         }
-        pending_edges.push(owned_edge(
-            &src.id,
-            &rel,
-            &dst,
-            json!({"owner":"kaban-parse"}),
-        ));
+        pending_edges.push(owned_edge(&src.id, &rel, &dst, json!({})));
     }
     for target in ret.about {
         let target = if NodeId::parse(&target).is_ok() {
@@ -398,92 +330,54 @@ pub async fn submit(api: &KabanApi, root: &Path, raw: Value) -> Result<Value, Jo
             gate.field("to_id", &target)?
         };
         if let Some((id, _)) = resolve_target(api, &target)? {
-            pending_edges.push(owned_edge(
-                &envelope.document_id,
-                "ABOUT",
-                &id,
-                json!({"owner":"kaban-parse"}),
-            ));
+            pending_edges.push(owned_edge(&envelope.document_id, "ABOUT", &id, json!({})));
         } else {
             skip(&mut skipped, "", "unknown_target", None);
         }
     }
-    // E38's authoritative brief currently requests no uncertain pairs. The core filter
-    // therefore rejects every unsolicited judgement; a return cannot create its own request.
-    let returned: Vec<kaban_core::PairJudgement> =
-        ret.pair_judgements.into_iter().map(Into::into).collect();
-    for (_, reason) in kaban_core::er::judge_filter(&[], &returned).skipped {
-        skip(&mut skipped, "", reason, None);
-    }
-    let layer = match row.dialect.as_str() {
-        "llm" => Layer::Llm,
-        "gliner" => Layer::Gliner,
-        _ => Layer::Script,
+    // every edge of the submission names its extractor producer (by dialect), method and
+    // score, which the store moves to the producer, `method` and `score` columns (EN-F22). Outgoing
+    // record and provenance edges score their source record's confidence, evidence citations
+    // their destination record's; a document `ABOUT` has no record and scores one. No prior
+    // or reconciliation applies: the score is stored as given.
+    let producer = match row.dialect.as_str() {
+        "llm" => kaban_core::Producer::Extractor(kaban_core::ExtractorKind::Llm),
+        "gliner" => kaban_core::Producer::Extractor(kaban_core::ExtractorKind::Gliner),
+        _ => kaban_core::Producer::Extractor(kaban_core::ExtractorKind::Script),
     };
-    let lineage = kaban_core::lineage_id(
-        layer,
-        &kaban_core::LineageParts::Machine {
-            content_hash_or_source: &row.content_hash,
-            extractor_id: &row.dialect,
-            version: &row.pipeline_version,
-        },
-    );
-    let mut assertions = Vec::new();
-    for record in placed.values() {
-        assertions.push(assertion(
-            BatchSubject::Record(record.id.clone()),
-            ClaimClass::KindOfRecord,
-            json!({"kind":record.kind,"props":record.props}),
-            layer,
-            &row,
-            &lineage,
-            record.confidence,
-        )?);
-    }
     let mut named_edges = BTreeSet::new();
-    for edge in pending_edges {
-        let edge = gate.edge(edge)?;
+    for mut edge in pending_edges {
         if let Op::UpsertEdge {
             src,
-            rel,
             dst,
-            props,
-        } = &edge
+            props: Some(Value::Object(map)),
+            ..
+        } = &mut edge
         {
-            if !named_edges.insert((
-                src.as_str().to_owned(),
-                dst.as_str().to_owned(),
-                rel.clone(),
-            )) {
-                continue;
-            }
-            // Outgoing record/revision/provenance edges use the source record's score;
-            // evidence citations use their destination record's score. Document ABOUT
-            // has no record confidence and uses the neutral raw input score of one,
-            // still multiplied by the configured layer prior by reconciliation.
             let confidence = placed
                 .values()
                 .find(|record| record.id == *src)
                 .or_else(|| placed.values().find(|record| record.id == *dst))
                 .map_or(1.0, |record| record.confidence);
-            assertions.push(assertion(
-                BatchSubject::Edge {
-                    src: src.clone(),
-                    rel: rel.clone(),
-                    dst: dst.clone(),
-                },
-                ClaimClass::Edge,
-                props.clone().unwrap_or_else(|| json!({})),
-                layer,
-                &row,
-                &lineage,
-                confidence,
-            )?);
+            let score = Fixed::from_f64(confidence).map_err(|_| invalid())?;
+            map.insert("producer".into(), json!(producer.as_str()));
+            map.insert("score".into(), json!(u32::from(score)));
+            map.insert("method".into(), json!("ingest_submit"));
+            map.insert("source_id".into(), json!(row.source_id));
+        }
+        let edge = gate.edge(edge)?;
+        if let Op::UpsertEdge { src, rel, dst, .. } = &edge
+            && !named_edges.insert((
+                src.as_str().to_owned(),
+                dst.as_str().to_owned(),
+                rel.clone(),
+            ))
+        {
+            continue;
         }
         ops.push(edge);
     }
-    let mut batch = WriteBatch::new(api.workspace().clone(), ops);
-    batch.assertions = assertions;
+    let batch = WriteBatch::new(api.workspace().clone(), ops);
     let request = JobSubmitRequest {
         job: job.clone(),
         contract: contract.with_fence(ret.fence),
@@ -495,6 +389,8 @@ pub async fn submit(api: &KabanApi, root: &Path, raw: Value) -> Result<Value, Jo
             .map(|chunk| chunk.id.clone())
             .collect(),
         batch,
+        // the API's gate session sets the count it made when it publishes
+        redactions: 0,
     };
     let cap = usize::try_from(api.engine().ingest.finish_cap).map_err(|_| invalid())?;
     let mut previous_redactions = row.redactions;
@@ -503,7 +399,6 @@ pub async fn submit(api: &KabanApi, root: &Path, raw: Value) -> Result<Value, Jo
         accumulate_state(
             current,
             report,
-            &placed,
             &named_edges,
             &skipped,
             &evidence_dropped,
@@ -521,7 +416,6 @@ pub async fn submit(api: &KabanApi, root: &Path, raw: Value) -> Result<Value, Jo
         })?;
     let batch = &receipt.batch;
     let mut records = Vec::new();
-    let mut revisions = Vec::new();
     for outcome in &batch.outcomes {
         let Some(record) = placed.values().find(|record| record.id == outcome.id) else {
             continue;
@@ -535,18 +429,13 @@ pub async fn submit(api: &KabanApi, root: &Path, raw: Value) -> Result<Value, Jo
                 continue;
             }
         };
-        records.push(json!({"local_id":record.local_id,"id":record.id,"outcome":if record.predecessor.is_some() { "revision_candidate" } else { status }}));
-        if let Some(predecessor) = &record.predecessor {
-            revisions.push(json!({"local_id":record.local_id,"id":record.id,"of":predecessor}));
-        }
+        records.push(json!({"local_id":record.local_id,"id":record.id,"outcome":status}));
     }
     let output = json!({"job":job,"status":"open","chunk":ret.chunk,"records":records,
-        "revision_candidates":revisions,"predecessor_terminal":placed.values().filter(|r| r.predecessor.is_some() && r.terminal).count(),
         "skipped":skipped,"evidence_dropped":evidence_dropped,
         "redactions":receipt.job.redactions.checked_sub(previous_redactions).ok_or_else(invalid)?,
         "created":batch.inserted,"updated":batch.updated,"unchanged":batch.unchanged,
-        "edges":named_edges.len(),"assertions":batch.assertions_inserted,
-        "changes":{"first_seq":batch.outbox_first_seq,"last_seq":batch.outbox_last_seq}});
+        "edges":named_edges.len()});
     let _: kaban_api::IngestSubmitReport =
         serde_json::from_value(output.clone()).map_err(|_| invalid())?;
     let clean = api.gate_response("ingest_submit", &output)?;
@@ -605,54 +494,6 @@ fn derived_id(domain: &[u8], fields: &[&str]) -> Result<NodeId, JobError> {
     NodeId::try_from(uuid::Uuid::from_bytes(bytes)).map_err(|_| invalid())
 }
 
-fn content_hash(workspace: &str, id: &NodeId, node: &NewNode) -> Result<String, JobError> {
-    let mut bytes = Vec::new();
-    let mut put = |field: &str| {
-        bytes.extend_from_slice(&(field.len() as u64).to_le_bytes());
-        bytes.extend_from_slice(field.as_bytes());
-    };
-    let props = serde_json::to_string(node.props.as_ref().unwrap_or(&Value::Null))
-        .map_err(|_| invalid())?;
-    for field in [
-        "kaban-batch/v1",
-        workspace,
-        &node.kind,
-        id.as_str(),
-        node.text.trim(),
-        node.summary.as_deref().unwrap_or(""),
-        if node.summary.is_some() { "1" } else { "0" },
-    ] {
-        put(field);
-    }
-    let mut tags = node.tags.clone();
-    tags.sort_unstable();
-    put(&tags.len().to_string());
-    for tag in &tags {
-        put(tag);
-    }
-    put(&props);
-    for scope in &node.path_scope {
-        put(scope);
-    }
-    Ok(kaban_policy::sha256_hex(&bytes))
-}
-
-fn same_content(existing: &Node, node: &NewNode) -> bool {
-    let mut props = existing.props.clone();
-    if let Some(object) = props.as_object_mut() {
-        object.remove("accepted_commit");
-    }
-    let mut old_tags = existing.tags.clone();
-    old_tags.sort_unstable();
-    let mut tags = node.tags.clone();
-    tags.sort_unstable();
-    existing.text.trim() == node.text.trim()
-        && existing.summary == node.summary
-        && old_tags == tags
-        && props == node.props.clone().unwrap_or_else(|| json!({}))
-        && existing.path_scope == node.path_scope
-}
-
 fn owned_edge(src: &NodeId, rel: &str, dst: &NodeId, props: Value) -> Op {
     Op::UpsertEdge {
         src: src.clone(),
@@ -663,10 +504,7 @@ fn owned_edge(src: &NodeId, rel: &str, dst: &NodeId, props: Value) -> Op {
 }
 
 fn forbidden(rel: &str) -> bool {
-    matches!(
-        rel,
-        "SUPERSEDES" | "INVALIDATES" | "CONTRADICTS" | "GOVERNS"
-    )
+    kaban_core::is_lifecycle_rel(rel)
 }
 
 fn allowed_edge(envelope: &JobEnvelope, from: &str, rel: &str, to: &str) -> bool {
@@ -690,39 +528,9 @@ fn resolve_target(api: &KabanApi, raw: &str) -> Result<Option<(NodeId, String)>,
         .map(|node| (id, node.kind)))
 }
 
-fn assertion(
-    subject: BatchSubject,
-    class: ClaimClass,
-    value: Value,
-    layer: Layer,
-    row: &IngestJob,
-    lineage: &str,
-    confidence: f64,
-) -> Result<BatchAssertion, JobError> {
-    Ok(BatchAssertion {
-        subject,
-        claim_class: class,
-        predicate: None,
-        object: None,
-        value,
-        layer,
-        method: Method::IngestSubmit,
-        extractor_id: Some(row.dialect.clone()),
-        extractor_version: None,
-        source_id: Some(row.source_id.clone()),
-        lineage_id: lineage.into(),
-        raw_score: Fixed::from_f64(confidence).map_err(|_| invalid())?,
-        rank: Rank::Normal,
-        rank_reason: None,
-        calibration_version: 0,
-        supersedes: None,
-    })
-}
-
 fn accumulate_state(
     current: &IngestJob,
     report: &BatchReport,
-    placed: &BTreeMap<String, Placed>,
     edges: &BTreeSet<(String, String, String)>,
     skipped: &[Value],
     evidence: &[Value],
@@ -748,15 +556,6 @@ fn accumulate_state(
         } else {
             state.overflow = true;
         }
-        if let Some(record) = placed.values().find(|r| r.id == outcome.id)
-            && record.predecessor.is_some()
-        {
-            state.revision_candidates = state.revision_candidates.checked_add(1).ok_or_else(bad)?;
-            if record.terminal {
-                state.predecessor_terminal =
-                    state.predecessor_terminal.checked_add(1).ok_or_else(bad)?;
-            }
-        }
     }
     for edge in edges {
         if names.len() < cap || names.contains(edge) {
@@ -765,10 +564,6 @@ fn accumulate_state(
             state.overflow = true;
         }
     }
-    state.assertions = state
-        .assertions
-        .checked_add(u64::from(report.assertions_inserted))
-        .ok_or_else(bad)?;
     state.edges = state
         .edges
         .checked_add(u64::try_from(edges.len()).map_err(|_| bad())?)

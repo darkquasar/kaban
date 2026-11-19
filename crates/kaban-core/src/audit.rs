@@ -1,40 +1,7 @@
-//! Audit types shared by the service layer and every store: what gets recorded (rule ids,
-//! field names, keyed hashes; never the offending value) and the write context that carries
-//! the entries into the store's transaction (core-spec S3; core-plan C1.4).
+//! The write context every store write takes (REC-06) and the workspace and actor identities.
 
-use crate::lifecycle::GovernedSet;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-
-/// Which gated operation an audit row records.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum AuditOp {
-    /// The denylist refused a write; nothing was stored.
-    Reject,
-    /// A redact-action hit was masked before storing or returning.
-    Redact,
-    /// A node was invalidated or archived.
-    Forget,
-    /// A node was purged (destructive).
-    Purge,
-    /// A governance acceptance (M3).
-    Accept,
-}
-
-impl AuditOp {
-    /// Stable lowercase name used in the `audit.op` column and exports.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Reject => "reject",
-            Self::Redact => "redact",
-            Self::Forget => "forget",
-            Self::Purge => "purge",
-            Self::Accept => "accept",
-        }
-    }
-}
 
 /// Workspace identifier (core-spec S6). Plain string newtype; `"*"` is the explicit wildcard
 /// on reads and never a stored value.
@@ -74,7 +41,7 @@ impl std::fmt::Display for WorkspaceId {
     }
 }
 
-/// Who performed a write (agent via MCP, human via CLI). Carried for later governance work;
+/// Who performed a write (agent via MCP, human via CLI). Carried on the write context;
 /// never logged with argument values.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
@@ -138,68 +105,29 @@ impl std::fmt::Display for ActorId {
 #[error("an actor id is 1 to {max} bytes without whitespace or control characters", max = ActorId::MAX_LEN)]
 pub struct InvalidActorId;
 
-/// One audit record. Carries rule ids, field names and keyed hashes only.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AuditEntry {
-    /// What happened.
-    pub op: AuditOp,
-    /// Tool or entry point (`remember`, `read`, `forget`, ...).
-    pub tool: String,
-    /// Field that was gated (`text`, `props`, `all`, ...).
-    pub field: String,
-    /// Workspace of the write.
-    pub workspace_id: WorkspaceId,
-    /// Effective policy version that produced the verdict.
-    pub policy_version: String,
-    /// `HMAC(audit_key, input)` of the gated string (a stub that cannot confirm a guess).
-    pub input_hmac: String,
-    /// Rule ids that fired.
-    pub rules: Vec<String>,
-    /// Node the entry refers to, when known. Read-path entries are deduplicated per
-    /// `(node_id, policy_version)`; write-path entries carry `None` before the id exists.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub node_id: Option<String>,
-}
-
-/// Why trusted code removes graph entries. This is not serialized caller authority.
+/// How hard a write's commit waits for the disk (REC-06 write context, plan T3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum RemovalIntent {
-    /// Producer omission: durable pruning protection applies.
+pub enum Durability {
+    /// The store's configured synchronous mode.
     #[default]
-    Automatic,
-    /// An explicit forget operation overrides pruning protection.
-    Explicit,
-    /// Policy rejection/redaction overrides pruning protection.
-    Policy,
+    Normal,
+    /// A full sync at commit.
+    Full,
 }
 
-/// Context of one gated write: the policy version to stamp, the workspace, the audit entries
-/// to persist in the same transaction, the actor, the configured writer and the governed kinds the store decides
-/// governance by (engine-spec EN-F4).
+/// Context of one write (REC-06): the workspace, the actor and how hard the commit waits for
+/// the disk, plus the slot the store records the call's terminal sequence in (the receipt
+/// reads it; the PC-4 survivor). A record's repository identity travels on the record itself
+/// (`NewNode::repo`), the one path the store reads it from.
 #[derive(Debug, Clone)]
 pub struct WriteCtx {
-    /// Effective policy version stamped on stored nodes.
-    pub policy_version: String,
     /// Workspace the write belongs to.
     pub workspace_id: WorkspaceId,
-    /// Audit rows to append atomically with the write.
-    pub audit: Vec<AuditEntry>,
     /// Who is writing. The configured writer (`--actor-id`, SS-26) is not carried here: the
     /// store stamps the identity it was opened as, the one authority.
     pub actor: Actor,
-    /// Trusted removal cause; never selected by a serialized request.
-    pub removal_intent: RemovalIntent,
-    /// Identity of the repository this process runs in (its root directory name, M3-23), if
-    /// any: stamped on a record's `repo` column when it is still unset.
-    pub repo: Option<String>,
-    /// The governed kinds and `on_link` rels of the loaded ontology (engine-plan E1.4): a new
-    /// record of a kind in the set starts `proposed`, every other kind has no governance. The
-    /// service sets it from the registry; [`WriteCtx::new`] defaults to the shipped set.
-    pub governed: Arc<GovernedSet>,
-    /// The discovered-labels rules (engine-plan E1.8, EN-F5): the loaded ontologies' policy
-    /// and the per-workspace cap. The service sets it from the registry and the engine
-    /// config; [`WriteCtx::new`] defaults to the shipped `review` policy and the register cap.
-    pub discovered: crate::model::DiscoveredRules,
+    /// How hard the commit waits for the disk.
+    pub durability: Durability,
     /// The call's terminal `changes.seq` (spec 05 SS-10), recorded by the store from inside
     /// the write transaction right before its commit (the log head at that moment: the call's
     /// last change row, or the head it saw when it wrote none) and read by the service for
@@ -233,18 +161,12 @@ impl Clone for TerminalSeq {
 }
 
 impl WriteCtx {
-    /// A context with no pending audit entries, no repository identity and the shipped
-    /// governed set.
-    pub fn new(policy_version: impl Into<String>, workspace_id: WorkspaceId, actor: Actor) -> Self {
+    /// A context with normal durability.
+    pub fn new(workspace_id: WorkspaceId, actor: Actor) -> Self {
         Self {
-            policy_version: policy_version.into(),
             workspace_id,
-            audit: Vec::new(),
             actor,
-            removal_intent: RemovalIntent::Automatic,
-            repo: None,
-            governed: GovernedSet::shipped(),
-            discovered: crate::model::DiscoveredRules::default(),
+            durability: Durability::Normal,
             terminal_seq: TerminalSeq::unset(),
         }
     }
@@ -265,44 +187,17 @@ impl WriteCtx {
         self.terminal_seq.get()
     }
 
-    /// The same context with a repository identity.
+    /// The same context committing with `durability`.
     #[must_use]
-    pub fn with_repo(mut self, repo: Option<String>) -> Self {
-        self.repo = repo;
-        self
-    }
-
-    /// The same context deciding governance by `governed` (the registry's set).
-    #[must_use]
-    pub fn with_governed(mut self, governed: Arc<GovernedSet>) -> Self {
-        self.governed = governed;
-        self
-    }
-
-    /// The same context placing undeclared labels by `discovered` (the registry's policy and
-    /// the engine's cap).
-    #[must_use]
-    pub fn with_discovered(mut self, discovered: crate::model::DiscoveredRules) -> Self {
-        self.discovered = discovered;
+    pub fn with_durability(mut self, durability: Durability) -> Self {
+        self.durability = durability;
         self
     }
 }
 
 impl Default for WriteCtx {
-    /// An empty policy version, the default workspace, the agent actor and the shipped set
-    /// (never an empty set: see [`GovernedSet`]).
+    /// The default workspace and the agent actor.
     fn default() -> Self {
-        Self::new(String::new(), WorkspaceId::default(), Actor::default())
+        Self::new(WorkspaceId::default(), Actor::default())
     }
-}
-
-/// Result of recomputing the audit chain.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AuditVerification {
-    /// Number of rows checked.
-    pub entries: u64,
-    /// Whether every row's HMAC matched and chained onto its predecessor.
-    pub ok: bool,
-    /// First sequence number that failed, when `ok` is false.
-    pub first_bad_seq: Option<u64>,
 }

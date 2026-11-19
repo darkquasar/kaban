@@ -1,4 +1,4 @@
-//! The north-star acceptance tests over the public tools (stage1-spec §8.3 steps 2 to 7;
+//! The north-star acceptance tests over the public tools (stage1-spec §8.3 steps 2, 6 and 7;
 //! stage1-plan CG10.2; walkthrough-example Step 6): black box over `kaban serve` started in
 //! a scratch copy of the fixture repository, the snapshot published into the data home the
 //! server reads (`<KABAN_HOME>/codegraph/<repo-id>`, the id derived with the server's own
@@ -15,9 +15,8 @@
 //!                                   ==> snippets::collect (git show at C2)  ==> writer::publish
 //!                                   ==> <home>/codegraph/<repo_id(key, common dir)>/<C2>.cg.db
 //!   kaban serve (cwd = <scratch>/repo, --policy <redact variant>)  <== stdio (mcp_client.rs)
-//!     remember D1, accept, remember D2, accept, link D2 SUPERSEDES D1,
-//!     why {symbol}, why {symbol, include_superseded}, governance_history {id: D1}, code_context
-//!   canary sweep: .cg.db, every response, kaban.db, -wal, -shm, audit export, stdout, stderr
+//!     remember D1, code_context, code_tests_for
+//!   canary sweep: .cg.db, every response, kaban.db, -wal, -shm, stdout, stderr
 //! ```
 
 #![cfg(feature = "code-graph")] // the code tools and the fixture snapshots exist only with the feature
@@ -54,16 +53,10 @@ const C3_DATE: &str = "2026-10-26T09:53:10Z";
 const C2_SUMMARY: &str = "C2: rename mem.go, extend PostgresDriver.Open";
 const C3_SUMMARY: &str = "C3: rename MemDriver to MemoryDriver";
 
-/// Normalised key prefixes (version `.`) of the Go `drivers` package, the Go `sqlite`
-/// package and the TypeScript package (`code_tools.rs` `GO_KEY`, `TS_KEY`).
+/// Normalised key prefixes (version `.`) of the Go `drivers` package and the TypeScript
+/// package (`code_tools.rs` `GO_KEY`, `TS_KEY`).
 const GO_KEY: &str = "scip-go gomod example.com/drivers . `example.com/drivers/drivers`/";
-const GO_SQLITE_KEY: &str = "scip-go gomod example.com/drivers . `example.com/drivers/sqlite`/";
 const TS_KEY: &str = "scip-typescript npm @example/drivers . src/";
-/// An external TypeScript key (the standard library's `Promise`): no anchor, no defining file
-/// under `src/`, so nothing governs it (the negative of step 4 for the TS half; every `src/`
-/// row is covered by the Decisions' `path_scope`).
-const TS_ELSEWHERE: &str =
-    "scip-typescript npm typescript . lib/`lib.es2015.iterable.d.ts`/Promise#";
 
 /// The commit the canary-sym variant is published under (not in any history).
 const CANARY_SYM_COMMIT: &str = "5151515151515151515151515151515151515151";
@@ -400,13 +393,6 @@ struct Run {
     s: Scratch,
     repo: PathBuf,
     snapshots: Vec<PathBuf>,
-    export: PathBuf,
-    d1: String,
-    d2: String,
-    why_current: Value,
-    why_all: Value,
-    why_elsewhere: Value,
-    history: Value,
     context: Value,
     tests_for: Value,
     finished: Finished,
@@ -418,9 +404,7 @@ struct Half {
     name: &'static str,
     /// The anchor key (`PostgresDriver#Open` / `PostgresDriver#open`).
     key: String,
-    /// A key nothing governs (the negative of step 4).
-    elsewhere: String,
-    /// `path_scope` of both Decisions.
+    /// `path_scope` of the Decision.
     scope: &'static str,
     /// The anchor's `relative_path`.
     path: &'static str,
@@ -433,7 +417,7 @@ struct Half {
     test_form: &'static str,
 }
 
-/// Steps 2 to 6 of §8.3 over MCP against a server started in `repo`, with the snapshot(s)
+/// Steps 2 and 6 of §8.3 over MCP against a server started in `repo`, with the snapshot(s)
 /// already published under `home`.
 fn drive(
     s: Scratch,
@@ -442,7 +426,6 @@ fn drive(
     snapshots: Vec<PathBuf>,
     half: &Half,
 ) -> Run {
-    let export = s.0.join("audit.jsonl");
     let repo_name = repo.file_name().unwrap().to_str().unwrap().to_owned();
     let mut c = McpClient::start(&Spawn {
         home: &s.home(),
@@ -450,14 +433,13 @@ fn drive(
         cwd: &repo,
         policy: Some(policy_path),
         workspace: WORKSPACE,
-        audit_export: Some(&export),
     });
     let anchor = json!({
         "repo": repo_name, "commit": half.commit, "tool": "manual",
         "relative_path": half.path, "name_path": "PostgresDriver/Open", "kind": "Method",
         "symbol": half.key, "snapshot_commit": half.commit,
     });
-    // step 2: D1 with the scope and the symbol anchor, accepted
+    // step 2: D1 with the scope and the symbol anchor
     let d1 = c.call(
         "remember",
         &json!({
@@ -465,35 +447,8 @@ fn drive(
             "props": {"rationale": "one interface, no base type"},
             "path_scope": [half.scope], "refs": [anchor],
         }),
-    )["id"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    c.accept_confirmed(&d1, "reviewed", &[half.scope]);
-    // step 3: D2 same scope and anchor, accepted explicitly, then the SUPERSEDES link
-    let d2 = c.call(
-        "remember",
-        &json!({
-            "kind": "Decision", "text": "drivers wrap a shared base",
-            "props": {"rationale": "shared retry and logging"},
-            "path_scope": [half.scope], "refs": [anchor],
-        }),
-    )["id"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    c.accept_confirmed(&d2, "reviewed", &[half.scope]);
-    let link = c.call("link", &json!({"from": d2, "rel": "SUPERSEDES", "to": d1}));
-    assert!(link["id"].is_string(), "{link}");
-    // step 4
-    let why_current = c.call("why", &json!({"targets": [{"symbol": half.key}]}));
-    let why_all = c.call(
-        "why",
-        &json!({"targets": [{"symbol": half.key}], "include_superseded": true}),
     );
-    let why_elsewhere = c.call("why", &json!({"targets": [{"symbol": half.elsewhere}]}));
-    // step 5
-    let history = c.call("governance_history", &json!({"id": d1}));
+    assert!(d1["id"].is_string(), "{d1}");
     // step 6
     let context = c.call("code_context", &json!({"target": {"symbol": half.key}}));
     // the test link of the defining file (both forms; the TS half's only form is naming)
@@ -504,13 +459,6 @@ fn drive(
         s,
         repo,
         snapshots,
-        export,
-        d1,
-        d2,
-        why_current,
-        why_all,
-        why_elsewhere,
-        history,
         context,
         tests_for,
         finished,
@@ -533,7 +481,6 @@ fn run_go() -> Run {
     let half = Half {
         name: "go",
         key: format!("{GO_KEY}PostgresDriver#Open()."),
-        elsewhere: format!("{GO_SQLITE_KEY}Driver#Open()."),
         scope: "drivers/",
         path: "drivers/postgres.go",
         commit: c2,
@@ -559,7 +506,6 @@ fn run_ts() -> Run {
     let half = Half {
         name: "ts",
         key: format!("{TS_KEY}`postgres.ts`/PostgresDriver#open()."),
-        elsewhere: TS_ELSEWHERE.to_owned(),
         scope: "src/",
         path: "src/postgres.ts",
         commit: head,
@@ -568,73 +514,15 @@ fn run_ts() -> Run {
     drive(s, repo, &policy_path, vec![snapshot], &half)
 }
 
-fn ids(cards: &Value) -> Vec<&str> {
-    cards
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|c| c["node"]["id"].as_str().unwrap())
-        .collect()
-}
-
-/// The §8.3 step 4 to 6 assertions over a run's answers (both halves).
+/// The §8.3 step 6 assertions over a run's answers (both halves).
 fn assert_north_star(r: &Run, half: &Half) {
-    let (d1, d2) = (r.d1.as_str(), r.d2.as_str());
-    // step 4, positive: D2 and not D1, matched by the symbol, accepted, the snapshot current
-    assert_eq!(
-        ids(&r.why_current["results"]),
-        vec![d2],
-        "{}",
-        r.why_current
-    );
-    let card = &r.why_current["results"][0];
-    assert_eq!(card["matched_by"], json!("symbol"), "{card}");
-    assert_eq!(card["governance"], json!("accepted"), "{card}");
-    assert_eq!(card["superseded_by"], json!([]), "{card}");
-    assert_eq!(
-        card["code"],
-        json!({"snapshot": {"commit": half.commit, "exact": true, "policy": "current"}}),
-        "{card}"
-    );
-    assert!(
-        card["currency"]["state"].is_string(),
-        "currency computed: {card}"
-    );
-    // step 4, negative: with the superseded records, D1 behind D2 with `superseded_by: [D2]`
-    let all = ids(&r.why_all["results"]);
-    assert_eq!(all, vec![d2, d1], "{}", r.why_all);
-    let old = &r.why_all["results"][1];
-    assert_eq!(old["governance"], json!("superseded"), "{old}");
-    assert_eq!(old["superseded_by"], json!([d2]), "{old}");
-    // a key nothing governs answers nothing
-    assert_eq!(r.why_elsewhere["results"], json!([]), "{}", r.why_elsewhere);
-    // step 5: both records with their chains, D1's events newest first
-    let records = r.history["records"].as_array().unwrap();
-    let find = |id: &str| {
-        records
-            .iter()
-            .find(|h| h["card"]["id"] == json!(id))
-            .unwrap_or_else(|| panic!("{id} in governance_history: {}", r.history))
-    };
-    let h1 = find(d1);
-    assert_eq!(h1["governance"], json!("superseded"), "{h1}");
-    assert_eq!(h1["superseded_by"], json!([d2]), "{h1}");
-    let kinds: Vec<&str> = h1["events"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|e| e["kind"].as_str().unwrap())
-        .collect();
-    assert_eq!(kinds, vec!["superseded", "accepted"], "{h1}");
-    let h2 = find(d2);
-    assert_eq!(h2["governance"], json!("accepted"), "{h2}");
-    assert_eq!(h2["supersedes"], json!([d1]), "{h2}");
-    assert_eq!(h2["superseded_by"], json!([]), "{h2}");
     // step 6
     let ctx = &r.context;
     assert_eq!(ctx["snapshot"]["commit"], json!(half.commit), "{ctx}");
-    assert_eq!(ids(&ctx["governing"]), vec![d2], "{ctx}");
-    assert_eq!(ctx["governing"][0]["superseded_by"], json!([]), "{ctx}");
+    assert!(
+        ctx.get("governing").is_none(),
+        "no governing records: {ctx}"
+    );
     assert_eq!(ctx["approximate"], json!(true), "{ctx}");
     // G1-F17 slices `def.sl ..= min(def.el, def.sl + 7)`: a Go or TypeScript method's `def`
     // is its identifier range (one line), so the fixture snippet is the signature line and
@@ -696,7 +584,6 @@ fn acceptance_north_star_go() {
     let half = Half {
         name: "go",
         key: format!("{GO_KEY}PostgresDriver#Open()."),
-        elsewhere: format!("{GO_SQLITE_KEY}Driver#Open()."),
         scope: "drivers/",
         path: "drivers/postgres.go",
         commit: GO_C2.to_owned(),
@@ -722,7 +609,6 @@ fn acceptance_north_star_ts() {
     let half = Half {
         name: "ts",
         key: format!("{TS_KEY}`postgres.ts`/PostgresDriver#open()."),
-        elsewhere: TS_ELSEWHERE.to_owned(),
         scope: "src/",
         path: "src/postgres.ts",
         commit: head,
@@ -742,8 +628,7 @@ fn acceptance_north_star_ts() {
 }
 
 /// Every byte channel of a run, named: the snapshot files, each `tools/call` response, the
-/// memory database with its `-wal` and `-shm`, the audit export, the server's stdout and
-/// stderr. The fixture repository copy is not a channel (its sources carry the canaries by
+/// memory database with its `-wal` and `-shm`, the server's stdout and stderr. The fixture repository copy is not a channel (its sources carry the canaries by
 /// design) and neither is the key.
 fn channels(r: &Run) -> Vec<(String, Vec<u8>)> {
     let mut out = Vec::new();
@@ -766,7 +651,6 @@ fn channels(r: &Run) -> Vec<(String, Vec<u8>)> {
             out.push((name.to_owned(), std::fs::read(&p).unwrap()));
         }
     }
-    out.push(("audit export".to_owned(), std::fs::read(&r.export).unwrap()));
     out.push((
         "server stdout".to_owned(),
         r.finished.stdout.clone().into_bytes(),
@@ -885,10 +769,9 @@ impl RenameRun {
 
 /// C1..C3 replayed; `<C2>.cg.db` from the committed index and `<C3>.cg.db` from the same
 /// index with the `MemDriver#` rows removed (stop 2 default). At C2: D anchored on
-/// `MemDriver#Open()` with no snapshot scope and D' with `snapshot_commit: C2`, both
-/// accepted, both resolved. At C3 (a second server after `git checkout`): `why` returns D
-/// with `code: snapshot_mismatch`, `exact: true`; `code_definition` is `unknown_symbol`; D
-/// and D' stay `accepted`; D' is not reached (the CG-JOIN v1 §3 scope predicate).
+/// `MemDriver#Open()` with no snapshot scope and D' with `snapshot_commit: C2`, and
+/// `code_definition` resolves the key. At C3 (a second server after `git checkout`):
+/// `code_definition` of the old key is `unknown_symbol`, nothing guessed onto the new name.
 fn run_rename() -> RenameRun {
     eprintln!(
         "anchor_stale_after_rename: fixture-derived (C3 snapshot = committed index minus MemDriver# rows); scip-go NOT RUN"
@@ -923,7 +806,6 @@ fn run_rename() -> RenameRun {
             cwd,
             policy: Some(&policy_path),
             workspace: WORKSPACE,
-            audit_export: None,
         })
     };
 
@@ -942,27 +824,12 @@ fn run_rename() -> RenameRun {
             .unwrap()
             .to_owned()
     };
-    let decision = remember(
+    remember(
         &mut at_c2_srv,
         "MemDriver keeps connections in memory",
         false,
     );
-    at_c2_srv.accept_confirmed(&decision, "reviewed", &["drivers/"]);
-    let d_scoped = remember(&mut at_c2_srv, "MemDriver is the test double", true);
-    at_c2_srv.accept_confirmed(&d_scoped, "reviewed", &["drivers/"]);
-    let before = at_c2_srv.call("why", &json!({"targets": [{"symbol": mem_key}]}));
-    let mut seen = ids(&before["results"]);
-    seen.sort_unstable();
-    let mut want = vec![decision.as_str(), d_scoped.as_str()];
-    want.sort_unstable();
-    assert_eq!(seen, want, "both anchored records resolve at C2: {before}");
-    for card in before["results"].as_array().unwrap() {
-        assert_eq!(
-            card["code"],
-            json!({"snapshot": {"commit": c2, "exact": true, "policy": "current"}}),
-            "{card}"
-        );
-    }
+    remember(&mut at_c2_srv, "MemDriver is the test double", true);
     let def = at_c2_srv.call("code_definition", &json!({"target": {"symbol": mem_key}}));
     assert_eq!(def["definition"]["symbol"], json!(mem_key), "{def}");
     assert_eq!(
@@ -977,20 +844,6 @@ fn run_rename() -> RenameRun {
     git(&repo, C3_DATE, &["checkout", "-q", "main"]);
     assert_eq!(rev_parse(&repo, "HEAD"), c3);
     let mut at_c3_srv = spawn(&repo);
-    let after = at_c3_srv.call("why", &json!({"targets": [{"symbol": mem_key}]}));
-    assert_eq!(
-        ids(&after["results"]),
-        vec![decision.as_str()],
-        "the unscoped anchor reaches D at C3, the C2-scoped one is not joined: {after}"
-    );
-    let card = &after["results"][0];
-    assert_eq!(
-        card["code"],
-        json!({"snapshot_mismatch": {"snapshot": {"commit": c3, "exact": true, "policy": "current"}}}),
-        "stale, not guessed: {card}"
-    );
-    assert_eq!(card["governance"], json!("accepted"), "D untouched: {card}");
-    assert_eq!(card["matched_by"], json!("symbol"), "{card}");
     let err = at_c3_srv.call_err("code_definition", &json!({"target": {"symbol": mem_key}}));
     assert!(
         err.starts_with("unknown_symbol:"),
@@ -1000,17 +853,6 @@ fn run_rename() -> RenameRun {
         !err.contains("MemDriver"),
         "the fixed text echoes no input: {err}"
     );
-    // nothing is guessed onto the new name: no record is reached through the old anchor
-    let renamed = format!("{GO_KEY}MemoryDriver#Open().");
-    let renamed_why = at_c3_srv.call("why", &json!({"targets": [{"symbol": renamed}]}));
-    assert_eq!(renamed_why["results"], json!([]), "{renamed_why}");
-    // both Decisions still accepted: D' is unreached by why at C3, not changed
-    for id in [&decision, &d_scoped] {
-        let h = at_c3_srv.call("governance_history", &json!({"id": id}));
-        let rec = &h["records"][0];
-        assert_eq!(rec["card"]["id"], json!(id), "{h}");
-        assert_eq!(rec["governance"], json!("accepted"), "{h}");
-    }
     let at_c3 = at_c3_srv.finish();
     assert!(at_c3.status.success());
     RenameRun {
@@ -1029,7 +871,7 @@ fn anchor_stale_after_rename() {
         r.at_c3
             .responses
             .iter()
-            .any(|resp| resp.to_string().contains("snapshot_mismatch")),
-        "the mismatch reached the wire"
+            .any(|resp| resp.to_string().contains("unknown_symbol")),
+        "the unknown old key reached the wire"
     );
 }

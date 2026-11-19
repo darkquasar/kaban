@@ -29,7 +29,8 @@ const READ_BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5)
 
 impl CgRead {
     /// Open the read connection on the memory database at `path` (`READ_ONLY | URI |
-    /// NO_MUTEX`; the URI flag is what lets `ATTACH` take the `file:` form). Nothing is
+    /// NO_MUTEX`; the URI flag is what lets `ATTACH` take the `file:` form), named by its
+    /// [`sqlite_uri`] like every connection of this crate. Nothing is
     /// attached yet. The path is the store's own file, already a regular file this process
     /// holds open, so no mode is tightened and no descriptor other than SQLite's is opened
     /// (C2.5a). Read-only: not an open the shared-open admission (SS-23) covers.
@@ -37,7 +38,7 @@ impl CgRead {
         let flags = OpenFlags::SQLITE_OPEN_READ_ONLY
             | OpenFlags::SQLITE_OPEN_URI
             | OpenFlags::SQLITE_OPEN_NO_MUTEX;
-        let conn = Connection::open_with_flags(path, flags).sql()?;
+        let conn = Connection::open_with_flags(sqlite_uri(path), flags).sql()?;
         conn.busy_timeout(READ_BUSY_TIMEOUT).sql()?;
         Ok(Self {
             conn,
@@ -160,21 +161,6 @@ impl std::fmt::Display for NoFileBacking {
 
 impl std::error::Error for NoFileBacking {}
 
-/// Create `path` as an empty owner-only (0600) file; fails with `AlreadyExists` when it exists
-/// (the migrator's backup target, core-spec S5). The mode is set exactly with `fchmod` before
-/// the descriptor is dropped, so a restrictive `umask` cannot leave `0400` or `0000` behind
-/// (C2.5b, P-6).
-pub(crate) fn create_owner_only(path: &Path) -> std::io::Result<()> {
-    use std::fs::OpenOptions;
-    use std::os::unix::fs::OpenOptionsExt;
-    let created = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(path)?;
-    fchmod_owner_only(&created)
-}
-
 fn fchmod_owner_only(file: &std::fs::File) -> std::io::Result<()> {
     use rustix::fs::Mode;
     rustix::fs::fchmod(file, Mode::RUSR | Mode::WUSR)?;
@@ -199,6 +185,11 @@ struct LiveEntry {
     owner: OwnerLock,
     /// An [`ExclusiveHold`] of this process is live on the file (one at a time).
     exclusive: bool,
+    /// The file's schema version is known to be in its main file (spec 11 CMP-01): the probe
+    /// of whoever registered the entry read it there, or an open of this process has since
+    /// published it ([`LiveGuard::publish`]). `false` for a file that was a fresh project to
+    /// that probe.
+    published: bool,
     /// Of `stores`, how many are openers waiting for another process's exclusive hold
     /// ([`LiftedPresence`]): not using the database. The process's presence mark is lifted
     /// only while every store of the process on the file is such a waiter (T8c review
@@ -235,6 +226,7 @@ impl LiveGuard {
         live: &mut Vec<LiveEntry>,
         ident: FileIdent,
         owner: Option<OwnerLock>,
+        probed: Option<Probed>,
     ) -> Result<Self> {
         match (live.iter_mut().find(|entry| entry.ident == ident), owner) {
             (Some(entry), _) => entry.stores += 1,
@@ -244,6 +236,7 @@ impl LiveGuard {
                 owner,
                 exclusive: false,
                 waiting: 0,
+                published: probed == Some(Probed::Current),
             }),
             (None, None) => {
                 return Err(StoreError::FileMode(std::io::Error::other(
@@ -254,6 +247,105 @@ impl LiveGuard {
         Ok(Self(ident))
     }
 }
+
+impl LiveGuard {
+    /// Make sure the file's schema version is in its main file before the open that holds
+    /// this guard succeeds (spec 11 CMP-01): nothing to do when the registry entry says it is;
+    /// otherwise (the open's probe found a fresh project: this open created it, or another
+    /// opener did while this one was admitted) [`publish_version`] runs on `conn`, the
+    /// database's own connection, and the entry records the outcome. Every first opener
+    /// therefore returns only once a reader of the main file alone (the probe) sees the
+    /// version, and a concurrent second opener cannot outrun the creator's checkpoint.
+    ///
+    /// # Errors
+    /// The errors of [`publish_version`]; the open must fail with them.
+    pub(crate) fn publish(&self, conn: &Connection) -> Result<()> {
+        let published = live_stores()
+            .iter()
+            .find(|entry| entry.ident == self.0)
+            .is_some_and(|entry| entry.published);
+        if published {
+            return Ok(());
+        }
+        // the checkpoint can wait: never under the registry lock
+        publish_version(conn)?;
+        if let Some(entry) = live_stores().iter_mut().find(|entry| entry.ident == self.0) {
+            entry.published = true;
+        }
+        Ok(())
+    }
+}
+
+/// The operation a failed sync of [`publish_version`]'s checkpoint names
+/// (`StoreError::StorageFatal`: the open fails and the checkpoint is not tried again).
+const PUBLISH_VERSION: &str = "publish_version";
+
+/// How long [`publish_version`] keeps trying to complete its checkpoint: the usual lock wait
+/// of a connection (`schema::BUSY_TIMEOUT`).
+pub(crate) const PUBLISH_WINDOW: std::time::Duration = crate::schema::BUSY_TIMEOUT;
+
+/// How long one checkpoint attempt of [`publish_version`] waits for readers before it is
+/// tried again (a concurrent checkpointer is never waited for by SQLite itself).
+const PUBLISH_ATTEMPT_WAIT: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Fold the log into the main file with `wal_checkpoint(TRUNCATE)` until the result row says
+/// every frame is in the main file: `busy` 0, or every frame of the log checkpointed. A busy
+/// result (a reader still on an older snapshot, another checkpointer) is tried again every
+/// [`PROBE_RETRY_INTERVAL`] for [`PUBLISH_WINDOW`]; then the open fails rather than succeed
+/// with the version in the `-wal` only. The connection's lock wait is back at
+/// `schema::BUSY_TIMEOUT` afterwards.
+///
+/// # Errors
+/// `StoreError::Backend` ([`VersionUnpublished`]) when the window passes with the checkpoint
+/// still incomplete; `StoreError::StorageFatal` ([`PUBLISH_VERSION`]) for a failed sync of the
+/// checkpoint; SQLite errors of the checkpoint.
+fn publish_version(conn: &Connection) -> Result<()> {
+    conn.busy_timeout(PUBLISH_ATTEMPT_WAIT).sql()?;
+    let deadline = std::time::Instant::now() + PUBLISH_WINDOW;
+    let outcome = loop {
+        let checkpoint = conn
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, i64>(2)?,
+                ))
+            })
+            .sql_at(PUBLISH_VERSION);
+        match checkpoint {
+            Ok((busy, log, checkpointed)) if busy == 0 || (log >= 0 && checkpointed == log) => {
+                break Ok(());
+            }
+            Ok(_) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(PROBE_RETRY_INTERVAL);
+            }
+            Ok(_) => {
+                break Err(StoreError::Backend {
+                    source: kaban_core::BackendSource::new(VersionUnpublished),
+                });
+            }
+            Err(e) => break Err(e),
+        }
+    };
+    conn.busy_timeout(crate::schema::BUSY_TIMEOUT).sql()?;
+    outcome
+}
+
+/// The checkpoint that puts a new project's schema version into the main file did not
+/// complete within [`PUBLISH_WINDOW`]: the open is refused (spec 11 CMP-01).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct VersionUnpublished;
+
+impl std::fmt::Display for VersionUnpublished {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(
+            "the project's schema version could not be checkpointed into the main database file \
+             (another connection kept reading the database); try again once it has closed",
+        )
+    }
+}
+
+impl std::error::Error for VersionUnpublished {}
 
 impl Drop for LiveGuard {
     fn drop(&mut self) {
@@ -441,7 +533,8 @@ impl Drop for ExclusiveHold {
 ///
 /// # Errors
 /// `StoreError::FileMode` when the database is absent or not a regular file, or when the lock
-/// file cannot be opened or locked.
+/// file cannot be opened or locked; the refusals of [`probe_version`] (spec 11 CMP-01) for a
+/// file no store of this process holds, before the lock file is created.
 pub fn exclusive_hold(path: &Path) -> Result<Option<ExclusiveHold>> {
     let meta = regular_file_metadata(path)
         .map_err(StoreError::FileMode)?
@@ -460,6 +553,10 @@ pub fn exclusive_hold(path: &Path) -> Result<Option<ExclusiveHold>> {
         entry.exclusive = true;
         return Ok(Some(ExclusiveHold(ident)));
     }
+    // a file no store of this process holds is probed like every open (CMP-01) before its
+    // owner file is created: a registered entry means a probed file, so no open under the
+    // hold skips the probe for an older or foreign database
+    let probed = probe_version(path, Some(&meta))?;
     let owner = OwnerLock {
         file: OwnerLock::open(path)?,
         sole: false,
@@ -473,6 +570,7 @@ pub fn exclusive_hold(path: &Path) -> Result<Option<ExclusiveHold>> {
         owner,
         exclusive: true,
         waiting: 0,
+        published: probed == Probed::Current,
     });
     Ok(Some(ExclusiveHold(ident)))
 }
@@ -492,110 +590,6 @@ impl LiveEntry {
         }
         Ok(())
     }
-}
-
-/// One opener's presence lifted while it waits for another process's exclusive hold (an
-/// index rebuild, `tantivy.rs`): a waiting opener is not using the database, and with every
-/// concurrent opener of one file marked none of them could ever take the hold. Per handle
-/// (T8c review t8c-2): the process's one mark is released only while every store of the
-/// process on the file is such a waiter, never while an admitted store (a diagnostic open, a
-/// serving store) is on it, and it comes back when the waiter goes on ([`Self::restore`]) or
-/// gives up (drop), or with this process's own hold (whose release downgrades to it).
-#[derive(Debug)]
-#[must_use = "the presence comes back when this is restored or dropped"]
-pub(crate) struct LiftedPresence(Option<FileIdent>);
-
-/// Lift this opener's presence on the database at `path` (see [`LiftedPresence`]). Nothing is
-/// lifted, and the token is inert, for a sole owner or while a hold of this process lives.
-///
-/// # Errors
-/// `StoreError::FileMode` when the database is absent or the lock cannot be released.
-pub(crate) fn lift_presence(path: &Path) -> Result<LiftedPresence> {
-    let mut live = live_stores();
-    let Some(pos) = presence_entry(&live, path)? else {
-        return Ok(LiftedPresence(None));
-    };
-    let entry = &mut live[pos];
-    entry.waiting += 1;
-    if entry.waiting == entry.stores
-        && let Err(e) = entry.lift_mark()
-    {
-        entry.waiting -= 1;
-        return Err(e);
-    }
-    Ok(LiftedPresence(Some(entry.ident)))
-}
-
-impl LiftedPresence {
-    /// The waiter's presence back before it goes on, waited for like a join (the other
-    /// process's hold may still be releasing).
-    ///
-    /// # Errors
-    /// `StoreError::ExclusiveMaintenance` when another process's hold outlasts the presence
-    /// wait; `StoreError::FileMode` when the lock cannot be taken.
-    pub(crate) fn restore(mut self) -> Result<()> {
-        self.put_back()
-    }
-
-    fn put_back(&mut self) -> Result<()> {
-        let Some(ident) = self.0.take() else {
-            return Ok(());
-        };
-        let deadline = std::time::Instant::now() + PRESENCE_WAIT;
-        loop {
-            // the registry lock is held per attempt, not across the wait: a store closing
-            // or opening in another thread meanwhile is not held up
-            let mut live = live_stores();
-            let Some(entry) = live.iter_mut().find(|entry| entry.ident == ident) else {
-                return Ok(());
-            };
-            let unmarked = entry.waiting == entry.stores && entry.marks_presence();
-            if !unmarked
-                || would_block(rustix::fs::fcntl_lock(
-                    &entry.owner.file,
-                    rustix::fs::FlockOperation::NonBlockingLockShared,
-                ))?
-            {
-                entry.waiting = entry.waiting.saturating_sub(1);
-                return Ok(());
-            }
-            drop(live);
-            if std::time::Instant::now() >= deadline {
-                // the waiter leaves its claim: the mark comes back with the next restore or
-                // with the last waiter's close
-                let mut live = live_stores();
-                if let Some(entry) = live.iter_mut().find(|entry| entry.ident == ident) {
-                    entry.waiting = entry.waiting.saturating_sub(1);
-                }
-                return Err(StoreError::ExclusiveMaintenance);
-            }
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
-    }
-}
-
-impl Drop for LiftedPresence {
-    fn drop(&mut self) {
-        // a waiter that gave up (an error, a timeout) is marked again, best effort
-        let _ = self.put_back();
-    }
-}
-
-/// The registry entry of `path` whose mark [`lift_presence`] moves: a sharing store's without
-/// a live hold; `None` when there is nothing to move.
-fn presence_entry(live: &[LiveEntry], path: &Path) -> Result<Option<usize>> {
-    let meta = regular_file_metadata(path)
-        .map_err(StoreError::FileMode)?
-        .ok_or_else(|| {
-            StoreError::FileMode(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!("{} does not exist", path.display()),
-            ))
-        })?;
-    let ident = file_ident(&meta);
-    Ok(live
-        .iter()
-        .position(|entry| entry.ident == ident && entry.marks_presence()))
 }
 
 /// The owner lock file beside the database, `<db>.owner`.
@@ -662,6 +656,170 @@ fn file_ident(meta: &std::fs::Metadata) -> FileIdent {
     (meta.dev(), meta.ino())
 }
 
+/// What [`probe_version`] admitted a file as.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Probed {
+    /// The main file holds the latest schema version.
+    Current,
+    /// No kaban schema in the main file and no non-empty `-wal`: a fresh project, whose
+    /// version an open must publish into the main file ([`LiveGuard::publish`]).
+    Fresh,
+}
+
+/// The version probe every file open runs first (spec 11 CMP-01, PR-04; unified-db-plan
+/// Task 4), before anything is created, tightened, locked or written: the main file alone is
+/// read through `file:<db>?mode=ro&immutable=1`, which takes no lock and creates no `-wal` or
+/// `-shm`, and the `-wal` is only `stat`ed. `meta` is the main file's
+/// [`regular_file_metadata`], `None` when it is absent. A main file at
+/// [`LATEST_SCHEMA_VERSION`] opens normally (a leftover `-wal` is then ordinary recovery);
+/// one at any other kaban version is refused untouched; a main file with no kaban schema
+/// (absent, empty or without the `node` table) is a fresh project unless a non-empty `-wal`
+/// lies beside it, which is never replayed. The version is read as [`Migrator::detect`]
+/// reads it. The callers skip a file a store or an [`ExclusiveHold`] of this process already
+/// holds: whoever registered it probed it, and no descriptor may be opened on it
+/// ([`tighten_regular_file`] says why).
+///
+/// [`LATEST_SCHEMA_VERSION`]: crate::LATEST_SCHEMA_VERSION
+/// [`Migrator::detect`]: crate::schema::Migrator::detect
+///
+/// # Errors
+/// `StoreError::SchemaUnsupported` for a main file at another version;
+/// `StoreError::NotAKabanProject` for a main file without a kaban schema beside a non-empty
+/// `-wal`; `StoreError::FileMode` when the `-wal` is a symlink or not a regular file; SQLite
+/// errors reading the main file.
+///
+/// Two outcomes may be another process's work in progress rather than the file's state, and
+/// are read again every [`PROBE_RETRY_INTERVAL`] until [`PROBE_RETRY_WINDOW`] has passed (with
+/// the main file `stat`ed anew each time): no kaban schema beside a non-empty `-wal` (a
+/// creator between its DDL and its TRUNCATE checkpoint) and a [`transient_read_failure`]. The
+/// last outcome is then returned as it is. A readable schema at another version is refused at
+/// once. The callers hold the in-process registry lock across the probe, so on those two
+/// outcomes another open in this process waits for the window too.
+fn probe_version(path: &Path, meta: Option<&std::fs::Metadata>) -> Result<Probed> {
+    let deadline = std::time::Instant::now() + PROBE_RETRY_WINDOW;
+    let mut meta = meta.cloned();
+    loop {
+        let outcome = probe_once(path, meta.as_ref());
+        #[cfg(test)]
+        PROBE_ATTEMPT.with(|seam| {
+            if let Some(seam) = seam.borrow_mut().as_mut() {
+                seam();
+            }
+        });
+        let pending = match &outcome {
+            Err(StoreError::NotAKabanProject { .. }) => true,
+            Err(e) => transient_read_failure(e),
+            Ok(_) => false,
+        };
+        let now = std::time::Instant::now();
+        if !pending || now >= deadline {
+            return outcome;
+        }
+        std::thread::sleep(PROBE_RETRY_INTERVAL.min(deadline - now));
+        meta = regular_file_metadata(path).map_err(StoreError::FileMode)?;
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A test's look at each read of [`probe_version`] on this thread, called once the read's
+    /// outcome is known (the probe-retry tests count the reads and resolve a pending shape
+    /// only after the first one has seen it).
+    pub(crate) static PROBE_ATTEMPT: std::cell::RefCell<Option<Box<dyn FnMut()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Whether `e` is an SQLite failure that an immutable read of a main file can meet while
+/// another process checkpoints into it (a torn read): busy or locked, an I/O error, "not a
+/// database" or corrupt. Everything else, a refusal included, is the file's state.
+fn transient_read_failure(e: &StoreError) -> bool {
+    use rusqlite::ErrorCode;
+    let StoreError::Backend { source } = e else {
+        return false;
+    };
+    matches!(
+        source.driver().downcast_ref::<rusqlite::Error>(),
+        Some(rusqlite::Error::SqliteFailure(failure, _)) if matches!(
+            failure.code,
+            ErrorCode::DatabaseBusy
+                | ErrorCode::DatabaseLocked
+                | ErrorCode::SystemIoFailure
+                | ErrorCode::NotADatabase
+                | ErrorCode::DatabaseCorrupt
+        )
+    )
+}
+
+/// One read of [`probe_version`]: its rule, without the retry.
+fn probe_once(path: &Path, meta: Option<&std::fs::Metadata>) -> Result<Probed> {
+    use crate::schema::{LATEST_SCHEMA_VERSION, Migrator};
+    let found = match meta {
+        Some(meta) if meta.len() > 0 => {
+            let flags = OpenFlags::SQLITE_OPEN_READ_ONLY
+                | OpenFlags::SQLITE_OPEN_URI
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+            let uri = format!("{}?mode=ro&immutable=1", sqlite_uri(path));
+            let conn = Connection::open_with_flags(uri, flags).sql()?;
+            Migrator::detect(&conn)?
+        }
+        // absent or empty: nothing recorded
+        _ => Some(0),
+    };
+    match found {
+        Some(LATEST_SCHEMA_VERSION) => Ok(Probed::Current),
+        Some(0) => {
+            let mut wal = path.as_os_str().to_owned();
+            wal.push("-wal");
+            match regular_file_metadata(Path::new(&wal)).map_err(StoreError::FileMode)? {
+                Some(wal) if wal.len() > 0 => Err(StoreError::NotAKabanProject {
+                    supported: LATEST_SCHEMA_VERSION,
+                }),
+                _ => Ok(Probed::Fresh),
+            }
+        }
+        other => Err(Migrator::unsupported(other)),
+    }
+}
+
+/// How long [`probe_version`] keeps re-reading a main file whose outcome another process may
+/// still be changing (spec 11 CMP-01): no kaban schema beside a non-empty `-wal` (a creator
+/// that has its DDL in the log and has not yet run its TRUNCATE checkpoint), or a transient
+/// SQLite failure of the immutable read (a busy, I/O, "not a database" or corrupt read under
+/// a concurrent checkpoint). A creator finishes well inside it; a static file is refused or
+/// failed once it has passed.
+pub(crate) const PROBE_RETRY_WINDOW: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// The pause between two reads of the probe inside [`PROBE_RETRY_WINDOW`].
+pub(crate) const PROBE_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_millis(25);
+
+/// `path` as an SQLite `file:` URI naming exactly that filesystem path, the one form every
+/// connection of this crate is opened with (the probe adds its `?mode=ro&immutable=1`).
+/// SQLite reads a name starting with `file:` as a URI whatever the open flags say (the bundled
+/// library is built with `SQLITE_USE_URI`), so a plain relative name `file:x.db` would open
+/// `x.db` while every `stat`, the owner file and the probe act on the literal `file:x.db`. As
+/// a full URI the name means one file to all of them: every byte outside the unreserved set
+/// (`A-Z a-z 0-9 - . _ ~`) but `/` is percent-encoded, so `?`, `#`, `%`, `:`, spaces and
+/// non-UTF-8 bytes cannot end the path, start parameters or be decoded into another name, and
+/// an absolute path is written after an empty authority (`file://` + path), so a path that
+/// itself starts with `//` is never read as a host.
+pub(crate) fn sqlite_uri(path: &Path) -> String {
+    use std::fmt::Write as _;
+    use std::os::unix::ffi::OsStrExt;
+    let mut out = String::from(if path.is_absolute() {
+        "file://"
+    } else {
+        "file:"
+    });
+    for &b in path.as_os_str().as_bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~' | b'/') {
+            out.push(char::from(b));
+        } else {
+            let _ = write!(out, "%{b:02X}");
+        }
+    }
+    out
+}
+
 /// Make an existing regular file owner-only (0600) with `fchmod` on an opened descriptor (plan
 /// C1.6). A file that is already owner-only is not opened at all: closing any descriptor to a
 /// database file would release every POSIX record lock this process holds on it (SQLite's
@@ -687,8 +845,9 @@ fn tighten_regular_file(path: &Path, meta: &std::fs::Metadata) -> std::io::Resul
 /// process already holds the same database file open, nothing is tightened at all: the first
 /// opener did that, and an opened descriptor would release the live store's locks (C2.5b, P-1).
 /// The decision and the open run under the registry lock so two openers in one process cannot
-/// interleave. The open is admitted by [`admit_open`] (SS-23) once the file exists and before
-/// the connection is opened: a refusal opens nothing.
+/// interleave. Before any of it, [`probe_version`] reads the version of an existing main file
+/// without writing (CMP-01). The open is admitted by [`admit_open`] (SS-23) once the file
+/// exists and before the connection is opened: a refusal opens nothing.
 ///
 /// Permissions are checked and set by path in sequence, so this relies on a trusted parent
 /// directory (not writable by other users): a path that is a symlink or not a regular file is
@@ -706,6 +865,13 @@ pub(crate) fn prepare_database_files(
         live.iter().any(|entry| entry.ident == file_ident(meta))
     };
     let meta = regular_file_metadata(path).map_err(StoreError::FileMode)?;
+    // the version probe first (CMP-01): an older file is refused before it is created,
+    // tightened, admitted or opened
+    let probed = if meta.as_ref().is_some_and(|meta| known_live(meta, &live)) {
+        None
+    } else {
+        Some(probe_version(path, meta.as_ref())?)
+    };
     let already_live = match meta {
         Some(ref meta) if known_live(meta, &live) => true,
         Some(ref meta) => {
@@ -752,8 +918,14 @@ pub(crate) fn prepare_database_files(
         })
         .map(|meta| file_ident(&meta))?;
     let owner = admit_open(&live, ident, path, capabilities)?;
-    let conn = Connection::open(path).sql()?;
-    let guard = LiveGuard::register(&mut live, ident, owner)?;
+    // the file checked above, by its URI (see [`sqlite_uri`]): never another file of a
+    // similar name
+    let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
+        | OpenFlags::SQLITE_OPEN_CREATE
+        | OpenFlags::SQLITE_OPEN_URI
+        | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    let conn = Connection::open_with_flags(sqlite_uri(path), flags).sql()?;
+    let guard = LiveGuard::register(&mut live, ident, owner, probed)?;
     drop(live);
     Ok((conn, guard))
 }
@@ -800,13 +972,14 @@ pub(crate) fn database_file_modes(path: &Path) -> Result<DatabaseFileModes> {
 /// file, and so must an existing `-wal` or `-shm` sidecar (RL-4): the same `symlink_metadata`
 /// refusal [`prepare_database_files`] applies, checked before SQLite opens anything, so a
 /// symlinked sidecar is never read as a WAL or written through the link. A missing sidecar is
-/// fine (SQLite creates its own). The open is read-write, so it is admitted by [`admit_open`]
+/// fine (SQLite creates its own). [`probe_version`] runs before the admission (CMP-01). The
+/// open is read-write, so it is admitted by [`admit_open`]
 /// (SS-23) like the ordinary open, and the connection is registered as live like every other.
 ///
 /// # Errors
 /// `StoreError::FileMode` when the file is absent, a symlink or not a regular file, or when an
-/// existing sidecar is a symlink or not a regular file; `StoreError::SharedOpenUnsupported`
-/// when the open is not admitted; SQLite open errors.
+/// existing sidecar is a symlink or not a regular file; the refusals of [`probe_version`];
+/// `StoreError::SharedOpenUnsupported` when the open is not admitted; SQLite open errors.
 pub(crate) fn open_existing_as_is(
     path: &Path,
     capabilities: StoreCapabilities,
@@ -828,12 +1001,19 @@ pub(crate) fn open_existing_as_is(
         regular_file_metadata(Path::new(&sidecar)).map_err(StoreError::FileMode)?;
     }
     let ident = file_ident(&meta);
+    // the version probe before the admission and the open (CMP-01), as in
+    // [`prepare_database_files`]
+    let probed = if live.iter().any(|entry| entry.ident == ident) {
+        None
+    } else {
+        Some(probe_version(path, Some(&meta))?)
+    };
     let owner = admit_open(&live, ident, path, capabilities)?;
     let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
         | OpenFlags::SQLITE_OPEN_NO_MUTEX
         | OpenFlags::SQLITE_OPEN_URI;
-    let conn = Connection::open_with_flags(path, flags).sql()?;
-    let guard = LiveGuard::register(&mut live, ident, owner)?;
+    let conn = Connection::open_with_flags(sqlite_uri(path), flags).sql()?;
+    let guard = LiveGuard::register(&mut live, ident, owner, probed)?;
     drop(live);
     Ok((conn, guard))
 }

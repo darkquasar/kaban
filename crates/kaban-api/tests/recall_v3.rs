@@ -13,7 +13,7 @@ fn api() -> KabanApi {
     let policy = Policy::from_file(Policy::parse(b"").unwrap(), "test".into()).unwrap();
     let store = Arc::new(SqliteStore::open_memory().unwrap());
     let signer = store.signer();
-    KabanApi::new(store, policy, signer, None)
+    KabanApi::new(store, policy, signer)
 }
 
 fn coderef(relative_path: &str, name_path: Option<&str>) -> CodeRefWire {

@@ -13,30 +13,12 @@ use std::process::ExitCode;
 /// found, 4 policy/config or request error (also a usage error), 5 store error. 1 is kept for a
 /// runtime failure the spec gives no code (a transport or serialization error). A write's
 /// receipt (spec 05 SS-10, `kaban_api::WriteOutcome`) maps onto the same table: `committed`
-/// is 0, `rejected` is the refusing error's own code and `committed_not_yet_searchable` is 6
-/// (the write stands and must not be replayed; a `set -e` script handles 6 explicitly).
+/// is 0, `rejected` is the refusing error's own code.
 pub(crate) const EXIT_FAILURE: u8 = 1;
 pub(crate) const EXIT_REJECTED: u8 = 2;
 pub(crate) const EXIT_NOT_FOUND: u8 = 3;
 pub(crate) const EXIT_INVALID: u8 = 4;
 pub(crate) const EXIT_STORE_ERROR: u8 = 5;
-pub(crate) const EXIT_PENDING_SEARCH: u8 = 6;
-
-/// Whether a write's response carries a `committed_not_yet_searchable` receipt (SS-10): the
-/// receipt sits at the response's top level or, in a composite report (`sync`), one level
-/// down; nothing else in a response is a receipt.
-pub(crate) fn pending_search(response: &serde_json::Value) -> bool {
-    let pending = |v: &serde_json::Value| {
-        v.get("receipt")
-            .and_then(|r| r.get("outcome"))
-            .and_then(serde_json::Value::as_str)
-            == Some("committed_not_yet_searchable")
-    };
-    pending(response)
-        || response
-            .as_object()
-            .is_some_and(|fields| fields.values().any(pending))
-}
 
 /// Printed by the tool seam instead of a result its serializer refused (review R4-3). Fixed on
 /// purpose: a serializer's message may quote the value, so the error is never formatted.
@@ -127,17 +109,12 @@ pub(crate) fn store_exit_code(e: &StoreError) -> u8 {
         | StoreError::Builtin(_)
         | StoreError::InvalidTransition(_)
         | StoreError::InvalidId(_)
-        // engine-plan E1.8 (EN-F5, EN-F7): request-shaped like the kind errors above; the
-        // E1.9a promotion refusals (RE3-3, RE3-4) are fixed classes of the same shape
-        | StoreError::KindNotAllowed
-        | StoreError::HumanOnly(_)
-        | StoreError::PromoteConflict
-        | StoreError::PromoteTargetIncompatible
+        // EN-F7: an ontology error at the record seam is request-shaped like the kind errors
         | StoreError::Ontology(_)
-        // OWN-86 (3): a refused `supersedes` is request-shaped, a fixed class
-        | StoreError::SupersedesInvalid(_)
-        // OWN-P: a database of another schema version is refused with guidance, request-shaped
-        | StoreError::SchemaUnsupported { .. } => EXIT_INVALID,
+        // OWN-P, spec 11 CMP-01: a database of another schema version, or a file that is no
+        // kaban project, is refused with guidance, request-shaped
+        | StoreError::SchemaUnsupported { .. }
+        | StoreError::NotAKabanProject { .. } => EXIT_INVALID,
         StoreError::NotFound(_) => EXIT_NOT_FOUND,
         _ => EXIT_STORE_ERROR,
     }

@@ -27,7 +27,7 @@ fn table_unknown_chunks_sums_the_documents_that_carry_the_key() {
     // Arrange
     let store = SqliteStore::open_memory().unwrap();
     let ws = WorkspaceId::default();
-    let ctx = WriteCtx::new("v1", ws.clone(), Actor::Agent);
+    let ctx = WriteCtx::new(ws.clone(), Actor::Agent);
     let batch = WriteBatch::new(
         ws.clone(),
         vec![

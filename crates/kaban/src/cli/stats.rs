@@ -27,12 +27,7 @@ impl ToolArgs for Flags {
 
 /// Scan arguments and the response through the shared tool seam, then print JSON.
 pub(crate) fn run(api: &KabanApi, raw: Value, format: Format) -> ExitCode {
-    run_tool(
-        api,
-        "stats",
-        raw,
-        &[],
-        format,
-        |api, request: StatsRequest| api.stats(request),
-    )
+    run_tool(api, "stats", raw, format, |api, request: StatsRequest| {
+        api.stats(request)
+    })
 }

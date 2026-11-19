@@ -104,10 +104,8 @@ pub struct IndexDocsResponse {
     pub timed_out: u32,
     /// Nothing was written (`dry_run`).
     pub dry_run: bool,
-    /// The run's receipt (spec 05 SS-10, one barrier per ingest run): `committed` once the
-    /// serving search reader covers the run's rows, `committed_not_yet_searchable` when the
-    /// barrier expired or failed (the run stands, do not replay it). Absent only from a
-    /// report the run itself produced before the service settled it.
+    /// The run's receipt (spec 05 SS-10): `committed` at the log head the run left. Absent
+    /// only from a report the run itself produced before the service added it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub receipt: Option<WriteReceipt>,
 }
@@ -121,7 +119,7 @@ pub struct FailedDocument {
     pub error: String,
 }
 
-/// `index_status` output (docs-ingest-spec D6, D7): counts, failures and lag of the bound
+/// `index_status` output (docs-ingest-spec D6, D7): counts and failures of the bound
 /// workspace's document index.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct IndexStatus {
@@ -148,8 +146,6 @@ pub struct IndexStatus {
     /// When the last ingestion run of this workspace finished (RFC 3339), if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_run: Option<String>,
-    /// Outbox rows not yet acknowledged by every consumer.
-    pub outbox_lag: u64,
     /// The pipeline version documents are indexed with.
     pub pipeline_version: u32,
     /// The extractors compiled into this binary (`crate@version`).

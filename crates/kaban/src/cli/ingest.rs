@@ -274,10 +274,9 @@ pub(crate) fn index_docs(
     let mut response = IndexDocsResponse::from(report);
     response.workspace = api.workspace().to_string();
     response.dry_run = req.dry_run;
-    // one barrier per ingest run (SS-10), after the run's transactions and locks: the receipt
-    // holds at the log head the run left (a dry run or a run that skipped everything waits
-    // for the state it saw like any other write)
-    response.receipt = Some(api.await_searchable(api.committed_receipt(None)));
+    // the receipt holds at the log head the run left (a dry run or a run that skipped
+    // everything names the state it saw like any other write)
+    response.receipt = Some(api.committed_receipt(None));
     Ok(response)
 }
 
@@ -299,7 +298,6 @@ pub(crate) fn run(api: &KabanApi, mut flags: Flags, format: Format) -> ExitCode 
                 api,
                 "ingest_claim",
                 json!({"with":dialect,"type":source_type,"path_prefix":path_prefix,"worker":worker}),
-                &[],
                 format,
                 |api, request| ingest_claim(api, &request),
             );
@@ -309,7 +307,6 @@ pub(crate) fn run(api: &KabanApi, mut flags: Flags, format: Format) -> ExitCode 
                 api,
                 "ingest_finish",
                 json!({"job":job,"fence":fence}),
-                &[],
                 format,
                 |api, request| ingest_finish(api, &request),
             );
@@ -345,7 +342,6 @@ pub(crate) fn run(api: &KabanApi, mut flags: Flags, format: Format) -> ExitCode 
             api,
             "ingest_next",
             json!({"job": job, "fence":fence, "n": chunk, "slice": slice, "chunks": chunks}),
-            &[],
             format,
             |api, request| ingest_next(api, &request),
         );
@@ -358,7 +354,6 @@ pub(crate) fn run(api: &KabanApi, mut flags: Flags, format: Format) -> ExitCode 
             api,
             "ingest_brief",
             json!({"path":"","mode":flags.mode,"with":flags.dialect}),
-            &[],
             format,
             |_, _| Err(ApiError::Invalid("invalid_ingest_mode".into())),
         );
@@ -367,7 +362,6 @@ pub(crate) fn run(api: &KabanApi, mut flags: Flags, format: Format) -> ExitCode 
         api,
         "index_docs",
         flags.into_raw(),
-        &[],
         format,
         |api, request: IndexDocsRequest| index_docs(api, &request),
     )
@@ -378,7 +372,6 @@ fn run_brief(api: &KabanApi, raw: Value, format: Format) -> ExitCode {
         api,
         "ingest_brief",
         raw,
-        &[],
         format,
         |api, request| ingest_brief(api, &request),
     )
@@ -403,7 +396,6 @@ pub(crate) fn run_submit(api: &KabanApi, flags: Flags, mut raw: Value, format: F
         api,
         "ingest_submit",
         raw,
-        &[],
         format,
         |api, request| {
             if request.job != job {

@@ -18,7 +18,6 @@ fn api(rig: &common::real::Rig, cap: u32) -> KabanApi {
         rig.store.clone(),
         kaban_policy::Policy::empty(),
         rig.store.signer(),
-        None,
         kaban_api::ApiConfig {
             engine: std::sync::Arc::new(engine),
             ..Default::default()
@@ -27,13 +26,7 @@ fn api(rig: &common::real::Rig, cap: u32) -> KabanApi {
 }
 fn rig(name: &str) -> common::real::Rig {
     let mut rig = common::real::rig("kaban-e310-finish", name);
-    let mut ontology = kaban_core::shipped::resolved().unwrap();
-    ontology
-        .priors
-        .insert("script.ingest_submit.edge".into(), 1.0);
-    ontology
-        .priors
-        .insert("script.ingest_submit.kind_of_record".into(), 1.0);
+    let ontology = kaban_core::shipped::resolved().unwrap();
     rig.store = std::sync::Arc::new(
         kaban_store_sqlite::SqliteStore::open_memory()
             .unwrap()
@@ -76,9 +69,6 @@ async fn finish_preserves_union_across_chunks_and_returns_exact_retained_bytes()
         .traverse(&kaban_core::TraverseQuery {
             start_ids: vec![ids[0].clone()],
             rels: vec!["EVIDENCE_FOR".into(), "DERIVED_FROM".into()],
-            filters: kaban_core::ReadFilters {
-                include_candidates: true,
-            },
             ..Default::default()
         })
         .unwrap()
@@ -93,12 +83,10 @@ async fn finish_preserves_union_across_chunks_and_returns_exact_retained_bytes()
     assert!(!row.plan_json.contains("harmless"));
     assert!(!row.plan_json.contains("assertion\""));
     // the receipt (spec 05 SS-10) is per database and per run: its identities and position
-    // are masked like the job and the change interval; its outcome is the snapshot's
-    assert_eq!(report["receipt"]["seq"], report["changes"]["last_seq"]);
+    // are masked like the job; its outcome is the snapshot's
+    assert_eq!(report["receipt"]["seq"], rig.store.changes_head().unwrap());
     let mut snapshot = report;
     snapshot["job"] = json!("<JOB>");
-    snapshot["changes"]["first_seq"] = json!("<FIRST_SEQ>");
-    snapshot["changes"]["last_seq"] = json!("<LAST_SEQ>");
     snapshot["receipt"]["instance_id"] = json!("<INSTANCE_ID>");
     snapshot["receipt"]["pack_lineage_id"] = json!("<PACK_LINEAGE_ID>");
     snapshot["receipt"]["seq"] = json!("<LAST_SEQ>");
@@ -108,7 +96,7 @@ async fn finish_preserves_union_across_chunks_and_returns_exact_retained_bytes()
 /// D3 review d3-6 (SS-10 "no-op requests still wait for the relevant returned state"): a run
 /// that submitted nothing emits no change row, and its receipt names the log head the finish
 /// transaction saw (the state the run references, on a database that already holds rows),
-/// never position 0; the change interval stays absent.
+/// never position 0.
 #[tokio::test]
 async fn a_finish_that_emitted_no_changes_reports_the_head_it_saw_never_zero() {
     let rig = rig("no-op");
@@ -128,7 +116,6 @@ async fn a_finish_that_emitted_no_changes_reports_the_head_it_saw_never_zero() {
     let bytes = finish(&api, &rig.root, &job).await.unwrap();
     let report: Value = serde_json::from_str(&bytes).unwrap();
     assert_eq!(report["submits"], 0, "{report}");
-    assert_eq!(report["changes"]["first_seq"], Value::Null, "{report}");
     assert_eq!(report["receipt"]["outcome"], "committed", "{report}");
     let seq = report["receipt"]["seq"].as_u64().expect("a position");
     assert!(seq >= head && seq > 0, "{report}");
@@ -181,7 +168,6 @@ async fn overflow_default_no_edge_and_present_expired_vs_pruned_refusals() {
         rig.store.clone(),
         kaban_policy::Policy::empty(),
         rig.store.signer(),
-        None,
         kaban_api::ApiConfig {
             workspace: kaban_core::WorkspaceId::new("foreign"),
             ..Default::default()
@@ -210,7 +196,7 @@ async fn changed_policy_refuses_retained_success_without_remasking_or_rewriting_
     )
     .unwrap();
     let policy = kaban_policy::Policy::from_file(file, "new".into()).unwrap();
-    let changed = KabanApi::new(rig.store.clone(), policy, rig.store.signer(), None);
+    let changed = KabanApi::new(rig.store.clone(), policy, rig.store.signer());
     // Closed control values are validated, not scanned. A CONTENT map key is the
     // report-policy seam; use the public gate adapter to retain invented free content.
     let source = rig
@@ -251,7 +237,7 @@ async fn changed_policy_refuses_retained_success_without_remasking_or_rewriting_
         "reject".into(),
     )
     .unwrap();
-    let changed = KabanApi::new(rig.store.clone(), reject, rig.store.signer(), None);
+    let changed = KabanApi::new(rig.store.clone(), reject, rig.store.signer());
     assert!(finish(&changed, &rig.root, &job).await.is_err());
     assert_eq!(
         rig.store.job_get(&job, api.workspace()).unwrap().unwrap(),
@@ -289,11 +275,7 @@ async fn forget_revokes_next_and_finish_and_preview_never_prunes() {
             .unwrap()
             .is_some()
     );
-    let ctx = kaban_core::WriteCtx::new(
-        api.policy_version(),
-        api.workspace().clone(),
-        kaban_core::Actor::HumanCli,
-    );
+    let ctx = kaban_core::WriteCtx::new(api.workspace().clone(), kaban_core::Actor::HumanCli);
     rig.store
         .forget(
             &NodeId::parse(&prepared.document.id).unwrap(),

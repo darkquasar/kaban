@@ -1,0 +1,16 @@
+[package]
+name = "kaban-index-graph"
+description = "kaban graph index: in-memory adjacency over the unified store (scaffold, spec 11)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+kaban-core.workspace = true
+tantivy.workspace = true   # `OwnedBytes` only: file mapping goes through tantivy's utility, no second mmap crate (OD-7)
+thiserror.workspace = true
+
+[lints]
+workspace = true

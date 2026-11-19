@@ -1,5 +1,0 @@
-ontology: shop
-version: 1
-kinds:
-  Thing: {description: "a thing", min_confidence: -0.1}
-rels: {}

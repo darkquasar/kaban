@@ -1,6 +1,6 @@
 //! kaban memory core: the labelled-property-graph model, the [`GraphStore`] portability seam
-//! (an umbrella over the role traits [`MemoryStore`], [`SchemaStore`], [`GovernanceStore`],
-//! [`AuditStore`], [`ChangeLogStore`], [`LeaseStore`], [`IngestStore`] and [`SyncStore`]), the
+//! (an umbrella over the role traits [`MemoryStore`], [`SchemaStore`], [`SessionStore`],
+//! [`ChangeLogStore`], [`LeaseStore`] and [`IngestStore`]), the
 //! [`Sink`] seam over the `ChangeLog`, id/time helpers and the store error type.
 //!
 //! Everything above this crate (policy, service layer, adapters) speaks in nodes, typed edges,
@@ -15,7 +15,6 @@ mod canon;
 mod changelog;
 pub mod config;
 mod error;
-mod events;
 pub mod ident;
 mod ids;
 mod lease;
@@ -25,54 +24,47 @@ pub mod ontology;
 /// The one-shot process runner (stage1-plan CG1.1): public as a module so the spawn lint can
 /// name `kaban_core::process` and so `Exec`, `EnvAllowlist`, `Monitor` keep their own namespace.
 pub mod process;
+pub mod query_budget;
 mod sink;
 mod store;
 pub mod text_index;
 mod validator;
-
-mod reconcile;
+mod view;
 
 pub use artifact::{
-    ArtifactDiagnostics, ArtifactKey, ArtifactSource, BuiltinProducer, CurrentProducerAuthority,
-    DerivedArtifact, GazetteerClaimSet, LayerMaintenance, MaintenanceRefusal, RetireReport,
-    SourceRev, artifact_key,
+    ArtifactDiagnostics, ArtifactKey, ArtifactSource, BuiltinProducer, DerivedArtifact,
+    GazetteerClaimSet, SourceRev, artifact_key,
 };
-pub use audit::{
-    Actor, ActorId, AuditEntry, AuditOp, AuditVerification, InvalidActorId, RemovalIntent,
-    WorkspaceId, WriteCtx,
-};
+pub use audit::{Actor, ActorId, Durability, InvalidActorId, WorkspaceId, WriteCtx};
 // canonical JSON, `props_schema` validator subset (engine-plan E1.1)
 pub use canon::canonical_json;
-pub use error::{BackendSource, Result, StoreError, SupersedesClass};
-pub use events::{Confirmation, Event, ForgetOutcome, NewConfirmation, NewEvent, SignerKind};
+pub use error::{BackendSource, Result, StoreError};
 pub use ids::{InvalidNodeId, NodeId, new_id, now_iso};
 pub use lease::Lease;
-// `GovernedSet` (engine-plan E1.4): the EN-F4 governance membership read from the ontology
-// (the deprecated E1.4 shims over the shipped set were deleted by E1.6)
+// `RuleSet` (engine-plan E1.4): the live EN-F4 ontology rules read from the loaded files
 pub use lifecycle::{
-    Governance, GovernedSet, INGEST_OWNER, InvalidTransition, Lifecycle, ReactivateRefusal,
-    StoreScope, governance_transition, lifecycle_transition,
+    INGEST_OWNER, InvalidTransition, LIFECYCLE_RELS, Lifecycle, ReactivateRefusal, RuleSet,
+    StoreScope, is_lifecycle_rel, lifecycle_transition, reconciliation_transition,
 };
 pub use model::{
-    AnchoredKind, AnchoredRow, BatchReport, BodyLocation, CodeRef, CodeRefFilter, ConventionProps,
-    DecisionProps, Edge, EdgeDiff, EdgeFilter, Evidence, FailureProps, ForgetMode, GoverningQuery,
-    Hit, IndexMeta, LinkReq, Location, NewNode, Node, Op, OpOutcome, OutcomeKind, RecallLayer,
-    RecallQuery, RedactedStrings, RememberOutcome, RescanAction, RescanReport, TraverseDirection,
-    TraverseQuery, TraverseResult, TypeDeclaration, TypeDef, WorkspaceFilter, WriteBatch,
+    BatchReport, BodyLocation, CodeRef, CodeRefFilter, ConventionProps, DecisionProps, Edge,
+    EdgeDiff, EdgeFilter, EdgeRescanAction, Evidence, FailureProps, ForgetMode, ForgetOutcome, Hit,
+    IndexMeta, LinkReq, Location, NewNode, Node, Op, OpOutcome, OutcomeKind, RecallMode,
+    RecallQuery, RedactedStrings, RememberOutcome, RescanAction, RescanCursor, RescanJudge,
+    RescanReport, TraverseDirection, TraverseQuery, TraverseResult, TypeDeclaration, TypeDef,
+    WorkspaceFilter, WriteBatch,
 };
-// discovered labels, candidates and `kind_stats` (engine-plan E1.8)
-pub use model::{DiscoveredRules, KindStat, PromoteReport, PruneReport, ReadFilters};
+// view names and commit ids (spec 11 T5)
 pub use validator::{
     Error as PropsError, Keyword, Schema, SchemaError, ValidatorLimits, first_error_text, validate,
 };
+pub use view::{CommitSha, InvalidCommitSha, InvalidViewName, ViewName};
 // hook session scratch, briefing and failure pairing (core-plan C4.3/C4.4; M4-12 to M4-17)
 pub use model::{
     EvidenceRun, FailurePatch, PendingFailuresQuery, PendingScope, SessionEdit, SessionEditKind,
 };
-// `.kaban/*.md` serialization (core-plan C5.1; M5-18)
-pub use model::{ConflictRow, ImportedRecord};
-// batch assertions and typed edge owners (engine-plan E2.2; EN-E4, EN-F8)
-pub use model::{BatchAssertion, BatchSubject, Owner};
+// typed edge owners (EN-E4) and the producer vocabulary moved out of reconciliation
+pub use model::{ExtractorKind, Fixed, FixedError, Method, Producer};
 // ontologies as data (engine-plan E1.2)
 pub use ontology::{
     KindName, NamespaceSet, Ns, ONTOLOGY_ERROR_TEXTS, Ontology, OntologyError, OntologyFile,
@@ -124,14 +116,11 @@ pub mod shipped {
 #[allow(deprecated)] // the EN-E10b alias, re-exported for one minor version (removed in 3.2)
 pub use store::OutboxStore;
 pub use store::{
-    AuditStore, ChangeLogStore, GovernanceStore, GraphStore, IngestStore, LeaseStore, MemoryStore,
-    SchemaStore, SyncStore,
+    ChangeLogStore, GraphStore, IngestStore, LeaseStore, MemoryStore, SchemaStore, SessionStore,
 };
-// the `supersession_chain` types (v4 stage1-plan CG5.3; cg-join-v1 §7)
-pub use store::{Chain, ChainDirection, PruningProtection, PruningTarget};
 pub use store::{
-    DatabaseFileModes, DocumentIndexSummary, FailedDocumentRow, ImportedPurge, MaintenanceOutcome,
-    ReviewRow, StoreCapabilities, UnstampedCounts, UnstampedReason,
+    DatabaseFileModes, DocumentIndexSummary, FailedDocumentRow, MaintenanceOutcome,
+    StoreCapabilities,
 };
 pub use store::{
     IngestJob, InvalidJobId, JobClaimRequest, JobFinishOutcome, JobFinishRequest,
@@ -142,22 +131,4 @@ pub use store::{
 pub use store::{
     AnchorPredicates, AttachHandle, SNAPSHOT_SYMBOL_PAGE, SnapshotAttach, SnapshotSymbol,
     SymbolPage,
-};
-
-pub use reconcile::{
-    Assertion, AssertionKey, AssertionStatus, CandidateReason, CanonicalJson, ClaimClass, Fixed,
-    FixedError, Layer, LineageParts, LogWeight, Method, Priors, PriorsError, ProtectionSet, Rank,
-    ReconcileCtx, Reconciler, Subject, UnresolvedReason, Verdict, group_key, lineage_id,
-    same_group, votes,
-};
-// entity resolution (engine-plan E2.10; EN-F51): the pure scorer and its vocabulary
-pub use reconcile::er;
-pub use reconcile::er::{
-    Agreement, Block, BlockKey, ErConfigError, ErContribution, ErDecision, ErPriors, ErReport,
-    ErScore, Field, FuzzyIndex, JudgeFilter, NodeView, PairJudgement, PairRef, UnmergeOutcome,
-};
-// the `explain` document and the evaluation counters (engine-plan E2.4; EN-F14, EN-F16)
-pub use reconcile::{
-    CandidateView, Contribution, Explanation, LineageView, PriorsObs, PriorsOutcome, SupporterView,
-    WEIGHTED_VOTE_V1,
 };

@@ -1,8 +1,7 @@
 //! The only process spawner in `kaban-api` (M3-10, now a wrapper): a bounded, hygienic `git`
-//! runner over `kaban_core::process` (stage1-plan CG1.1). `rev-parse HEAD` stamps
-//! `accepted_commit` at acceptance (C3.2, M3-23); the currency queries of C3.3 (`log
-//! --name-status -M`, `ls-files`) and the sync queries run through the same entry. Local git
-//! only, never the network (core-spec S8). This crate no longer constructs a `Command` of its own.
+//! runner over `kaban_core::process` (stage1-plan CG1.1): the code-graph repository identity
+//! and the code-context history queries run through it. Local git only, never the network
+//! (core-spec S8). This crate no longer constructs a `Command` of its own.
 //!
 //! ```text
 //!   GitRunner::run(root, args)
@@ -83,22 +82,6 @@ pub(crate) fn is_commit_hex(s: &str) -> bool {
 }
 
 impl GitRunner {
-    /// `git rev-parse HEAD` in `root`: the lowercase hex commit id, or `None` when the
-    /// repository has no HEAD, git is absent, slow or fails (acceptance proceeds without a
-    /// commit stamp; the failure class is traced).
-    pub fn head(&self, root: &Path) -> Option<String> {
-        match self.run(root, &["rev-parse", "HEAD"]) {
-            Ok(out) => {
-                let sha = out.trim();
-                is_commit_hex(sha).then(|| sha.to_owned())
-            }
-            Err(e) => {
-                tracing::debug!(error = %e, "accepted_commit not stamped");
-                None
-            }
-        }
-    }
-
     /// Run `git <args>` in `root` and return its stdout.
     ///
     /// # Errors

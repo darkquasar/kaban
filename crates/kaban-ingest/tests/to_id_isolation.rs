@@ -11,13 +11,7 @@ use serde_json::json;
 #[tokio::test]
 async fn links_resolve_only_active_same_workspace_nodes() {
     let mut rig = common::real::rig("kaban-e39-targets", "isolation");
-    let mut ontology = kaban_core::shipped::resolved().unwrap();
-    ontology
-        .priors
-        .insert("script.ingest_submit.edge".into(), 1.0);
-    ontology
-        .priors
-        .insert("script.ingest_submit.kind_of_record".into(), 1.0);
+    let ontology = kaban_core::shipped::resolved().unwrap();
     rig.store = std::sync::Arc::new(
         kaban_store_sqlite::SqliteStore::open_memory()
             .unwrap()
@@ -29,7 +23,6 @@ async fn links_resolve_only_active_same_workspace_nodes() {
         rig.store.clone(),
         kaban_policy::Policy::empty(),
         rig.store.signer(),
-        None,
     );
     let same = NodeId::new();
     let foreign = NodeId::new();
@@ -51,7 +44,7 @@ async fn links_resolve_only_active_same_workspace_nodes() {
                         },
                     }],
                 ),
-                &WriteCtx::new("policy", ws, Actor::Agent),
+                &WriteCtx::new(ws, Actor::Agent),
             )
             .unwrap();
     }
@@ -71,40 +64,31 @@ async fn links_resolve_only_active_same_workspace_nodes() {
         .traverse(&kaban_core::TraverseQuery {
             start_ids: vec![id],
             rels: vec!["RELATES_TO".into()],
-            filters: kaban_core::ReadFilters {
-                include_candidates: true,
-            },
             ..Default::default()
         })
         .unwrap()
         .edges;
     assert_eq!(edges.len(), 1);
     assert_eq!(edges[0].dst, same.as_str());
-    assert_eq!(edges[0].props["owner"], "kaban-parse");
-    let mut scores = Vec::new();
-    rig.store
-        .rescan_assertions("confidence-proof", &mut |claim, _| {
-            scores.push((
-                claim.method,
-                claim.rank,
-                claim.raw_score,
-                claim.lineage_id.clone(),
-            ));
-            Some(claim.value.as_value().clone())
+    // the submission edge is the extractor's (PC-16: the producer is the stored column)
+    let extractor = rig
+        .store
+        .traverse(&kaban_core::TraverseQuery {
+            start_ids: vec![NodeId::parse(result["records"][0]["id"].as_str().unwrap()).unwrap()],
+            rels: vec!["RELATES_TO".into()],
+            edge_filter: Some(kaban_core::EdgeFilter {
+                producers: [
+                    kaban_core::ExtractorKind::Llm,
+                    kaban_core::ExtractorKind::Gliner,
+                    kaban_core::ExtractorKind::Script,
+                ]
+                .map(kaban_core::Producer::Extractor)
+                .to_vec(),
+                ..Default::default()
+            }),
+            ..Default::default()
         })
-        .unwrap();
-    assert_eq!(
-        scores.len(),
-        3,
-        "record, provenance and valid link assertions only"
-    );
-    assert!(scores.iter().all(|(method, rank, score, _)| *method
-        == kaban_core::Method::IngestSubmit
-        && *rank == kaban_core::Rank::Normal
-        && score.0 == 8000));
-    assert!(
-        scores
-            .iter()
-            .all(|(_, _, _, lineage)| lineage == &scores[0].3)
-    );
+        .unwrap()
+        .edges;
+    assert_eq!(extractor.len(), 1, "{extractor:?}");
 }

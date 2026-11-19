@@ -5,14 +5,12 @@ use super::KabanApi;
 use crate::control::ControlPath;
 use crate::enrich::{self, EnrichBudget, Enricher, Enrichment};
 use crate::error::ApiError;
-use crate::snapshot::{self, SnapshotOutcome};
 use crate::types::{
-    AnchoredCard, PolicyStats, RecallRequest, RecallResponse, StatsRequest, StatsResponse,
-    TraverseRequest, TraverseResponse,
+    PolicyStats, RecallRequest, RecallResponse, StatsRequest, StatsResponse, TraverseRequest,
+    TraverseResponse,
 };
 use kaban_core::{
-    AnchoredRow, CodeRef, CodeRefFilter, Fixed, Layer, Method, NodeId, ReadFilters, RecallQuery,
-    StoreScope, TraverseQuery, WriteCtx,
+    CodeRef, CodeRefFilter, Fixed, Method, NodeId, Producer, RecallQuery, StoreScope, TraverseQuery,
 };
 
 const MAX_IDS: usize = 64;
@@ -32,81 +30,43 @@ impl KabanApi {
         // (review R1-3): the sanitized query is what FTS sees, and masked filter values match
         // the masked values that were stored
         let t = "recall";
-        let mut ctx = self.write_ctx(None);
         let mut red = Vec::new();
-        let query = self.gate(&mut ctx, t, "query", &p.query, &mut red)?;
-        let kinds = self.gate_all(&mut ctx, t, "kinds", &p.kinds, &mut red)?;
-        let tags = self.gate_all(&mut ctx, t, "tags", &p.tags, &mut red)?;
-        let workspace_id = self.gate_opt(
-            &mut ctx,
-            t,
-            "workspace_id",
-            p.workspace_id.as_deref(),
-            &mut red,
-        )?;
+        let query = self.gate(t, "query", &p.query, &mut red)?;
+        let kinds = self.gate_all(t, "kinds", &p.kinds, &mut red)?;
+        let tags = self.gate_all(t, "tags", &p.tags, &mut red)?;
+        let workspace_id = self.gate_opt(t, "workspace_id", p.workspace_id.as_deref(), &mut red)?;
         // the CodeRef filter fields are content (S1 lists CodeRef fields): gated like the rest
         let r#ref = match &p.r#ref {
             Some(f) => Some(CodeRefFilter {
-                relative_path: self.gate(
-                    &mut ctx,
-                    t,
-                    "ref.relative_path",
-                    &f.relative_path,
-                    &mut red,
-                )?,
-                name_path: self.gate_opt(
-                    &mut ctx,
-                    t,
-                    "ref.name_path",
-                    f.name_path.as_deref(),
-                    &mut red,
-                )?,
-                repo: self.gate_opt(&mut ctx, t, "ref.repo", f.repo.as_deref(), &mut red)?,
+                relative_path: self.gate(t, "ref.relative_path", &f.relative_path, &mut red)?,
+                name_path: self.gate_opt(t, "ref.name_path", f.name_path.as_deref(), &mut red)?,
+                repo: self.gate_opt(t, "ref.repo", f.repo.as_deref(), &mut red)?,
             }),
             None => None,
         };
         // enricher ids are content (gated, so the error can only echo the masked id) and are
         // resolved before any lookup
-        let enrich_ids = self.gate_all(&mut ctx, t, "enrich", &p.enrich, &mut red)?;
-        self.flush_audit(&mut ctx)?;
+        let enrich_ids = self.gate_all(t, "enrich", &p.enrich, &mut red)?;
         let enrichers = self.resolve_enrichers(&enrich_ids)?;
         let q = RecallQuery {
-            layers: p.layers,
+            modes: p.modes,
             fuzzy: p.fuzzy,
-            // EN-F49: candidates are absent unless the request asks for them
-            filters: ReadFilters {
-                include_candidates: p.include_candidates,
-            },
             query,
             kinds,
             tags,
             workspace_id: self.read_workspace(workspace_id.as_deref()),
             limit: p.limit.unwrap_or(10),
             hops: p.hops.unwrap_or(1),
-            include_superseded: p.include_superseded,
             include_archived: p.include_archived,
             r#ref,
         };
         // the read gate decides eligibility inside the recall (spec 05 SS-11): a record a
         // reject rule hides is no deliverable result and the store refills in its place. The
-        // predicate runs under the store's lock, so it reads nothing from the store: the
-        // hidden reads are audited once the recall has returned, the shown cards projected
-        // (and audited) below with their `why`
-        let hidden = std::cell::RefCell::new(Vec::new());
+        // predicate runs under the store's lock, so it reads nothing from the store; the
+        // shown cards are projected below with their `why`
         let hits = self
             .store
-            .recall_eligible(&q, &|node| match self.hidden_read(node) {
-                None => true,
-                Some(verdicts) => {
-                    hidden.borrow_mut().push((node.id.clone(), verdicts));
-                    false
-                }
-            })?;
-        for (id, verdicts) in hidden.into_inner() {
-            let mut ctx = self.write_ctx(None);
-            ctx.audit = verdicts;
-            self.record_read(&mut ctx, &id);
-        }
+            .recall_eligible(&q, &|node| !self.hidden_read(node))?;
         let mut results = Vec::with_capacity(hits.len());
         let mut visible: Vec<NodeId> = Vec::with_capacity(hits.len());
         for h in &hits {
@@ -158,9 +118,8 @@ impl KabanApi {
         let refs = &pointers[..pointers.len().min(budget.max_refs)];
         let mut out = Vec::new();
         for e in enrichers {
-            for (i, item) in e.enrich(refs, budget)?.into_iter().enumerate() {
-                let key = format!("enrich:{}:{i}", e.id());
-                if let Some(gated) = self.project_enrichment(&key, &item) {
+            for item in e.enrich(refs, budget)? {
+                if let Some(gated) = self.project_enrichment(&item) {
                     out.push(gated);
                 }
             }
@@ -183,13 +142,11 @@ impl KabanApi {
         // every string is gated before any lookup, so a `NotFound` can only echo the masked
         // value (review R1-3)
         let t = "traverse";
-        let mut ctx = self.write_ctx(None);
         let mut red = Vec::new();
         // start ids are control (validated by shape, scanned only when malformed)
         let mut start_ids = Vec::with_capacity(p.start_ids.len());
         for s in &p.start_ids {
             let gated = self.gate_control(
-                &mut ctx,
                 t,
                 ControlPath::request(t, "start_ids[]"),
                 "start_ids",
@@ -198,82 +155,35 @@ impl KabanApi {
             )?;
             start_ids.push(Self::node_id(&gated)?);
         }
-        let rels = self.gate_all(&mut ctx, t, "rels", &p.rels, &mut red)?;
-        let mut node_kinds = self.gate_all(&mut ctx, t, "node_kinds", &p.node_kinds, &mut red)?;
-        // EN-F46: the set name and the filter vocabulary are gated like `rels` (a masked value
-        // then fails the closed-vocabulary match with a fixed word, never an echo)
-        let kind_set = self.gate_opt(&mut ctx, t, "kind_set", p.kind_set.as_deref(), &mut red)?;
+        let rels = self.gate_all(t, "rels", &p.rels, &mut red)?;
+        let node_kinds = self.gate_all(t, "node_kinds", &p.node_kinds, &mut red)?;
+        // EN-F46: the filter vocabulary is gated like `rels` (a masked value then fails the
+        // closed-vocabulary match with a fixed word, never an echo)
         let edge_filter = match &p.edge_filter {
             Some(f) => Some((
                 f.min_score,
-                self.gate_all(&mut ctx, t, "edge_filter.layers", &f.layers, &mut red)?,
-                self.gate_all(&mut ctx, t, "edge_filter.methods", &f.methods, &mut red)?,
+                self.gate_all(t, "edge_filter.producers", &f.producers, &mut red)?,
+                self.gate_all(t, "edge_filter.methods", &f.methods, &mut red)?,
             )),
             None => None,
         };
-        let workspace_id = self.gate_opt(
-            &mut ctx,
-            t,
-            "workspace_id",
-            p.workspace_id.as_deref(),
-            &mut red,
-        )?;
-        self.flush_audit(&mut ctx)?;
-        // EN-F46 `kind_set`: resolved here into `node_kinds` (the union with the caller's);
-        // `governing` is the one set the ontology defines in 3.0.0
-        match kind_set.as_deref() {
-            None => {}
-            Some("governing") => {
-                for kind in self.registry().governing_kinds() {
-                    if !node_kinds.contains(&kind) {
-                        node_kinds.push(kind);
-                    }
-                }
-            }
-            Some(_) => return Err(ApiError::Invalid("unknown_kind_set".into())),
-        }
+        let workspace_id = self.gate_opt(t, "workspace_id", p.workspace_id.as_deref(), &mut red)?;
         let edge_filter = match edge_filter {
-            Some((min_score, layers, methods)) => {
-                Some(Self::edge_filter(min_score, &layers, &methods)?)
+            Some((min_score, producers, methods)) => {
+                Some(Self::edge_filter(min_score, &producers, &methods)?)
             }
             None => None,
         };
-        // EN-F19: one resolution per call when the expansion is asked for (as `why(symbol)`
-        // does, cg-join-v1 §4); the lease inside `Resolved` lives until this function returns,
-        // the attachment on the store's read connection persists across requests. The store
-        // expands only under THIS request's admission (S7; the wave-2 review's RW2-2): any
-        // other outcome (no provider, no repository, no snapshot, too new, a refused directory)
-        // leaves `anchored` empty whatever an earlier request left attached, and is never an
-        // error.
-        let outcome = p.follow_anchors.then(|| snapshot::resolve_for_card(self));
-        let admitted = match &outcome {
-            Some(SnapshotOutcome::Resolved(r)) => {
-                self.store.attach_snapshot(&snapshot::attach_from(r))?;
-                true
-            }
-            Some(SnapshotOutcome::Absent | SnapshotOutcome::TooNew) | None => false,
-        };
         let q = TraverseQuery {
-            // EN-F49: candidates are absent unless the request asks for them
-            filters: ReadFilters {
-                include_candidates: p.include_candidates,
-            },
             start_ids,
             rels,
             // a closed enum (MT-5): validated by the typed parse, registered as control
             direction: p.direction.unwrap_or_default(),
             max_depth: p.max_depth.unwrap_or(1),
             node_kinds,
-            // resolved above; the store does not read it (the field stays for E2.9)
-            kind_set,
             edge_filter,
-            // a closed enum: validated by the typed parse
-            governance: p.governance.clone(),
             limit: p.limit.unwrap_or(100),
             workspace_id: self.read_workspace(workspace_id.as_deref()),
-            // the flag the store sees is this request's admission, not the caller's wish
-            follow_anchors: admitted,
-            anchor_repo: self.config.repo.clone(),
         };
         let r = self.store.traverse(&q)?;
         let nodes: Vec<_> = r
@@ -288,18 +198,7 @@ impl KabanApi {
             .filter(|e| ids.contains(e.src.as_str()) && ids.contains(e.dst.as_str()))
             .filter_map(|e| self.project_edge(t, e))
             .collect();
-        // a card whose `from` node was hidden on projection (S4) is hidden with it
-        let anchored: Vec<_> = r
-            .anchored
-            .iter()
-            .filter(|a| ids.contains(a.from.as_str()))
-            .filter_map(|a| self.project_anchored(t, a))
-            .collect();
-        Ok(TraverseResponse {
-            nodes,
-            edges,
-            anchored,
-        })
+        Ok(TraverseResponse { nodes, edges })
     }
 
     /// The wire edge filter as the store takes it (EN-F46): the closed vocabularies by their
@@ -307,7 +206,7 @@ impl KabanApi {
     /// fixed word (the gated value is never echoed).
     fn edge_filter(
         min_score: Option<f64>,
-        layers: &[String],
+        producers: &[String],
         methods: &[String],
     ) -> Result<kaban_core::EdgeFilter, ApiError> {
         let min_score = match min_score {
@@ -316,9 +215,9 @@ impl KabanApi {
             })?),
             None => None,
         };
-        let layers = layers
+        let producers = producers
             .iter()
-            .map(|l| Layer::parse(l).ok_or_else(|| ApiError::Invalid("unknown_layer".into())))
+            .map(|p| Producer::parse(p).ok_or_else(|| ApiError::Invalid("unknown_producer".into())))
             .collect::<Result<Vec<_>, _>>()?;
         let methods = methods
             .iter()
@@ -326,63 +225,9 @@ impl KabanApi {
             .collect::<Result<Vec<_>, _>>()?;
         Ok(kaban_core::EdgeFilter {
             min_score,
-            layers,
+            producers,
             methods,
         })
-    }
-
-    /// Outgoing projection of one `anchored[]` card: the snapshot strings (path, ref, key,
-    /// name) are content and pass the read gate like a `WhyCard`'s (core-spec S4; a redact
-    /// hit masks, a reject hit hides the card); the `from` id is control (validated by shape).
-    fn project_anchored(&self, tool: &'static str, a: &AnchoredRow) -> Option<AnchoredCard> {
-        if !self.scan_on_read() {
-            return Some(AnchoredCard {
-                from: a.from.to_string(),
-                kind: a.kind,
-                path: a.path.clone(),
-                r#ref: a.r#ref.clone(),
-                key: a.key.clone(),
-                name: a.name.clone(),
-            });
-        }
-        let mut ctx = self.write_ctx(None);
-        let mut red = Vec::new();
-        let read_tool = "read";
-        let opt = |ctx: &mut WriteCtx,
-                   red: &mut Vec<String>,
-                   field,
-                   s: &Option<String>|
-         -> Result<Option<String>, ApiError> {
-            s.as_deref()
-                .map(|s| self.scan_str(ctx, read_tool, field, s, red))
-                .transpose()
-        };
-        let gated = (|| -> Result<AnchoredCard, ApiError> {
-            Ok(AnchoredCard {
-                from: self.scan_control(
-                    &mut ctx,
-                    read_tool,
-                    ControlPath::response(tool, "anchored[].from"),
-                    "anchored.from",
-                    a.from.as_str(),
-                    &mut red,
-                )?,
-                kind: a.kind,
-                path: self.scan_str(&mut ctx, read_tool, "anchored.path", &a.path, &mut red)?,
-                r#ref: opt(&mut ctx, &mut red, "anchored.ref", &a.r#ref)?,
-                key: opt(&mut ctx, &mut red, "anchored.key", &a.key)?,
-                name: opt(&mut ctx, &mut red, "anchored.name", &a.name)?,
-            })
-        })();
-        self.record_read(
-            &mut ctx,
-            &format!(
-                "anchored:{}:{}",
-                a.from,
-                a.r#ref.as_deref().unwrap_or(&a.path)
-            ),
-        );
-        gated.ok()
     }
 
     /// Counts of nodes/edges by kind and relationship inside the bound (or requested)
@@ -392,15 +237,12 @@ impl KabanApi {
     /// Store errors.
     #[allow(clippy::needless_pass_by_value)] // core-plan §6 interface: requests are taken by value
     pub fn stats(&self, p: StatsRequest) -> Result<StatsResponse, ApiError> {
-        let mut ctx = self.write_ctx(None);
         let requested = self.gate_opt(
-            &mut ctx,
             "stats",
             "workspace_id",
             p.workspace_id.as_deref(),
             &mut Vec::new(),
         )?;
-        self.flush_audit(&mut ctx)?;
         let v = self
             .store
             .stats(self.read_workspace(requested.as_deref()).as_deref())?;
@@ -438,11 +280,21 @@ impl KabanApi {
             store,
             stores: vec![StoreScope::Project],
             policy,
-            // Optional bookkeeping must not hide usable counters or sibling layers.
-            layers: self.store.index_meta().map_or_else(
-                |_| crate::layers::LayerRegistry.enabled(self.engine()),
-                |meta| crate::layers::LayerRegistry.with_runs(self.engine(), &meta),
+            // Optional bookkeeping must not hide usable counters or the other producers.
+            producers: self.store.index_meta().map_or_else(
+                |_| crate::producers::ProducerRegistry.enabled(self.engine()),
+                |meta| crate::producers::ProducerRegistry.with_runs(self.engine(), &meta),
             ),
+            // the catalog's index states (its cheap summary); a failure hides no other counter
+            indexes: self.catalog.as_ref().map_or_else(Vec::new, |catalog| {
+                catalog.status().map_or_else(
+                    |e| {
+                        tracing::warn!(error = %e, "stats: the catalog status could not be read");
+                        Vec::new()
+                    },
+                    |found| found.indexes,
+                )
+            }),
         })
     }
 }

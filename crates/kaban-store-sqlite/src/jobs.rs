@@ -6,11 +6,13 @@ use crate::sql_error::SqlResultExt;
 use kaban_core::{BackendSource, IngestJob, JobId, JobStatus, Result, StoreError, WorkspaceId};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
-pub(crate) fn layer(dialect: &str) -> Result<kaban_core::Layer> {
+/// The extractor producer of a job's dialect (PC-16).
+pub(crate) fn dialect_producer(dialect: &str) -> Result<kaban_core::Producer> {
+    use kaban_core::{ExtractorKind, Producer};
     match dialect {
-        "llm" => Ok(kaban_core::Layer::Llm),
-        "gliner" => Ok(kaban_core::Layer::Gliner),
-        "none" | "script" => Ok(kaban_core::Layer::Script),
+        "llm" => Ok(Producer::Extractor(ExtractorKind::Llm)),
+        "gliner" => Ok(Producer::Extractor(ExtractorKind::Gliner)),
+        "none" | "script" => Ok(Producer::Extractor(ExtractorKind::Script)),
         _ => Err(StoreError::InvalidName("claim".into(), "invalid_layer")),
     }
 }
@@ -53,15 +55,15 @@ pub(crate) fn pending(
     prefix: Option<&str>,
     limit: u32,
 ) -> Result<Vec<kaban_core::PendingJob>> {
-    let layer = layer(dialect)?;
+    let producer = dialect_producer(dialect)?;
     let rows = conn.prepare("SELECT n.id,json_extract(n.props,'$.path'),n.content_hash,n.rev FROM node n
         WHERE n.workspace_id=?1 AND n.kind='Document' AND n.lifecycle='active'
         AND json_extract(n.props,'$.owner')='kaban-ingest' AND json_type(n.props,'$.path')='text'
         AND (?3 IS NULL OR substr(json_extract(n.props,'$.path'),1,length(?3))=?3)
-        AND NOT EXISTS(SELECT 1 FROM derived_artifact a WHERE a.source_rid=n.rid AND a.workspace_id=?1 AND a.layer=?2
+        AND NOT EXISTS(SELECT 1 FROM derived_artifact a WHERE a.source_rid=n.rid AND a.workspace_id=?1 AND a.producer=?2
           AND json_extract(a.source_rev,'$.content_hash')=n.content_hash)
         ORDER BY json_extract(n.props,'$.path'),n.id LIMIT ?4").sql()?
-        .query_map(params![workspace.as_str(),layer.as_str(),prefix,limit], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,i64>(3)?)))
+        .query_map(params![workspace.as_str(),producer.as_str(),prefix,limit], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,i64>(3)?)))
         .sql()?.collect::<rusqlite::Result<Vec<_>>>().sql()?;
     rows.into_iter()
         .map(|(id, path, content_hash, rev)| {
@@ -158,7 +160,7 @@ pub(crate) fn claim(
     let document_id = kaban_core::NodeId::parse(&document)
         .map_err(|_| StoreError::InvalidName("job".into(), "stale"))?;
     check_source(conn, &job, &document_id, &request.source_rev, &chunks)?;
-    let marked: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM derived_artifact a JOIN node n ON n.rid=a.source_rid WHERE n.id=?1 AND a.workspace_id=?2 AND a.layer=?3 AND json_extract(a.source_rev,'$.content_hash')=n.content_hash)",params![document,job.workspace.as_str(),layer(&job.dialect)?.as_str()],|r|r.get(0)).sql()?;
+    let marked: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM derived_artifact a JOIN node n ON n.rid=a.source_rid WHERE n.id=?1 AND a.workspace_id=?2 AND a.producer=?3 AND json_extract(a.source_rev,'$.content_hash')=n.content_hash)",params![document,job.workspace.as_str(),dialect_producer(&job.dialect)?.as_str()],|r|r.get(0)).sql()?;
     if marked {
         return Ok(None);
     }
@@ -231,9 +233,8 @@ pub(crate) fn done_artifact(
     conn: &Connection,
     job: &IngestJob,
     request: &kaban_core::JobFinishRequest,
-    ctx: &kaban_core::WriteCtx,
 ) -> Result<kaban_core::DerivedArtifact> {
-    let layer = layer(&job.dialect)?;
+    let producer = dialect_producer(&job.dialect)?;
     let source_rid: i64 = conn
         .query_row(
             "SELECT rid FROM node WHERE id=?1 AND workspace_id=?2",
@@ -242,24 +243,17 @@ pub(crate) fn done_artifact(
         )
         .sql()?;
     // The shipped job protocol, never a worker-supplied producer descriptor, owns this marker.
-    let producer = format!("kaban-parse:{}@1", job.dialect);
+    let producer_id = format!("kaban-parse:{}@1", job.dialect);
     let config_hash = job.marker_config_hash();
     let artifact = kaban_core::DerivedArtifact {
-        key: kaban_core::artifact_key(
-            &request.source_rev,
-            layer,
-            &producer,
-            &config_hash,
-            &ctx.policy_version,
-        ),
+        key: kaban_core::artifact_key(&request.source_rev, producer, &producer_id, &config_hash),
         workspace_id: job.workspace.clone(),
-        layer,
-        producer_id: producer,
+        producer,
+        producer_id,
         source_rid,
         source_rev: request.source_rev.clone(),
         config_hash,
-        policy_version: ctx.policy_version.clone(),
-        published_at: crate::reconcile::persist::now_unix(),
+        published_at: crate::edge_write::now_unix(),
     };
     Ok(artifact)
 }
@@ -277,7 +271,7 @@ pub(crate) fn release(conn: &Connection, job: &IngestJob) -> Result<()> {
 
 /// Revoke only the exact Document/source binding, before purge clears its props.
 pub(crate) fn revoke_document(conn: &Connection, document: &str, workspace: &str) -> Result<u32> {
-    if !crate::reconcile::engine_tables(conn)? {
+    if !crate::edge_write::scoring_columns(conn)? {
         return Ok(0);
     }
     conn.execute("UPDATE leases SET expires_at=unixepoch()-1 WHERE name IN (SELECT json_extract(plan,'$.lease.name') FROM ingest_jobs WHERE workspace_id=?2 AND json_extract(plan,'$.document_id')=?1)",params![document,workspace]).sql()?;
@@ -313,7 +307,7 @@ pub(crate) fn prune(
 }
 
 pub(crate) fn exhausted(conn: &Connection, workspace: &WorkspaceId, attempts: u32) -> Result<u64> {
-    let value: i64 = conn.query_row("SELECT count(*) FROM node n JOIN leases l ON l.name IN ('attempt:ingest:'||?1||':llm:'||n.id||'@'||json_extract(n.props,'$.content_hash'),'attempt:ingest:'||?1||':gliner:'||n.id||'@'||json_extract(n.props,'$.content_hash'),'attempt:ingest:'||?1||':none:'||n.id||'@'||json_extract(n.props,'$.content_hash')) WHERE n.workspace_id=?1 AND n.kind='Document' AND n.lifecycle='active' AND l.fence>=?2 AND NOT EXISTS(SELECT 1 FROM derived_artifact a WHERE a.workspace_id=?1 AND a.source_rid=n.rid AND json_extract(a.source_rev,'$.content_hash')=n.content_hash AND l.name='attempt:ingest:'||?1||':'||CASE a.layer WHEN 'script' THEN 'none' ELSE a.layer END||':'||n.id||'@'||json_extract(n.props,'$.content_hash'))",params![workspace.as_str(),attempts],|r|r.get(0)).sql()?;
+    let value: i64 = conn.query_row("SELECT count(*) FROM node n JOIN leases l ON l.name IN ('attempt:ingest:'||?1||':llm:'||n.id||'@'||json_extract(n.props,'$.content_hash'),'attempt:ingest:'||?1||':gliner:'||n.id||'@'||json_extract(n.props,'$.content_hash'),'attempt:ingest:'||?1||':none:'||n.id||'@'||json_extract(n.props,'$.content_hash')) WHERE n.workspace_id=?1 AND n.kind='Document' AND n.lifecycle='active' AND l.fence>=?2 AND NOT EXISTS(SELECT 1 FROM derived_artifact a WHERE a.workspace_id=?1 AND a.source_rid=n.rid AND json_extract(a.source_rev,'$.content_hash')=n.content_hash AND l.name='attempt:ingest:'||?1||':'||CASE a.producer WHEN 'extractor:script' THEN 'none' ELSE substr(a.producer,length('extractor:')+1) END||':'||n.id||'@'||json_extract(n.props,'$.content_hash'))",params![workspace.as_str(),attempts],|r|r.get(0)).sql()?;
     u64::try_from(value).map_err(|_| StoreError::InvalidName("claim".into(), "invalid_count"))
 }
 
@@ -526,75 +520,13 @@ fn add_count(a: u64, b: u64) -> Result<u64> {
         .ok_or(StoreError::InvalidName("submit".into(), "too_large"))
 }
 
-/// Only an explicitly reindexed exact edge claim may be re-derived by a new checked job.
-/// Generic batch replay, finish/policy/forget retirement and human deprecation stay immutable.
-pub(crate) fn restore_reindexed(
-    conn: &Connection,
-    job: &IngestJob,
-    claims: &[kaban_core::BatchAssertion],
-) -> Result<bool> {
-    let mut changed = false;
-    for claim in claims {
-        let kaban_core::BatchSubject::Edge { src, rel, dst } = &claim.subject else {
-            continue;
-        };
-        if claim.layer != layer(&job.dialect)?
-            || claim.method != kaban_core::Method::IngestSubmit
-            || claim.source_id.as_deref() != Some(job.source_id.as_str())
-            || claim.value["owner"] != "kaban-parse"
-        {
-            continue;
-        }
-        let rid = |id: &kaban_core::NodeId| -> Result<Option<i64>> {
-            conn.query_row(
-                "SELECT rid FROM node WHERE id=?1 AND workspace_id=?2 AND lifecycle='active'",
-                params![id.as_str(), job.workspace.as_str()],
-                |r| r.get(0),
-            )
-            .optional()
-            .sql()
-        };
-        let (Some(src), Some(dst)) = (rid(src)?, rid(dst)?) else {
-            continue;
-        };
-        let assertion = kaban_core::Assertion {
-            key: kaban_core::AssertionKey::default(),
-            workspace_id: job.workspace.clone(),
-            subject: kaban_core::Subject::Edge {
-                src,
-                rel: rel.clone(),
-                dst,
-            },
-            claim_class: claim.claim_class,
-            predicate: claim.predicate.clone(),
-            object_rid: None,
-            value: kaban_core::CanonicalJson::new(claim.value.clone()),
-            layer: claim.layer,
-            method: claim.method,
-            extractor_id: claim.extractor_id.clone(),
-            extractor_version: claim.extractor_version.clone(),
-            source_id: claim.source_id.clone(),
-            lineage_id: claim.lineage_id.clone(),
-            raw_score: claim.raw_score,
-            rank: claim.rank,
-            rank_reason: claim.rank_reason.clone(),
-            calibration_version: claim.calibration_version,
-            supersedes: claim.supersedes.clone(),
-            ts: 0,
-        }
-        .with_key()?;
-        changed |= conn.execute("UPDATE assertion SET rank='normal',rank_reason=NULL WHERE key=?1 AND workspace_id=?2 AND rank='deprecated' AND rank_reason='producer-set:reindex'",params![assertion.key.0,job.workspace.as_str()]).sql()? != 0;
-    }
-    Ok(changed)
-}
-
 /// Persist only successful transaction outcomes; callers cannot replace scalar counters.
 pub(crate) fn record_submit(
     conn: &Connection,
     mut job: IngestJob,
     report: &kaban_core::BatchReport,
     state: kaban_core::JobSubmitStateUpdate,
-    ctx: &kaban_core::WriteCtx,
+    redactions: u64,
 ) -> Result<IngestJob> {
     let original = kaban_core::JobSubmitContract::from_job(&job)?;
     let old_plan: serde_json::Value = serde_json::from_str(&job.plan_json)?;
@@ -611,13 +543,7 @@ pub(crate) fn record_submit(
     job.created = add_count(job.created, u64::from(report.inserted))?;
     job.updated = add_count(job.updated, u64::from(report.updated))?;
     job.unchanged = add_count(job.unchanged, u64::from(report.unchanged))?;
-    job.redactions = add_count(
-        job.redactions,
-        ctx.audit
-            .iter()
-            .filter(|a| a.op == kaban_core::AuditOp::Redact)
-            .count() as u64,
-    )?;
+    job.redactions = add_count(job.redactions, redactions)?;
     conn.execute(
         "UPDATE ingest_jobs SET plan=?1,named_edges=?2,submits=?3,created=?4,updated=?5,unchanged=?6,redactions=?7 WHERE job_id=?8 AND workspace_id=?9 AND status='open'",
         params![job.plan_json,serde_json::to_string(&job.named_edges)?,sql_count(job.submits)?,sql_count(job.created)?,sql_count(job.updated)?,sql_count(job.unchanged)?,sql_count(job.redactions)?,job.job.as_str(),job.workspace.as_str()],
@@ -627,21 +553,19 @@ pub(crate) fn record_submit(
 
 /// Scope follows owned derivation, not merely an extractor's record list. Chunk paths
 /// include earlier retained jobs and historical `PART_OF` links, even after chunk replacement.
+/// The population adds the document's own `ABOUT` edges (submission writes them from the
+/// Document, which is neither a record nor a chunk).
 const FINISH_SCOPE: &str = "WITH records(rid) AS (
  SELECT e.src FROM edge e JOIN node d ON d.rid=e.dst
  WHERE d.id=?1 AND d.workspace_id=?2 AND e.workspace_id=?2 AND e.rel='DERIVED_FROM'
- AND json_extract(e.props,'$.owner')='kaban-parse'
- UNION SELECT a.subject_rid FROM assertion a JOIN node d ON d.rid=a.object_rid
- WHERE d.id=?1 AND a.workspace_id=?2 AND a.source_id=?3 AND a.subject_kind='edge'
- AND a.predicate='DERIVED_FROM' AND a.method='ingest_submit' AND a.layer IN ('llm','gliner','script')
- AND json_extract(a.value,'$.owner')='kaban-parse'
+ AND e.producer LIKE 'extractor:%'
 ), chunks(rid) AS (
  SELECT c.rid FROM node c JOIN edge cs ON cs.src=c.rid JOIN node s ON s.rid=cs.dst
  JOIN edge sd ON sd.src=s.rid JOIN node d ON d.rid=sd.dst
  WHERE c.kind='Chunk' AND c.workspace_id=?2 AND s.kind='Section' AND s.workspace_id=?2
  AND d.id=?1 AND d.workspace_id=?2 AND cs.rel='PART_OF' AND sd.rel='PART_OF'
  AND cs.workspace_id=?2 AND sd.workspace_id=?2
- AND json_extract(cs.props,'$.owner')='kaban-ingest' AND json_extract(sd.props,'$.owner')='kaban-ingest'
+ AND cs.producer='document_ingest' AND sd.producer='document_ingest'
  UNION SELECT c.rid FROM ingest_jobs j, json_each(j.plan,'$.chunks') p JOIN node c ON c.id=json_extract(p.value,'$.id')
  WHERE j.workspace_id=?2 AND j.source_id=?3 AND json_extract(j.plan,'$.document_id')=?1
  AND c.workspace_id=?2 AND c.kind='Chunk'
@@ -649,11 +573,11 @@ const FINISH_SCOPE: &str = "WITH records(rid) AS (
 
 type FinishEdge = (i64, i64, String, String, String);
 
-/// Bounded complete population, collected before any retirement or edge deletion.
+/// Bounded complete population, collected before any retirement or edge deletion. Its edges
+/// are the job's own producer's: shared scope discovery grants no shared deletion (PC-20 (2)).
 pub(crate) struct FinishPopulation {
+    pub(crate) producer: kaban_core::Producer,
     pub(crate) edges: Vec<FinishEdge>,
-    pub(crate) claims: Vec<i64>,
-    pub(crate) orphans: Vec<kaban_core::NodeId>,
     pub(crate) skipped_cap: bool,
 }
 
@@ -669,6 +593,7 @@ pub(crate) fn finish_population(
             .cloned()
             .unwrap_or_else(|| serde_json::json!([])),
     )?;
+    let producer = dialect_producer(&job.dialect)?;
     let limit = i64::from(request.finish_cap) + 1;
     let args = params![
         request.document.as_str(),
@@ -679,35 +604,25 @@ pub(crate) fn finish_population(
     let edges = conn.prepare(&format!("{FINISH_SCOPE}
         SELECT e.src,e.dst,e.rel,s.id,d.id FROM edge e JOIN node s ON s.rid=e.src JOIN node d ON d.rid=e.dst
         WHERE e.workspace_id=?2 AND s.workspace_id=?2 AND d.workspace_id=?2
-        AND json_extract(e.props,'$.owner')='kaban-parse'
-        AND (e.layer IS NULL OR e.layer IN ('llm','gliner','script'))
+        AND e.producer=?5
         AND (e.source_id IS NULL OR e.source_id=?3)
-        AND (e.src IN records OR (e.rel='EVIDENCE_FOR' AND e.src IN chunks))
-        ORDER BY s.id,d.id,e.rel LIMIT ?4")).sql()?.query_map(args, |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).sql()?.collect::<rusqlite::Result<Vec<FinishEdge>>>().sql()?;
-    let claims = conn
-        .prepare(&format!(
-            "{FINISH_SCOPE}
-        SELECT a.id FROM assertion a WHERE a.workspace_id=?2 AND a.source_id=?3
-        AND a.subject_kind='edge' AND a.claim_class='edge' AND a.method='ingest_submit'
-        AND a.layer IN ('llm','gliner','script') AND json_extract(a.value,'$.owner')='kaban-parse'
-        AND (a.subject_rid IN records OR (a.predicate='EVIDENCE_FOR' AND a.subject_rid IN chunks))
-        ORDER BY a.id LIMIT ?4"
-        ))
-        .sql()?
-        .query_map(args, |r| r.get(0))
-        .sql()?
-        .collect::<rusqlite::Result<Vec<i64>>>()
-        .sql()?;
+        AND (e.src IN records OR (e.rel='EVIDENCE_FOR' AND e.src IN chunks)
+         OR (e.rel='ABOUT' AND s.id=?1))
+        ORDER BY s.id,d.id,e.rel LIMIT ?4")).sql()?.query_map(params![
+        request.document.as_str(),
+        job.workspace.as_str(),
+        job.source_id,
+        limit,
+        producer.as_str()
+    ], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).sql()?.collect::<rusqlite::Result<Vec<FinishEdge>>>().sql()?;
     let scoped_records = conn
         .prepare(&format!(
             "{FINISH_SCOPE}
-        SELECT n.id,n.governance FROM node n WHERE n.rid IN records AND n.workspace_id=?2
+        SELECT n.id FROM node n WHERE n.rid IN records AND n.workspace_id=?2
         ORDER BY n.id LIMIT ?4"
         ))
         .sql()?
-        .query_map(args, |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-        })
+        .query_map(args, |r| r.get::<_, String>(0))
         .sql()?
         .collect::<rusqlite::Result<Vec<_>>>()
         .sql()?;
@@ -722,26 +637,12 @@ pub(crate) fn finish_population(
         )
         .collect();
     let mut all_records = records.clone();
-    all_records.extend(scoped_records.iter().map(|(id, _)| id.clone()));
+    all_records.extend(scoped_records);
     let skipped_cap = plan["submit_state"]["overflow"].as_bool().unwrap_or(false)
-        || names.len().saturating_add(all_records.len()) > request.finish_cap as usize
-        || claims.len() > request.finish_cap as usize;
-    let orphans = if skipped_cap {
-        Vec::new()
-    } else {
-        scoped_records
-            .into_iter()
-            .filter(|(id, governance)| governance == "proposed" && !records.contains(id))
-            .map(|(id, _)| {
-                kaban_core::NodeId::parse(&id)
-                    .map_err(|_| StoreError::InvalidName("job".into(), "stale"))
-            })
-            .collect::<Result<_>>()?
-    };
+        || names.len().saturating_add(all_records.len()) > request.finish_cap as usize;
     Ok(FinishPopulation {
+        producer,
         edges,
-        claims,
-        orphans,
         skipped_cap,
     })
 }

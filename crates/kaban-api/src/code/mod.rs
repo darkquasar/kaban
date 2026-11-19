@@ -49,9 +49,7 @@ use crate::api::KabanApi;
 use crate::control::ControlPath;
 use crate::enrich::FollowUp;
 use crate::error::ApiError;
-use crate::types::WhyCard;
 use kaban_codegraph::{CodeGraphReader, ReadError, Resolved, SnapshotRef};
-use kaban_core::WriteCtx;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -549,8 +547,7 @@ pub struct LastChange {
 
 /// `code_context`'s result (stage1-spec §6 `CodeContextResponse`, G1-F14): the definition
 /// card, up to 3 callers and 3 callees over `REFERENCES` (approximate until a language's
-/// `CALLS` derivation is proven, stage 2), up to 3 test links, the governing records of
-/// `why(symbol)` with their currency and `superseded_by`, and the file's last change (`null`
+/// `CALLS` derivation is proven, stage 2), up to 3 test links and the file's last change (`null`
 /// when git is slow, absent or the row has no path: never an error).
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct CodeContextResponse {
@@ -573,9 +570,6 @@ pub struct CodeContextResponse {
     pub approximate: bool,
     /// Up to 3 `TESTED_BY` links, by `(test.distance, test.path, test.ref)`.
     pub tests: Vec<TestLink>,
-    /// The governing records of the target's symbol key (`why(symbol)`: currency and
-    /// `superseded_by` on each); empty for a file, local or external row.
-    pub governing: Vec<WhyCard>,
     /// The last commit touching the definition's file; `null` when unknown.
     pub last_change: Option<LastChange>,
     /// Suggested next calls (none are synthesised in 3.0.0, OWN-68 SC-09).
@@ -836,14 +830,12 @@ impl KabanApi {
     /// set is validated, anything else is scanned as content (the selector then refuses it).
     fn gate_selector(
         &self,
-        ctx: &mut WriteCtx,
         tool: &'static str,
         sel: &SymbolSelector,
         red: &mut Vec<String>,
     ) -> Result<SymbolSelector, ApiError> {
         let label = match sel.label.as_deref() {
             Some(l) => Some(self.gate_control(
-                ctx,
                 tool,
                 ControlPath::request(tool, "target.label"),
                 "target.label",
@@ -853,11 +845,11 @@ impl KabanApi {
             None => None,
         };
         Ok(SymbolSelector {
-            symbol: self.gate_opt(ctx, tool, "target.symbol", sel.symbol.as_deref(), red)?,
-            r#ref: self.gate_opt(ctx, tool, "target.ref", sel.r#ref.as_deref(), red)?,
+            symbol: self.gate_opt(tool, "target.symbol", sel.symbol.as_deref(), red)?,
+            r#ref: self.gate_opt(tool, "target.ref", sel.r#ref.as_deref(), red)?,
             label,
-            name: self.gate_opt(ctx, tool, "target.name", sel.name.as_deref(), red)?,
-            path: self.gate_opt(ctx, tool, "target.path", sel.path.as_deref(), red)?,
+            name: self.gate_opt(tool, "target.name", sel.name.as_deref(), red)?,
+            path: self.gate_opt(tool, "target.path", sel.path.as_deref(), red)?,
             line: sel.line,
         })
     }

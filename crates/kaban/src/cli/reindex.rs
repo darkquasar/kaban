@@ -1,64 +1,60 @@
-//! DB-only maintenance, through the same request/result gates as other CLI calls.
+//! `kaban reindex [text|graph|all]` (spec 11 PC-7): rebuild derived indexes from this
+//! database's rows, through the same request/result gates as other CLI calls; canonical
+//! records and repository files are never changed.
 use crate::Cli;
 use crate::cli::{output::Format, seam};
+use kaban_api::{ReindexReport, ReindexTarget};
+use serde::Deserialize;
 use serde_json::json;
 use std::process::ExitCode;
 
-#[derive(serde::Deserialize)]
-struct LayerRequest {
-    layer: kaban_core::Layer,
-}
-
-/// Retained reindex operations.
-#[derive(clap::Subcommand)]
-pub(crate) enum Command {
-    /// Rebuild the text index from the database without changing canonical content
+/// The indexes `reindex` rebuilds.
+#[derive(Clone, Copy, clap::ValueEnum)]
+pub(crate) enum Which {
+    /// The text index
     Text,
-    /// DB-only reset; generated links remain absent until explicit ingestion with the layer enabled
-    Layer { name: String },
+    /// The memory graph
+    Graph,
+    /// Every derived index
+    All,
 }
 
-/// Execute a maintenance pass against the bound database, never repository files.
-pub(crate) fn run(cli: Cli, command: &Command, format: Format) -> ExitCode {
-    match command {
-        Command::Layer { name } => {
-            let api = match super::open_service(cli) {
-                Ok(api) => api,
-                Err(code) => return code,
-            };
-            seam::run_tool(
-                &api,
-                "reindex_layer",
-                json!({"layer":name}),
-                &[],
-                format,
-                |api, request: LayerRequest| {
-                    let report = api.reindex_layer(request.layer)?;
-                    super::output::print_error(
-                        "DB-only reset: generated links remain absent until explicit ingestion with the layer enabled; rebuilding has not run.",
-                    );
-                    Ok(report)
-                },
-            )
-        }
-        Command::Text => {
-            let api = match super::open_service(cli) {
-                Ok(api) => api,
-                Err(code) => return code,
-            };
-            seam::run_tool::<serde_json::Value, serde_json::Value, _>(
-                &api,
-                "reindex",
-                json!({}),
-                &[],
-                format,
-                |api, _| {
-                    api.store()
-                        .reindex_text()
-                        .map(|rows| json!({"rows": rows}))
-                        .map_err(kaban_api::ApiError::from)
-                },
-            )
+impl From<Which> for ReindexTarget {
+    fn from(which: Which) -> Self {
+        match which {
+            Which::Text => Self::Text,
+            Which::Graph => Self::Graph,
+            Which::All => Self::All,
         }
     }
+}
+
+/// The request the seam scans: the one target, no caller string.
+#[derive(Deserialize)]
+struct ReindexArgs {
+    which: ReindexTarget,
+}
+
+/// `reindex` arguments.
+#[derive(clap::Args)]
+pub(crate) struct Flags {
+    /// Which derived indexes to rebuild
+    #[arg(value_enum, default_value_t = Which::All)]
+    which: Which,
+}
+
+/// Rebuild the indexes `flags` names against the bound database.
+pub(crate) fn run(cli: Cli, flags: &Flags, format: Format) -> ExitCode {
+    let api = match super::open_service(cli) {
+        Ok(api) => api,
+        Err(code) => return code,
+    };
+    let which = ReindexTarget::from(flags.which);
+    seam::run_tool::<ReindexArgs, ReindexReport, _>(
+        &api,
+        "reindex",
+        json!({ "which": which }),
+        format,
+        |api, args| api.reindex(args.which),
+    )
 }

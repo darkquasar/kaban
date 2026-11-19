@@ -4,11 +4,11 @@
 //!
 //! ```text
 //! open => bind: register kaban_writer() = the actor on the connection (before any migration)
-//! any write => node/edge/event/assertion trigger or explicit purge row => INSERT changes
+//! any write => node/edge trigger or explicit purge row => INSERT changes
 //!   ~> changes_stamp (persistent, AFTER INSERT, stamp still NULL)
 //!        => RAISE writer_unbound when kaban_writer() IS NULL
 //!        => stamp the change row from kaban_writer() + index_meta (db_id, pack_lineage_id)
-//!        => copy that stamp onto the node, edge, event or assertion row the change names
+//!        => copy that stamp onto the node or edge row the change names
 //! ```
 //!
 //! The writer is fixed for the connection's life: a persistent trigger may not read a
@@ -18,15 +18,15 @@
 //! (a fixture, the `sqlite3` shell) has no `kaban_writer()`, so it cannot prepare a canonical
 //! write at all (`no such function: kaban_writer`): nothing is written unstamped or under
 //! another actor's stamp. The record copy is a stamp-only update: the `changes` triggers name
-//! the canonical columns only (ident.rs for `node`, 0009 for `edge` and `events`), so it emits
-//! no second change row. The audit chain is untouched.
+//! the canonical columns only (ident.rs for `node`, `schema.sql` for `edge`), so it emits no
+//! second change row.
 
 use crate::sql_error::SqlResultExt;
 use kaban_core::{ActorId, Result, new_id};
 use rusqlite::Connection;
 use rusqlite::functions::FunctionFlags;
 
-/// The stamp columns of `node`, `edge`, `events`, `assertion` and `changes` (migration 0009);
+/// The stamp columns of `node`, `edge` and `changes` (migration 0009);
 /// never canonical.
 pub(crate) const COLUMNS: [&str; 3] = ["actor_id", "instance_id", "pack_lineage_id"];
 

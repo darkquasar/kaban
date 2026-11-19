@@ -6,12 +6,11 @@
 # KBN_VARIANT (host-specific switch, see below), KBN_MODE (capture|recipes).
 #
 # Recipes mode (round 2, M5 C5.3): `kaban` is on PATH (the logging shim in front of the static binary),
-# a database is seeded in the scratch repo with the CLI (one accepted Decision carrying the
-# sentinel KBN-DEC-<hex> with path scope notes.txt; the human-cli signer route, no token), the
-# REAL recipe configs from /work/hooks are rendered for the host with the capture hook kept
-# alongside (sentinel probes off), the prompt runs, and `kaban recall` / `kaban why` plus the
-# shim's call log produce the reduced verdict (booleans and counts only, S1 fence); the Stop
-# recipes' detached `kaban sync` (M5-20) is waited for (bounded) and reported as `sync_detached`.
+# a database is seeded in the scratch repo with the CLI (one Decision carrying the sentinel
+# KBN-DEC-<hex> with path scope notes.txt; it creates the database, which hooks never do, and is
+# never briefed or injected), the REAL recipe configs from /work/hooks are rendered for the host
+# with the capture hook kept alongside (sentinel probes off), the prompt runs, and `kaban recall`
+# plus the shim's call log produce the reduced verdict (booleans and counts only, S1 fence).
 # Mounts: /harness (ro: scripts/hooks-live; this file is /harness/container/entrypoint.sh), $HOME/.kbn-creds-ro (ro copies of the
 # sandbox auth state), /work (tmpfs scratch repo), /capture (tmpfs), /out (reduced results only).
 #
@@ -156,8 +155,7 @@ if [ "$MODE" = recipes ]; then
             --path-scope notes.txt --importance 0.9 --props '{"rationale":"live harness seed (W2-D2)"}' 2>"$CAP/seed-err.txt")"
   SEED_ID="$(printf '%s' "$seed" | jq -r '.id // empty' 2>/dev/null)"
   if [ -n "$SEED_ID" ]; then
-    acc="$(kaban --json accept "$SEED_ID" --reason "seed" --path-scope notes.txt 2>>"$CAP/seed-err.txt")"
-    log "seed: remember status=$(enum_of "$(printf '%s' "$seed" | jq -r '.status // "?"')" "${KABAN_STATUSES[@]}") accept governance=$(enum_of "$(printf '%s' "$acc" | jq -r '.node.governance // "?"')" "${KABAN_STATUSES[@]}") db=$([ -f "$KABAN_DB" ] && echo present || echo absent)"
+    log "seed: remember status=$(enum_of "$(printf '%s' "$seed" | jq -r '.status // "?"')" "${KABAN_STATUSES[@]}") db=$([ -f "$KABAN_DB" ] && echo present || echo absent)"
   else
     log "seed FAILED (remember printed no id; stderr lines: $(wc -l < "$CAP/seed-err.txt"))"
   fi
@@ -369,28 +367,12 @@ log "events by name: $(jq -r '.event' "$OUT/events.jsonl" | sort | uniq -c | awk
 # recipes mode: what the real handlers wrote and what the model consumed (reduced) -------------
 if [ "$MODE" = recipes ]; then
   calls="$KBN_KABAN_CALLS"; [ -f "$calls" ] || : > "$calls"
-  # C5.3 (M5-20, M5-28): the Stop recipes start `kaban sync` fully detached, so it may still be
-  # running when the host has exited; wait for the shim to log its line (bounded), then count
-  # the files it wrote. The verdict carries booleans and counts only.
-  sync_wait_s=0; sync_wait_max=30; [ -n "${KBN_DRY_CMD:-}" ] && sync_wait_max=5   # a dry run is synchronous
-  while [ "$sync_wait_s" -lt "$sync_wait_max" ] && ! jq -e 'select(.argv[0]=="sync")' "$calls" >/dev/null 2>&1; do
-    sleep 1; sync_wait_s=$((sync_wait_s + 1))
-  done
-  sync_calls="$(jq -c 'select(.argv[0]=="sync")' "$calls" | jq -s -c '.')"
-  kaban_files_after="$(find "$WORK/.kaban" -type f 2>/dev/null | wc -l | tr -d ' ')"
-  sync_detached="$(jq -n -c --argjson calls "$sync_calls" --argjson files "$kaban_files_after" --argjson waited "$sync_wait_s" \
-    --argjson digest "$([ -f "$WORK/.kaban/adr/INDEX.md" ] && echo true || echo false)" \
-    '{calls: ($calls | length), ran: (($calls | length) > 0), staged_flag_seen: ($calls | any(.argv | index("--stage") != null)),
-      exit_codes: ($calls | map(.rc) | unique), ms_max: ($calls | map(.ms) | max // 0),
-      kaban_files_after: $files, decisions_md_exists: $digest, waited_s: $waited}')"
-  log "sync detached: $sync_detached"
   # the shim's call lines (argv words, rc, ms, byte counts, stdout shape): exported as they are
   cp "$calls" "$OUT/kaban-calls.jsonl"
   hook_calls="$(jq -c 'select(.argv[0]=="hook")' "$calls")"
   # kaban's view after the session (inside the container; reduced before export)
   # every captured Failure has the text `"<command>" failed: …` (M4-10), so "failed" finds them all
   kaban --json recall "failed" --kind Failure --full-text --limit 20 > "$CAP/recall.json" 2>"$CAP/recall-err.txt" || true
-  kaban --json why --path notes.txt > "$CAP/why.json" 2>"$CAP/why-err.txt" || true
   failure_ids="$(jq -r '.results[]?.id // empty' "$CAP/recall.json" 2>/dev/null)"
   id_echoed=no
   for fid in $failure_ids; do grep -q -- "$fid" "$CAP/assistant.txt" 2>/dev/null && id_echoed=yes; done
@@ -399,34 +381,31 @@ if [ "$MODE" = recipes ]; then
     --arg dec "$KBN_DEC" --arg seed_id "$SEED_ID" \
     --argjson calls "$(jq -s -c '.' <<< "$hook_calls")" \
     --argjson recall "$(jq -c '{count: (.count // 0), failures: [.results[]? | {pending_fix: (.props.pending_fix // null), evidence_runs: ((.props.evidence_runs // []) | length), has_command: ((.props.command // "") != ""), has_error_text: ((.props.error_text // "") != "")}]}' "$CAP/recall.json" 2>/dev/null || echo '{"count":null,"failures":[]}')" \
-    --argjson why "$(jq -c --arg dec "$KBN_DEC" '{results: ((.results // []) | length), seed_present: ([.results[]? | .. | strings | select(test($dec))] | length > 0)}' "$CAP/why.json" 2>/dev/null || echo '{"results":null,"seed_present":false}')" \
     --arg dec_assistant "$(yn "$KBN_DEC" "$CAP/assistant.txt")" --arg dec_anywhere "$(yn "$KBN_DEC" "$CAP/transcript.jsonl")" \
     --arg dec_first_reply "$(printf '%s' "$first_assistant" | grep -q -- "$KBN_DEC" && echo yes || echo no)" \
     --arg failure_id_echoed "$id_echoed" --arg unresolved_echoed "$(yn unresolved "$CAP/assistant.txt")" \
-    --argjson sync_detached "$sync_detached" \
     '($calls | map(select(.argv[1]=="session-start"))) as $ss
      | ($calls | map(select(.argv[1]=="pre-tool-use"))) as $pre
      | ($calls | map(select(.argv[1]=="post-tool-use" or .argv[1]=="post-tool-use-failure"))) as $post
      | ($calls | map(select(.argv[1]=="stop"))) as $stop
      | ($calls | map(select(.argv[1]=="fix"))) as $fix
-     | {sentinel_decision: $dec, seed_accepted: ($seed_id != ""),
+     | {sentinel_decision: $dec, seed_recorded: ($seed_id != ""),
         hook_calls: ($calls | length), hook_calls_by_event: ($calls | group_by(.argv[1]) | map({(.[0].argv[1]): length}) | add // {}),
         hook_exit_codes: ($calls | map(.rc) | unique), any_exit_2: ($calls | any(.rc == 2)),
         hook_ms_max: ($calls | map(.ms) | max // 0), any_hook_over_2000ms: ($calls | any(.ms > 2000)),
         briefing: {hook_output: ($ss | any(.out_shape.hookSpecificOutput.additionalContext == "<string>")),
                    injected_first_reply: $dec_first_reply, injected_assistant: $dec_assistant, anywhere: $dec_anywhere},
         pre_context: {hook_calls: ($pre | length), hook_output: ($pre | any(.out_shape.hookSpecificOutput.additionalContext == "<string>")),
-                      note: "the same sentinel text as the briefing; see briefing.injected_*"},
+                      note: "pre-tool-use records the edit and injects nothing; hook_output stays false"},
         failure_recorded: ($recall.failures | any(.pending_fix == true)),
         evidence_appended: ($recall.failures | any(.evidence_runs > 0)),
-        recall: $recall, why_notes_txt: $why,
+        recall: $recall,
         stop: {hook_calls: ($stop | length), prompt_printed: ($stop | any(.out_shape.decision == "<string>")),
                second_stop_empty: (($stop | length) >= 2 and ($stop | last | .out_shape == {})),
                failure_id_echoed: $failure_id_echoed, unresolved_echoed: $unresolved_echoed,
-               fix_calls: ($fix | length), fix_status_printed: ($fix | any(.out_shape.status == "<string>"))},
-        sync_detached: $sync_detached}' \
+               fix_calls: ($fix | length), fix_status_printed: ($fix | any(.out_shape.status == "<string>"))}}' \
     > "$OUT/recipes-verdict.json"
   log "recipes verdict: $(cat "$OUT/recipes-verdict.json")"
-  { echo "recall stderr lines: $(wc -l < "$CAP/recall-err.txt")"; echo "why stderr lines: $(wc -l < "$CAP/why-err.txt")"; } | log_line
+  echo "recall stderr lines: $(wc -l < "$CAP/recall-err.txt")" | log_line
 fi
 exit 0

@@ -1,6 +1,5 @@
 ---
 source: crates/kaban/tests/cli_ontology.rs
-assertion_line: 106
 expression: list
 ---
 {
@@ -18,7 +17,7 @@ expression: list
       "hash": "[hash]",
       "kinds": 8,
       "ns": "adr",
-      "rels": 7,
+      "rels": 6,
       "version": 1
     },
     {

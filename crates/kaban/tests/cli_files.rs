@@ -1,6 +1,5 @@
-//! Files the `kaban` binary creates or is pointed at (core-spec S5, S3; C2.5b review P-2 and
-//! P-6): the database, key and audit-export files are exactly `0600` whatever the process
-//! `umask`, and `--audit-export` refuses a path that aliases the database or its sidecars.
+//! Files the `kaban` binary creates (core-spec S5; C2.5b review P-6): the database and key
+//! files are exactly `0600` whatever the process `umask`.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // test code: failures are the assertion
 
@@ -14,16 +13,6 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-/// CLI-files view of the scratch home: the audit export target.
-trait ScratchExt {
-    fn export(&self) -> PathBuf;
-}
-impl ScratchExt for Scratch {
-    fn export(&self) -> PathBuf {
-        self.0.join("audit-export.jsonl")
-    }
-}
-
 fn mode(path: &Path) -> u32 {
     std::fs::metadata(path).unwrap().permissions().mode() & 0o777
 }
@@ -34,94 +23,7 @@ fn sidecar(db: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(s)
 }
 
-/// `kaban serve` with `--audit-export export`, stdin closed: the server exits as soon as the
-/// client is gone, so only the startup checks run.
-fn serve_with_export(s: &Scratch, export: &Path) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_kaban"))
-        .env("KABAN_HOME", s.home())
-        .arg("--db")
-        .arg(s.db())
-        .arg("--audit-export")
-        .arg(export)
-        .arg("serve")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .unwrap()
-}
-
-fn assert_refused_as_config_error(out: &std::process::Output, what: &str) {
-    assert_eq!(
-        out.status.code(),
-        Some(4),
-        "{what}: expected exit 4 (config error), got {:?}; stderr: {}",
-        out.status,
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let err = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        err.contains("audit-export"),
-        "{what}: stderr names the option: {err}"
-    );
-    assert!(out.stdout.is_empty(), "{what}: stdout stays empty on error");
-}
-
-/// P-2: `--audit-export` pointed straight at the database (or a sidecar name) is a
-/// configuration error, before any write.
-#[test]
-fn audit_export_pointing_at_the_database_or_a_sidecar_is_refused() {
-    let s = Scratch::new("kaban-cli-files", "export-direct");
-    let out = serve_with_export(&s, &s.db());
-    assert_refused_as_config_error(&out, "export = db");
-    assert!(
-        !s.db().exists(),
-        "the database is not even created when the configuration is refused"
-    );
-    let out = serve_with_export(&s, &sidecar(&s.db(), "-wal"));
-    assert_refused_as_config_error(&out, "export = db-wal");
-    let out = serve_with_export(&s, &sidecar(&s.db(), "-shm"));
-    assert_refused_as_config_error(&out, "export = db-shm");
-    // the same file reached through a `..` component is still the database
-    let dotted = s.0.join("sub").join("..").join("kaban.db");
-    std::fs::create_dir_all(s.0.join("sub")).unwrap();
-    let out = serve_with_export(&s, &dotted);
-    assert_refused_as_config_error(&out, "export = sub/../db");
-}
-
-/// P-2: a symlink is refused whatever it points at, and a hard link to the database is
-/// recognised by its `(dev, inode)` identity.
-#[test]
-fn audit_export_through_a_symlink_or_hard_link_to_the_database_is_refused() {
-    let s = Scratch::new("kaban-cli-files", "export-links");
-    // create the database first, so links to it can exist
-    let out = serve_with_export(&s, &s.export());
-    assert!(
-        s.db().exists(),
-        "fixture: a plain export path starts the server (exit {:?}, stderr {})",
-        out.status,
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let link = s.0.join("export-link.jsonl");
-    std::os::unix::fs::symlink(s.0.join("harmless.jsonl"), &link).unwrap();
-    let out = serve_with_export(&s, &link);
-    assert_refused_as_config_error(&out, "export = symlink to a harmless file");
-    assert!(
-        !s.0.join("harmless.jsonl").exists(),
-        "the symlink target was not created"
-    );
-    let hard = s.0.join("export-hard.jsonl");
-    std::fs::hard_link(s.db(), &hard).unwrap();
-    let out = serve_with_export(&s, &hard);
-    assert_refused_as_config_error(&out, "export = hard link to the database");
-    assert_eq!(
-        std::fs::metadata(s.db()).unwrap().len(),
-        std::fs::metadata(&hard).unwrap().len(),
-        "the database bytes were not appended to"
-    );
-}
-
-/// Drive one `remember` through the MCP server so the audit export file gets written.
+/// Drive one `remember` through the MCP server so the database and its key get written.
 fn remember_once(s: &Scratch, mut cmd: Command) {
     let mut child = cmd
         .env("KABAN_HOME", s.home())
@@ -163,7 +65,7 @@ fn remember_once(s: &Scratch, mut cmd: Command) {
     );
     send(json!({"jsonrpc": "2.0", "method": "notifications/initialized"}));
     // the shipped example policy redacts `hunter2` (rule `old-password`, not a secret), which
-    // produces the audit row that the export file carries
+    // produces an audit row signed with the key
     send(
         json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "remember", "arguments": {"kind": "Fact", "text": "a note with hunter2 written under a restrictive umask"}}}),
     );
@@ -190,8 +92,6 @@ fn files_created_under_a_restrictive_umask_are_exactly_0600() {
         .arg(s.db())
         .arg("--policy")
         .arg(policy)
-        .arg("--audit-export")
-        .arg(s.export())
         .arg("serve");
     remember_once(&s, cmd);
     assert_eq!(mode(&s.db()), 0o600, "database file mode under umask 0277");
@@ -208,10 +108,4 @@ fn files_created_under_a_restrictive_umask_are_exactly_0600() {
         .unwrap()
         .path();
     assert_eq!(mode(&key), 0o600, "audit key file mode under umask 0277");
-    assert!(s.export().exists(), "fixture: the export was written");
-    assert_eq!(
-        mode(&s.export()),
-        0o600,
-        "audit export file mode under umask 0277"
-    );
 }

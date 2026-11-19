@@ -13,13 +13,10 @@
 mod common;
 
 use common::{Scratch, created, ctx, nid};
-use kaban_core::ontology::{Ns, Qualified};
-use kaban_core::text_index::{Canonical, Rows};
 use kaban_core::{
-    ChangeLogStore, ForgetMode, IngestStore, MemoryStore, NewNode, NodeId, Op, RedactedStrings,
-    RememberOutcome, RescanAction, SchemaStore, SyncStore, WorkspaceId, WriteBatch,
+    ForgetMode, IngestStore, MemoryStore, NewNode, NodeId, Op, RedactedStrings, RememberOutcome,
+    RescanAction, WorkspaceId, WriteBatch,
 };
-use kaban_store_sqlite::index_rows::IndexRows;
 use kaban_store_sqlite::{LATEST_SCHEMA_VERSION, SqliteStore};
 use rusqlite::Connection;
 use rusqlite::types::Value;
@@ -118,18 +115,6 @@ fn occurrences(path: &Path, needle: &[u8]) -> usize {
     })
 }
 
-fn index_texts(s: &Scratch) -> (Vec<(String, String)>, Canonical) {
-    let rows = IndexRows::open(&s.db()).unwrap();
-    let mut seen = Vec::new();
-    let at = rows
-        .active(&mut |row| {
-            seen.push((row.id.clone(), row.text.clone()));
-            Ok(())
-        })
-        .unwrap();
-    (seen, at)
-}
-
 /// Rejection first: a body whose payload no longer decodes, and one whose tag names a
 /// dictionary this binary does not ship, fail every read by name. No read returns bytes.
 #[test]
@@ -154,19 +139,6 @@ fn a_corrupt_or_foreign_encoded_body_fails_the_read_explicitly_never_as_garbage(
         )
         .unwrap();
     let err = store.get(&nid(&victim.id), false).unwrap_err();
-    assert!(
-        chain(&err).contains("corrupt body payload"),
-        "{}",
-        chain(&err)
-    );
-    let rows = IndexRows::open(&s.db()).unwrap();
-    let err = rows.active(&mut |_| Ok(())).unwrap_err();
-    assert!(
-        chain(&err).contains("corrupt body payload"),
-        "{}",
-        chain(&err)
-    );
-    let err = rows.current(std::slice::from_ref(&victim.id)).unwrap_err();
     assert!(
         chain(&err).contains("corrupt body payload"),
         "{}",
@@ -230,14 +202,6 @@ fn a_blob_without_a_whole_tag_fails_the_read_explicitly_never_as_an_empty_body()
             blob.len(),
             chain(&err)
         );
-        let rows = IndexRows::open(&s.db()).unwrap();
-        let err = rows.current(std::slice::from_ref(&victim.id)).unwrap_err();
-        assert!(
-            chain(&err).contains("corrupt body payload"),
-            "{} bytes through the index rows: {}",
-            blob.len(),
-            chain(&err)
-        );
     }
     assert_eq!(
         store.get(&nid(&neighbour.id), false).unwrap().unwrap().text,
@@ -277,13 +241,6 @@ fn a_truncated_or_altered_plain_body_fails_the_read_explicitly_never_as_another_
         assert!(
             chain(&err).contains("corrupt body payload"),
             "{case} through get: {}",
-            chain(&err)
-        );
-        let rows = IndexRows::open(&s.db()).unwrap();
-        let err = rows.current(std::slice::from_ref(&victim.id)).unwrap_err();
-        assert!(
-            chain(&err).contains("corrupt body payload"),
-            "{case} through the index rows: {}",
             chain(&err)
         );
     }
@@ -362,25 +319,19 @@ fn bodies_are_encoded_on_write_and_read_back_exactly_on_every_surface() {
             &store.get(&nid(&note.id), false).unwrap().unwrap().text,
             text
         );
-        store.mark_serialized(&nid(&note.id), note.rev).unwrap();
     }
-    let (rows, at) = index_texts(&s);
-    assert_eq!(
-        rows,
-        notes
-            .iter()
-            .map(|n| (n.id.clone(), n.text.clone()))
-            .collect::<Vec<_>>()
-    );
-    assert_eq!(at.seq, store.changes_head().unwrap());
-    let exported = store
-        .serialized_records("default", &["Decision"], 10)
+    // the text index was built from the decoded body
+    let found = store
+        .recall(&kaban_core::RecallQuery {
+            query: "quokka".into(),
+            hops: 0,
+            ..Default::default()
+        })
         .unwrap();
-    let mut exported: Vec<String> = exported.into_iter().map(|n| n.text).collect();
-    exported.sort();
-    let mut expected = texts.to_vec();
-    expected.sort();
-    assert_eq!(exported, expected);
+    assert_eq!(
+        found.iter().map(|h| h.node.id.as_str()).collect::<Vec<_>>(),
+        [notes[0].id.as_str()]
+    );
     for text in &texts {
         let again = store
             .remember(
@@ -438,7 +389,6 @@ fn an_unknown_dictionary_hash_refuses_the_open_with_guidance() {
             "open_existing_key",
             SqliteStore::open_existing_key(&s.db(), &s.keys(), &actor).map(drop),
         ),
-        ("IndexRows::open", IndexRows::open(&s.db()).map(drop)),
     ];
     for (constructor, outcome) in refusals {
         let err = outcome.expect_err(constructor);
@@ -469,28 +419,31 @@ fn a_rescan_redaction_rewrites_the_body_encoded_and_reads_back_masked() {
     let clean = created(&store, "Fact", &body("quokka", 3000));
 
     let report = store
-        .rescan("v2", 100, &mut |n| {
-            if n.text.contains("hunter2") {
-                RescanAction::Redact {
-                    strings: Box::new(RedactedStrings {
-                        text: n.text.replace("hunter2", "[redacted]"),
-                        summary: n.summary.clone(),
-                        tags: n.tags.clone(),
-                        props: n.props.clone(),
-                        path_scope: n.path_scope.clone(),
-                        session_id: n.session_id.clone(),
-                        agent_id: n.agent_id.clone(),
-                        repo: n.repo.clone(),
-                        commit_sha: n.commit_sha.clone(),
-                        accepted_commit: n.accepted_commit.clone(),
-                        dup_key: n.dup_key.clone(),
-                    }),
-                    audit: vec![],
+        .rescan(
+            "v2",
+            kaban_core::RescanCursor::Start,
+            100,
+            &mut |n: &kaban_core::Node| {
+                if n.text.contains("hunter2") {
+                    RescanAction::Redact {
+                        strings: Box::new(RedactedStrings {
+                            text: n.text.replace("hunter2", "[redacted]"),
+                            summary: n.summary.clone(),
+                            tags: n.tags.clone(),
+                            props: n.props.clone(),
+                            path_scope: n.path_scope.clone(),
+                            session_id: n.session_id.clone(),
+                            agent_id: n.agent_id.clone(),
+                            repo: n.repo.clone(),
+                            commit_sha: n.commit_sha.clone(),
+                            dup_key: n.dup_key.clone(),
+                        }),
+                    }
+                } else {
+                    RescanAction::Keep
                 }
-            } else {
-                RescanAction::Keep
-            }
-        })
+            },
+        )
         .unwrap();
 
     assert_eq!((report.redacted, report.kept), (1, 1));
@@ -504,55 +457,6 @@ fn a_rescan_redaction_rewrites_the_body_encoded_and_reads_back_masked() {
     assert_eq!(
         store.get(&nid(&clean.id), false).unwrap().unwrap().text,
         clean.text
-    );
-}
-
-/// `promote_kind` recomputes every content hash of the group from its body: over encoded
-/// bodies the new hash is the hash of the decoded text under the new kind.
-#[test]
-fn promote_recomputes_content_hashes_from_decoded_bodies() {
-    let s = Scratch::new("ss17-body", "promote");
-    let store = compressed(&s);
-    let text = body("quokka supplies the widgets", 2000);
-    let vendor = created(&store, "Vendor", &text);
-    assert!(is_encoded(&stored(&s, &vendor.id)));
-    store
-        .schema_extend(kaban_core::TypeDef {
-            kind: "label".into(),
-            name: "infra:Vendor".into(),
-            ns: None,
-            description: "a supplier".into(),
-            from_kinds: vec![],
-            to_kinds: vec![],
-            directed: true,
-            props_schema: None,
-            builtin: false,
-            declaration: kaban_core::TypeDeclaration::default(),
-        })
-        .unwrap();
-
-    let report = store
-        .promote_kind(
-            &WorkspaceId::default(),
-            &vendor.kind,
-            &Qualified {
-                ns: Ns::parse("infra").unwrap(),
-                name: "Vendor".into(),
-            },
-            &kaban_core::Actor::HumanCli,
-        )
-        .unwrap();
-
-    assert_eq!(report.to, "infra:Vendor");
-    let promoted = store.get(&nid(&vendor.id), false).unwrap().unwrap();
-    assert_eq!(promoted.kind, "infra:Vendor");
-    assert_eq!(promoted.text, text);
-    // `nodes.rs`: sha256 over `workspace \u{1} kind \u{1} trimmed text`
-    assert_eq!(
-        promoted.content_hash,
-        kaban_policy::sha256_hex(
-            format!("default\u{1}infra:Vendor\u{1}{}", text.trim()).as_bytes()
-        )
     );
 }
 

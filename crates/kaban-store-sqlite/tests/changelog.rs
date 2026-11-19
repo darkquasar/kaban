@@ -7,9 +7,8 @@ mod common;
 
 use common::{Scratch, created, ctx, nid};
 use kaban_core::{
-    Ack, Change, ChangeEntity, ChangeLogStore, ChangeOp, Governance, GovernanceStore, Lease,
-    LeaseStore, MemoryStore, NewEvent, NewNode, NodeId, RememberOutcome, SignerKind, Sink, SinkId,
-    SinkReport, run_sink,
+    Ack, Change, ChangeEntity, ChangeLogStore, ChangeOp, Lease, LeaseStore, MemoryStore, NewNode,
+    NodeId, RememberOutcome, Sink, SinkId, SinkReport, run_sink,
 };
 use kaban_store_sqlite::SqliteStore;
 
@@ -23,12 +22,9 @@ fn ops_after(store: &SqliteStore, after: u64) -> Vec<(ChangeEntity, ChangeOp)> {
         .collect()
 }
 
-/// C2.4 slice 1 (F11, MD-24): every node, edge and event write produces exactly one `changes`
-/// row, read back in `seq` order with the row's id and workspace; `remember` + two
-/// non-mutating links = the node row plus, per link, the human claim's row, its status
-/// (`pending -> winner`) and the edge (engine-spec EN-F8/EN-F9, E2.2: a link is a human
-/// assertion projected to one edge) = 7 rows; accepting a Decision = its node update + its
-/// event + the human `kind_of_record` claim's row and its status (EN-F12c, E2.3a) = 4 rows.
+/// C2.4 slice 1 (F11, MD-24): every node and edge write produces exactly one `changes` row,
+/// read back in `seq` order with the row's id and workspace; `remember` + two non-mutating
+/// links = the node row plus one row per edge = 3 rows.
 #[test]
 fn every_write_produces_exactly_one_changes_row() {
     let store = SqliteStore::open_memory().unwrap();
@@ -70,11 +66,7 @@ fn every_write_produces_exactly_one_changes_row() {
         rows.iter().map(|c| (c.entity, c.op)).collect::<Vec<_>>(),
         vec![
             (ChangeEntity::Node, ChangeOp::Insert),
-            (ChangeEntity::Assertion, ChangeOp::Insert),
-            (ChangeEntity::Assertion, ChangeOp::Status),
             (ChangeEntity::Edge, ChangeOp::Insert),
-            (ChangeEntity::Assertion, ChangeOp::Insert),
-            (ChangeEntity::Assertion, ChangeOp::Status),
             (ChangeEntity::Edge, ChangeOp::Insert),
         ],
         "{rows:?}"
@@ -88,44 +80,15 @@ fn every_write_produces_exactly_one_changes_row() {
     assert!(rows.iter().all(|c| c.ts > 0));
     let last = rows.last().unwrap().seq;
 
-    // OWN-84 (1) (E2.5g): the EN-F12c record claim is a human acceptance's; an agent's or
-    // the system's acceptance writes the node update and the event only
-    let mut human = ctx();
-    human.actor = kaban_core::Actor::HumanCli;
-    store
-        .transition(
-            &NodeId::parse(&decision.id).unwrap(),
-            Governance::Accepted,
-            NewEvent {
-                reason: "ok".into(),
-                signer_kind: SignerKind::HumanCli,
-                ..Default::default()
-            },
-            &human,
-        )
-        .unwrap();
-    let rows = store.changes_read(last, 10).unwrap();
-    assert_eq!(
-        rows.iter().map(|c| (c.entity, c.op)).collect::<Vec<_>>(),
-        vec![
-            (ChangeEntity::Node, ChangeOp::Update),
-            (ChangeEntity::Event, ChangeOp::Insert),
-            (ChangeEntity::Assertion, ChangeOp::Insert),
-            (ChangeEntity::Assertion, ChangeOp::Status),
-        ],
-        "a human acceptance is one node update, one event, the human record claim and its status: {rows:?}"
-    );
-    assert_eq!(rows[0].id, decision.id);
     // `limit` and `after` are honoured
     assert_eq!(store.changes_read(0, 2).unwrap().len(), 2);
     assert_eq!(
-        store.changes_read(rows[3].seq, 10).unwrap(),
+        store.changes_read(last, 10).unwrap(),
         vec![],
         "nothing after the newest row"
     );
-    // a refreshed link (same src, dst, rel, another confidence) is a second human claim of
-    // the triple (its row and its status), retires the prior action's winning status, and
-    // produces one edge update row (RE4-10; E2.2).
+    // a refreshed link (same src, dst, rel, another confidence) produces one edge update row
+    // (governance claims are gone, T3).
     store
         .link(
             &nid(&decision.id),
@@ -137,16 +100,10 @@ fn every_write_produces_exactly_one_changes_row() {
         )
         .unwrap();
     assert_eq!(
-        ops_after(&store, rows[3].seq),
-        vec![
-            (ChangeEntity::Assertion, ChangeOp::Insert),
-            (ChangeEntity::Assertion, ChangeOp::Status),
-            (ChangeEntity::Assertion, ChangeOp::Status),
-            (ChangeEntity::Edge, ChangeOp::Update),
-        ]
+        ops_after(&store, last),
+        vec![(ChangeEntity::Edge, ChangeOp::Update)]
     );
-    // MD-24: a purge is one explicit `purge` row plus one `delete` row per removed edge, and
-    // (EN-F8a, E2.2) one `delete` row per claim naming the node (the `ABOUT` link's claim)
+    // MD-24: a purge is one explicit `purge` row plus one `delete` row per removed edge
     let before = store.changes_read(0, 100).unwrap().last().unwrap().seq;
     let outcome = store
         .forget(
@@ -161,13 +118,12 @@ fn every_write_produces_exactly_one_changes_row() {
         vec![
             (ChangeEntity::Edge, ChangeOp::Delete),
             (ChangeEntity::Node, ChangeOp::Purge),
-            (ChangeEntity::Assertion, ChangeOp::Delete),
         ],
         "{rows:?}"
     );
     assert_eq!(rows[1].id, b.id);
     assert_eq!(
-        outcome.outbox_seq, rows[2].seq,
+        outcome.outbox_seq, rows[1].seq,
         "ForgetOutcome points at the last row"
     );
 }
@@ -193,12 +149,25 @@ fn cursor(db: &std::path::Path, name: &str) -> Option<i64> {
     .ok()
 }
 
-fn lag(store: &SqliteStore) -> i64 {
-    store.stats(None).unwrap()["changes_lag"].as_i64().unwrap()
+/// `max(seq) - min(last_seq)` over the external consumers, 0 without any (the `stats.changes_lag`
+/// field went with the projector lag fields, T3; the cursor arithmetic it reported is read here,
+/// without the store's own `text-index` cursor, which follows the store's publication).
+fn lag(db: &std::path::Path) -> i64 {
+    rusqlite::Connection::open(db)
+        .unwrap()
+        .query_row(
+            "SELECT CASE WHEN (SELECT count(*) FROM projections WHERE name <> 'text-index') = 0 THEN 0
+                    ELSE max(0, (SELECT COALESCE(max(seq), 0) FROM changes)
+                        - (SELECT min(last_seq) FROM projections WHERE name <> 'text-index'))
+               END",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap()
 }
 
 /// C2.4 slice 2 (F11, F15, MD-13): a consumer holding the current fence advances its cursor
-/// (first ack registers the projection); `stats.changes_lag` is `max(seq) - min(last_seq)`
+/// (first ack registers the projection); the lag is `max(seq) - min(last_seq)`
 /// and 0 without consumers; cursors never move backwards.
 #[test]
 fn a_fenced_ack_advances_the_cursor_and_lag_follows() {
@@ -209,21 +178,21 @@ fn a_fenced_ack_advances_the_cursor_and_lag_follows() {
     }
     let newest = store.changes_read(0, 10).unwrap().last().unwrap().seq;
     assert_eq!(newest, 5);
-    assert_eq!(lag(&store), 0, "no consumer registered: no lag");
+    assert_eq!(lag(&s.db()), 0, "no consumer registered: no lag");
 
     seed_lease(&s.db(), "export", 1);
     store.changes_ack("export", 3, 1).unwrap();
     assert_eq!(cursor(&s.db(), "export"), Some(3));
-    assert_eq!(lag(&store), 2);
+    assert_eq!(lag(&s.db()), 2);
     store.changes_ack("export", 5, 1).unwrap();
-    assert_eq!(lag(&store), 0);
+    assert_eq!(lag(&s.db()), 0);
     // an older `upto` is a no-op, never a step back (MD-13)
     store.changes_ack("export", 2, 1).unwrap();
     assert_eq!(cursor(&s.db(), "export"), Some(5));
     // the slowest consumer defines the lag
     seed_lease(&s.db(), "vectors", 1);
     store.changes_ack("vectors", 1, 1).unwrap();
-    assert_eq!(lag(&store), 4);
+    assert_eq!(lag(&s.db()), 4);
 }
 
 /// C2.4 slice 2 negative (F15 SR-2, MD-13): a stale fence (a successor took the lease) and a
@@ -301,7 +270,7 @@ fn prune_never_deletes_above_the_slowest_cursor_minus_tail() {
     // and the next write continues the sequence instead of restarting below the cursors
     created(&store, "Fact", "magpies swoop in spring");
     assert_eq!(seqs(&store), vec![10, 11]);
-    assert_eq!(lag(&store), 1);
+    assert_eq!(lag(&s.db()), 1);
 }
 
 /// The database clock decides expiry (`leases.rs`): move the row into the past.
@@ -327,7 +296,7 @@ struct ProbeSink<'a> {
 
 impl Sink for ProbeSink<'_> {
     fn id(&self) -> SinkId {
-        SinkId::EXPORT
+        SinkId("export")
     }
     fn consume(&mut self, changes: &[Change]) -> kaban_core::Result<Ack> {
         self.seen.extend(changes.iter().map(|c| c.seq));
@@ -429,10 +398,7 @@ fn a_lease_lost_between_the_read_and_the_ack_leaves_the_cursor_and_a_rerun_re_co
         rows_before,
         "no row written"
     );
-    let mut stats_after = store.stats(None).unwrap();
-    // the cursor moved, so the lag did; every other counter is identical
-    for key in ["changes_lag", "outbox_lag"] {
-        stats_after[key] = stats_before[key].clone();
-    }
+    let stats_after = store.stats(None).unwrap();
+    // the cursor moved; every counter is identical
     assert_eq!(stats_after, stats_before, "identical store state");
 }

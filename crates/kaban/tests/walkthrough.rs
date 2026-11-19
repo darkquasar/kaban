@@ -1,5 +1,5 @@
 //! E3.11: the walkthrough (Steps 1..6) over the real stdio MCP server; CLI only for setup, plain
-//! ingestion, review and doctor. Synthetic code rows never execute an indexer. EN-N4: two fresh
+//! ingestion and doctor. Synthetic code rows never execute an indexer. EN-N4: two fresh
 //! runs compare after relabelling generated ids (OWN-117); a same-database replay keeps every id.
 #![cfg(all(feature = "ingest", feature = "code-graph"))]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -15,9 +15,7 @@ mod shop_rows;
 
 use common::Scratch;
 use kaban_core::{
-    Actor, AssertionStatus, BatchAssertion, BatchSubject, ChangeLogStore, ClaimClass, Fixed,
-    IngestStore, Layer, MemoryStore, Method, NewNode, NodeId, Op, Rank, WorkspaceId, WriteBatch,
-    WriteCtx,
+    Actor, ChangeLogStore, IngestStore, NewNode, NodeId, Op, WorkspaceId, WriteBatch, WriteCtx,
 };
 use kaban_policy::Policy;
 use kaban_store_sqlite::SqliteStore;
@@ -85,7 +83,6 @@ fn start(s: &Scratch, root: &Path) -> McpClient {
         cwd: root,
         policy: None,
         workspace: "default",
-        audit_export: None,
     })
 }
 
@@ -94,11 +91,7 @@ fn store(s: &Scratch) -> SqliteStore {
 }
 
 fn ctx() -> WriteCtx {
-    WriteCtx::new(
-        Policy::empty().effective_hash(),
-        WorkspaceId::default(),
-        Actor::Agent,
-    )
+    WriteCtx::new(WorkspaceId::default(), Actor::Agent)
 }
 
 fn fixed_id(i: usize) -> NodeId {
@@ -119,35 +112,6 @@ fn changes(s: &Scratch) -> u64 {
             return after;
         };
         after = last.seq;
-    }
-}
-
-fn claim(
-    subject: BatchSubject,
-    class: ClaimClass,
-    value: Value,
-    layer: Layer,
-    method: Method,
-    score: u32,
-    lineage: &str,
-) -> BatchAssertion {
-    BatchAssertion {
-        subject,
-        claim_class: class,
-        predicate: None,
-        object: None,
-        value,
-        layer,
-        method,
-        extractor_id: Some("walkthrough".into()),
-        extractor_version: Some("1".into()),
-        source_id: Some(ARCH.into()),
-        lineage_id: lineage.into(),
-        raw_score: Fixed::new(score).unwrap(),
-        rank: Rank::Normal,
-        rank_reason: None,
-        calibration_version: 1,
-        supersedes: None,
     }
 }
 
@@ -181,7 +145,8 @@ fn step3(s: &Scratch, _root: &Path, mcp: &mut McpClient, arch: &str, adr: &str) 
     let submitted = mcp.call("ingest_submit", &body);
     assert_eq!(submitted["created"], 1, "{submitted}");
     let decision = nodes(s, "Decision").into_iter().next().unwrap();
-    assert_eq!(decision.governance, kaban_core::Governance::Proposed);
+    // REC-08: an extracted record is active at commit, with no proposed state
+    assert_eq!(decision.lifecycle, kaban_core::Lifecycle::Active);
     let before = changes(s);
     let repeat = mcp.call("ingest_submit", &body);
     assert_eq!(repeat["unchanged"], 1, "{repeat}");
@@ -196,7 +161,7 @@ fn step3(s: &Scratch, _root: &Path, mcp: &mut McpClient, arch: &str, adr: &str) 
         .unwrap();
     let mut forbidden = body.clone();
     forbidden["edges"] = json!([
-        {"from_local_id":"discounts","rel":"GOVERNS","to_id":code.id},
+        {"from_local_id":"discounts","rel":"INVALIDATES","to_id":code.id},
         {"from_local_id":"discounts","rel":"SUPERSEDES","to_id":decision.id}
     ]);
     let refusal = mcp.call("ingest_submit", &forbidden);
@@ -209,60 +174,27 @@ fn step3(s: &Scratch, _root: &Path, mcp: &mut McpClient, arch: &str, adr: &str) 
         mcp.call("ingest_finish", &json!({"job":brief["job"]})),
         finish
     );
-    let mut batch = WriteBatch::new(WorkspaceId::default(), vec![]);
-    batch.assertions.push(claim(
-        BatchSubject::Edge {
-            src: NodeId::parse(&decision.id).unwrap(),
-            rel: "GOVERNS".into(),
-            dst: NodeId::parse(&code.id).unwrap(),
-        },
-        ClaimClass::Edge,
-        json!({}),
-        Layer::Llm,
-        Method::Llm,
-        10_000,
-        "machine-governs",
-    ));
-    let report = store(s).apply_batch(batch, &ctx()).unwrap();
-    assert_eq!(report.verdicts.get(&AssertionStatus::Candidate), Some(&1));
-    let candidate = mcp.call("explain", &json!({"address":decision.id}));
-    assert!(
-        candidate.to_string().contains("governed_semantics"),
-        "{candidate}"
-    );
-    let governs =
-        |mcp: &mut McpClient| {
-            mcp.call("traverse",&json!({
-        "start_ids":[decision.id],"rels":["GOVERNS"],"max_depth":1,"include_candidates":true
-    }))
-        };
-    assert_eq!(governs(mcp)["edges"], json!([]));
-    let accepted = mcp.accept_confirmed(
-        &decision.id,
-        "reviewed server-side rule",
-        &["src/checkout/**"],
-    );
-    assert!(
-        governs(mcp)["edges"].as_array().unwrap().is_empty(),
-        "acceptance cannot invent GOVERNS"
-    );
-    // Explicitly human-authorized link request, separate from acceptance elicitation.
+    let depends = |mcp: &mut McpClient| {
+        mcp.call(
+            "traverse",
+            &json!({
+                "start_ids":[decision.id],"rels":["DEPENDS_ON"],"max_depth":1
+            }),
+        )
+    };
+    assert_eq!(depends(mcp)["edges"], json!([]));
+    // Explicitly human-authorized link request.
     mcp.call(
         "link",
-        &json!({"from":decision.id,"rel":"GOVERNS","to":code.id}),
+        &json!({"from":decision.id,"rel":"DEPENDS_ON","to":code.id}),
     );
     // Both original source chunks are citations; the architecture link is an explicit human act.
     mcp.call(
         "link",
         &json!({"from":arch,"rel":"EVIDENCE_FOR","to":decision.id}),
     );
-    let human = governs(mcp);
+    let human = depends(mcp);
     assert_eq!(human["edges"].as_array().unwrap().len(), 1, "{human}");
-    let assertion_key =
-        &candidate["explanation"]["candidates"][0]["lineages"][0]["best"]["assertion_key"];
-    let provenance = mcp.call("explain", &json!({"address":assertion_key}));
-    assert!(provenance.to_string().contains("human"), "{provenance}");
-    assert!(provenance.to_string().contains("preferred"), "{provenance}");
     let evidence = mcp.call(
         "traverse",
         &json!({"start_ids":[decision.id],"rels":["EVIDENCE_FOR"],"max_depth":1,"direction":"in"}),
@@ -278,11 +210,11 @@ fn step3(s: &Scratch, _root: &Path, mcp: &mut McpClient, arch: &str, adr: &str) 
         );
     }
     json!({"decision":decision.id,"brief":brief,"page":page,"submit":submitted,
-        "forbidden":refusal,"finish":finish,"candidate":candidate,"accept":accepted,
-        "human_relation":human,"provenance":provenance,"evidence":evidence,"replay":repeat})
+        "forbidden":refusal,"finish":finish,"human_relation":human,"evidence":evidence,
+        "replay":repeat})
 }
 
-fn step4(s: &Scratch, root: &Path, mcp: &mut McpClient, arch: &str) -> Value {
+fn step4(s: &Scratch, mcp: &mut McpClient, arch: &str) -> Value {
     let brief = mcp.call(
         "ingest_brief",
         &json!({"path":ARCH,"with":"gliner","link":"gazetteer"}),
@@ -296,13 +228,7 @@ fn step4(s: &Scratch, root: &Path, mcp: &mut McpClient, arch: &str) -> Value {
     );
     mcp.call("ingest_finish", &json!({"job":brief["job"]}));
     let org = fixed_id(100);
-    let text = store(s)
-        .get(&NodeId::parse(arch).unwrap(), false)
-        .unwrap()
-        .unwrap()
-        .text;
-    let offset = u32::try_from(text.find("Cart").unwrap()).unwrap();
-    let mut batch = WriteBatch::new(
+    let batch = WriteBatch::new(
         WorkspaceId::default(),
         vec![Op::UpsertNode {
             id: org.clone(),
@@ -313,42 +239,11 @@ fn step4(s: &Scratch, root: &Path, mcp: &mut McpClient, arch: &str) -> Value {
             },
         }],
     );
-    let mut span = claim(
-        BatchSubject::Span {
-            chunk: NodeId::parse(arch).unwrap(),
-            offset,
-            len: 4,
-        },
-        ClaimClass::Type,
-        json!("x:Org"),
-        Layer::Gliner,
-        Method::Gliner,
-        6100,
-        "gliner-cart",
-    );
-    span.object = Some(org.clone());
-    batch.assertions.push(span);
-    let report = store(s).apply_batch(batch, &ctx()).unwrap();
+    // an undeclared kind is refused, not placed as a discovered kind (PC-14)
+    let refused = store(s).apply_batch(batch, &ctx()).unwrap_err();
     assert!(
-        report.verdicts.contains_key(&AssertionStatus::Candidate)
-            || report.verdicts.contains_key(&AssertionStatus::Unresolved),
-        "{report:?}"
-    );
-    let stats = store(s).kind_stats(&WorkspaceId::default()).unwrap();
-    let stat = stats
-        .iter()
-        .find(|row| row.ns == "x" && row.kind == "Org")
-        .unwrap();
-    assert_eq!(stat.n_nodes, 1);
-    let explain = mcp.call("explain", &json!({"address":org.as_str()}));
-    let review = cli(s, root, &["review", "--ontology", "x"]);
-    assert!(!review["items"].as_array().unwrap().is_empty(), "{review}");
-    assert!(
-        review["items"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|i| !i["first_action"].is_null())
+        matches!(refused, kaban_core::StoreError::UnknownKind(_)),
+        "{refused:?}"
     );
     let traversal = mentions(mcp, arch);
     assert!(
@@ -358,20 +253,10 @@ fn step4(s: &Scratch, root: &Path, mcp: &mut McpClient, arch: &str) -> Value {
             .iter()
             .any(|e| e["to"] == org.as_str())
     );
-    json!({"brief":brief,"page":page,"submit":submitted,"store":report,"kind_stats":stats,
-        "explain":explain,"review":review,"mentions":traversal})
+    json!({"brief":brief,"page":page,"submit":submitted,"mentions":traversal})
 }
 
 fn step5(mcp: &mut McpClient, decision: &str, arch: &str, adr: &str) -> Value {
-    let why = mcp.call("why", &json!({"targets":[{"path":"src/checkout/cart.rs"}]}));
-    let matches: Vec<_> = why["results"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|r| r["node"]["id"] == decision)
-        .collect();
-    assert_eq!(matches.len(), 1, "{why}");
-    assert_eq!(matches[0]["governance"], "accepted");
     let evidence = mcp.call(
         "traverse",
         &json!({"start_ids":[decision],"rels":["EVIDENCE_FOR"],"direction":"in","max_depth":1}),
@@ -405,27 +290,10 @@ fn step5(mcp: &mut McpClient, decision: &str, arch: &str, adr: &str) -> Value {
         "code_context",
         &json!({"target":{"symbol":shop_rows::DISCOUNT}}),
     );
-    assert!(
-        context["governing"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|r| r["node"]["id"] == decision),
-        "{context}"
-    );
-    let unrelated = mcp.call("why",&json!({"targets":[{"path":"src/unrelated.rs"},{"symbol":"rust-analyzer cargo unrelated . Other#"}]}));
-    assert!(
-        unrelated["results"].as_array().unwrap().is_empty(),
-        "{unrelated}"
-    );
-    json!({"why":why,"evidence":evidence,"recall":recall,"code_context":context,"negative":unrelated})
+    json!({"evidence":evidence,"recall":recall,"code_context":context})
 }
 
 fn step6(s: &Scratch, root: &Path, mcp: &mut McpClient, dir: &Path, decision: &str) -> Value {
-    let before = store(s)
-        .get(&NodeId::parse(decision).unwrap(), false)
-        .unwrap()
-        .unwrap();
     let path = root.join("src/checkout/cart.rs");
     let text = std::fs::read_to_string(&path).unwrap();
     std::fs::write(path, text.replace("apply_discount", "apply_promotion")).unwrap();
@@ -452,10 +320,6 @@ fn step6(s: &Scratch, root: &Path, mcp: &mut McpClient, dir: &Path, decision: &s
         .find(|n| n.props["symbol"] == shop_rows::DISCOUNT)
         .unwrap();
     let doctor = cli(s, root, &["doctor"]);
-    let explain = mcp.call("explain", &json!({"address":code.id}));
-    let review = cli(s, root, &["review", "--status", "stale"]);
-    assert_eq!(explain["status"]["pending"], "stale", "{explain}");
-    assert!(!review["items"].as_array().unwrap().is_empty(), "{review}");
     // Doctor names the renamed anchor in its stale_anchors check (not stale_artifacts).
     let stale = doctor["checks"]
         .as_array()
@@ -471,15 +335,6 @@ fn step6(s: &Scratch, root: &Path, mcp: &mut McpClient, dir: &Path, decision: &s
     assert!(
         stale["detail"].as_str().unwrap().contains(&anchor),
         "{doctor}"
-    );
-    let old = mcp.call("why", &json!({"targets":[{"symbol":shop_rows::DISCOUNT}]}));
-    assert!(
-        old["results"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|r| r["node"]["id"] == decision && r["code"].get("snapshot_mismatch").is_some()),
-        "{old}"
     );
     let new = mcp.call(
         "code_context",
@@ -503,36 +358,13 @@ fn step6(s: &Scratch, root: &Path, mcp: &mut McpClient, dir: &Path, decision: &s
     );
     let submitted = mcp.call("ingest_submit", &body);
     let finished = mcp.call("ingest_finish", &json!({"job":brief["job"]}));
-    let after = store(s)
-        .get(&NodeId::parse(decision).unwrap(), false)
-        .unwrap()
-        .unwrap();
-    assert_eq!(
-        serde_json::to_value(before).unwrap(),
-        serde_json::to_value(after).unwrap(),
-        "accepted Decision is never rewritten by a changed ADR"
-    );
-    let revisions = mcp.call(
-        "traverse",
-        &json!({"start_ids":[decision],"rels":["RELATES_TO"],"direction":"in","max_depth":1,"include_candidates":true}),
-    );
-    assert!(
-        revisions["nodes"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|n| n["kind"] == "Decision"
-                && n["governance"] == "proposed"
-                && n["id"] != decision),
-        "{revisions}"
-    );
     let supersedes = mcp.call(
         "traverse",
         &json!({"start_ids":[decision],"rels":["SUPERSEDES"],"max_depth":1}),
     );
     assert_eq!(supersedes["edges"], json!([]));
-    json!({"commit":commit,"doctor":doctor,"explain":explain,"review":review,"old_symbol":old,
-        "new_symbol":new,"revision_submit":submitted,"revision_finish":finished,"revisions":revisions})
+    json!({"commit":commit,"doctor":doctor,"new_symbol":new,
+        "revision_submit":submitted,"revision_finish":finished})
 }
 
 fn step1(s: &Scratch, root: &Path) -> (McpClient, String, PathBuf) {
@@ -610,11 +442,6 @@ fn step1(s: &Scratch, root: &Path) -> (McpClient, String, PathBuf) {
     assert!(
         definition.to_string().contains("\"policy\":\"current\""),
         "{definition}"
-    );
-    let missing = "rust-analyzer cargo other . absent().";
-    assert_eq!(
-        mcp.call("why", &json!({"targets":[{"symbol":missing}]}))["results"],
-        json!([])
     );
     (mcp, commit, dir)
 }
@@ -748,7 +575,7 @@ impl Run {
         let (arch, adr, step2_output) = step2(s, root, &mut mcp);
         let step3_output = step3(s, root, &mut mcp, &arch, &adr);
         let decision = step3_output["decision"].as_str().unwrap();
-        let step4_output = step4(s, root, &mut mcp, &arch);
+        let step4_output = step4(s, &mut mcp, &arch);
         let step5_output = step5(&mut mcp, decision, &arch, &adr);
         let step6_output = step6(s, root, &mut mcp, &dir, decision);
         assert!(mcp.finish().status.success());

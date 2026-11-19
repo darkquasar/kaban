@@ -44,8 +44,4 @@ pub struct SchemaResponse {
     pub relationships: Vec<TypeDef>,
     /// Naming conventions.
     pub naming: Naming,
-    /// The discovered-kind counters of the request's workspace (engine-spec EN-F6; engine-plan
-    /// E1.8), empty when no label was ever discovered there.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub kind_stats: Vec<kaban_core::KindStat>,
 }

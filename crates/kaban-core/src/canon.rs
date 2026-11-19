@@ -1,5 +1,5 @@
-//! Canonical JSON text (engine-spec EN-F3a `enum` equality, EN-F12a rule (3); engine-plan E1.1,
-//! shared with the E2.1 assertion keys): object keys sorted byte-wise, no whitespace, integers
+//! Canonical JSON text (engine-spec EN-F3a `enum` equality, EN-F12a rule (3); engine-plan E1.1):
+//! object keys sorted byte-wise, no whitespace, integers
 //! written as integers, every other number as the shortest text that round-trips through `f64`,
 //! strings escaped as `serde_json` escapes them. The function is total and idempotent: parsing
 //! its output and canonicalising again yields the same bytes.

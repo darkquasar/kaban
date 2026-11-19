@@ -11,9 +11,8 @@ use serde_json::Value;
 
 use super::OntologyError;
 use super::meta::{
-    Acceptance, ColumnWeights, DiscoveredPolicy, Extract, Governed, GroupBy, Index, KindBody, Ns,
-    OnLink, OntologyFile, QuestionKindsDecl, QuestionTemplate, RankHints, RelBody, Stamp,
-    check_ranges,
+    ColumnWeights, Extract, GroupBy, KindBody, Ns, OnLink, OntologyFile, QuestionTemplate,
+    RankHints, RelBody, Rules, check_ranges,
 };
 use crate::validator::{Schema, ValidatorLimits};
 
@@ -107,15 +106,6 @@ impl FromIterator<Ns> for NamespaceSet {
     }
 }
 
-/// One end of a relationship: a kind or the `path` literal.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RelEnd {
-    /// A resolved kind.
-    Kind(Qualified),
-    /// The literal `path` (a `GOVERNS` target).
-    Path,
-}
-
 /// A kind after inheritance and mixins.
 #[derive(Debug, Clone)]
 pub struct ResolvedKind {
@@ -129,12 +119,8 @@ pub struct ResolvedKind {
     pub mixins: Vec<Qualified>,
     /// The merged, meta-validated `props_schema`.
     pub props_schema: Schema,
-    /// Governance (per kind, never inherited: OD-E-2).
-    pub governed: Option<Governed>,
-    /// The acceptance tier of an ungoverned kind's candidates and `proposed` records
-    /// (OWN-84 (1); per kind like `governed`, a mixin's counts once; refused beside
-    /// `governed`).
-    pub acceptance: Option<Acceptance>,
+    /// Record rules (per kind, never inherited through `is_a`: OD-E-2).
+    pub rules: Option<Rules>,
     /// Rank hints (inherited, overridden by the kind's own).
     pub rank: Option<RankHints>,
     /// FTS prop paths (inherited plus the kind's own).
@@ -145,19 +131,6 @@ pub struct ResolvedKind {
     pub column_weights: Option<ColumnWeights>,
     /// Extraction hints (inherited, overridden).
     pub extract: Option<Extract>,
-    /// Winner gate (inherited, overridden).
-    pub min_confidence: Option<f64>,
-    /// Indexing meta-config (inherited, overridden; engine-spec §3.1 `index`, OWN-65).
-    pub index: Option<Index>,
-}
-
-impl ResolvedKind {
-    /// The effective stamping policy: the kind's `index.stamp`, `commit` when no block is set
-    /// anywhere along `is_a` and the mixins (engine-spec §3.1 "Default when the block is
-    /// absent: `commit`").
-    pub fn stamp(&self) -> Stamp {
-        self.index.map_or(Stamp::Commit, |index| index.stamp)
-    }
 }
 
 /// A relationship type after resolution.
@@ -165,20 +138,16 @@ impl ResolvedKind {
 pub struct ResolvedRel {
     /// Identity.
     pub id: Qualified,
-    /// Allowed sources (empty = any).
-    pub from: Vec<RelEnd>,
-    /// Allowed targets (empty = any).
-    pub to: Vec<RelEnd>,
+    /// Allowed source kinds (empty = any).
+    pub from: Vec<Qualified>,
+    /// Allowed target kinds (empty = any).
+    pub to: Vec<Qualified>,
     /// Directed edge.
     pub directed: bool,
     /// Human description.
     pub description: Option<String>,
     /// Lifecycle side effect.
     pub on_link: Option<OnLink>,
-    /// Minimum confidence for an auto edge.
-    pub confidence_required: Option<f64>,
-    /// Needs a human (EN-S10).
-    pub governed_semantics: bool,
 }
 
 /// One resolved `source_types` entry.
@@ -190,21 +159,12 @@ pub struct ResolvedSourceType {
     pub paths: Vec<String>,
 }
 
-/// The `kinds` of a question template.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum QuestionKinds {
-    /// Every kind with `governs_paths: true`.
-    GovernsPaths,
-    /// An explicit list.
-    Kinds(Vec<Qualified>),
-}
-
 /// One resolved question template (every field a validated shape: the file form types
 /// `group_by` and `where`, [`check_ranges`] bounds `depth`, the names are resolved here).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResolvedQuestion {
     /// Target kinds.
-    pub kinds: QuestionKinds,
+    pub kinds: Vec<Qualified>,
     /// Predicate block (a mapping of plain data).
     pub where_: serde_json::Map<String, Value>,
     /// Excluding rel.
@@ -230,14 +190,10 @@ pub struct Ontology {
     pub rels: BTreeMap<Qualified, ResolvedRel>,
     /// Mixin bodies by identity (as declared).
     pub mixins: BTreeMap<Qualified, KindBody>,
-    /// `discovered` block per namespace.
-    pub discovered: BTreeMap<Ns, DiscoveredPolicy>,
     /// `source_types` per namespace.
     pub source_types: BTreeMap<Ns, BTreeMap<String, ResolvedSourceType>>,
     /// `default_kind` per namespace.
     pub default_kind: BTreeMap<Ns, Qualified>,
-    /// Priors merged across files (one value per key).
-    pub priors: BTreeMap<String, f64>,
     /// Questions by `(ns, name)`.
     pub questions: BTreeMap<Qualified, ResolvedQuestion>,
 }
@@ -443,7 +399,7 @@ impl MergedSchema {
 /// that exist elsewhere, under the default [`ValidatorLimits`].
 ///
 /// # Errors
-/// Every [`OntologyError`] except `BuiltinImmutable` and `DiscoveredCapReached` (later seams).
+/// Every [`OntologyError`] except `BuiltinImmutable` (a later seam).
 pub fn resolve(files: &[OntologyFile], loaded: &NamespaceSet) -> Result<Ontology, OntologyError> {
     resolve_with(files, loaded, &ValidatorLimits::default())
 }
@@ -494,18 +450,10 @@ pub fn resolve_with(
             .ok_or_else(|| file_error(&path("from")))?;
         let to = body.to.as_ref().ok_or_else(|| file_error(&path("to")))?;
         let directed = body.directed.ok_or_else(|| file_error(&path("directed")))?;
-        let ends = |names: &[String], key: &str| -> Result<Vec<RelEnd>, OntologyError> {
-            let allow_path = key == "to";
+        let ends = |names: &[String], key: &str| -> Result<Vec<Qualified>, OntologyError> {
             names
                 .iter()
-                .map(|name| {
-                    if allow_path && name == "path" {
-                        Ok(RelEnd::Path)
-                    } else {
-                        decl.lookup(&q.ns, name, &path(key), &decl.kinds)
-                            .map(RelEnd::Kind)
-                    }
-                })
+                .map(|name| decl.lookup(&q.ns, name, &path(key), &decl.kinds))
                 .collect()
         };
         ontology.rels.insert(
@@ -517,24 +465,12 @@ pub fn resolve_with(
                 directed,
                 description: body.description.clone(),
                 on_link: body.on_link,
-                confidence_required: body.confidence_required,
-                governed_semantics: body.governed_semantics.unwrap_or(false),
             },
         );
     }
     // the per-namespace blocks
     for file in files {
         let ns = &file.ontology;
-        if let Some(policy) = &file.discovered {
-            match ontology.discovered.get(ns) {
-                Some(existing) if existing != policy => {
-                    return Err(conflict(&qualified(ns, "discovered"), "duplicate"));
-                }
-                _ => {
-                    ontology.discovered.insert(ns.clone(), policy.clone());
-                }
-            }
-        }
         for (name, source) in &file.source_types {
             let kinds = source
                 .kinds
@@ -565,16 +501,6 @@ pub fn resolve_with(
                 }
                 _ => {
                     ontology.default_kind.insert(ns.clone(), q);
-                }
-            }
-        }
-        for (key, value) in &file.priors {
-            match ontology.priors.get(key) {
-                Some(existing) if existing.to_bits() != value.to_bits() => {
-                    return Err(conflict(&qualified(ns, key), "duplicate_prior"));
-                }
-                _ => {
-                    ontology.priors.insert(key.clone(), *value);
                 }
             }
         }
@@ -682,15 +608,12 @@ fn resolve_kind(
             &serde_json::json!({"type": "object"}),
             &ValidatorLimits::default(),
         )?,
-        governed: None,
-        acceptance: None,
+        rules: None,
         rank: None,
         fts_fields: Vec::new(),
         ident_fields: Vec::new(),
         column_weights: None,
         extract: None,
-        min_confidence: None,
-        index: None,
     };
     // is_a: the parent's merged schema and hints
     if let Some(parent_name) = &body.is_a {
@@ -710,8 +633,6 @@ fn resolve_kind(
         resolved.ident_fields.clone_from(&parent.ident_fields);
         resolved.column_weights.clone_from(&parent.column_weights);
         resolved.extract.clone_from(&parent.extract);
-        resolved.min_confidence = parent.min_confidence;
-        resolved.index = parent.index;
     }
     // mixins in list order; a key declared by two mixins is a conflict, whatever the values
     // (an explicit empty list and `description` are declarations too: E1.3a RE1-5)
@@ -741,13 +662,9 @@ fn resolve_kind(
             claim("props_schema")?;
             merged.fold(schema, q, "mixin_retype")?;
         }
-        if let Some(governed) = &mixin.governed {
-            claim("governed")?;
-            resolved.governed = Some(governed.clone());
-        }
-        if let Some(acceptance) = mixin.acceptance {
-            claim("acceptance")?;
-            resolved.acceptance = Some(acceptance);
+        if let Some(rules) = &mixin.rules {
+            claim("rules")?;
+            resolved.rules = Some(rules.clone());
         }
         if let Some(rank) = &mixin.rank {
             claim("rank")?;
@@ -769,14 +686,6 @@ fn resolve_kind(
             claim("extract")?;
             resolved.extract = Some(extract.clone());
         }
-        if let Some(min) = mixin.min_confidence {
-            claim("min_confidence")?;
-            resolved.min_confidence = Some(min);
-        }
-        if let Some(index) = mixin.index {
-            claim("index")?;
-            resolved.index = Some(index);
-        }
         resolved.mixins.push(mixin_id);
     }
     // the kind's own keys win over mixins and inheritance; its properties may add, never retype
@@ -784,17 +693,8 @@ fn resolve_kind(
         Schema::parse(schema, &decl.limits)?;
         merged.fold(schema, q, "retype")?;
     }
-    if let Some(governed) = &body.governed {
-        resolved.governed = Some(governed.clone());
-    }
-    if let Some(acceptance) = body.acceptance {
-        resolved.acceptance = Some(acceptance);
-    }
-    // OWN-84 (1): a governed kind's tier is its mixin's `governed.acceptance`; a second
-    // top-level `acceptance` beside it (the kind's own or a mixin's) is a conflict, like a
-    // key two mixins declare
-    if resolved.governed.is_some() && resolved.acceptance.is_some() {
-        return Err(conflict(q, "acceptance_governed"));
+    if let Some(rules) = &body.rules {
+        resolved.rules = Some(rules.clone());
     }
     if let Some(rank) = &body.rank {
         resolved.rank = Some(rank.clone());
@@ -812,12 +712,6 @@ fn resolve_kind(
     }
     if let Some(extract) = &body.extract {
         resolved.extract = Some(extract.clone());
-    }
-    if let Some(min) = body.min_confidence {
-        resolved.min_confidence = Some(min);
-    }
-    if let Some(index) = body.index {
-        resolved.index = Some(index);
     }
     resolved.props_schema = Schema::parse(&merged.into_value(), &decl.limits)?;
     visiting.remove(q);
@@ -841,13 +735,10 @@ fn resolve_question(
 ) -> Result<ResolvedQuestion, OntologyError> {
     let path = |key: &str| format!("questions.{name}.{key}");
     let kinds = match template.kinds.as_ref() {
-        Some(QuestionKindsDecl::GovernsPaths(_)) => QuestionKinds::GovernsPaths,
-        Some(QuestionKindsDecl::Kinds(items)) => QuestionKinds::Kinds(
-            items
-                .iter()
-                .map(|k| decl.lookup(ns, k, &path("kinds"), &decl.kinds))
-                .collect::<Result<_, _>>()?,
-        ),
+        Some(items) => items
+            .iter()
+            .map(|k| decl.lookup(ns, k, &path("kinds"), &decl.kinds))
+            .collect::<Result<_, _>>()?,
         None => return Err(file_error(&path("kinds"))),
     };
     let where_ = template

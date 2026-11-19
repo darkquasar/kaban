@@ -11,7 +11,6 @@ fn api(rig: &common::real::Rig) -> KabanApi {
         rig.store.clone(),
         kaban_policy::Policy::empty(),
         rig.store.signer(),
-        None,
     )
 }
 
@@ -32,28 +31,19 @@ async fn public_submit_places_repeats_without_changes_and_accumulates_actual_out
     assert_eq!(first["created"], 1);
     assert_eq!(first["skipped"], json!([]));
     assert_eq!(first["evidence_dropped"], json!([]));
-    assert!(first["assertions"].as_u64().unwrap() >= 3);
     let id = NodeId::parse(first["records"][0]["id"].as_str().unwrap()).unwrap();
     let stored = rig.store.get(&id, false).unwrap().unwrap();
     assert_eq!(stored.text, "A harmless source body.");
     assert_eq!(stored.props["evidence"][0]["quote"], "harmless   source");
     let (_, edges) = rig.hop(&id, &["DERIVED_FROM", "EVIDENCE_FOR"], 1);
     assert!(
-        edges.is_empty(),
-        "default Script missing prior rejects projections, never gains implicit authority"
-    );
-    assert!(
-        rig.store
-            .rescan_assertions("test-negative", &mut |_, _| None)
-            .unwrap()
-            .scanned
-            > 0
+        !edges.is_empty(),
+        "submitted provenance edges are active like the record"
     );
     let last = rig.last_seq();
     let second = submit(&api, &rig.root, body).await.unwrap();
     assert_eq!(second["created"], 0);
     assert_eq!(second["unchanged"], 1);
-    assert_eq!(second["assertions"], 0);
     assert_eq!(
         rig.last_seq(),
         last,
@@ -81,8 +71,6 @@ async fn public_submit_places_repeats_without_changes_and_accumulates_actual_out
     let mut snapshot = first;
     snapshot["job"] = json!("<JOB>");
     snapshot["records"][0]["id"] = json!("<RECORD>");
-    snapshot["changes"]["first_seq"] = json!("<FIRST_SEQ>");
-    snapshot["changes"]["last_seq"] = json!("<LAST_SEQ>");
     insta::assert_json_snapshot!("report", snapshot);
 }
 
@@ -96,7 +84,6 @@ async fn bounded_union_preserves_names_and_overflow_does_not_refuse_later_submit
         rig.store.clone(),
         kaban_policy::Policy::empty(),
         rig.store.signer(),
-        None,
         kaban_api::ApiConfig {
             engine: std::sync::Arc::new(engine),
             ..Default::default()
@@ -229,4 +216,169 @@ async fn ontology_reload_marks_job_stale_without_submit_graph_writes() {
         .unwrap();
     assert_eq!(row.status, kaban_core::JobStatus::Stale);
     assert_eq!(row.submits, 0);
+}
+
+/// REC-08 for extractor output: a structured submit writes its records and named edges as
+/// active rows in one commit, like `remember`; the report carries no claim or revision state.
+#[tokio::test]
+async fn submitted_records_and_edges_are_active_for_a_second_process() {
+    let rig =
+        common::real::rig_on_disk("kaban-e39-submit", "active", kaban_policy::Policy::empty());
+    std::fs::write(rig.root.join("a.md"), "# Source\n\nThree harmless facts.\n").unwrap();
+    let api = api(&rig);
+    let prepared = brief(&api, &rig.root, "a.md", &IngestOpts::default())
+        .await
+        .unwrap();
+    let report = submit(
+        &api,
+        &rig.root,
+        json!({"job":prepared.job,"records":[
+            {"local_id":"one","kind":"Fact","text":"Alpha extractor fact"},
+            {"local_id":"two","kind":"Fact","text":"Beta extractor fact"},
+            {"local_id":"three","kind":"Fact","text":"Gamma extractor fact"}
+        ],"edges":[
+            {"from_local_id":"one","rel":"RELATES_TO","to_local_id":"two"},
+            {"from_local_id":"two","rel":"RELATES_TO","to_local_id":"three"}
+        ]}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(report["created"], 3, "{report}");
+    for field in ["assertions", "revision_candidates"] {
+        assert!(report.get(field).is_none(), "report.{field}: {report}");
+    }
+    let ids: Vec<NodeId> = report["records"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| NodeId::parse(r["id"].as_str().unwrap()).unwrap())
+        .collect();
+    assert_eq!(ids.len(), 3, "{report}");
+
+    // a second process: its own connection to the same database
+    let db = rig.db.clone().unwrap();
+    let other = std::sync::Arc::new(
+        kaban_store_sqlite::SqliteStore::open(&db, &db.parent().unwrap().join("keys")).unwrap(),
+    );
+    let reader = KabanApi::new(other.clone(), kaban_policy::Policy::empty(), other.signer());
+    let found = reader
+        .recall(kaban_api::RecallRequest {
+            query: "extractor fact".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    let mut hits: Vec<&str> = found
+        .results
+        .iter()
+        .filter(|c| c.kind == "Fact")
+        .map(|c| c.id.as_str())
+        .collect();
+    hits.sort_unstable();
+    let mut want: Vec<&str> = ids.iter().map(NodeId::as_str).collect();
+    want.sort_unstable();
+    assert_eq!(hits, want, "{found:?}");
+    for card in &found.results {
+        assert_eq!(card.lifecycle, kaban_core::Lifecycle::Active, "{card:?}");
+    }
+    let expanded = other
+        .traverse(&kaban_core::TraverseQuery {
+            start_ids: vec![ids[0].clone()],
+            rels: vec!["RELATES_TO".into()],
+            direction: kaban_core::TraverseDirection::Out,
+            max_depth: 2,
+            limit: 50,
+            ..Default::default()
+        })
+        .unwrap();
+    let mut pairs: Vec<(&str, &str)> = expanded
+        .edges
+        .iter()
+        .map(|e| (e.src.as_str(), e.dst.as_str()))
+        .collect();
+    pairs.sort_unstable();
+    let mut expected = [
+        (ids[0].as_str(), ids[1].as_str()),
+        (ids[1].as_str(), ids[2].as_str()),
+    ];
+    expected.sort_unstable();
+    assert_eq!(pairs, expected, "{expanded:?}");
+}
+
+/// Submission edges carry the producer score of their record (the source record's
+/// confidence, `1.0` when it names none), stored as given with no prior: a traverse at
+/// `min_score: 0` finds every edge and the threshold splits them at the record confidence.
+#[tokio::test]
+async fn submitted_edges_score_their_record_confidence_for_score_filtered_traversal() {
+    let rig =
+        common::real::rig_on_disk("kaban-e39-submit", "scores", kaban_policy::Policy::empty());
+    std::fs::write(rig.root.join("a.md"), "# Source\n\nThree harmless facts.\n").unwrap();
+    let api = api(&rig);
+    let prepared = brief(&api, &rig.root, "a.md", &IngestOpts::default())
+        .await
+        .unwrap();
+    let report = submit(
+        &api,
+        &rig.root,
+        json!({"job":prepared.job,"records":[
+            {"local_id":"one","kind":"Fact","text":"Alpha scored fact","confidence":0.8},
+            {"local_id":"two","kind":"Fact","text":"Beta scored fact"},
+            {"local_id":"three","kind":"Fact","text":"Gamma scored fact"}
+        ],"edges":[
+            {"from_local_id":"one","rel":"RELATES_TO","to_local_id":"two"},
+            {"from_local_id":"two","rel":"RELATES_TO","to_local_id":"three"}
+        ]}),
+    )
+    .await
+    .unwrap();
+    let ids: Vec<NodeId> = report["records"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| NodeId::parse(r["id"].as_str().unwrap()).unwrap())
+        .collect();
+    assert_eq!(ids.len(), 3, "{report}");
+    let walk = |rels: &[&str], min_score: u32| {
+        let r = rig
+            .store
+            .traverse(&kaban_core::TraverseQuery {
+                start_ids: vec![ids[0].clone()],
+                rels: rels.iter().map(|r| (*r).to_owned()).collect(),
+                direction: kaban_core::TraverseDirection::Out,
+                max_depth: 2,
+                limit: 50,
+                edge_filter: Some(kaban_core::EdgeFilter {
+                    min_score: Some(kaban_core::Fixed::new(min_score).unwrap()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })
+            .unwrap();
+        let mut scored: Vec<(String, String, Option<f64>)> = r
+            .edges
+            .into_iter()
+            .map(|e| (e.src, e.dst, e.confidence))
+            .collect();
+        scored.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+        scored
+    };
+    let (one, two, three) = (ids[0].to_string(), ids[1].to_string(), ids[2].to_string());
+    let mut both = vec![
+        (one.clone(), two.clone(), Some(0.8)),
+        (two.clone(), three.clone(), Some(1.0)),
+    ];
+    both.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+    assert_eq!(
+        walk(&["RELATES_TO"], 0),
+        both,
+        "min_score 0 keeps every edge"
+    );
+    assert_eq!(walk(&["RELATES_TO"], 8000), both, "the 0.8 edge meets 0.8");
+    assert!(
+        walk(&["RELATES_TO"], 8001).is_empty(),
+        "above 0.8 the first hop is cut, so the walk stops"
+    );
+    // the provenance edge scores its source record too
+    let derived = walk(&["DERIVED_FROM"], 0);
+    assert_eq!(derived.len(), 1, "{derived:?}");
+    assert_eq!(derived[0].2, Some(0.8), "{derived:?}");
 }

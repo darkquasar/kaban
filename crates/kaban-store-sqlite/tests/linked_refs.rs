@@ -89,7 +89,7 @@ fn a_pointer_in_another_workspace_is_not_a_pointer_of_the_owner() {
     let s = common::Scratch::new("kaban-linked-refs", "ws");
     let store = SqliteStore::open(&s.db(), &s.keys()).unwrap();
     let owner = created(&store, "Fact", "owner in the default workspace");
-    let other_ctx = WriteCtx::new("pv", WorkspaceId::new("other"), Actor::Agent);
+    let other_ctx = WriteCtx::new(WorkspaceId::new("other"), Actor::Agent);
     let foreign = match store
         .remember(
             NewNode {

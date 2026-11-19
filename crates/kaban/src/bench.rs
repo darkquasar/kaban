@@ -25,9 +25,6 @@
 //!        through the real pipeline after the notes, plus `recall_chunks`; 0 = today's bench
 //!   bench cg gen|run (feature `bench`, stage1-plan §18, CG7.3): the code-graph snapshot bench
 //!        in `cg.rs`, a separate corpus and result document (`bench_schema: 3`)
-//!   bench why-paired --before <0003 copy> --after <migrated copy> (EN-N7, engine-plan E2.7):
-//!        the `why` path prefilter against the scan, paired rounds in one process
-//!        (`why_paired.rs`, `bench_schema: 4`, informational)
 //!   bench recall --measure <layer set> (EN-N3, engine-plan E3.12 RP-13; feature `ingest`):
 //!        one `LayerMeasurement` per fresh process (`layers.rs`)
 //! ```
@@ -38,18 +35,66 @@
     clippy::cast_sign_loss
 )] // benchmark arithmetic on small counts/durations
 
+pub(crate) mod catalog;
 #[cfg(feature = "bench")]
 pub(crate) mod cg;
 #[cfg(feature = "ingest")]
 mod chunks;
+pub(crate) mod code;
 mod corpus;
+pub(crate) mod crash;
+pub(crate) mod git;
+pub(crate) mod graph;
 #[cfg(feature = "ingest")]
 mod layers;
+pub(crate) mod query;
 #[allow(dead_code)] // E3.5 early pure metric seam; CLI consumer is a separately admitted slice.
 pub(crate) mod recall_classes;
 pub(crate) mod recall_runtime;
 mod report;
+pub(crate) mod rollup;
 mod runner;
-pub(crate) mod why_paired;
+#[cfg(feature = "bench")]
+mod synthetic;
+pub(crate) mod text;
 
 pub(crate) use runner::{Shape, run};
+
+/// Refuse a spec 11 bench its owning task has not filled yet (`name`: kaban's own bench name):
+/// `bench <name> not delivered`, exit 4.
+fn not_delivered(name: &str) -> std::process::ExitCode {
+    crate::cli::output::print_error(&format!("error: bench {name} not delivered"));
+    std::process::ExitCode::from(crate::cli::output::EXIT_INVALID)
+}
+
+/// Run this binary as a child through the one process runner (`bench crash`, `bench catalog
+/// --memory`): `args`, the caller's `HOME`, `KABAN_HOME`, `TMPDIR` and `PATH` plus `env`, killed
+/// past `deadline`.
+#[cfg(feature = "bench")]
+fn run_self(
+    args: &[&std::ffi::OsStr],
+    env: &[(&str, &str)],
+    deadline: std::time::Duration,
+) -> anyhow::Result<kaban_core::process::Outcome> {
+    use kaban_core::process::{EnvAllowlist, Exec, InheritedFds, Spec};
+    let mut allowed = EnvAllowlist::new();
+    for name in ["HOME", "KABAN_HOME", "TMPDIR", "PATH"] {
+        allowed.carry(name)?;
+    }
+    for (name, value) in env {
+        allowed.insert(name, value)?;
+    }
+    Ok(kaban_core::process::run(Spec {
+        exec: Exec::Path(std::env::current_exe()?),
+        args: args.iter().map(|a| a.to_os_string()).collect(),
+        cwd: std::path::Path::new("."),
+        env: allowed,
+        deadline,
+        stdout_cap: 64 * 1024,
+        stderr_cap: 64 * 1024,
+        monitors: Vec::new(),
+        join_bound: std::time::Duration::from_secs(1),
+        // the benches run under a flock launcher, as the identity commands do
+        inherited_fds: InheritedFds::Tolerate,
+    })?)
+}

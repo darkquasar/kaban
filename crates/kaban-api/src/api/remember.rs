@@ -8,12 +8,8 @@ use crate::error::ApiError;
 use crate::ontology::validate_kind_props;
 use crate::types::{CodeRefWire, RememberRequest, RememberResponse, RememberStatus};
 use kaban_codegraph::{CodeGraphReader, HeadInput, Resolved};
-use kaban_core::ontology::meta::{Dedup, Stamp};
 use kaban_core::ontology::resolve::normalise_stored;
-use kaban_core::{
-    CodeRef, LinkReq, NewNode, NodeId, RememberOutcome, StoreScope, WorkspaceId, WriteCtx,
-};
-use kaban_core::{StoreError, UnstampedReason};
+use kaban_core::{CodeRef, LinkReq, NewNode, NodeId, RememberOutcome, StoreScope, WorkspaceId};
 use std::sync::Arc;
 
 const MAX_TAGS: usize = 32;
@@ -50,18 +46,6 @@ impl KabanApi {
     /// errors otherwise; nothing is stored on error.
     #[allow(clippy::needless_pass_by_value)] // core-plan §6 interface: requests are taken by value
     pub fn remember(&self, p: RememberRequest) -> Result<RememberResponse, ApiError> {
-        let mut response = self.remember_unsettled(p)?;
-        response.receipt = self.await_searchable(response.receipt);
-        Ok(response)
-    }
-
-    /// [`Self::remember`] before its write barrier (SS-10): the body of the public call, for a
-    /// public call that embeds a `remember` (a hook) and runs the one barrier itself.
-    #[allow(clippy::needless_pass_by_value)] // the public call's body: the request is taken by value
-    pub(crate) fn remember_unsettled(
-        &self,
-        p: RememberRequest,
-    ) -> Result<RememberResponse, ApiError> {
         if p.tags.len() > MAX_TAGS || p.links.len() > MAX_LINKS {
             return Err(ApiError::Invalid("too many tags or links".into()));
         }
@@ -88,16 +72,12 @@ impl KabanApi {
         let mut red = Vec::new();
         let t = "remember";
         // The workspace is gated first and the write context is built from the sanitized value,
-        // so a redact-class workspace never reaches an audit row or the export raw (review R1-1).
-        let mut ctx = self.write_ctx(None);
+        // so a redact-class workspace never reaches the store raw (review R1-1).
         let workspace_id = match &p.workspace_id {
-            Some(s) => self.gate(&mut ctx, t, "workspace_id", s, &mut red)?,
+            Some(s) => self.gate(t, "workspace_id", s, &mut red)?,
             None => self.config.workspace.as_str().to_owned(),
         };
-        ctx.workspace_id = WorkspaceId::new(workspace_id.as_str());
-        for e in &mut ctx.audit {
-            e.workspace_id = ctx.workspace_id.clone();
-        }
+        let ctx = self.write_ctx(Some(workspace_id.as_str()));
         // joined view first, so a phrase split across fields is still caught
         let joined = [
             Some(p.kind.as_str()),
@@ -113,38 +93,37 @@ impl KabanApi {
         .chain(p.path_scope.iter().map(String::as_str))
         .collect::<Vec<_>>()
         .join(" ");
-        self.gate_joined(&mut ctx, t, "all", &joined)?;
+        self.gate_joined(t, "all", &joined)?;
         // the gated kind in its canonical stored spelling (E1.9a RE3-2: `adr:Decision` is
         // `Decision`, `user:Widget` is `Widget`), the one name every registry lookup below and
         // the store's placement judge; a foreign qualified name is itself
-        let kind = normalise_stored(&self.gate(&mut ctx, t, "kind", &p.kind, &mut red)?);
-        let text = self.gate(&mut ctx, t, "text", &p.text, &mut red)?;
+        let kind = normalise_stored(&self.gate(t, "kind", &p.kind, &mut red)?);
+        let text = self.gate(t, "text", &p.text, &mut red)?;
         let summary = match &p.summary {
-            Some(s) => Some(self.gate(&mut ctx, t, "summary", s, &mut red)?),
+            Some(s) => Some(self.gate(t, "summary", s, &mut red)?),
             None => None,
         };
         let mut tags = Vec::new();
         for s in &p.tags {
-            tags.push(self.gate(&mut ctx, t, "tag", s, &mut red)?);
+            tags.push(self.gate(t, "tag", s, &mut red)?);
         }
         // stored as its canonical set (R3-6), the denominator of its F14 currency
-        let path_scope = crate::currency::canonical_path_scope(&self.gate_all(
-            &mut ctx,
+        let path_scope = crate::path_scope::canonical_path_scope(&self.gate_all(
             t,
             "path_scope",
             &p.path_scope,
             &mut red,
         )?);
         let session_id = match &p.session_id {
-            Some(s) => Some(self.gate(&mut ctx, t, "session_id", s, &mut red)?),
+            Some(s) => Some(self.gate(t, "session_id", s, &mut red)?),
             None => None,
         };
         let agent_id = match &p.agent_id {
-            Some(s) => Some(self.gate(&mut ctx, t, "agent_id", s, &mut red)?),
+            Some(s) => Some(self.gate(t, "agent_id", s, &mut red)?),
             None => None,
         };
         let props = match &p.props {
-            Some(v) => Some(self.gate_json(&mut ctx, t, "props", v, &mut red)?),
+            Some(v) => Some(self.gate_json(t, "props", v, &mut red)?),
             None => None,
         };
         // kind props against the kind's `props_schema` in the registry (engine-spec EN-F3; keys
@@ -168,15 +147,9 @@ impl KabanApi {
         };
         let mut refs: Vec<NewNode> = Vec::new();
         for w in &p.refs {
-            let gated = self.gate_coderef(&mut ctx, t, w, &mut red)?;
-            let gated = self.verify_coderef(
-                &mut ctx,
-                t,
-                &mut red,
-                gated,
-                head.as_deref(),
-                resolved.as_ref(),
-            )?;
+            let gated = self.gate_coderef(t, w, &mut red)?;
+            let gated =
+                self.verify_coderef(t, &mut red, gated, head.as_deref(), resolved.as_ref())?;
             let stored = CodeRef::try_from(gated)?;
             refs.push(NewNode {
                 kind: "CodeRef".into(),
@@ -196,10 +169,9 @@ impl KabanApi {
         for l in &p.links {
             check_unit("link.confidence", l.confidence)?;
             let req = LinkReq {
-                rel: self.gate(&mut ctx, t, "link.rel", &l.rel, &mut red)?,
+                rel: self.gate(t, "link.rel", &l.rel, &mut red)?,
                 from: match &l.from {
                     Some(s) => Some(Self::node_id(&self.gate_control(
-                        &mut ctx,
                         t,
                         ControlPath::request(t, "links[].from"),
                         "link.from",
@@ -210,7 +182,6 @@ impl KabanApi {
                 },
                 to: match &l.to {
                     Some(s) => Some(Self::node_id(&self.gate_control(
-                        &mut ctx,
                         t,
                         ControlPath::request(t, "links[].to"),
                         "link.to",
@@ -248,16 +219,9 @@ impl KabanApi {
                 });
             }
         }
-        // the near-duplicate key of a kind whose mixin says `dedup: title+scope` (EN-F4; the
+        // the near-duplicate key of a kind whose rules say `dedup: title+scope` (EN-F4; the
         // shipped Decision)
-        let dedups = self
-            .registry
-            .with_kind(&kind, |k| {
-                k.governed
-                    .as_ref()
-                    .is_some_and(|g| g.dedup == Dedup::TitleScope)
-            })
-            .unwrap_or(false);
+        let dedups = self.rules().dedups(&kind);
         let n = NewNode {
             dup_key: dedups.then(|| dup_key(summary.as_deref(), &text, &path_scope)),
             kind,
@@ -276,29 +240,9 @@ impl KabanApi {
             store_scope: StoreScope::Project,
         };
         let outcome = self.store.remember_with(n, &links, &refs, &ctx)?;
-        self.export_audit(&ctx.audit);
         match outcome {
             RememberOutcome::Created(node) => {
-                // OWN-65 (engine-spec §3.1 "Sources that are not repositories"): a record of a
-                // `stamp: commit` kind written where no stamp can come records why; never an
-                // error: the record committed, so a failure here is logged and the receipt
-                // stands at the record's own position (SS-10); when the row is written, the
-                // call's terminal position is its transaction's
-                let mut seq = ctx.terminal_seq();
-                if let Some(reason) = self.unstamped_reason(&node.kind) {
-                    match NodeId::parse(&node.id)
-                        .map_err(|e| ApiError::from(StoreError::from(e)))
-                        .and_then(|id| {
-                            Ok(self
-                                .store
-                                .record_unstamped(&id, &node.workspace_id, reason)?)
-                        }) {
-                        Ok(terminal) => seq = Some(terminal),
-                        Err(e) => {
-                            tracing::warn!(error = %e, "the unstamped event failed after the record committed");
-                        }
-                    }
-                }
+                let seq = ctx.terminal_seq();
                 // candidates are records of the same kind (the key is title and scope only)
                 let candidate_duplicates = match &node.dup_key {
                     Some(k) => self
@@ -344,20 +288,6 @@ impl KabanApi {
         }
     }
 
-    /// OWN-65: why a record of `kind` written now gets no commit sha: the process runs outside
-    /// any repository (`repo_root` unset). Repository history is not queried on this write
-    /// path: doctor reports its current availability on demand. An unknown kind keeps the
-    /// spec default `commit`.
-    fn unstamped_reason(&self, kind: &str) -> Option<UnstampedReason> {
-        if self.registry.index_policy(kind).unwrap_or(Stamp::Commit) != Stamp::Commit {
-            return None;
-        }
-        match self.config.repo_root.as_deref() {
-            None => Some(UnstampedReason::NoRepository),
-            Some(_) => None,
-        }
-    }
-
     /// Gate every string field of a wire ref (field names `refs.<name>`); `info` is scanned
     /// here and dropped by the conversion to the stored form. `symbol` and `observed_at` are
     /// content (G1-F9: scanned before any grammar sees them); `snapshot_commit` is the one
@@ -365,25 +295,23 @@ impl KabanApi {
     /// validated, any other value is content and scanned.
     fn gate_coderef(
         &self,
-        ctx: &mut WriteCtx,
         t: &str,
         w: &CodeRefWire,
         red: &mut Vec<String>,
     ) -> Result<CodeRefWire, ApiError> {
         Ok(CodeRefWire {
-            repo: self.gate(ctx, t, "refs.repo", &w.repo, red)?,
-            commit: self.gate(ctx, t, "refs.commit", &w.commit, red)?,
-            tool: self.gate(ctx, t, "refs.tool", &w.tool, red)?,
-            relative_path: self.gate(ctx, t, "refs.relative_path", &w.relative_path, red)?,
-            name_path: self.gate_opt(ctx, t, "refs.name_path", w.name_path.as_deref(), red)?,
-            kind: self.gate_opt(ctx, t, "refs.kind", w.kind.as_deref(), red)?,
+            repo: self.gate(t, "refs.repo", &w.repo, red)?,
+            commit: self.gate(t, "refs.commit", &w.commit, red)?,
+            tool: self.gate(t, "refs.tool", &w.tool, red)?,
+            relative_path: self.gate(t, "refs.relative_path", &w.relative_path, red)?,
+            name_path: self.gate_opt(t, "refs.name_path", w.name_path.as_deref(), red)?,
+            kind: self.gate_opt(t, "refs.kind", w.kind.as_deref(), red)?,
             body_location: w.body_location,
             location: w.location,
             reference_line: w.reference_line,
-            symbol: self.gate_opt(ctx, t, "refs.symbol", w.symbol.as_deref(), red)?,
+            symbol: self.gate_opt(t, "refs.symbol", w.symbol.as_deref(), red)?,
             snapshot_commit: match &w.snapshot_commit {
                 Some(s) => Some(self.gate_control(
-                    ctx,
                     t,
                     ControlPath::request("remember", "refs[].snapshot_commit"),
                     "refs.snapshot_commit",
@@ -392,14 +320,8 @@ impl KabanApi {
                 )?),
                 None => None,
             },
-            observed_at: self.gate_opt(
-                ctx,
-                t,
-                "refs.observed_at",
-                w.observed_at.as_deref(),
-                red,
-            )?,
-            info: self.gate_opt(ctx, t, "refs.info", w.info.as_deref(), red)?,
+            observed_at: self.gate_opt(t, "refs.observed_at", w.observed_at.as_deref(), red)?,
+            info: self.gate_opt(t, "refs.info", w.info.as_deref(), red)?,
         })
     }
 
@@ -418,7 +340,6 @@ impl KabanApi {
     /// refused `symbol_invalid` without a rewrite (E2.5d).
     fn verify_coderef(
         &self,
-        ctx: &mut WriteCtx,
         t: &str,
         red: &mut Vec<String>,
         mut w: CodeRefWire,
@@ -440,7 +361,7 @@ impl KabanApi {
             match r.snapshot.nodes_in_file(&path) {
                 Ok(rows) => {
                     let key = coderef::derive_symbol(&*r.snapshot, &rows, name_path)?;
-                    if self.gate(ctx, t, "refs.symbol", &key, red)? != key {
+                    if self.gate(t, "refs.symbol", &key, red)? != key {
                         return Err(coderef::symbol_invalid());
                     }
                     // the key-form rule of an explicit `symbol` (RU3-6), on the derived key too (RW1-3)

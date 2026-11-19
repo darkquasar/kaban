@@ -3,8 +3,7 @@
 //! workflow: `ontology load` of a user ontology, plain `index_docs` of 100 documents, 50
 //! structured `script` jobs (`ingest_brief`, `ingest_submit`, `ingest_finish`) and 50 fenced
 //! `ingest_claim` jobs (gliner dialect) of ten records each, the gazetteer over the 1,000
-//! records (`index_docs --link gazetteer`), reconciliation in every finish and one ER pass
-//! (`SqliteStore::er_resolve`: ER has no CLI or MCP verb in 3.0.0). Afterwards
+//! records (`index_docs --link gazetteer`); the ER pass went with governance (T3). Afterwards
 //! `PRAGMA foreign_key_check` is empty, the record counts are exact, and a claim and a submit
 //! bound to a foreign workspace write nothing. The phase times are printed (informational,
 //! never a gate).
@@ -20,7 +19,6 @@
 mod common;
 
 use common::{Scratch, Server};
-use kaban_store_sqlite::SqliteStore;
 use serde_json::{Value, json};
 use std::io::Write;
 use std::path::Path;
@@ -33,9 +31,6 @@ const BRIEF_DOCS: usize = 50;
 const SERVICES_PER_DOC: usize = 2;
 const COMPONENTS_PER_DOC: usize = 8;
 const RECORDS: usize = DOCS * (SERVICES_PER_DOC + COMPONENTS_PER_DOC);
-/// Component 0 of document `d` and of document `d + BRIEF_DOCS` share a first line: one ER
-/// `Match` pair per brief/claim document pair.
-const ER_PAIRS: u64 = BRIEF_DOCS as u64;
 /// The workspace the repository binds (its root directory's name).
 const WS: &str = "repo";
 
@@ -264,13 +259,6 @@ fn one_thousand_records_through_ontology_structured_claim_gazetteer_and_er() {
     let gazetteer_took = t.elapsed();
     srv.finish();
 
-    let store = SqliteStore::open(&s.db(), &s.home().join("keys")).unwrap();
-    let t = Instant::now();
-    let er = store.er_resolve(WS).unwrap();
-    let er_took = t.elapsed();
-    drop(store);
-    assert_eq!(er.matched, ER_PAIRS, "{er:?}");
-
     let conn = rusqlite::Connection::open(s.db()).unwrap();
     let violations: Vec<String> = conn
         .prepare("PRAGMA foreign_key_check")
@@ -295,14 +283,10 @@ fn one_thousand_records_through_ontology_structured_claim_gazetteer_and_er() {
     // every record's first line is in its own document: the gazetteer linked each at least once
     let mentioned = count(
         &conn,
-        "SELECT count(DISTINCT dst) FROM edge WHERE rel = 'MENTIONS' AND layer = 'gazetteer'",
+        "SELECT count(DISTINCT dst) FROM edge WHERE rel = 'MENTIONS' AND producer = 'gazetteer'",
         &[],
     );
     assert!(mentioned >= RECORDS, "{mentioned} records mentioned");
-    assert_eq!(
-        count(&conn, "SELECT count(*) FROM node_identity", &[]),
-        usize::try_from(ER_PAIRS).unwrap()
-    );
 
     // negative: a claimer and a submitter bound to another workspace write nothing
     let before = state(&conn);
@@ -355,7 +339,7 @@ fn one_thousand_records_through_ontology_structured_claim_gazetteer_and_er() {
     println!(
         "scale_e3: {RECORDS} records in {DOCS} documents: plain index {plain_took:?}, \
          {BRIEF_DOCS} brief jobs {brief_took:?}, {} claim jobs {claim_took:?}, finish total {:?} \
-         (max {:?}, {DOCS} finishes), gazetteer {gazetteer_took:?}, er {er_took:?} ({er:?})",
+         (max {:?}, {DOCS} finishes), gazetteer {gazetteer_took:?}",
         DOCS - BRIEF_DOCS,
         finishes.total,
         finishes.max,

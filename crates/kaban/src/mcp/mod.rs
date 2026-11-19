@@ -1,17 +1,15 @@
-//! MCP stdio adapter: 18 tools in the default build (the 10 memory tools; `index_docs` and
-//! `index_status` with the `ingest` feature; the six `code_*` tools with `code-graph`; 10 with
-//! no features) + four resources (`kaban://schema`, `kaban://stats`, `kaban://documents` with
-//! `ingest`, `kaban://code-index` with `code-graph`), each a thin wrapper over [`KabanApi`]
-//! that adds no behaviour (the `accept` handler adds the host's elicitation probe before the
-//! token flow, core-plan C3.2). Tool errors carry the service error's message text (never an
-//! offending value).
+//! MCP stdio adapter: the eight memory tools (`remember`, `link`, `recall`, `traverse`,
+//! `schema_describe`, `schema_extend`, `forget`, `stats`), the ingest tools with the `ingest`
+//! feature and the `code_*` tools with `code-graph`, plus four resources (`kaban://schema`,
+//! `kaban://stats`, `kaban://documents` with `ingest`, `kaban://code-index` with `code-graph`),
+//! each a thin wrapper over [`KabanApi`] that adds no behaviour. Tool errors carry the service
+//! error's message text (never an offending value).
 //!
 //! `call_tool` is written by hand (not `#[tool_handler]`) so the raw `arguments` value is
 //! scanned by the denylist before typed deserialization (core-spec S1, `KabanApi::prepare_args`):
 //! a serde error can never echo a secret, and the span records only a tool name the router
 //! knows (never argument values, never an unrecognized name). The typed handlers gate every
-//! string field they use (so redactions are reported and audited inside the write's
-//! transaction), and every content, error and resource string leaving the adapter passes the
+//! string field they use (so redactions are reported inside the write's transaction), and every content, error and resource string leaving the adapter passes the
 //! response gate (`KabanApi::gate_response` through [`gate_reply`], its plain-string form
 //! `KabanApi::gate_response_text` through [`gate_text`]; review R1-3), and a gated result that
 //! no longer has its declared shape is withheld (review R3-9). Errors for an unknown
@@ -25,7 +23,7 @@
 //! [`gate_reply`]: the handlers never return rmcp's typed JSON wrapper (`wrapper::Json`), which
 //! would serialize the ungated value (M3-16). Errors stay text-only.
 //!
-//! Every [`KabanApi`] call (SQLite, audit chain, denylist) is synchronous and may block, for
+//! Every [`KabanApi`] call (SQLite, text index, denylist) is synchronous and may block, for
 //! example in SQLite's `busy_timeout`, so each one runs on `tokio::task::spawn_blocking` through
 //! [`KabanServer::blocking`] (core-spec E2, N4; review R0-1). Nothing is held across an `.await`:
 //! the closure owns its request and an `Arc` of the API.
@@ -38,15 +36,13 @@ use kaban_api::ingest_jobs::{
     IngestSubmitRequest,
 };
 use kaban_api::{
-    AcceptRequest, AcceptResponse, Caller, ExplainStatusRequest, ForgetRequest, ForgetResponse,
-    GovernanceHistoryRequest, GovernanceHistoryResponse, KabanApi, LinkRequest, LinkResponse,
-    RecallRequest, RecallResponse, RememberRequest, RememberResponse, SchemaExtendRequest,
-    SchemaResponse, StatsRequest, StatsResponse, StatusExplanation, TraverseRequest,
-    TraverseResponse, WhyRequest, WhyResponse,
+    ForgetRequest, ForgetResponse, KabanApi, LinkRequest, LinkResponse, RecallRequest,
+    RecallResponse, RememberRequest, RememberResponse, SchemaExtendRequest, SchemaResponse,
+    StatsRequest, StatsResponse, TraverseRequest, TraverseResponse,
 };
 #[cfg(feature = "ingest")]
 use kaban_api::{IndexDocsRequest, IndexDocsResponse, IndexStatus};
-use kaban_core::{Actor, TypeDef};
+use kaban_core::TypeDef;
 use rmcp::handler::server::common::schema_for_output;
 use rmcp::handler::server::router::tool::ToolRouter;
 #[cfg(feature = "ingest")]
@@ -60,7 +56,7 @@ use rmcp::model::{
     ReadResourceRequestParams, ReadResourceResponse, ReadResourceResult, Resource,
     ResourceContents, ServerCapabilities, ServerConfig, Tool,
 };
-use rmcp::service::{ElicitationMode, RequestContext};
+use rmcp::service::RequestContext;
 use rmcp::{
     ErrorData as McpError, RoleServer, ServerHandler, ServiceExt, schemars, tool, tool_router,
 };
@@ -72,17 +68,6 @@ use tokio_util::sync::CancellationToken;
 /// Tool parameters for tools without arguments.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub(crate) struct Empty {}
-
-/// The form a host that supports elicitation shows for a Decision acceptance (core-plan C3.2).
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-struct AcceptConfirm {
-    /// Whether the user confirms the acceptance.
-    confirm: bool,
-}
-rmcp::elicit_safe!(AcceptConfirm);
-
-/// How long the host may take to answer the elicitation (core-plan C3.2).
-const ELICIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
 /// The rmcp server handler.
 #[derive(Clone)]
@@ -151,7 +136,7 @@ fn gate_text(api: &KabanApi, text: &str) -> String {
 /// serialized, its text content (`CallToolResult::structured`), so the two never differ
 /// (M3-16); a withheld or failed result is a text-only error. A redaction that leaves the value
 /// outside the declared response type `T` withholds the result too (R3-9, [`gate_value`]).
-/// Runs on the blocking pool (a verdict may write an audit row).
+/// Runs on the blocking pool (the denylist scan is synchronous).
 fn gate_reply<T: Serialize + DeserializeOwned>(
     api: &KabanApi,
     tool: &str,
@@ -224,9 +209,7 @@ fn gated_resource<T: Serialize + DeserializeOwned>(
 
 /// The pre-parse scan of `tool`'s raw arguments (`KabanApi::prepare_args`, the request side of
 /// the seam). The arguments are taken by value and handed back for the typed parse: the
-/// adapter makes no copy of them, so no ordinary `String` of a secret leaf (the confirmation
-/// token) is created and dropped unzeroized here (review R3-2, RC-5); the typed parse then
-/// moves the token string into the zeroizing `ConfirmationToken`.
+/// adapter makes no copy of them (review R3-2, RC-5).
 fn prescan(
     api: &KabanApi,
     tool: &str,
@@ -278,14 +261,35 @@ impl KabanServer {
     }
 
     /// [`Self::tool_call`] for a public write (spec 05 SS-10): a refusal carries the typed
-    /// `rejected` receipt beside its error text.
+    /// `rejected` receipt beside its error text. A write that succeeded is followed by the
+    /// bounded checkpoint ([`Self::checkpoint_after_write`]).
     async fn write_tool_call<T, F>(&self, tool: &'static str, f: F) -> CallToolResult
     where
         T: Serialize + DeserializeOwned + Send + 'static,
         F: FnOnce(&KabanApi) -> Result<T, kaban_api::ApiError> + Send + 'static,
     {
-        self.tool_call_with(tool, OnRefusal::RejectedReceipt, f)
-            .await
+        let reply = self
+            .tool_call_with(tool, OnRefusal::RejectedReceipt, f)
+            .await;
+        if reply.is_error != Some(true) {
+            self.checkpoint_after_write();
+        }
+        reply
+    }
+
+    /// The bounded checkpoint after a write (KER-09), as the one-shot commands run it after
+    /// their acknowledgement: spawned on the blocking pool, so the response never waits for
+    /// it; it ticks only once its interval has elapsed, and an error is logged, never returned.
+    fn checkpoint_after_write(&self) {
+        let Some(catalog) = self.api.catalog().cloned() else {
+            return;
+        };
+        drop(tokio::task::spawn_blocking(move || {
+            match catalog.checkpoint_if_due() {
+                Ok(ran) => tracing::debug!(ran, "post-ack checkpoint"),
+                Err(e) => tracing::warn!(error = %e, "post-ack checkpoint failed"),
+            }
+        }));
     }
 
     async fn tool_call_with<T, F>(
@@ -428,7 +432,7 @@ impl KabanServer {
     }
 
     #[tool(
-        description = "Forget a node: tombstone (default; keeps history, hidden from every read, never re-proposed as a duplicate), invalidate (tombstone plus governance invalidated with an event), archive (reachable by id and graph expansion only), or purge (destructive; removes text, index entries and edges, the id never reappears).",
+        description = "Forget a node: tombstone (default; keeps history, hidden from every read, never re-proposed as a duplicate), invalidate (the same effect as tombstone), archive (reachable by id and graph expansion only), or purge (destructive; removes text, index entries and edges, the id never reappears).",
         output_schema = output_schema::<ForgetResponse>(),
         annotations(
             title = "Forget",
@@ -444,21 +448,6 @@ impl KabanServer {
     }
 
     #[tool(
-        description = "Get, set or clear durable automatic-pruning protection on a node, claim or relationship. Explicit and effective dependency protection are separate. Does not prevent automated replacement, explicit deletion or policy enforcement.",
-        output_schema = output_schema::<kaban_api::PruningProtectionResponse>(),
-        annotations(title = "Pruning protection",read_only_hint = false,destructive_hint = false,idempotent_hint = true,open_world_hint = false)
-    )]
-    async fn pruning_protection(
-        &self,
-        Parameters(p): Parameters<kaban_api::PruningProtectionRequest>,
-    ) -> CallToolResult {
-        self.write_tool_call("pruning_protection", move |api| {
-            api.pruning_protection(p, Actor::Agent)
-        })
-        .await
-    }
-
-    #[tool(
         description = "Counts of nodes/edges by kind and relationship in the bound workspace (workspace_id \"*\" for all), database size, denylist policy version.",
         output_schema = output_schema::<StatsResponse>(),
         annotations(
@@ -471,140 +460,6 @@ impl KabanServer {
     )]
     async fn stats(&self, Parameters(p): Parameters<StatsRequest>) -> CallToolResult {
         self.tool_call("stats", move |api| api.stats(p)).await
-    }
-
-    #[tool(
-        description = "Why: the accepted (then proposed) Decisions and Conventions that govern a path (their path_scope covers it) or match a query, each with its currency since acceptance: active, needs_review (half or more of the scope changed in committed history), stale (every scope entry is gone) or uncheckable (no repository, git absent or slow, another repository, not accepted). Targets are {\"path\": \"src/store/sqlite.rs\"} or {\"query\": \"wal mode\"}, up to 16 per call; results are per target, accepted first.",
-        output_schema = output_schema::<WhyResponse>(),
-        annotations(
-            title = "Why",
-            read_only_hint = true,
-            destructive_hint = false,
-            idempotent_hint = true,
-            open_world_hint = false
-        )
-    )]
-    async fn why(&self, Parameters(p): Parameters<WhyRequest>) -> CallToolResult {
-        self.tool_call("why", move |api| api.why(p)).await
-    }
-
-    #[tool(
-        description = "Governance history: for each Decision or Convention one selector reaches (a record id; a SCIP symbol key as why reaches it; a repository-relative path whose path_scope covers it), the SUPERSEDES chain in both directions (supersedes and superseded_by, nearest first) and its governance events, newest first. Superseded and archived records are included here and nowhere else but why(include_superseded). Exactly one of id, symbol or path; limit bounds records (default 20, max 100), each chain is bounded to 50 hops and each record to its 100 newest events; partial is true when any bound cut. A hop in an unselected workspace ends the chain (chain_cut) and is never returned.",
-        output_schema = output_schema::<GovernanceHistoryResponse>(),
-        annotations(
-            title = "Governance history",
-            read_only_hint = true,
-            destructive_hint = false,
-            idempotent_hint = true,
-            open_world_hint = false
-        )
-    )]
-    async fn governance_history(
-        &self,
-        Parameters(p): Parameters<GovernanceHistoryRequest>,
-    ) -> CallToolResult {
-        self.tool_call("governance_history", move |api| api.governance_history(p))
-            .await
-    }
-
-    #[tool(
-        description = "Explain the status of anything addressable in the index: a node id, e:<edge id>, a claim key (64 hex digits), a discovered kind (x:Org) or <path>:<offset>. One document: the status (pending: candidate, unresolved, conflict, stale, proposed, discovered; settled: active, accepted, dissent, rejected, superseded) with its reason sentence, the conflict group's explanation where one exists, the lineages with their offsets, the policy that applies, the status history and the exact next actions with the kaban command for each (empty for a settled status).",
-        output_schema = output_schema::<StatusExplanation>(),
-        annotations(
-            title = "Explain",
-            read_only_hint = true,
-            destructive_hint = false,
-            idempotent_hint = true,
-            open_world_hint = false
-        )
-    )]
-    async fn explain(&self, Parameters(p): Parameters<ExplainStatusRequest>) -> CallToolResult {
-        self.tool_call("explain", move |api| api.explain_status(p))
-            .await
-    }
-
-    #[tool(
-        description = "Accept a governed record (sets governance=accepted and appends an event). Needs a reason and a non-empty path_scope (paths or globs the record governs). Conventions and Failures are accepted directly (signer_kind agent). A Decision needs human confirmation: the response is status=confirmation_required with a prompt to show the user and a one-time confirmation_token (10 min); once the user agrees, call accept again with the same id, the confirmation_token and confirmed_by_user=true (signer_kind human-via-chat). Where the host supports elicitation the user is asked directly first. Supersede an old Decision with link rel=SUPERSEDES.",
-        output_schema = output_schema::<AcceptResponse>(),
-        annotations(
-            title = "Accept",
-            read_only_hint = false,
-            destructive_hint = false,
-            idempotent_hint = false,
-            open_world_hint = false
-        )
-    )]
-    async fn accept(
-        &self,
-        Parameters(p): Parameters<AcceptRequest>,
-        context: RequestContext<RoleServer>,
-    ) -> CallToolResult {
-        // the actor is never read from the wire (M3-17): an MCP caller is an agent, its host is
-        // the client name it declared at `initialize` (gated like every content string)
-        let caller = Caller {
-            kind: Actor::Agent,
-            host: context
-                .peer
-                .peer_info()
-                .map(|info| info.client_info.name.clone()),
-            session: None,
-        };
-        let first = {
-            let (p, caller) = (p.clone(), caller.clone());
-            self.blocking(move |api| api.accept(p, &caller)).await
-        };
-        let outcome = match first {
-            Ok(Ok(AcceptResponse::ConfirmationRequired {
-                prompt,
-                confirmation_token,
-                expires_in_s,
-            })) if context
-                .peer
-                .supported_elicitation_modes()
-                .contains(&ElicitationMode::Form) =>
-            {
-                // the host can ask the user itself: the prompt (gated text) goes through the
-                // form; a `confirm: true` answer redeems the token here, anything else (declined,
-                // cancelled, `confirm: false`, timeout) falls back to the token path unchanged
-                let question = {
-                    let prompt = prompt.clone();
-                    match self.blocking(move |api| gate_text(api, &prompt)).await {
-                        Ok(text) => text,
-                        Err(msg) => return CallToolResult::error(vec![ContentBlock::text(msg)]),
-                    }
-                };
-                let answer = context
-                    .peer
-                    .elicit_with_timeout::<AcceptConfirm>(question, Some(ELICIT_TIMEOUT))
-                    .await;
-                match answer {
-                    Ok(Some(AcceptConfirm { confirm: true })) => {
-                        let redeem = AcceptRequest {
-                            confirmation_token: Some(confirmation_token),
-                            confirmed_by_user: true,
-                            ..p
-                        };
-                        self.blocking(move |api| api.accept(redeem, &caller)).await
-                    }
-                    _ => Ok(Ok(AcceptResponse::ConfirmationRequired {
-                        prompt,
-                        confirmation_token,
-                        expires_in_s,
-                    })),
-                }
-            }
-            other => other,
-        };
-        match outcome {
-            Ok(r) => match self
-                .blocking(move |api| gate_reply(api, "accept", r, OnRefusal::ErrorOnly))
-                .await
-            {
-                Ok(reply) => reply,
-                Err(msg) => CallToolResult::error(vec![ContentBlock::text(msg)]),
-            },
-            Err(msg) => CallToolResult::error(vec![ContentBlock::text(msg)]),
-        }
     }
 }
 
@@ -640,7 +495,7 @@ impl KabanServer {
         }
     }
 
-    /// [`gate_text`] on the blocking pool (the denylist check may write an audit row).
+    /// [`gate_text`] on the blocking pool (the denylist check is synchronous).
     async fn gate_error_text(&self, text: String) -> String {
         match self.blocking(move |api| gate_text(api, &text)).await {
             Ok(safe) => safe,
@@ -701,7 +556,7 @@ impl KabanServer {
     }
 
     #[tool(
-        description = "Finish a workspace-scoped structured ingestion job: reconcile the union of successful submits, preserve human and foreign edges, and retain a gated canonical report for bounded byte-identical retries. Reopens and revalidates the source and current policy; no extractor is executed.",
+        description = "Finish a workspace-scoped structured ingestion job: reconcile the union of successful submits, preserve authored and other producers' edges, and retain a gated canonical report for bounded byte-identical retries. Reopens and revalidates the source and current policy; no extractor is executed.",
         output_schema = output_schema::<IngestFinishReport>(),
         annotations(title = "Finish ingestion job", read_only_hint = false,
             destructive_hint = true, idempotent_hint = true, open_world_hint = false)
@@ -717,7 +572,7 @@ impl KabanServer {
     }
 
     #[tool(
-        description = "Validate a workspace-scoped structured extractor return against its checked source and pinned ontology, then atomically publish proposed records, acceptance-safe revision candidates, L3 assertions, owned edges, successful audit and bounded job accumulation. No extractor is executed; governed relationships and foreign targets are refused.",
+        description = "Validate a workspace-scoped structured extractor return against its checked source and pinned ontology, then write its records and the producer's edges as active records in one commit and count the submit on the job. No extractor is executed; lifecycle relationships (SUPERSEDES, INVALIDATES, CONTRADICTS) and foreign targets are refused.",
         output_schema = output_schema::<IngestSubmitReport>(),
         annotations(title = "Submit ingestion records", read_only_hint = false,
             destructive_hint = false, idempotent_hint = true, open_world_hint = false)
@@ -777,7 +632,7 @@ impl KabanServer {
     }
 
     #[tool(
-        description = "Status of the document index of the bound workspace: documents by status, chunks, blocked chunks and denylist rule ids (counts only), failed documents with their error, last run, outbox lag, pipeline version and the compiled extractors. Also available as resource kaban://documents with the document list.",
+        description = "Status of the document index of the bound workspace: documents by status, chunks, blocked chunks and denylist rule ids (counts only), failed documents with their error, last run, pipeline version and the compiled extractors. Also available as resource kaban://documents with the document list.",
         output_schema = output_schema::<IndexStatus>(),
         annotations(
             title = "Index status",
@@ -816,7 +671,7 @@ impl ServerHandler for KabanServer {
         tracing::Span::current().record("tool", tracing::field::display(known.name.as_ref()));
         if let Some(args) = request.arguments.take() {
             let tool = request.name.to_string();
-            // a rejection writes an audit row inside the store: blocking pool. The arguments
+            // the denylist scan is synchronous: blocking pool. The arguments
             // move through the scan and come back for the typed parse (no clone, review R3-2)
             let scanned = self.blocking(move |api| prescan(api, &tool, args)).await;
             match scanned {
@@ -937,20 +792,13 @@ pub(crate) async fn serve_stdio(api: KabanApi) -> anyhow::Result<()> {
         .serve(rmcp::transport::stdio())
         .await?;
     let cancel = CancellationToken::new();
-    let import_api = job_api.clone();
     #[cfg(feature = "code-graph")]
     let warmup = code::spawn_warmup(job_api.clone());
     let job = spawn_rescan(job_api, cancel.clone());
-    // the `.kaban/*.md` startup import (core-spec F13; M5-13): once, after the server is up so
-    // `initialize` is not delayed, skipped without a `.kaban/` directory
-    let import = spawn_startup_import(import_api);
     let served = service.waiting().await;
     cancel.cancel();
     if let Err(e) = job.await {
         tracing::error!(error = %e, "rescan task failed");
-    }
-    if let Err(e) = import.await {
-        tracing::error!(error = %e, "startup import task failed");
     }
     #[cfg(feature = "code-graph")]
     if let Err(e) = warmup.await {
@@ -958,27 +806,6 @@ pub(crate) async fn serve_stdio(api: KabanApi) -> anyhow::Result<()> {
     }
     served?;
     Ok(())
-}
-
-/// Run the startup import on the blocking pool (M5-13); the summary is one line of counts,
-/// never a path or a value from a file (core-spec S1).
-fn spawn_startup_import(api: KabanApi) -> tokio::task::JoinHandle<()> {
-    tokio::task::spawn_blocking(move || match kaban_api::sync::startup_import(&api) {
-        Ok(Some(report)) => tracing::info!(
-            files = report.files,
-            imported = report.imported,
-            unchanged = report.unchanged,
-            tombstones = report.tombstones,
-            conflicts = report.conflicts.len(),
-            rejected = report.rejected,
-            skipped = report.skipped,
-            tombstoned_by_absence = report.tombstoned_by_absence,
-            reserialized = report.reserialized,
-            "startup import done"
-        ),
-        Ok(None) => tracing::debug!("startup import skipped: no .kaban directory"),
-        Err(e) => tracing::warn!(error = %e, "startup import failed; `kaban rebuild` retries it"),
-    })
 }
 
 /// Run the rescan job on the blocking pool; `cancel` is checked between batches. The closure
@@ -999,57 +826,64 @@ fn spawn_rescan(api: KabanApi, cancel: CancellationToken) -> tokio::task::JoinHa
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)] // test code: failures are the assertion
 mod tests {
-    use super::prescan;
-    use kaban_api::KabanApi;
-    use kaban_policy::Policy;
+    #![allow(clippy::unwrap_used)] // test code: failures are the assertion
+
+    use super::*;
+    use kaban_api::{CatalogMaintenance, CatalogVerify, CompactReport};
+    use kaban_core::StoreError;
     use kaban_store_sqlite::SqliteStore;
-    use rmcp::model::JsonObject;
-    use serde_json::{Value, json};
-    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::{Duration, Instant};
 
-    /// Review R3-2 (RC-5): the adapter's pre-parse scan hands the typed parse the very
-    /// arguments it judged. The token string the typed parse moves into the zeroizing
-    /// `ConfirmationToken` is the one allocation the transport produced, not a copy the
-    /// adapter made (the check is by buffer identity; a transient copy inside the scan is not
-    /// observable without an allocator hook, which `unsafe_code = "forbid"` rules out).
-    #[test]
-    fn the_pre_parse_scan_hands_the_same_arguments_on_without_copying() {
-        let base = std::env::temp_dir().join(format!("kaban-prescan-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&base);
-        std::fs::create_dir_all(&base).unwrap();
-        let store = Arc::new(SqliteStore::open(&base.join("k.db"), &base.join("keys")).unwrap());
-        let api = KabanApi::new(store.clone(), Policy::empty(), store.signer(), None);
+    /// A catalog port that only counts its checkpoint ticks.
+    #[derive(Default)]
+    struct Ticks(AtomicUsize);
 
-        let token = "ab".repeat(32);
-        let mut args = JsonObject::new();
-        args.insert("id".into(), json!("01a17a03-5cbc-7000-8000-000000000000"));
-        args.insert("confirmation_token".into(), Value::String(token));
-        args.insert("confirmed_by_user".into(), json!(true));
-        let before = args["confirmation_token"].as_str().unwrap().as_ptr();
+    impl CatalogMaintenance for Ticks {
+        fn compact(&self) -> Result<CompactReport, StoreError> {
+            Ok(CompactReport::default())
+        }
+        fn recover(&self) -> Result<String, StoreError> {
+            Ok(String::new())
+        }
+        fn verify(&self) -> Result<CatalogVerify, StoreError> {
+            Ok(CatalogVerify::default())
+        }
+        fn status(&self) -> Result<kaban_api::CatalogStatus, StoreError> {
+            Ok(kaban_api::CatalogStatus::default())
+        }
+        fn checkpoint_if_due(&self) -> Result<bool, StoreError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(true)
+        }
+        fn reindex_graph(&self) -> Result<(), StoreError> {
+            Ok(())
+        }
+    }
 
-        let (args, verdict) = prescan(&api, "accept", args);
-        assert!(verdict.is_ok(), "{verdict:?}");
-        assert_eq!(
-            args["confirmation_token"].as_str().unwrap().as_ptr(),
-            before,
-            "the typed parse receives the bytes the scan judged, not a re-materialized copy"
-        );
-        assert_eq!(args.len(), 3, "nothing added or dropped");
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_served_write_is_followed_by_the_bounded_checkpoint() {
+        // Arrange
+        let store = Arc::new(SqliteStore::open_memory().unwrap());
+        let ticks = Arc::new(Ticks::default());
+        let api = KabanApi::new(store.clone(), kaban_policy::Policy::empty(), store.signer())
+            .with_catalog(ticks.clone());
+        let server = KabanServer::new(api);
+        let request: RememberRequest =
+            serde_json::from_value(serde_json::json!({"kind": "Fact", "text": "the tide turns"}))
+                .unwrap();
 
-        // a value that is not a kaban token is content: rejected under its credential-named
-        // key, and the arguments still come back (the caller decides what to drop)
-        let mut pasted = JsonObject::new();
-        pasted.insert("id".into(), json!("01a17a03-5cbc-7000-8000-000000000000"));
-        pasted.insert("confirmation_token".into(), json!("AKIAQWERTYUIOPASDFGH"));
-        let (pasted, verdict) = prescan(&api, "accept", pasted);
-        let text = verdict.unwrap_err().to_string();
-        assert!(
-            text.contains("aws-access-key-id") && !text.contains("AKIAQWERTYUIOPASDFGH"),
-            "{text}"
-        );
-        assert_eq!(pasted.len(), 2);
-        let _ = std::fs::remove_dir_all(&base);
+        // Act
+        let reply = server.remember(Parameters(request)).await;
+
+        // Assert: the write succeeded, and one tick ran after it (bounded wait: it runs
+        // beside the response)
+        assert_ne!(reply.is_error, Some(true), "{reply:?}");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while ticks.0.load(Ordering::SeqCst) == 0 && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(ticks.0.load(Ordering::SeqCst), 1);
     }
 }

@@ -18,12 +18,11 @@ fn reindex_text_backfills_and_repeated_pass_preserves_content() {
                 ..Default::default()
             },
             &[],
-            &WriteCtx::new("v1", WorkspaceId::default(), Actor::Agent),
+            &WriteCtx::new(WorkspaceId::default(), Actor::Agent),
         )
         .unwrap();
     drop(store);
-    // the index beside the database is removed: `reindex text` rebuilds it from the rows
-    std::fs::remove_dir_all(kaban_core::text_index::index_dir(&scratch.db())).unwrap();
+    // `reindex text` rebuilds the text index from the rows, twice with the same content
     for _ in 0..2 {
         let output = Command::new(env!("CARGO_BIN_EXE_kaban"))
             .env("KABAN_HOME", scratch.home())

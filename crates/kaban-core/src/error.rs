@@ -92,9 +92,9 @@ pub enum StoreError {
         /// Kind the batch asked for.
         requested: String,
     },
-    /// An ingestion batch names a workspace other than its write context's: the audit rows
-    /// would be attributed to a tenant other than the mutated rows (R2-1), so the batch is
-    /// refused before any write.
+    /// An ingestion batch names a workspace other than its write context's: its rows would be
+    /// attributed to a tenant other than the context's (R2-1), so the batch is refused before
+    /// any write.
     #[error("batch workspace '{batch}' differs from the write context's workspace '{ctx}'")]
     WorkspaceMismatch {
         /// Workspace of the write context.
@@ -117,29 +117,67 @@ pub enum StoreError {
         #[source]
         source: BackendSource,
     },
+    /// A query or maintenance budget refused the work (spec 11 QRY-06, 7.6): its memory
+    /// ceiling, its deadline or its cancellation. The text is the budget's own; it carries
+    /// only the limit and its measured value.
+    #[error(transparent)]
+    BudgetExceeded(#[from] crate::query_budget::BudgetExceeded),
     /// JSON (de)serialization of props/tags failed.
     #[error(transparent)]
     Json(#[from] serde_json::Error),
-    /// The audit chain could not be initialised (key file missing, unreadable or malformed).
-    /// Writes must not proceed without it (core-spec S3).
-    #[error("audit chain unavailable")]
+    /// The database identity or its HMAC key could not be read (key file missing, unreadable
+    /// or malformed). Writes must not proceed without it (core-spec S3).
+    #[error("database key unavailable")]
     Audit(#[source] Box<dyn std::error::Error + Send + Sync>),
     /// The database file (or a `-wal`/`-shm` sidecar) could not be created or restricted to
     /// owner-only permissions (core-spec S5). The store refuses to open rather than leave a
     /// world-readable database behind.
     #[error("database file could not be created or made owner-only (0600)")]
     FileMode(#[source] std::io::Error),
+    /// A sync of a store file to stable storage failed (spec 11 KER-11), so the operation
+    /// `op` it served was aborted: nothing it wrote is published or acknowledged, and the sync
+    /// is never retried in place (after a failed sync the kernel may have dropped the dirty
+    /// pages, so a later success would prove nothing). The process reports it; the text names
+    /// the operation, the source is the operating system's error.
+    #[error("storage_fatal: {op} could not sync to stable storage")]
+    StorageFatal {
+        /// The operation that synced (`append_extent`, `create_container`, ...).
+        op: &'static str,
+        /// The failed sync's error.
+        #[source]
+        source: std::io::Error,
+    },
     /// The database is at another schema version than the one this kaban serves (spec 05
     /// OWN-P: one schema, no migrations; an older and a newer file alike). It is left
-    /// untouched.
+    /// untouched: no upgrade path exists (spec 11 CMP-01, OD-1).
     #[error(
-        "database schema version {found} is not the version {supported} this kaban serves: the database was created by another kaban version; export it with that version and re-ingest here, or start a new database"
+        "database schema version {found} is not the version {supported} this kaban serves: no upgrade path exists; create a fresh project and re-ingest"
     )]
     SchemaUnsupported {
         /// Version recorded in the database (1 for an unversioned spike file).
         found: u32,
         /// The one version this binary serves.
         supported: u32,
+    },
+    /// The database file records no kaban schema while a non-empty `-wal` lies beside it
+    /// (spec 11 CMP-01): an unknown writer's log, never replayed. Both files are left
+    /// untouched.
+    #[error(
+        "the database is not a kaban v{supported} project: its main file records no kaban schema and a non-empty -wal lies beside it; move both aside or create a fresh project"
+    )]
+    NotAKabanProject {
+        /// The one version this binary serves.
+        supported: u32,
+    },
+    /// A new node would get a row id above `max`, the highest local id the graph can address
+    /// (spec 11 PC-1: `node.rid` is the graph's `u32` local id). The whole write was rolled
+    /// back; row ids are never reused, so the project cannot take more nodes.
+    #[error(
+        "the database has used every node id the graph can address (the highest is {max}); create a fresh project and re-ingest"
+    )]
+    NodeIdCeiling {
+        /// The highest node row id the graph can address.
+        max: u32,
     },
     /// Another process holds the database open and this store cannot share one between
     /// processes (spec 05 SS-23: the shared open, mode B, is refused). Nothing was opened.
@@ -161,7 +199,7 @@ pub enum StoreError {
     /// was attached (spec 05 SS-25). The text is the fixed class: no commit, no path.
     #[error("snapshot_mismatch")]
     SnapshotMismatch,
-    /// A lifecycle or governance transition the spec does not allow (core-spec §4).
+    /// A lifecycle transition the spec does not allow (core-spec §4).
     #[error(transparent)]
     InvalidTransition(#[from] crate::lifecycle::InvalidTransition),
     /// A string that is not a node id.
@@ -189,15 +227,6 @@ pub enum StoreError {
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
     },
-    /// An undeclared label the discovered-labels policy refuses (engine-spec EN-F5: policy
-    /// `deny`, or a label that would shadow a governed kind under any policy). The record is
-    /// skipped; the text is the fixed class and nothing else: the label is caller data and
-    /// reaches neither `Display` nor `Debug` (core S3, E1.9a RE3-8).
-    #[error("kind_not_allowed")]
-    KindNotAllowed,
-    /// An operation reserved to a human actor (EN-F5 `promote`), called by an agent.
-    #[error("human_only:{0}")]
-    HumanOnly(&'static str),
     /// The database retired its in-database FTS5 index (spec 05 SS-16) and this store has no
     /// text index attached (a build without the Tantivy adapter, or a library open): recall,
     /// the text index rebuild and its diagnostics have nothing to work on, so they are refused
@@ -211,79 +240,17 @@ pub enum StoreError {
     /// reason given (another session holds the database). Nothing was opened.
     #[error("the text index must be rebuilt and cannot be at this open: {0}")]
     TextIndexRebuildRefused(&'static str),
-    /// `promote_kind` would give a renamed record the dedup identity (workspace, kind, text)
-    /// of an existing active record of the target kind (E1.9a RE3-3). The whole promotion is
-    /// refused; nothing is renamed.
-    #[error("promote_conflict")]
-    PromoteConflict,
-    /// The promotion target cannot take the records as they are (E1.9a RE3-4): a governed
-    /// kind (its lifecycle starts `proposed`, its `dedup` key is derived at write time), or a
-    /// kind whose `props_schema` some record of the group does not satisfy. Decided by the
-    /// service from the loaded ontology before any mutation.
-    #[error("promote_target_incompatible")]
-    PromoteTargetIncompatible,
-    /// An ontology error raised at the record seam (EN-F7 texts: `discovered_cap_reached`,
-    /// `invalid_identifier` for a discovered label, `unknown_kind` for a promotion target).
+    /// An ontology error raised at the record seam (EN-F7 texts).
     #[error(transparent)]
     Ontology(#[from] crate::ontology::OntologyError),
-    /// A producer `UpsertEdge` carrying a `layer` names no matching `edge` assertion in its
-    /// batch (engine-spec EN-F9; engine-plan E2.2): no producer writes an edge directly, the
-    /// projection of a verdict does, so the batch is refused before any write. The text is
-    /// the fixed class; the triple is caller data and is not echoed.
-    #[error("edge_requires_assertion")]
-    EdgeRequiresAssertion,
-    /// A batch assertion names a subject, span or object the batch's workspace does not hold (EN-S3, F17): unknown, purged or another tenant's; the whole
-    /// batch fails before any claim row is written. The id is echoed as the other
-    /// `NotFound` paths do (an id is control, not content).
-    #[error("assertion subject not found in the batch's workspace: {0}")]
-    AssertionSubjectNotFound(String),
-    /// A batch assertion's fixed-point input is out of range (EN-F12a: a `raw_score` above
-    /// 10000); nothing is written.
+    /// A producer's edge set or derived artifact does not match its producer, workspace or
+    /// source (a gazetteer set the store refuses), so the batch is refused before any write. The text is the fixed class; the triple is caller data and
+    /// is not echoed.
+    #[error("edge_set_refused")]
+    EdgeSetRefused,
+    /// A fixed-point input is out of range (EN-F12a: a value above 10000); nothing is written.
     #[error(transparent)]
     Fixed(#[from] crate::FixedError),
-    /// A human edge claim (`link`, an inline link of `remember`) was recorded but its group
-    /// has no winner to materialise (a zero-confidence claim is `no_valid_support`), so no
-    /// edge exists; the rel is control, not content.
-    #[error("claim_rejected: no edge materialised for '{0}'")]
-    ClaimRejected(String),
-    /// A claim's `supersedes` is refused (OWN-86 (3); EN-F8): it names no claim of the
-    /// batch's workspace, a claim of another conflict group, or closes a cycle inside the
-    /// batch. The whole batch fails before any claim row is written; the text is the fixed
-    /// class, never the key.
-    #[error("{0}")]
-    SupersedesInvalid(SupersedesClass),
-}
-
-/// Why a claim's `supersedes` was refused ([`StoreError::SupersedesInvalid`]): a fixed class,
-/// so the refusal carries no key and no value.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive] // a later rule adds a class; match with a fallback arm
-pub enum SupersedesClass {
-    /// The key names no claim the batch's workspace holds: unknown, purged, or another
-    /// tenant's (one class for all three, so the refusal is no existence oracle across tenants).
-    NotFound,
-    /// The named claim is of another conflict group (workspace, claim class, subject, detail).
-    CrossGroup,
-    /// The batch's `supersedes` references form a cycle (A supersedes B supersedes A, or longer).
-    Cycle,
-}
-
-impl SupersedesClass {
-    /// The class as the refusal renders it.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::NotFound => "supersedes_not_found",
-            Self::CrossGroup => "supersedes_cross_group",
-            Self::Cycle => "supersedes_cycle",
-        }
-    }
-}
-
-impl std::fmt::Display for SupersedesClass {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
 }
 
 impl std::fmt::Debug for StoreError {
@@ -322,14 +289,27 @@ impl std::fmt::Debug for StoreError {
                 .finish(),
             Self::Builtin(name) => f.debug_tuple("Builtin").field(name).finish(),
             Self::Backend { source } => f.debug_struct("Backend").field("source", source).finish(),
+            Self::BudgetExceeded(e) => f.debug_tuple("BudgetExceeded").field(e).finish(),
             Self::Json(e) => f.debug_tuple("Json").field(e).finish(),
             Self::Audit(e) => f.debug_tuple("Audit").field(e).finish(),
             Self::FileMode(e) => f.debug_tuple("FileMode").field(e).finish(),
+            Self::StorageFatal { op, source } => f
+                .debug_struct("StorageFatal")
+                .field("op", op)
+                .field("source", source)
+                .finish(),
             Self::SchemaUnsupported { found, supported } => f
                 .debug_struct("SchemaUnsupported")
                 .field("found", found)
                 .field("supported", supported)
                 .finish(),
+            Self::NotAKabanProject { supported } => f
+                .debug_struct("NotAKabanProject")
+                .field("supported", supported)
+                .finish(),
+            Self::NodeIdCeiling { max } => {
+                f.debug_struct("NodeIdCeiling").field("max", max).finish()
+            }
             Self::SharedOpenUnsupported => f.write_str("SharedOpenUnsupported"),
             Self::ExclusiveMaintenance => f.write_str("ExclusiveMaintenance"),
             Self::SnapshotMismatch => f.write_str("SnapshotMismatch"),
@@ -346,24 +326,13 @@ impl std::fmt::Debug for StoreError {
                 .field("to", to)
                 .field("source", source)
                 .finish(),
-            Self::KindNotAllowed => f.write_str("KindNotAllowed"),
-            Self::HumanOnly(what) => f.debug_tuple("HumanOnly").field(what).finish(),
             Self::TextIndexUnavailable => f.write_str("TextIndexUnavailable"),
             Self::TextIndexRebuildRefused(why) => {
                 f.debug_tuple("TextIndexRebuildRefused").field(why).finish()
             }
-            Self::PromoteConflict => f.write_str("PromoteConflict"),
-            Self::PromoteTargetIncompatible => f.write_str("PromoteTargetIncompatible"),
             Self::Ontology(e) => f.debug_tuple("Ontology").field(e).finish(),
-            Self::EdgeRequiresAssertion => f.write_str("EdgeRequiresAssertion"),
-            Self::AssertionSubjectNotFound(id) => {
-                f.debug_tuple("AssertionSubjectNotFound").field(id).finish()
-            }
+            Self::EdgeSetRefused => f.write_str("EdgeSetRefused"),
             Self::Fixed(e) => f.debug_tuple("Fixed").field(e).finish(),
-            Self::ClaimRejected(rel) => f.debug_tuple("ClaimRejected").field(rel).finish(),
-            Self::SupersedesInvalid(class) => {
-                f.debug_tuple("SupersedesInvalid").field(class).finish()
-            }
         }
     }
 }

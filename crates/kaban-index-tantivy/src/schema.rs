@@ -2,18 +2,15 @@
 //! kinds' `fts_fields` projection reaches `summary` through the store, the `ident_fields` and
 //! anchors feed `ident_terms`, the per-kind `column_weights` become query boosts); the fields
 //! themselves are the FTS5 index's four content columns plus the retrieval keys and the filter
-//! fields. Nothing is stored: a hit's `rid`, `revision` and `kind` come from fast columns, the
-//! record UUID is the delete key, and the record body lives in SQLite only.
+//! fields. Nothing is stored: a hit's `rid` comes from a fast column, and the record body lives
+//! in SQLite only.
 
 use crate::analyzers::{FOLDED, IDENT, STEMMED};
 use tantivy::schema::{
     FAST, Field, INDEXED, IndexRecordOption, STRING, Schema, TextFieldIndexing, TextOptions,
 };
 
-/// Bumped when the field set or an option changes; part of the payload's compatibility.
-pub(crate) const SCHEMA_VERSION: u32 = 1;
-
-/// The fast columns a hit is read from.
+/// The fast columns: a hit's `rid`, the revision and kind each document was indexed at.
 pub(crate) const RID: &str = "rid";
 pub(crate) const REVISION: &str = "revision";
 pub(crate) const KIND: &str = "kind";

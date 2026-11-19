@@ -17,9 +17,9 @@
 //! lacks are tombstoned (overwrite mode; `history: true` is DI3.4).
 //!
 //! Engine boundary (engine-plan §10, EN-F25): identifier matching (`find_mentions`, the
-//! gazetteer, `MENTIONS`) is not here. The store-side owned edge diff (spec D5 [A-3],
-//! `EdgeDiff::Owned`) is core EN-E4 and has not landed; every edge written here already carries
-//! `props.owner = "kaban-ingest"`; DI1.8 landed `EdgeDiff::Owned` and every batch here uses it.
+//! gazetteer, `MENTIONS`) is not here. Every batch here uses the owned edge diff (spec D5
+//! [A-3], `EdgeDiff::Owned` under the `document_ingest` producer, PC-16): every edge it writes
+//! is stored under that producer, and a re-ingest deletes only those.
 
 use crate::chunk::{ChunkDraft, estimate_tokens, slices_for};
 use crate::extract::{AnchorKind, LinkDraft, SectionDraft};
@@ -32,16 +32,16 @@ use crate::model::{
     PreparedGraph, SectionNode, SectionProps, SourceId, TOKEN_ESTIMATOR,
 };
 use kaban_core::{
-    AuditEntry, EdgeDiff, INGEST_OWNER, NewNode, Node, NodeId, Op, Owner, WorkspaceId, WriteBatch,
+    EdgeDiff, INGEST_OWNER, NewNode, Node, NodeId, Op, Producer, WorkspaceId, WriteBatch,
 };
-use kaban_policy::{AuditSigner, Policy};
+use kaban_policy::Policy;
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
-/// `props.owner` of every node and edge this pipeline writes (spec D5 [A-3]): the core's
-/// [`INGEST_OWNER`], the wire form of [`Owner::KabanIngest`] that `EdgeDiff::Owned` compares
-/// against and the only owner the store reactivates for (DI1.8; typed in E2.2).
+/// `props.owner` of every Document, Section and Chunk node this pipeline writes (spec D5
+/// [A-3]): the core's [`INGEST_OWNER`], the only owner the store reactivates for (DI1.8). The
+/// pipeline's edges carry their producer in the edge row instead (PC-16).
 pub const EDGE_OWNER: &str = INGEST_OWNER;
 
 /// Every batch this pipeline writes: the owned edge diff (spec D5 [A-3], engine-spec EN-E4), so
@@ -50,7 +50,7 @@ pub const EDGE_OWNER: &str = INGEST_OWNER;
 pub fn ingest_batch(workspace: &WorkspaceId, ops: Vec<Op>) -> WriteBatch {
     let mut batch = WriteBatch::new(workspace.clone(), ops);
     batch.edge_diff = EdgeDiff::Owned {
-        owner: Owner::KabanIngest,
+        producer: Producer::DocumentIngest,
     };
     batch
 }
@@ -169,8 +169,7 @@ impl ExistingDocument {
 }
 
 /// What one document contributes to [`assemble`]: sanitized document props, the chunker's
-/// sections with their gated chunks in the same order, the gated links and tags, and the audit
-/// rows collected so far.
+/// sections with their gated chunks in the same order, and the gated links and tags.
 #[derive(Debug)]
 pub struct AssembleInput<'a> {
     /// The source identity.
@@ -182,23 +181,19 @@ pub struct AssembleInput<'a> {
     pub sections: &'a [(SectionDraft, Vec<ChunkDraft>)],
     /// Gated chunks, flattened in document order (one per draft in `sections`).
     pub chunks: Vec<GatedChunk>,
-    /// Audit rows collected before assembly.
-    pub audit: Vec<AuditEntry>,
     /// [`crate::PIPELINE_VERSION`] (an id input).
     pub pipeline_version: u32,
     /// Delivery slice size for `ChunkProps::slices` (spec D4 [A-2]).
     pub slice_bytes: u32,
 }
 
-/// The assembled graph and the audit rows (heading redactions appended). Links and tags are
+/// The assembled graph and the redacted heading ranges. Links and tags are
 /// gated after assembly ([`crate::gate::gate_links_and_tags`] needs the heading verdicts,
 /// RD2-3) and set on the graph by the caller.
 #[derive(Debug)]
 pub struct Assembled {
     /// Nodes with ids assigned, chunks in reading order; `links` and `tags` empty.
     pub graph: PreparedGraph,
-    /// Audit rows for the same transaction.
-    pub audit: Vec<AuditEntry>,
     /// Source ranges of the sections whose heading path carried a hit (RD2-3).
     pub redacted_sections: Vec<std::ops::Range<u64>>,
 }
@@ -206,18 +201,12 @@ pub struct Assembled {
 /// Assign `section_id`/`chunk_id` (DI1.1) over the sanitized heading paths and chunk texts and
 /// fix the reading order (`order` on sections and chunks, which `build_batch` turns into
 /// `NEXT`). Heading texts are persisted and are id inputs, so they are gated here first (S1).
-pub fn assemble(
-    policy: &Policy,
-    signer: &dyn AuditSigner,
-    workspace: &WorkspaceId,
-    input: AssembleInput<'_>,
-) -> Assembled {
+pub fn assemble(policy: &Policy, input: AssembleInput<'_>) -> Assembled {
     let AssembleInput {
         source,
         mut props,
         sections,
         chunks,
-        mut audit,
         pipeline_version,
         slice_bytes,
     } = input;
@@ -229,8 +218,7 @@ pub fn assemble(
     let mut section_nodes = Vec::with_capacity(sections.len());
     let mut order = 0u32;
     for (i, (draft, drafts)) in sections.iter().enumerate() {
-        let (heading_path, ids) =
-            gate_heading_path(policy, signer, workspace, &draft.heading_path, &mut audit);
+        let (heading_path, ids) = gate_heading_path(policy, &draft.heading_path);
         if !ids.is_empty() {
             redacted_sections.push(draft.byte_start..draft.byte_end);
         }
@@ -304,7 +292,6 @@ pub fn assemble(
             links: Vec::new(),
             tags: Vec::new(),
         },
-        audit,
         redacted_sections,
     }
 }
@@ -428,7 +415,6 @@ struct LinkEdgeProps<'a> {
     alias: Option<&'a str>,
     resolved: bool,
     embed: bool,
-    owner: &'static str,
 }
 
 impl<'a> LinkEdgeProps<'a> {
@@ -440,7 +426,6 @@ impl<'a> LinkEdgeProps<'a> {
             alias: link.alias.as_deref(),
             resolved,
             embed: link.embed,
-            owner: EDGE_OWNER,
         })
         .unwrap_or_default()
     }
@@ -451,7 +436,7 @@ fn owned_edge(src: &NodeId, dst: &NodeId, rel: &str) -> Op {
         src: src.clone(),
         dst: dst.clone(),
         rel: rel.to_owned(),
-        props: Some(json!({ "owner": EDGE_OWNER })),
+        props: None,
     }
 }
 
@@ -663,11 +648,9 @@ pub fn forget_document(
         .get(&id, true)?
         .ok_or_else(|| kaban_api::ApiError::NotFound(id.to_string()))?;
     let previous = ExistingDocument::from_node(&node);
-    let mut removal_ctx = ctx.clone();
-    removal_ctx.removal_intent = kaban_core::RemovalIntent::Explicit;
     let report = store.apply_batch(
         forget_document_batch(&previous, &node, &ctx.workspace_id),
-        &removal_ctx,
+        ctx,
     )?;
     Ok(ForgottenDocument {
         document_id: id.to_string(),

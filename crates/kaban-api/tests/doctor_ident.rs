@@ -23,7 +23,7 @@ fn context(scratch: &Scratch) -> DoctorContext {
         schema_version: LATEST_SCHEMA_VERSION,
         keys_dir: scratch.keys(),
         vacuum: false,
-        priors: false,
+        allocator_adapter: None,
     }
 }
 
@@ -47,14 +47,14 @@ fn current_and_noncurrent_markers_are_diagnosed_without_mutation_or_disclosure()
                 ..Default::default()
             },
             &[],
-            &WriteCtx::new("v1", WorkspaceId::default(), Actor::Agent),
+            &WriteCtx::new(WorkspaceId::default(), Actor::Agent),
         )
         .unwrap();
     let RememberOutcome::Created(node) = outcome else {
         unreachable!()
     };
     let id = NodeId::parse(&node.id).unwrap();
-    let api = KabanApi::new(store.clone(), Policy::empty(), store.signer(), None);
+    let api = KabanApi::new(store.clone(), Policy::empty(), store.signer());
     let canary = "RAW_IDENT_METADATA_CANARY";
     for marker in [
         Some(IDENT_TERMS_VERSION),
@@ -85,12 +85,6 @@ fn current_and_noncurrent_markers_are_diagnosed_without_mutation_or_disclosure()
             assert!(row.detail.contains("kaban reindex text"));
         }
         assert!(!serde_json::to_string(&report).unwrap().contains(canary));
-        assert!(
-            report
-                .checks
-                .iter()
-                .any(|row| row.name == "audit" && row.ok)
-        );
         assert_eq!(store.index_meta().unwrap().entries, metadata);
         assert_eq!(
             serde_json::to_value(store.get(&id, false).unwrap()).unwrap(),
@@ -103,7 +97,7 @@ fn current_and_noncurrent_markers_are_diagnosed_without_mutation_or_disclosure()
 fn metadata_read_failure_is_named_and_does_not_hide_siblings() {
     let scratch = Scratch::new("doctor-ident", "read-failure");
     let store = Arc::new(SqliteStore::open(&scratch.db(), &scratch.keys()).unwrap());
-    let api = KabanApi::new(store.clone(), Policy::empty(), store.signer(), None);
+    let api = KabanApi::new(store.clone(), Policy::empty(), store.signer());
     rusqlite::Connection::open(scratch.db())
         .unwrap()
         .execute("DROP TABLE index_meta", [])
@@ -112,14 +106,7 @@ fn metadata_read_failure_is_named_and_does_not_hide_siblings() {
     let row = ident_check(&report);
     assert!(!row.ok);
     assert_eq!(row.detail, "not checked: backend read failed");
-    for name in [
-        "db_modes",
-        "integrity",
-        "fts_integrity",
-        "layers",
-        "audit",
-        "unresolved",
-    ] {
+    for name in ["db_modes", "integrity", "fts_integrity", "producers"] {
         assert!(
             report.checks.iter().any(|row| row.name == name),
             "{report:?}"

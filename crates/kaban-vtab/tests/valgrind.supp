@@ -1,0 +1,13 @@
+# Valgrind memcheck suppressions for the kaban-vtab tests (docs/developer/SAFETY.md, memory
+# checker). Matching needs the symbol table: do not strip the test binaries.
+
+# A contained panic's payload is leaked, never dropped: its destructor could panic again
+# (src/adapter.rs `contain`, src/allocator.rs).
+{
+   kaban-vtab-contained-panic-payload
+   Memcheck:Leak
+   match-leak-kinds: definite
+   fun:malloc
+   ...
+   fun:*__rust_start_panic*
+}

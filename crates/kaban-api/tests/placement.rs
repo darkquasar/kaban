@@ -468,8 +468,8 @@ fn kaban_api_and_kaban_ingest_sources_carry_no_sql_and_no_rusqlite_type() {
     assert!(
         sources
             .iter()
-            .any(|p| p.ends_with("kaban-api/src/explain.rs")),
-        "the walker must reach crates/kaban-api/src/explain.rs; saw {} files",
+            .any(|p| p.ends_with("kaban-api/src/hooks.rs")),
+        "the walker must reach crates/kaban-api/src/hooks.rs; saw {} files",
         sources.len()
     );
     assert!(

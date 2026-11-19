@@ -9,7 +9,7 @@ use kaban_store_sqlite::SqliteStore;
 use serde_json::json;
 
 fn fixture(store: &SqliteStore) -> (IngestJob, NodeId, NodeId, SourceRev, WriteCtx) {
-    let ctx = WriteCtx::new("policy", WorkspaceId::default(), Actor::Agent);
+    let ctx = WriteCtx::new(WorkspaceId::default(), Actor::Agent);
     let document = NodeId::new();
     let chunk = NodeId::new();
     store.apply_batch(WriteBatch::new(ctx.workspace_id.clone(), vec![

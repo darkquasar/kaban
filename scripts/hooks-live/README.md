@@ -48,17 +48,15 @@ input was observed (exact counts, never a vacuous pass over an empty capture).
 | `container/kaban-rec.sh` | test only (`test-pi-extension.sh`): records the envelopes the pi extension sends before running the real binary |
 | `test-capture.sh` | behaviour test of the capture fence with invented data, including the event vocabulary (runs in the sandbox or in the image) |
 | `test-out-fence.sh [--kaban <bin>]` | end-to-end fence test: dry-run sessions (no model, no credentials) per host with canaries planted in the prompt, a filename, event names, stderr, a tool response, host error items, a multiline tool name and Claude result subtype (`bash\nKBNCANARY…`, `success\nKBNCANARY…`), the session name, `--variant`, `--model` and (with `--kaban`) kaban argv and a recorded Failure; asserts zero hits in every file under `/out` and in the console, and that every planted input was observed (exact event counts known and `other`, positive stderr and host-error class counts, the planted file, the prompt hash and length, exact `tool_uses`, the reduced metadata) |
-| `test-pi-extension.sh --kaban <bin>`, `test-pi-extension.mjs` | offline fake-pi test of `hooks/pi/kaban-hooks.ts` inside the image (jiti): exact envelope keys per event (R4-4 allowlist) and the exact envelope sequence, no secret, briefing/pre/Failure/evidence/Stop behaviour, `session_shutdown` returns in under 1 s and its detached `kaban sync` writes `.kaban/adr/INDEX.md` with the seeded Decision (M5-20), node syntax check; the syntax check, the behaviour test and the recalled state (`failures >= 1`, `pending_fix`, `evidence_runs >= 1`, `has_secret == false`) all decide the exit status |
-| `test-stop-sync.sh` | offline (no Docker, no binary) test of the detached `kaban sync` in `hooks/{claude-code,codex}/{stop,subagent-stop}.sh` (M5-20): a fake `kaban` that sleeps 5 s on `sync`; the wrappers return with their stdout closed in under 2 s, print one JSON document, the fake sees exactly `sync --json`, `/dev/null` on fds 0 to 2, its own session and `KABAN_DB`; `KABAN_HOOK_SYNC=0` starts no sync |
-| `dry-stop-sync.sh <claude-code\|codex> --kaban <bin>` | Docker dry run (no model, no credentials) of the real Stop recipe in recipes mode: one Stop envelope through `stop.sh`, then the `sync_detached` verdict (ran, exit codes, no `--stage`, `.kaban` files after, `adr/INDEX.md` exists) is asserted (M5-28) |
+| `test-pi-extension.sh --kaban <bin>`, `test-pi-extension.mjs` | offline fake-pi test of `hooks/pi/kaban-hooks.ts` inside the image (jiti): the extension registers exactly its five handlers (no `session_shutdown`), only registered handlers are dispatched, exact envelope keys per event (R4-4 allowlist) and the exact envelope sequence, no secret and no image item forwarded, no briefing and no pre-edit message from the seeded Decision, Failure recorded, one Stop continuation naming it and a silent second settle, the pending Failure briefed (nextTurn) in a second session, evidence appended, node syntax check; the syntax check, the behaviour test and the recalled state (`failures >= 1`, `pending_fix`, `evidence_runs >= 1`, `has_secret == false`) all decide the exit status |
+| `test-stop-sync.sh` | offline (no Docker, no binary) check that `hooks/{claude-code,codex}/{stop,subagent-stop}.sh` start no `kaban sync`: with a fake `kaban`, each wrapper exits 0, prints one JSON document and makes exactly one call, `hook <event> --host <host> --stdin-json` |
 
 ## Usage
 
 ```sh
 scripts/hooks-live/build.sh                      # once; needs PROXY_CA_CERT_B64 and the proxy env
 bash scripts/hooks-live/test-capture.sh          # capture fence test, no Docker needed
-bash scripts/hooks-live/test-stop-sync.sh        # detached-sync wrapper test, no Docker needed
-bash scripts/hooks-live/dry-stop-sync.sh codex --kaban "$K"   # dry Stop probe of the real recipe (Docker, no model)
+bash scripts/hooks-live/test-stop-sync.sh        # Stop wrappers start no sync, no Docker needed
 bash scripts/hooks-live/test-out-fence.sh --kaban "$K"    # /out fence, dry runs in Docker, no model
 bash scripts/hooks-live/test-pi-extension.sh --kaban "$K" # fake-pi extension test in Docker, no model
 scripts/hooks-live/run.sh codex s1               # capture + briefing sentinel + PreToolUse probe
@@ -105,24 +103,23 @@ Inside the container the entrypoint: mounts `<repo>/hooks` read-only at `/work/h
 `examples/policy.yaml` at `/policy.yaml`, the binary at `/opt/kaban/kaban` and the shim at
 `/usr/local/bin/kaban`; exports `KABAN_HOME=~/.kaban`, `KABAN_DB=/work/kaban.db`,
 `KABAN_POLICY=/policy.yaml`; seeds the database with the CLI (`kaban remember Decision
-"KBN-DEC-<hex> …" --path-scope notes.txt`, then `kaban accept <id> --reason seed --path-scope
-notes.txt`: the human-cli signer route, no token); renders the **real** recipe config for the
+"KBN-DEC-<hex> …" --path-scope notes.txt`; this creates the database, which hooks never do, and
+the Decision is never briefed or injected); renders the **real** recipe config for the
 host with the capture entries kept alongside (probes off): Claude `settings.hooks.json` merged
 into `~/.claude/settings.json`, Codex `hooks.json` merged into `~/.codex/hooks.json` with the
 scripts copied to `~/.codex/hooks/kaban/` (or, `--variant config-toml`, `config.hooks.toml`
 appended to `~/.codex/config.toml` and no `hooks.json`), pi `-e /work/hooks/pi/kaban-hooks.ts`
 plus the capture extension; runs the prompt; then runs `kaban recall "failed" --kind Failure`
-and `kaban why --path notes.txt` inside the container and writes `recipes-verdict.json`:
+inside the container and writes `recipes-verdict.json`:
 
 | Field | Meaning |
 |---|---|
 | `hook_calls`, `hook_calls_by_event`, `hook_exit_codes`, `any_exit_2`, `hook_ms_max`, `any_hook_over_2000ms` | from the shim's call log (`kaban-calls.jsonl`, exported as is: no envelope or output text) |
-| `briefing.hook_output`, `briefing.injected_first_reply` / `injected_assistant` / `anywhere` | the session-start document carried `additionalContext`; the seeded `KBN-DEC-<hex>` appears in the first 4000 characters of assistant text / any assistant text / anywhere in the stream |
-| `pre_context.hook_calls`, `pre_context.hook_output` | the pre-tool-use calls and whether one produced `additionalContext` (its text is the same seeded Decision, so the echo verdict is shared with the briefing) |
+| `seed_recorded` | the seed `remember` printed an id |
+| `briefing.hook_output`, `briefing.injected_first_reply` / `injected_assistant` / `anywhere` | the session-start document carried `additionalContext` (pending Failures only); the seeded `KBN-DEC-<hex>` appears in the first 4000 characters of assistant text / any assistant text / anywhere in the stream (expected `no`: a Decision is never briefed) |
+| `pre_context.hook_calls`, `pre_context.hook_output` | the pre-tool-use calls and whether one produced `additionalContext` (expected false: pre-tool-use records the edit and injects nothing) |
 | `failure_recorded`, `evidence_appended`, `recall` | a Failure with `pending_fix: true` exists; one has `evidence_runs > 0`; reduced recall (counts, booleans) |
-| `why_notes_txt` | result count of `kaban why --path notes.txt` and whether the seeded sentinel is present |
 | `stop.*` | stop calls, prompt printed (`decision` present), second stop `{}`, Failure id or "unresolved" echoed by the assistant, `hook fix` calls |
-| `sync_detached` | M5 C5.3 (M5-20, M5-28): the detached `kaban sync` the Stop recipes (Claude, Codex) or pi's `session_shutdown` start: `calls`, `ran`, `staged_flag_seen` (must be false), `exit_codes`, `ms_max`, `kaban_files_after` (files under `/work/.kaban`), `decisions_md_exists`, `waited_s` (the entrypoint waits up to 30 s, 5 s in a dry run, for the shim's `sync` line after the host exits) |
 
 `KBN_DRY_CMD='<shell>' run.sh … --recipes …` replaces the host CLI by a shell command (harness
 self-test without a model call; see the dry runs in the W2-D2 report). In a dry run no credentials
@@ -157,7 +154,7 @@ are staged. `test-out-fence.sh` is built on it.
 - The container home, the scratch repo and `/capture` are tmpfs and die with `--rm`.
 - Recipes mode: the shim logs argv **words** from a fixed vocabulary (subcommands, events, hosts,
   flags, kinds) and counts free-text arguments; stdout documents are reduced with `reduce.jq`;
-  `kaban recall`/`why` output is reduced to counts and booleans before export; the seeded
+  `kaban recall` output is reduced to counts and booleans before export; the seeded
   sentinel `KBN-DEC-<hex>` is the only value that travels (it is the harness's own).
 
 ## Credential passover (OWN-15, OWN-16)

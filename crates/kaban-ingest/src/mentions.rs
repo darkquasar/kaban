@@ -2,8 +2,8 @@
 use aho_corasick::{AhoCorasick, AhoCorasickKind, MatchKind};
 use kaban_core::config::Gazetteer;
 use kaban_core::{
-    BatchAssertion, BatchSubject, ClaimClass, Fixed, GraphStore, Layer, Method, Node, NodeId, Op,
-    Rank, SNAPSHOT_SYMBOL_PAGE, SymbolPage, WorkspaceId, WriteBatch,
+    Fixed, GraphStore, Method, Node, NodeId, Op, Producer, SNAPSHOT_SYMBOL_PAGE, SymbolPage,
+    WorkspaceId, WriteBatch,
 };
 use kaban_policy::{Policy, norm_term, norm_with_offsets};
 use serde::{Deserialize, Serialize};
@@ -531,7 +531,7 @@ pub fn find_mentions(dict: &Dictionary, chunk: &NodeId, text: &str) -> Vec<Menti
 }
 
 pub(crate) fn append_mentions(batch: &mut WriteBatch, mentions: &[Mention], source_id: &str) {
-    // A triple is one claim, not one competing claim per occurrence. Prefer the
+    // A triple is one edge, not one edge per occurrence. Prefer the
     // strongest occurrence, breaking ties by the first original byte position.
     let mut selected = BTreeMap::new();
     for mention in mentions.iter().filter(|m| !m.ambiguous) {
@@ -547,30 +547,8 @@ pub(crate) fn append_mentions(batch: &mut WriteBatch, mentions: &[Mention], sour
             .or_insert(mention);
     }
     for mention in selected.into_values() {
-        let value = json!({"method": mention.method.as_str(), "offset": mention.offset, "len": mention.len, "score": mention.score.0});
-        batch.assertions.push(BatchAssertion {
-            subject: BatchSubject::Edge {
-                src: mention.chunk.clone(),
-                rel: "MENTIONS".into(),
-                dst: mention.target.clone(),
-            },
-            claim_class: ClaimClass::Edge,
-            predicate: None,
-            object: None,
-            value: value.clone(),
-            layer: Layer::Gazetteer,
-            method: mention.method,
-            extractor_id: None,
-            extractor_version: Some("1".into()),
-            source_id: Some(source_id.to_owned()),
-            lineage_id: format!("gazetteer:{source_id}"),
-            raw_score: mention.score,
-            rank: Rank::Normal,
-            rank_reason: None,
-            calibration_version: 0,
-            supersedes: None,
-        });
-        // Name the edge in Owned diff; immutable claim reconciliation remains the authority.
-        batch.ops.push(Op::UpsertEdge { src: mention.chunk.clone(), dst: mention.target.clone(), rel: "MENTIONS".into(), props: Some(json!({"owner": "kaban-ingest", "method": mention.method.as_str(), "offset": mention.offset, "len": mention.len, "score": mention.score.0})) });
+        // the producer edge names its producer and source; the store moves them into the
+        // scoring columns with the method, score and span (`apply_batch`)
+        batch.ops.push(Op::UpsertEdge { src: mention.chunk.clone(), dst: mention.target.clone(), rel: "MENTIONS".into(), props: Some(json!({"producer": Producer::Gazetteer.as_str(), "source_id": source_id, "method": mention.method.as_str(), "offset": mention.offset, "len": mention.len, "score": mention.score.0})) });
     }
 }

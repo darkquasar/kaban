@@ -2,10 +2,11 @@
 //! `[section] key` of the register is a field of the matching section struct, its `Default` is
 //! the register's value, and the YAML path is `section.key` in `~/.kaban/config.yaml`
 //! (`KABAN_HOME`). Fields are plain serde data (`f64`, `u32`, `bool`, `String`, `BTreeMap`,
-//! `Option`); the typed forms (`Fixed`, `Fusion`, `ModelIdentity`, `ErPriors`, `LinkMode`) are
+//! `Option`); the typed forms (`Fixed`, `Fusion`, `ModelIdentity`, `LinkMode`) are
 //! built once at the consuming seam by the task that owns them, so this module depends on
-//! nothing defined later. Unknown keys fail at every depth with the field path (never the value);
-//! an opt-in budget of 0 fails [`ConfigError::Range`].
+//! nothing defined later. Unknown keys fail at every depth with the field path (never the value),
+//! the sections of removed features (`reconcile`, `er`, `why`, `briefing`) included; an opt-in
+//! budget of 0 fails [`ConfigError::Range`].
 //!
 //! `[index]` carries, since v4 CG4.2, the `kaban-index` keys
 //! (`isolation`, `container_image`, `container_cli`, `deadline_secs`, `quota.*`,
@@ -21,72 +22,6 @@ use serde_json::Value;
 
 use crate::canon::canonical_json;
 use crate::validator::ValidatorLimits;
-
-/// `[reconcile]` (EN-F12).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields, default)]
-pub struct Reconcile {
-    /// Auto-accept threshold of a `type` winner (becomes `Fixed` at the E2.1 seam).
-    pub tau_type: f64,
-    /// Auto-accept threshold of a `canonical_id` winner.
-    pub tau_id: f64,
-    /// A `priors.yaml` replacing the EN-F12 table; unset by default.
-    pub priors: Option<PathBuf>,
-}
-
-impl Default for Reconcile {
-    fn default() -> Self {
-        Self {
-            tau_type: 0.3,
-            tau_id: 0.4,
-            priors: None,
-        }
-    }
-}
-
-/// `[discovered] promote_when.*` (EN-F5).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields, default)]
-pub struct PromoteWhen {
-    /// Minimum occurrences of a candidate kind.
-    pub min_count: u32,
-    /// Minimum distinct sources.
-    pub min_sources: u32,
-    /// Minimum mean extractor score.
-    pub min_mean_score: f64,
-}
-
-impl Default for PromoteWhen {
-    fn default() -> Self {
-        Self {
-            min_count: 20,
-            min_sources: 3,
-            min_mean_score: 0.7,
-        }
-    }
-}
-
-/// `[discovered]` (EN-F5).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields, default)]
-pub struct Discovered {
-    /// Candidate kinds per workspace.
-    pub cap: u32,
-    /// Days before an unpromoted candidate is pruned.
-    pub prune_after_days: u32,
-    /// Promotion suggestion thresholds.
-    pub promote_when: PromoteWhen,
-}
-
-impl Default for Discovered {
-    fn default() -> Self {
-        Self {
-            cap: 500,
-            prune_after_days: 90,
-            promote_when: PromoteWhen::default(),
-        }
-    }
-}
 
 /// `[ontology]` (EN-F3a).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -149,51 +84,17 @@ impl Default for Gazetteer {
     }
 }
 
-/// `[embed]` (EN-F26, EN-F26a).
+/// `[extractors]` (EN-F27a; the old `[l3]`, PC-16).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
-pub struct Embed {
-    /// Reserved external model identity; nonempty configuration is unavailable in this release.
-    pub model: Option<BTreeMap<String, String>>,
-    /// Vector storage type (`int8` | `f32`).
-    pub dtype: String,
-    /// Mutual kNN neighbourhood size.
-    pub knn_k: u32,
-    /// Per-kind similarity threshold; the `default` entry applies to every kind without one.
-    pub tau: BTreeMap<String, f64>,
-    /// Rows per scan window.
-    pub scan_window_rows: u32,
-    /// RSS delta budget of one query scan in MiB (opt-in budget; 0 is out of range).
-    pub max_scan_rss_mb: u32,
-    /// Minimum int8/f32 top-k overlap before int8 storage is kept.
-    pub min_topk_overlap: f64,
-}
-
-impl Default for Embed {
-    fn default() -> Self {
-        Self {
-            model: None,
-            dtype: "int8".to_owned(),
-            knn_k: 5,
-            tau: BTreeMap::from([("default".to_owned(), 0.80)]),
-            scan_window_rows: 4096,
-            max_scan_rss_mb: 32,
-            min_topk_overlap: 0.9,
-        }
-    }
-}
-
-/// `[l3]` (EN-F27a).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields, default)]
-pub struct L3 {
+pub struct Extractors {
     /// Holdout F1 an extractor must reach before `--with` is accepted.
     pub holdout_min_f1: f64,
     /// Minimum judged spans in the holdout.
     pub holdout_min_spans: u32,
 }
 
-impl Default for L3 {
+impl Default for Extractors {
     fn default() -> Self {
         Self {
             holdout_min_f1: 0.50,
@@ -290,47 +191,6 @@ impl Default for Ask {
     }
 }
 
-/// `[er]` (EN-F51; becomes `ErPriors` at the E2.10 seam).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields, default)]
-pub struct Er {
-    /// Fellegi-Sunter `m` probability per field.
-    pub m: BTreeMap<String, f64>,
-    /// Fellegi-Sunter `u` probability per field.
-    pub u: BTreeMap<String, f64>,
-    /// Match decision threshold.
-    pub match_threshold: f64,
-    /// Possible-match threshold.
-    pub possible_threshold: f64,
-}
-
-impl Default for Er {
-    fn default() -> Self {
-        Self {
-            m: BTreeMap::from([
-                ("title".to_owned(), 0.9),
-                ("aliases".to_owned(), 0.8),
-                ("kind".to_owned(), 0.95),
-                ("tags".to_owned(), 0.6),
-                ("path_scope".to_owned(), 0.7),
-                ("anchors".to_owned(), 0.95),
-                ("summary".to_owned(), 0.5),
-            ]),
-            u: BTreeMap::from([
-                ("title".to_owned(), 0.01),
-                ("aliases".to_owned(), 0.02),
-                ("kind".to_owned(), 0.3),
-                ("tags".to_owned(), 0.1),
-                ("path_scope".to_owned(), 0.05),
-                ("anchors".to_owned(), 0.001),
-                ("summary".to_owned(), 0.1),
-            ]),
-            match_threshold: 8.0,
-            possible_threshold: 3.0,
-        }
-    }
-}
-
 /// `[ingest]` (EN-F37, EN-F38, EN-F27a).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -367,22 +227,6 @@ impl Default for Ingest {
             lru_entries: 4,
             lru_mib: 8,
             default_with: None,
-        }
-    }
-}
-
-/// `[pipeline]` (EN-F15a).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields, default)]
-pub struct Pipeline {
-    /// Rows retired per transaction.
-    pub retire_batch_rows: u32,
-}
-
-impl Default for Pipeline {
-    fn default() -> Self {
-        Self {
-            retire_batch_rows: 1000,
         }
     }
 }
@@ -490,31 +334,18 @@ impl Default for Link {
     }
 }
 
-/// `[briefing]` (EN-F49, OD-E-6).
+/// `[text]` (EN-N3; the text index build budget, the old `budget.l0_rss_mb`, PC-16; an opt-in
+/// budget, 0 is out of range).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
-pub struct Briefing {
-    /// Candidate kinds listed in the briefing.
-    pub max_candidates: u32,
+pub struct Text {
+    /// Text index build RSS budget in MiB.
+    pub build_rss_mb: u32,
 }
 
-impl Default for Briefing {
+impl Default for Text {
     fn default() -> Self {
-        Self { max_candidates: 5 }
-    }
-}
-
-/// `[budget]` (EN-N3; both opt-in budgets, 0 is out of range).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields, default)]
-pub struct Budget {
-    /// L0 RSS budget in MiB.
-    pub l0_rss_mb: u32,
-}
-
-impl Default for Budget {
-    fn default() -> Self {
-        Self { l0_rss_mb: 64 }
+        Self { build_rss_mb: 64 }
     }
 }
 
@@ -537,60 +368,183 @@ impl Default for Bench {
     }
 }
 
-/// `[why]` (EN-F10 prefilter, EN-N7).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// The smallest memory a maintenance unit of work (one seal, fold or base build) needs, in MiB:
+/// a `catalog.maintenance_memory_mib` below it is refused.
+// 7.6 (2026-11-18): seal of 10,000 ops, VmHWM 21,384 KiB, 3.75 MiB over its start: 4x margin
+const MIN_MAINTENANCE_MEMORY_MIB: u64 = 16;
+
+/// The shortest deadline a maintenance unit of work can meet, in ms: a
+/// `catalog.maintenance_deadline_ms` below it is refused.
+// 7.6 (2026-11-18): seal of 10,000 ops, VmHWM 21,384 KiB, ran 13 ms (debug build)
+const MIN_MAINTENANCE_DEADLINE_MS: u64 = 100;
+
+/// `[catalog]` (spec 11 PC-10, Task 6, 7.6): compaction policy, the scheduled checkpoint and
+/// the maintenance budget of the catalog. Validated at load ([`CatalogCfg::validate`]): a value
+/// out of range is refused naming its key, never clamped.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
-pub struct Why {
-    /// Anchor prefilter on.
-    pub anchor_prefilter: bool,
+pub struct CatalogCfg {
+    /// What each class may hold pending before it seals ([`SealOps`]).
+    pub seal_ops: SealOps,
+    /// Sealed layers over a base before they fold.
+    pub fold_depth: u32,
+    /// Layer bytes over base bytes past which the layers fold.
+    pub fold_delta_ratio: f64,
+    /// Interval of the scheduled checkpoint, in ms.
+    pub checkpoint_interval_ms: u64,
+    /// Memory ceiling of one maintenance unit of work (seal, fold, base build), in MiB.
+    pub maintenance_memory_mib: u64,
+    /// Deadline of one maintenance unit of work, in ms.
+    pub maintenance_deadline_ms: u64,
+    /// Live views besides `main` that compaction keeps, newest by last use (amendment 3.2):
+    /// the older ones are marked `needs_reimport` and their extents retire.
+    pub view_retention: u32,
 }
 
-impl Default for Why {
+impl Default for CatalogCfg {
     fn default() -> Self {
         Self {
-            anchor_prefilter: true,
+            seal_ops: SealOps::default(),
+            fold_depth: 8,
+            fold_delta_ratio: 0.25,
+            // `bench catalog` (2026-11-18): 60 s, 1 to 4 writers, WAL high-water 1,512,072 B
+            checkpoint_interval_ms: 1_000,
+            // a value the machine can hold: refused above physical memory only when configured
+            maintenance_memory_mib: default_maintenance_memory_mib(physical_memory_mib()),
+            // 7.6 (2026-11-18): fold of 5M edges, VmHWM 1,605,864 KiB, ran 9.9 s (debug build)
+            maintenance_deadline_ms: 30_000,
+            // amendment 3.2: the retention count of views besides `main`
+            view_retention: 200,
+        }
+    }
+}
+
+/// `[catalog.seal_ops]`: the seal trigger of each index class, in what the class counts as
+/// pending.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct SealOps {
+    /// Text: pending text segments, one per commit, not operations; tombstone rows are not
+    /// counted.
+    pub text: u32,
+    /// Graph: pending operations.
+    pub graph: u32,
+    /// Code: pending operations.
+    pub code: u32,
+}
+
+impl Default for SealOps {
+    fn default() -> Self {
+        // 7.6 (2026-11-18): graph seal of 10,000 ops, VmHWM 21,384 KiB, ran 13 ms (debug build)
+        Self {
+            // owner decision 2026-11-19: seal past 32 pending text segments
+            text: 32,
+            graph: 10_000,
+            code: 10_000,
+        }
+    }
+}
+
+/// The maintenance memory ceiling when `catalog.maintenance_memory_mib` is not set, in MiB.
+// 7.6 (2026-11-18): fold of 1M edges, VmHWM 361,472 KiB (353 MiB): 2.9x headroom
+const DEFAULT_MAINTENANCE_MEMORY_MIB: u64 = 1_024;
+
+/// The effective default of `catalog.maintenance_memory_mib`: [`DEFAULT_MAINTENANCE_MEMORY_MIB`],
+/// or half of `physical_mib` (the machine's physical memory, where known) when that is less, so
+/// an untouched configuration loads on every machine; a configured value is still refused
+/// above physical memory ([`CatalogCfg::validate`]).
+fn default_maintenance_memory_mib(physical_mib: Option<u64>) -> u64 {
+    physical_mib.map_or(DEFAULT_MAINTENANCE_MEMORY_MIB, |physical| {
+        DEFAULT_MAINTENANCE_MEMORY_MIB.min(physical / 2)
+    })
+}
+
+/// The machine's physical memory in MiB (`MemTotal` of `/proc/meminfo`), `None` where it is
+/// not known (another platform, an unreadable file): then no value is refused for exceeding it.
+fn physical_memory_mib() -> Option<u64> {
+    let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
+    let kib: u64 = meminfo
+        .lines()
+        .find_map(|l| l.strip_prefix("MemTotal:"))?
+        .trim()
+        .strip_suffix("kB")?
+        .trim()
+        .parse()
+        .ok()?;
+    Some(kib / 1024)
+}
+
+impl CatalogCfg {
+    /// Refuse a value out of range, naming its key (spec 11 7.6: never clamped): a count,
+    /// depth, interval or view retention of 0, a ratio that is not a positive number, a memory ceiling below
+    /// the smallest unit of work or above physical memory, a deadline below the smallest unit
+    /// of work.
+    ///
+    /// # Errors
+    /// [`ConfigError::Range`] with the key's dotted path (the first refused key).
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        let memory = self.maintenance_memory_mib;
+        let refused = [
+            ("catalog.seal_ops.text", self.seal_ops.text == 0),
+            ("catalog.seal_ops.graph", self.seal_ops.graph == 0),
+            ("catalog.seal_ops.code", self.seal_ops.code == 0),
+            ("catalog.fold_depth", self.fold_depth == 0),
+            (
+                "catalog.fold_delta_ratio",
+                !(self.fold_delta_ratio.is_finite() && self.fold_delta_ratio > 0.0),
+            ),
+            (
+                "catalog.checkpoint_interval_ms",
+                self.checkpoint_interval_ms == 0,
+            ),
+            (
+                "catalog.maintenance_memory_mib",
+                memory < MIN_MAINTENANCE_MEMORY_MIB
+                    || physical_memory_mib().is_some_and(|physical| memory > physical),
+            ),
+            (
+                "catalog.maintenance_deadline_ms",
+                self.maintenance_deadline_ms < MIN_MAINTENANCE_DEADLINE_MS,
+            ),
+            ("catalog.view_retention", self.view_retention == 0),
+        ];
+        match refused.into_iter().find(|(_, out_of_range)| *out_of_range) {
+            Some((path, _)) => Err(ConfigError::Range { path: path.into() }),
+            None => Ok(()),
         }
     }
 }
 
 /// The engine configuration: every §15.1 section with its register defaults.
+///
+/// This is the configuration root of the whole kaban process (`Engine` keeps its spec 03
+/// meaning, the program), not the storage engine: the storage kernel is named the catalog,
+/// with its own `[catalog]` section (PC-10).
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct EngineConfig {
-    /// `[reconcile]`
-    pub reconcile: Reconcile,
-    /// `[discovered]`
-    pub discovered: Discovered,
     /// `[ontology]`
     pub ontology: OntologyCfg,
     /// `[gazetteer]`
     pub gazetteer: Gazetteer,
-    /// `[embed]`
-    pub embed: Embed,
-    /// `[l3]`
-    pub l3: L3,
+    /// `[extractors]`
+    pub extractors: Extractors,
     /// `[recall]`
     pub recall: Recall,
     /// `[ask]`
     pub ask: Ask,
-    /// `[er]`
-    pub er: Er,
     /// `[ingest]`
     pub ingest: Ingest,
-    /// `[pipeline]`
-    pub pipeline: Pipeline,
     /// `[index]`
     pub index: Index,
     /// `[link]`
     pub link: Link,
-    /// `[briefing]`
-    pub briefing: Briefing,
-    /// `[budget]`
-    pub budget: Budget,
+    /// `[text]`
+    pub text: Text,
     /// `[bench]`
     pub bench: Bench,
-    /// `[why]`
-    pub why: Why,
+    /// `[catalog]`
+    pub catalog: CatalogCfg,
 }
 
 /// Why a configuration file failed to load. Content-free: an I/O class, a field path.
@@ -625,13 +579,12 @@ pub enum ConfigError {
 }
 
 /// The opt-in budgets (engine-plan §4 memory policy, OWN-54/SD-11): a positive integer each.
-const BUDGETS: [&str; 11] = [
+const BUDGETS: [&str; 10] = [
     "ingest.claim_ttl_s",
     "ingest.claim_max_attempts",
     "ingest.claim_scan_max",
-    "budget.l0_rss_mb",
+    "text.build_rss_mb",
     "gazetteer.max_automaton_mb",
-    "embed.max_scan_rss_mb",
     "ingest.lru_mib",
     "index.deadline_secs",
     "index.quota.file_bytes",
@@ -648,7 +601,9 @@ const BUDGETS: [&str; 11] = [
 pub fn load(path: &Path) -> Result<EngineConfig, ConfigError> {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(EngineConfig::default()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            return Ok(EngineConfig::default());
+        }
         Err(e) => {
             return Err(ConfigError::Io {
                 class: io_class(e.kind()),
@@ -686,17 +641,8 @@ fn parse(text: &str) -> Result<EngineConfig, ConfigError> {
             path: "ingest.default_with",
         });
     }
-    if cfg
-        .embed
-        .model
-        .as_ref()
-        .is_some_and(|model| !model.is_empty())
-    {
-        return Err(ConfigError::NotAvailable {
-            path: "embed.model",
-        });
-    }
     cfg.recall.effective_rrf_k()?;
+    cfg.catalog.validate()?;
     let flat = flatten(&cfg);
     for budget in BUDGETS {
         if flat.get(budget).is_some_and(|v| v.as_u64() == Some(0)) {
@@ -831,5 +777,92 @@ fn io_class(kind: io::ErrorKind) -> &'static str {
         io::ErrorKind::InvalidData => "invalid_data",
         io::ErrorKind::Interrupted => "interrupted",
         _ => "other",
+    }
+}
+
+#[cfg(test)]
+mod catalog_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)] // test code: failures are the assertion
+
+    use super::*;
+
+    #[test]
+    fn the_catalog_section_defaults_to_fold_depth_8_and_ratio_a_quarter() {
+        let cfg = parse("catalog: {}\n").unwrap();
+        assert_eq!(cfg.catalog, CatalogCfg::default());
+        assert_eq!(cfg.catalog.fold_depth, 8);
+        assert!((cfg.catalog.fold_delta_ratio - 0.25).abs() < f64::EPSILON);
+        assert_eq!(
+            cfg.catalog.maintenance_memory_mib,
+            default_maintenance_memory_mib(physical_memory_mib())
+        );
+        assert_eq!(cfg.effective_overrides(), Vec::new());
+    }
+
+    #[test]
+    fn the_default_maintenance_memory_fits_a_small_machine() {
+        // half of a 1 GiB machine, the full 1024 MiB on a large one or where it is not known
+        assert_eq!(default_maintenance_memory_mib(Some(1_024)), 512);
+        assert_eq!(default_maintenance_memory_mib(Some(16_384)), 1_024);
+        assert_eq!(default_maintenance_memory_mib(None), 1_024);
+    }
+
+    #[test]
+    fn a_catalog_value_out_of_range_is_refused_naming_its_key() {
+        let mut cases = vec![
+            ("seal_ops: {text: 0}", "catalog.seal_ops.text"),
+            ("seal_ops: {graph: 0}", "catalog.seal_ops.graph"),
+            ("seal_ops: {code: 0}", "catalog.seal_ops.code"),
+            ("fold_depth: 0", "catalog.fold_depth"),
+            ("fold_delta_ratio: 0.0", "catalog.fold_delta_ratio"),
+            ("fold_delta_ratio: -1.0", "catalog.fold_delta_ratio"),
+            (
+                "checkpoint_interval_ms: 0",
+                "catalog.checkpoint_interval_ms",
+            ),
+            (
+                "maintenance_memory_mib: 0",
+                "catalog.maintenance_memory_mib",
+            ),
+            (
+                "maintenance_memory_mib: 15",
+                "catalog.maintenance_memory_mib",
+            ),
+            (
+                "maintenance_deadline_ms: 0",
+                "catalog.maintenance_deadline_ms",
+            ),
+            (
+                "maintenance_deadline_ms: 99",
+                "catalog.maintenance_deadline_ms",
+            ),
+            ("view_retention: 0", "catalog.view_retention"),
+        ];
+        if physical_memory_mib().is_some() {
+            // above any machine's physical memory
+            cases.push((
+                "maintenance_memory_mib: 1099511627776",
+                "catalog.maintenance_memory_mib",
+            ));
+        }
+        for (yaml, key) in cases {
+            let refused = parse(&format!("catalog:\n  {yaml}\n"));
+            assert_eq!(
+                refused,
+                Err(ConfigError::Range { path: key.into() }),
+                "{yaml}"
+            );
+        }
+    }
+
+    #[test]
+    fn catalog_values_at_the_smallest_unit_of_work_load_unchanged() {
+        let cfg = parse(
+            "catalog:\n  maintenance_memory_mib: 16\n  maintenance_deadline_ms: 100\n  fold_depth: 1\n",
+        )
+        .unwrap();
+        assert_eq!(cfg.catalog.maintenance_memory_mib, 16);
+        assert_eq!(cfg.catalog.maintenance_deadline_ms, 100);
+        assert_eq!(cfg.catalog.fold_depth, 1);
     }
 }

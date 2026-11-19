@@ -1,4 +1,4 @@
-//! The C4.1b tool subcommands `remember`, `why`, `recall` and `forget` (core-spec F7, §6, S1;
+//! The C4.1b tool subcommands `remember`, `recall` and `forget` (core-spec F7, §6, S1;
 //! core-plan C4.1 as amended by M4-3, M4-4, M4-5, M4-20), black-box through the binary: every
 //! exit code of core-spec §6 reproduced once (a denylist rejection 2 with the value never
 //! echoed, an unknown id 3, a policy, request or usage error 4, a read-only database directory
@@ -65,8 +65,8 @@ fn document(out: &Output) -> Value {
     serde_json::from_str(&text).unwrap_or_else(|e| panic!("one JSON document: {e}: {text}"))
 }
 
-/// `value` with every `checked_at` leaf removed: `why` stamps each currency with the time of
-/// the call, which differs between two runs of the same request.
+/// `value` with every `checked_at` leaf removed: a currency stamp carries the time of the call,
+/// which differs between two runs of the same request.
 fn without_timestamps(value: &Value) -> Value {
     match value {
         Value::Object(map) => Value::Object(
@@ -114,7 +114,7 @@ fn count_nodes(s: &Scratch, kind: &str) -> i64 {
 }
 
 #[test]
-fn remember_why_recall_and_forget_print_one_json_document_in_both_layouts() {
+fn remember_recall_and_forget_print_one_json_document_in_both_layouts() {
     let s = Scratch::new("kaban-cli", "documents");
     // remember: a Decision with a path scope and typed props from the flags (pretty), and the
     // same request again (compact): a duplicate is reported, not stored twice
@@ -157,22 +157,6 @@ fn remember_why_recall_and_forget_print_one_json_document_in_both_layouts() {
     ));
     assert_eq!(fact["status"], "created", "{fact}");
     let fact_id = fact["id"].as_str().unwrap().to_owned();
-
-    // why: by path from the flags, and by the same target from a body
-    let why = both_layouts(&s, &["why", "--path", "src/store/sqlite.rs"]);
-    let results = why["results"].as_array().unwrap();
-    assert_eq!(results.len(), 1, "{why}");
-    assert_eq!(results[0]["node"]["id"], id.as_str());
-    assert_eq!(results[0]["matched_by"], "path_scope");
-    let why_body = document(&with_stdin(
-        &s,
-        &["why", "--stdin-json"],
-        br#"{"targets": [{"path": "src/store/sqlite.rs"}], "limit": 5}"#,
-    ));
-    assert_eq!(
-        without_timestamps(&why_body["results"]),
-        without_timestamps(&why["results"])
-    );
 
     // recall: a query from the flags with a kind filter
     let recall = both_layouts(&s, &["recall", "WAL mode", "--kind", "Decision"]);
@@ -249,7 +233,6 @@ fn a_policy_request_or_usage_error_exits_4_with_a_fixed_text() {
     // the body and the argument flags are exclusive, for each tool subcommand
     for args in [
         &["remember", "--stdin-json", "--tag", "t"][..],
-        &["why", "--stdin-json", "--limit", "3"][..],
         &["recall", "--stdin-json", "--full-text"][..],
         &["forget", "--stdin-json", "--mode", "archive"][..],
     ] {
@@ -287,11 +270,6 @@ fn a_policy_request_or_usage_error_exits_4_with_a_fixed_text() {
         assert!(text.starts_with("error: "), "{args:?}: {text}");
         assert!(out.stdout.is_empty(), "{args:?}: stdout stays empty");
     }
-
-    // a request the service refuses (no target) is 4 through the seam as well
-    let no_target = run(&s, &["why", "--limit", "3"]);
-    assert_eq!(no_target.status.code(), Some(4), "{}", stderr(&no_target));
-    assert!(stderr(&no_target).contains("targets"));
 }
 
 /// Restores the directory mode on drop, so the scratch can be removed whatever the outcome.

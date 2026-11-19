@@ -3,8 +3,7 @@
 //! tool call and nothing else:
 //!
 //! 1. the raw request is one JSON tree scanned by `KabanApi::prepare_args` before any typed
-//!    parse, so a serde error can never echo a secret (a rejection reclaims the secret leaves
-//!    the caller placed with `RawSecret` back into zeroizing memory);
+//!    parse, so a serde error can never echo a secret;
 //! 2. a typed parse failure becomes `ApiError::Invalid` with the fixed text of shared
 //!    [`crate::scrub::typed_argument_failure`] (the class and the type-derived parts, no
 //!    caller byte, RW3-1);
@@ -22,11 +21,10 @@
 //! [`read_stdin_json`] is the bounded reader behind `--stdin-json` (1 MiB, M4-4).
 
 use crate::cli::output::{
-    self, EXIT_INVALID, EXIT_PENDING_SEARCH, EXIT_REJECTED, EXIT_STORE_ERROR, Format,
-    SERIALIZATION_FAILED,
+    self, EXIT_INVALID, EXIT_REJECTED, EXIT_STORE_ERROR, Format, SERIALIZATION_FAILED,
 };
 use crate::scrub::{OnRefusal, rejected_receipt_document, typed_argument_failure};
-use kaban_api::{ApiError, KabanApi, RawSecret};
+use kaban_api::{ApiError, KabanApi};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -48,14 +46,12 @@ const ERROR_WITHHELD: &str = "error: error details withheld (denylist hit)";
 /// Most bytes `--stdin-json` reads (M4-4).
 pub(crate) const STDIN_JSON_LIMIT: usize = 1024 * 1024;
 
-/// Run `tool` on `raw` through the seam and print its one JSON document. `secret_keys` names
-/// the top-level leaves the caller moved in with `RawSecret::place`; on a rejection they are
-/// reclaimed before the tree is dropped. A read: a refusal prints the error text alone.
+/// Run `tool` on `raw` through the seam and print its one JSON document. A read: a refusal
+/// prints the error text alone.
 pub(crate) fn run_tool<Req, Resp, F>(
     api: &KabanApi,
     tool: &str,
     raw: Value,
-    secret_keys: &[&str],
     format: Format,
     call: F,
 ) -> ExitCode
@@ -64,15 +60,7 @@ where
     Resp: Serialize + DeserializeOwned,
     F: FnOnce(&KabanApi, Req) -> Result<Resp, ApiError>,
 {
-    run_tool_with(
-        api,
-        tool,
-        raw,
-        secret_keys,
-        format,
-        OnRefusal::ErrorOnly,
-        call,
-    )
+    run_tool_with(api, tool, raw, format, OnRefusal::ErrorOnly, call)
 }
 
 /// [`run_tool`] for a public write (spec 05 SS-10): a refusal keeps its reason-specific status
@@ -83,7 +71,6 @@ pub(crate) fn run_write_tool<Req, Resp, F>(
     api: &KabanApi,
     tool: &str,
     raw: Value,
-    secret_keys: &[&str],
     format: Format,
     call: F,
 ) -> ExitCode
@@ -92,15 +79,7 @@ where
     Resp: Serialize + DeserializeOwned,
     F: FnOnce(&KabanApi, Req) -> Result<Resp, ApiError>,
 {
-    run_tool_with(
-        api,
-        tool,
-        raw,
-        secret_keys,
-        format,
-        OnRefusal::RejectedReceipt,
-        call,
-    )
+    run_tool_with(api, tool, raw, format, OnRefusal::RejectedReceipt, call)
 }
 
 /// The seam behind [`run_tool`] and [`run_write_tool`]: `on_refusal` says what a refusal
@@ -108,8 +87,7 @@ where
 pub(crate) fn run_tool_with<Req, Resp, F>(
     api: &KabanApi,
     tool: &str,
-    mut raw: Value,
-    secret_keys: &[&str],
+    raw: Value,
     format: Format,
     on_refusal: OnRefusal,
     call: F,
@@ -120,19 +98,12 @@ where
     F: FnOnce(&KabanApi, Req) -> Result<Resp, ApiError>,
 {
     let outcome = match api.prepare_args(tool, &raw) {
-        // the typed parse consumes the tree (a secret leaf moves into its zeroizing typed
+        // the typed parse consumes the tree (a secret leaf moves into its typed
         // form); its failure is the fixed text (no caller byte) and still gated below
         Ok(()) => serde_json::from_value::<Req>(raw)
             .map_err(|e| ApiError::Invalid(typed_argument_failure(&e.to_string())))
             .and_then(|request| call(api, request)),
-        Err(e) => {
-            if let Value::Object(args) = &mut raw {
-                for key in secret_keys {
-                    drop(RawSecret::reclaim(args, key));
-                }
-            }
-            Err(e)
-        }
+        Err(e) => Err(e),
     };
     match outcome {
         Ok(resp) => {
@@ -151,11 +122,6 @@ where
             }
             if output::print_json(&clean, format).is_err() {
                 return serialization_failure();
-            }
-            // the typed receipt is printed whole; status 6 says the write stands but is not
-            // searchable yet (SS-10), so a script never replays it
-            if output::pending_search(&clean) {
-                return ExitCode::from(EXIT_PENDING_SEARCH);
             }
             ExitCode::SUCCESS
         }
@@ -249,17 +215,11 @@ mod tests {
     fn a_failing_serializer_prints_the_fixed_text_and_exits_5_without_its_message() {
         if std::env::var_os(CHILD_ENV).is_some() {
             let store = std::sync::Arc::new(SqliteStore::open_memory().unwrap());
-            let api = KabanApi::new(
-                store.clone(),
-                kaban_policy::Policy::empty(),
-                store.signer(),
-                None,
-            );
+            let api = KabanApi::new(store.clone(), kaban_policy::Policy::empty(), store.signer());
             let code = run_tool::<Value, Unserializable, _>(
                 &api,
                 "doctor",
                 serde_json::json!({}),
-                &[],
                 Format::Compact,
                 |_, _| Ok(Unserializable),
             );

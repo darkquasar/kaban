@@ -1,0 +1,3 @@
+# The older-format fixtures are SQLite files; the root ignore rules skip *.db.
+!kaban.db
+!kaban.db-wal

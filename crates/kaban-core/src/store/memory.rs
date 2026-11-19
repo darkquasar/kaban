@@ -1,16 +1,13 @@
 //! [`MemoryStore`]: the memory graph role trait.
 
 use super::anchors::{AnchorPredicates, SnapshotAttach, SnapshotSymbol, SymbolPage};
-use super::types::ReviewRow;
 use crate::audit::WriteCtx;
 use crate::error::Result;
-use crate::events::ForgetOutcome;
 use crate::ids::NodeId;
 use crate::model::{
-    Edge, ForgetMode, Hit, LinkReq, NewNode, Node, RecallQuery, RememberOutcome, TraverseQuery,
-    TraverseResult,
+    Edge, ForgetMode, ForgetOutcome, Hit, LinkReq, NewNode, Node, RecallQuery, RememberOutcome,
+    TraverseQuery, TraverseResult,
 };
-use crate::text_index::Visibility;
 use serde_json::Value;
 
 /// The memory graph itself: notes and typed edges, reads by id, hybrid recall, bounded
@@ -18,7 +15,7 @@ use serde_json::Value;
 /// `stats` tool. Used by the service layer's remember/query/mutate paths, the MCP adapter and
 /// the bench.
 pub trait MemoryStore: Send + Sync {
-    /// Store a node and its inline links atomically (with `ctx.audit`); exact duplicates return
+    /// Store a node and its inline links atomically; exact duplicates return
     /// `Existing`.
     ///
     /// # Errors
@@ -52,7 +49,7 @@ pub trait MemoryStore: Send + Sync {
     /// # Errors
     /// Backend errors only; a missing or hidden node is `Ok(None)`.
     fn get(&self, id: &NodeId, include_hidden: bool) -> Result<Option<Node>>;
-    /// Create or update a typed edge (with `ctx.audit`); `SUPERSEDES`/`INVALIDATES` mark the
+    /// Create or update a typed edge; `SUPERSEDES`/`INVALIDATES` mark the
     /// destination.
     ///
     /// # Errors
@@ -68,7 +65,7 @@ pub trait MemoryStore: Send + Sync {
     ) -> Result<Edge>;
     /// Hybrid recall (BM25 + graph expansion + RRF), deterministic order. Lifecycle is
     /// enforced while every hop frontier is built (R2-4): expansion runs through active nodes,
-    /// through archived ones only when `include_superseded` opts in, never through tombstoned
+    /// through archived ones only when `include_archived` opts in, never through tombstoned
     /// or purged ones, so a hidden node never bridges to an otherwise unreachable one.
     ///
     /// # Errors
@@ -94,28 +91,6 @@ pub trait MemoryStore: Send + Sync {
             .filter(|hit| eligible(&hit.node))
             .collect())
     }
-    /// How far committed writes are visible to [`Self::recall`]'s seed searches (spec 05
-    /// SS-10, SS-11): [`Visibility::Current`] for a store whose index is written in the
-    /// record's transaction (the default); an index with its own storage reports the
-    /// watermark its serving reader covers.
-    ///
-    /// # Errors
-    /// Backend errors reading the watermark.
-    fn text_visible(&self) -> Result<Visibility> {
-        Ok(Visibility::Current)
-    }
-    /// Publish what this process committed and has not yet projected into an index with its
-    /// own storage, toward `target` (a receipt's position; `u64::MAX` for everything) until
-    /// `deadline` (spec 05 SS-10: the caller's one deadline per public call, passed down),
-    /// never rebuilding and never waiting for another process's publisher. Nothing to do for
-    /// a store whose index is written in the record's transaction (the default).
-    ///
-    /// # Errors
-    /// A store or index failure; the caller's receipt stays committed whatever happens here.
-    fn text_publish(&self, target: u64, deadline: std::time::Instant) -> Result<()> {
-        let _ = (target, deadline);
-        Ok(())
-    }
     /// Bounded traversal over active nodes only (core-spec §4, F6): a start id that is not
     /// active in the queried workspace is `NotFound`, and every frontier expands through
     /// active far endpoints only (R2-4).
@@ -123,52 +98,6 @@ pub trait MemoryStore: Send + Sync {
     /// # Errors
     /// `NotFound` for an unknown, non-active or other-workspace start id, or a backend error.
     fn traverse(&self, q: &TraverseQuery) -> Result<TraverseResult>;
-    /// The explanation of the conflict group `group_key` (engine-spec EN-F14; engine-plan
-    /// E2.4): the group's stored supporters are decided again, read-only, exactly as the write
-    /// path decides them (same reconciler, same protection, same thresholds), and the vote is
-    /// rendered: the candidates in decision order with their lineages, the margin and the
-    /// gates, the tie-break level when two sums were equal, the unresolved reason and the
-    /// protecting human claim when they apply. Nothing is written; the document is the same
-    /// bytes whatever order the claims arrived in (EN-F12a).
-    ///
-    /// # Errors
-    /// `NotFound` for a group no stored claim belongs to; backend errors.
-    fn explain_group(&self, group_key: &str) -> Result<crate::reconcile::Explanation>;
-    /// The group key of the claim whose stable key is `key`, in every workspace (the
-    /// store-level entry the goldens drive). The service's `explain` entries read through
-    /// [`Self::claim_group_in`], the workspace-bound form.
-    ///
-    /// # Errors
-    /// `NotFound` for an unknown key; backend errors.
-    fn claim_group(&self, key: &str) -> Result<String>;
-    /// [`Self::claim_group`] bound to `workspace` (core-spec S6; the `kaban explain <key>`
-    /// entry: a person names a claim, the explanation is its group's): the group key of the
-    /// claim `key` when the claim belongs to `workspace`, else `NotFound` exactly as for a
-    /// key nothing holds. A group key names its workspace, so the group it returns is the
-    /// workspace's own.
-    ///
-    /// # Errors
-    /// `NotFound` for an unknown key or one of another workspace; backend errors.
-    fn claim_group_in(&self, workspace: &str, key: &str) -> Result<String>;
-    /// The outstanding review items of `workspace` (engine-spec EN-F14a; engine-plan E2.5;
-    /// RE4-9): one [`ReviewRow`] per `(node, group)` whose claims are still `candidate` or
-    /// `unresolved` with no winner (an `unresolved` dissent parked under a human winner is a
-    /// decided group, EN-F12c), plus the `discovered_kind` admission row of a node of an
-    /// undeclared kind on its own, in `(rid, group_key)` order; `subject` narrows the list to
-    /// one node. A candidate node holds a `node_candidate` row (the per-node truth of EN-F5a);
-    /// an unresolved group joins from its statuses.
-    ///
-    /// # Errors
-    /// Backend errors.
-    fn review_rows(&self, workspace: &str, subject: Option<&NodeId>) -> Result<Vec<ReviewRow>>;
-    /// One page of the active `proposed` records of `workspace`, whatever their kind (the
-    /// wave-2 review's RW2-5: `kaban review` lists every record awaiting acceptance, the
-    /// governed kinds and the ones the reconciler materialised alike, EN-F13), ordered by id
-    /// (N5), `offset` rows skipped, at most `limit` rows (clamped to 500 by the store).
-    ///
-    /// # Errors
-    /// Backend errors.
-    fn proposed_nodes_in(&self, workspace: &str, offset: usize, limit: usize) -> Result<Vec<Node>>;
     /// The active `Chunk` of `workspace` ingested from `path` whose byte range covers
     /// `offset` (`props.path`, `props.byte_start <= offset < props.byte_end`; the
     /// `<path>:<offset>` address of EN-F14a), the lowest id when ranges overlap. The lookup
@@ -179,9 +108,9 @@ pub trait MemoryStore: Send + Sync {
     /// # Errors
     /// Backend errors.
     fn chunk_covering(&self, workspace: &str, path: &str, offset: u64) -> Result<Option<Node>>;
-    /// Tombstone (default), invalidate, archive or purge a node (with `ctx.audit`, which the
+    /// Tombstone (default), invalidate, archive or purge a node (which the
     /// caller fills with the `Forget`/`Purge` entry). Lifecycle follows the spec §4 table;
-    /// `Invalidate` also moves governance and writes an `invalidated` event.
+    /// `Invalidate` has the same effect as `Tombstone`.
     ///
     /// # Errors
     /// `NotFound` (unknown or purged id), `InvalidTransition` or a backend error.
@@ -245,27 +174,4 @@ pub trait MemoryStore: Send + Sync {
     /// # Errors
     /// Backend errors.
     fn stats(&self, workspace_id: Option<&str>) -> Result<Value>;
-    /// `kaban unmerge <id>` (engine-spec EN-F51 (5); engine-plan E2.10): every `node_identity`
-    /// row naming `id` (as the merged or the canonical node) inside `workspace` is deleted, the
-    /// identity claim behind each becomes `deprecated` under the gated `reason` and its group is
-    /// re-decided without its vote, with `ctx.audit` in the same transaction. Both nodes stay.
-    ///
-    /// # Errors
-    /// `NotFound` for an unknown or foreign id, or one no identity row names; backend errors.
-    fn unmerge(
-        &self,
-        workspace: &str,
-        id: &NodeId,
-        reason: &str,
-        ctx: &WriteCtx,
-    ) -> Result<crate::er::UnmergeOutcome>;
-    /// The canonical a merged node reads as (engine-spec EN-F51 (5); E2.10 boundary review
-    /// BR-6, the logical-read contract): the `node_identity` redirect of `id` inside
-    /// `workspace`, as a node id. `None` for a canonical (it has no row), for a node no
-    /// identity row names, for a purged canonical (`NULL` is no redirect) and for a store
-    /// without the engine tables. A projection of the winning identity claims, never evidence.
-    ///
-    /// # Errors
-    /// Backend errors.
-    fn canonical_of(&self, workspace: &str, id: &NodeId) -> Result<Option<NodeId>>;
 }

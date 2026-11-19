@@ -51,7 +51,7 @@ fn graph_rows(s: &Scratch) -> Value {
     kaban_store_sqlite::register_body_reader(&conn).unwrap();
     let nodes = conn
         .prepare(
-            "SELECT id,kind,kaban_body(text),props,governance,lifecycle,content_hash FROM node ORDER BY id",
+            "SELECT id,kind,kaban_body(text),props,lifecycle,content_hash FROM node ORDER BY id",
         )
         .unwrap()
         .query_map([], |r| {
@@ -61,28 +61,14 @@ fn graph_rows(s: &Scratch) -> Value {
                 r.get::<_, String>(2)?,
                 r.get::<_, String>(3)?,
                 r.get::<_, String>(4)?,
-                r.get::<_, String>(5)?,
-                r.get::<_, String>(6)?
+                r.get::<_, String>(5)?
             ]))
         })
         .unwrap()
         .collect::<rusqlite::Result<Vec<_>>>()
         .unwrap();
-    let claims = conn
-        .prepare("SELECT key,rank,rank_reason FROM assertion ORDER BY key")
-        .unwrap()
-        .query_map([], |r| {
-            Ok(json!([
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, Option<String>>(2)?
-            ]))
-        })
-        .unwrap()
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .unwrap();
-    let edges=conn.prepare("SELECT s.id,d.id,e.rel,e.props,e.layer,e.method,e.score,e.source_id FROM edge e JOIN node s ON s.rid=e.src JOIN node d ON d.rid=e.dst ORDER BY s.id,d.id,e.rel").unwrap().query_map([],|r|Ok(json!([r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?,r.get::<_,Option<String>>(4)?,r.get::<_,Option<String>>(5)?,r.get::<_,Option<f64>>(6)?,r.get::<_,Option<String>>(7)?]))).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
-    json!({"nodes":nodes,"claims":claims,"edges":edges})
+    let edges=conn.prepare("SELECT s.id,d.id,e.rel,e.props,e.producer,e.method,e.score,e.source_id FROM edge e JOIN node s ON s.rid=e.src JOIN node d ON d.rid=e.dst ORDER BY s.id,d.id,e.rel").unwrap().query_map([],|r|Ok(json!([r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?,r.get::<_,Option<String>>(4)?,r.get::<_,Option<String>>(5)?,r.get::<_,Option<f64>>(6)?,r.get::<_,Option<String>>(7)?]))).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+    json!({"nodes":nodes,"edges":edges})
 }
 
 #[test]
@@ -166,59 +152,6 @@ fn two_processes_duplicate_submit_create_once_and_equal_single_submit_graph() {
     first.finish();
     second.finish();
     single.finish();
-}
-
-#[test]
-fn acceptance_before_pending_submit_preserves_authority_and_makes_revision_candidate() {
-    let s = Scratch::new("kaban-e310-race", "accept");
-    let root = repo(&s);
-    let mut server = Server::start_at(&s, &root);
-    let prepared = call(
-        &mut server,
-        "ingest_brief",
-        &json!({"path":"a.md","type":"adr"}),
-    );
-    let job = prepared["job"].as_str().unwrap();
-    let original = json!({"job":job,"records":[{"local_id":"d","kind":"Decision","text":"Original decision","props":{"rationale":"Original rationale"},"confidence":1.0}]});
-    let placed = call(&mut server, "ingest_submit", &original);
-    let id = placed["records"][0]["id"].as_str().unwrap();
-    // Stdin is the deterministic publication barrier. The pending independent submit
-    // process exists before acceptance and cannot read/overwrite the accepted bytes.
-    let pending = launch(&s, &root, &["ingest", "job", "submit", job, "--stdin-json"]);
-    let accepted = launch(
-        &s,
-        &root,
-        &["accept", id, "--reason", "reviewed", "--path-scope", "a.md"],
-    )
-    .wait_with_output()
-    .unwrap();
-    parse(&accepted);
-    let conn = rusqlite::Connection::open(s.db()).unwrap();
-    kaban_store_sqlite::register_body_reader(&conn).unwrap();
-    let before: (String, String, i64) = conn
-        .query_row(
-            "SELECT kaban_body(text),props,rev FROM node WHERE id=?",
-            [id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )
-        .unwrap();
-    let changed = json!({"job":job,"records":[{"local_id":"d","kind":"Decision","text":"New decision","props":{"rationale":"New rationale"},"confidence":1.0}]});
-    let result = parse(&send(pending, &changed));
-    assert_eq!(result["records"][0]["outcome"], "revision_candidate");
-    assert_eq!(result["revision_candidates"][0]["of"], id);
-    let after: (String, String, i64) = conn
-        .query_row(
-            "SELECT kaban_body(text),props,rev FROM node WHERE id=?",
-            [id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )
-        .unwrap();
-    assert_eq!(after, before);
-    let governance: String = conn
-        .query_row("SELECT governance FROM node WHERE id=?", [id], |r| r.get(0))
-        .unwrap();
-    assert_eq!(governance, "accepted");
-    server.finish();
 }
 
 #[test]

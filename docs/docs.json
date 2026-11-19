@@ -23,7 +23,6 @@
             "group": "Guides",
             "pages": [
               "guides/memory",
-              "guides/governance",
               "guides/documents",
               "guides/code-graph"
             ]

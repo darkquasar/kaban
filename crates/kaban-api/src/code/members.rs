@@ -31,13 +31,11 @@ impl KabanApi {
     /// repository-relative path rule is `selector_invalid`), store errors from the audit flush.
     #[allow(clippy::needless_pass_by_value)] // core-plan §6 interface: requests are taken by value
     pub fn code_members(&self, req: CodeMembersRequest) -> Result<CodeListResponse, ApiError> {
-        let mut ctx = self.write_ctx(None);
         let mut red = Vec::new();
-        let target = self.gate_selector(&mut ctx, TOOL, &req.target, &mut red)?;
+        let target = self.gate_selector(TOOL, &req.target, &mut red)?;
         let mut labels = Vec::with_capacity(req.labels.len());
         for l in &req.labels {
             labels.push(self.gate_control(
-                &mut ctx,
                 TOOL,
                 ControlPath::request(TOOL, "labels[]"),
                 "labels",
@@ -45,14 +43,8 @@ impl KabanApi {
                 &mut red,
             )?);
         }
-        let current_path = self.gate_opt(
-            &mut ctx,
-            TOOL,
-            "current_path",
-            req.current_path.as_deref(),
-            &mut red,
-        )?;
-        self.flush_audit(&mut ctx)?;
+        let current_path =
+            self.gate_opt(TOOL, "current_path", req.current_path.as_deref(), &mut red)?;
         if labels
             .iter()
             .any(|l| !SCIP_KIND_NAMES.contains(&l.as_str()))

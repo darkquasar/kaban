@@ -27,7 +27,6 @@ fn ingestor(store: &Arc<SqliteStore>, fake: &Arc<Fake>, workspace: &str) -> Inge
         store.clone(),
         Policy::empty(),
         store.signer(),
-        None,
         ApiConfig {
             workspace: WorkspaceId::new(workspace),
             ..ApiConfig::default()

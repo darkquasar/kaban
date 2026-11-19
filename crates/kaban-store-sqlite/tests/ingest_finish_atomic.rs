@@ -1,10 +1,12 @@
-//! Atomic retirement, replay safety, union scopes, retention and already-read races.
+//! The structured-ingest finish transaction over direct edges (DEL-08 survivors of the claim-era
+//! file): a holder that lost its lease deletes nothing, a failing report callback rolls the edge
+//! deletion back, a cap or overflow skips every delete, and chunk evidence of an earlier,
+//! already pruned job is still in scope.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 use kaban_core::{
-    Actor, BatchAssertion, BatchSubject, ChangeLogStore, ClaimClass, EdgeDiff, Fixed, Governance,
-    IngestJob, IngestStore, JobFinishRequest, JobFinishStateUpdate, JobId, JobStatus,
-    JobSubmitContract, Layer, Lifecycle, MemoryStore, Method, NewNode, NodeId, Op, Rank, SourceRev,
-    StoreError, TraverseQuery, WorkspaceId, WriteBatch, WriteCtx,
+    Actor, ChangeLogStore, EdgeDiff, IngestJob, IngestStore, JobFinishRequest,
+    JobFinishStateUpdate, JobId, JobStatus, JobSubmitContract, MemoryStore, NewNode, NodeId, Op,
+    SourceRev, StoreError, TraverseQuery, WorkspaceId, WriteBatch, WriteCtx,
 };
 use kaban_store_sqlite::SqliteStore;
 use serde_json::{Value, json};
@@ -33,47 +35,40 @@ fn node(id: &NodeId, kind: &str, text: &str, props: Value) -> Op {
         },
     }
 }
-fn edge(src: &NodeId, dst: &NodeId, rel: &str, owner: &str) -> Op {
+
+fn edge(src: &NodeId, dst: &NodeId, rel: &str, props: Value) -> Op {
     Op::UpsertEdge {
         src: src.clone(),
         dst: dst.clone(),
         rel: rel.into(),
-        props: Some(json!({"owner":owner})),
+        props: Some(props),
     }
 }
-fn claim(src: &NodeId, dst: &NodeId, rel: &str, source: &str, layer: Layer) -> BatchAssertion {
-    BatchAssertion {
-        subject: BatchSubject::Edge {
-            src: src.clone(),
-            dst: dst.clone(),
-            rel: rel.into(),
-        },
-        claim_class: ClaimClass::Edge,
-        predicate: None,
-        object: None,
-        value: json!({"owner":"kaban-parse"}),
-        layer,
-        method: Method::IngestSubmit,
-        extractor_id: None,
-        extractor_version: None,
-        source_id: Some(source.into()),
-        lineage_id: format!("fixture-{source}"),
-        raw_score: Fixed::ONE,
-        rank: Rank::Normal,
-        rank_reason: None,
-        calibration_version: 0,
-        supersedes: None,
-    }
+
+/// A submission edge as structured submit writes it: under the extractor producer of
+/// `dialect`, scored, with the source lineage in the `source_id` column.
+fn submitted_edge(dialect: &str, src: &NodeId, dst: &NodeId, rel: &str) -> Op {
+    edge(
+        src,
+        dst,
+        rel,
+        json!({"producer":format!("extractor:{dialect}"),"method":"ingest_submit","score":10000,"source_id":"di-not-node"}),
+    )
 }
-fn apply(store: &SqliteStore, ops: Vec<Op>, assertions: Vec<BatchAssertion>, ctx: &WriteCtx) {
-    let mut batch = WriteBatch::new(ctx.workspace_id.clone(), ops);
-    batch.edge_diff = EdgeDiff::None;
-    batch.assertions = assertions;
-    store.apply_batch(batch, ctx).unwrap();
-}
+
+/// A document with a current and an earlier chunk, a record the job names, an orphan record
+/// it does not, and four submission edges: the named `record -> document` provenance, the
+/// orphan's provenance, an unnamed `record -> target` edge and the earlier chunk's evidence for
+/// the orphan.
 fn fixture() -> Fixture {
+    fixture_for("llm")
+}
+
+/// [`fixture`] with the job and its four submission edges under the extractor `dialect`.
+fn fixture_for(dialect: &str) -> Fixture {
+    let parse_edge = |src: &NodeId, dst: &NodeId, rel: &str| submitted_edge(dialect, src, dst, rel);
     let store = SqliteStore::open_memory().unwrap();
-    let ctx = WriteCtx::new("policy", WorkspaceId::default(), Actor::Agent);
+    let ctx = WriteCtx::new(WorkspaceId::default(), Actor::Agent);
     let (document, chunk, old_chunk, section, record, orphan, target) = (
         NodeId::new(),
         NodeId::new(),
@@ -83,8 +78,10 @@ fn fixture() -> Fixture {
         NodeId::new(),
         NodeId::new(),
     );
-    apply(
-        &store,
+    let ingest = json!({"owner":"kaban-ingest"});
+    let structure = json!({"producer":"document_ingest"});
+    let mut batch = WriteBatch::new(
+        ctx.workspace_id.clone(),
         vec![
             node(
                 &document,
@@ -92,19 +89,9 @@ fn fixture() -> Fixture {
                 "source",
                 json!({"owner":"kaban-ingest","source_id":"di-not-node","content_hash":"content","chunk_ids":[chunk]}),
             ),
-            node(&chunk, "Chunk", "current", json!({"owner":"kaban-ingest"})),
-            node(
-                &old_chunk,
-                "Chunk",
-                "earlier",
-                json!({"owner":"kaban-ingest"}),
-            ),
-            node(
-                &section,
-                "Section",
-                "section",
-                json!({"owner":"kaban-ingest"}),
-            ),
+            node(&chunk, "Chunk", "current", ingest.clone()),
+            node(&old_chunk, "Chunk", "earlier", ingest.clone()),
+            node(&section, "Section", "section", ingest.clone()),
             node(
                 &record,
                 "Decision",
@@ -118,37 +105,42 @@ fn fixture() -> Fixture {
                 json!({"rationale":"orphan reason"}),
             ),
             node(&target, "Fact", "target", json!({})),
-            edge(&old_chunk, &section, "PART_OF", "kaban-ingest"),
-            edge(&section, &document, "PART_OF", "kaban-ingest"),
+            // the document structure is the document ingest's (PC-16 producer column)
+            edge(&old_chunk, &section, "PART_OF", structure.clone()),
+            edge(&section, &document, "PART_OF", structure),
+            parse_edge(&record, &document, "DERIVED_FROM"),
+            parse_edge(&orphan, &document, "DERIVED_FROM"),
+            parse_edge(&record, &target, "RELATES_TO"),
+            parse_edge(&old_chunk, &orphan, "EVIDENCE_FOR"),
         ],
-        vec![
-            claim(
-                &record,
-                &document,
-                "DERIVED_FROM",
-                "di-not-node",
-                Layer::Llm,
-            ),
-            claim(
-                &orphan,
-                &document,
-                "DERIVED_FROM",
-                "di-not-node",
-                Layer::Llm,
-            ),
-            claim(&record, &target, "RELATES_TO", "di-not-node", Layer::Llm),
-            claim(
-                &old_chunk,
-                &orphan,
-                "EVIDENCE_FOR",
-                "di-not-node",
-                Layer::Llm,
-            ),
-        ],
-        &ctx,
     );
+    batch.edge_diff = EdgeDiff::None;
+    store.apply_batch(batch, &ctx).unwrap();
     let rev = SourceRev::from(&store.get(&document, true).unwrap().unwrap());
-    let job=IngestJob{job:JobId::from_digest(&[10;32]),workspace:ctx.workspace_id.clone(),source_id:"di-not-node".into(),relative_path:"source.md".into(),content_hash:"content".into(),pipeline_version:"1".into(),chunk_config_hash:"chunks".into(),mode:"structured".into(),dialect:"llm".into(),doc_type:"generic".into(),kinds:vec!["Fact".into()],plan_json:json!({"v":1,"document_id":document,"chunks":[{"id":chunk}],"submit_state":{"named_records":[record]},"finished_report_json":null}).to_string(),named_edges:vec![(record.to_string(),document.to_string(),"DERIVED_FROM".into())],submits:2,created:2,updated:0,unchanged:0,redactions:0,status:JobStatus::Open,created_at:1,expires_at:i64::MAX,finished_at:None};
+    let job = IngestJob {
+        job: JobId::from_digest(&[10; 32]),
+        workspace: ctx.workspace_id.clone(),
+        source_id: "di-not-node".into(),
+        relative_path: "source.md".into(),
+        content_hash: "content".into(),
+        pipeline_version: "1".into(),
+        chunk_config_hash: "chunks".into(),
+        mode: "structured".into(),
+        dialect: dialect.into(),
+        doc_type: "generic".into(),
+        kinds: vec!["Fact".into()],
+        plan_json: json!({"v":1,"document_id":document,"chunks":[{"id":chunk}],"submit_state":{"named_records":[record]},"finished_report_json":null}).to_string(),
+        named_edges: vec![(record.to_string(), document.to_string(), "DERIVED_FROM".into())],
+        submits: 2,
+        created: 2,
+        updated: 0,
+        unchanged: 0,
+        redactions: 0,
+        status: JobStatus::Open,
+        created_at: 1,
+        expires_at: i64::MAX,
+        finished_at: None,
+    };
     store.job_open(&job).unwrap();
     Fixture {
         store,
@@ -163,6 +155,7 @@ fn fixture() -> Fixture {
         rev,
     }
 }
+
 fn request(f: &Fixture, cap: u32) -> JobFinishRequest {
     JobFinishRequest {
         job: f.job.job.clone(),
@@ -174,86 +167,66 @@ fn request(f: &Fixture, cap: u32) -> JobFinishRequest {
         retention_days: 7,
     }
 }
-fn finish(f: &Fixture, cap: u32) -> String {
-    f.store.job_finish(request(f,cap),&f.ctx,&mut |row,outcome| {
-        let plan:Value=serde_json::from_str(&row.plan_json)?;
-        let report_json=if row.status==JobStatus::Finished {plan["finished_report_json"].as_str().unwrap().into()} else {json!({"retired":outcome.retired_assertions,"deleted":outcome.deleted_edges,"orphans":outcome.orphans,"skipped_cap":outcome.skipped_cap}).to_string()};
-        Ok(JobFinishStateUpdate{report_json,audit:vec![]})
-    }).unwrap()
+
+fn finish(f: &Fixture, cap: u32) -> Value {
+    let text = f
+        .store
+        .job_finish(request(f, cap), &f.ctx, &mut |row, outcome| {
+            let plan: Value = serde_json::from_str(&row.plan_json)?;
+            let report_json = if row.status == JobStatus::Finished {
+                plan["finished_report_json"].as_str().unwrap().into()
+            } else {
+                json!({"deleted":outcome.deleted_edges,"skipped_cap":outcome.skipped_cap})
+                    .to_string()
+            };
+            Ok(JobFinishStateUpdate { report_json })
+        })
+        .unwrap();
+    serde_json::from_str(&text).unwrap()
 }
-fn edges(f: &Fixture) -> Vec<kaban_core::Edge> {
-    f.store
+
+/// Every edge out of the record, the orphan and the earlier chunk, as comparable JSON.
+fn edges(f: &Fixture) -> Value {
+    let mut edges = f
+        .store
         .traverse(&TraverseQuery {
             start_ids: vec![f.record.clone(), f.orphan.clone(), f.old_chunk.clone()],
             max_depth: 1,
             ..Default::default()
         })
         .unwrap()
-        .edges
+        .edges;
+    edges.sort_by(|a, b| a.id.cmp(&b.id));
+    serde_json::to_value(edges).unwrap()
+}
+
+fn rels(f: &Fixture) -> Vec<String> {
+    let mut rels: Vec<String> = edges(f)
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["rel"].as_str().unwrap().to_owned())
+        .collect();
+    rels.sort();
+    rels
 }
 
 #[test]
-fn protected_l3_relationship_survives_finish_omission() {
-    use kaban_core::{GovernanceStore, PruningTarget};
-    let mut f = fixture();
-    let target = PruningTarget::Relationship {
-        src: f.record.clone(),
-        dst: f.target.clone(),
-        rel: "RELATES_TO".into(),
-    };
-    f.store.pruning_protection_set(&target, &f.ctx).unwrap();
-    finish(&f, 100);
-    assert!(
-        edges(&f).iter().any(|e| e.rel == "RELATES_TO"),
-        "protected L3 relationship and supporting claim must survive finish omission"
-    );
-    assert!(
-        !edges(&f).iter().any(|e| e.rel == "EVIDENCE_FOR"),
-        "unprotected sibling is retired"
-    );
-    f.store.pruning_protection_clear(&target, &f.ctx).unwrap();
-    f.job.job = JobId::from_digest(&[77; 32]);
-    f.store.job_open(&f.job).unwrap();
-    finish(&f, 100);
-    assert!(
-        !edges(&f).iter().any(|e| e.rel == "RELATES_TO"),
-        "clear restores L3 omission eligibility"
-    );
-}
-
-#[test]
-fn protected_document_omission_does_not_revoke_its_job() {
-    use kaban_core::{GovernanceStore, PruningTarget};
+fn an_omitting_finish_deletes_the_unnamed_submission_edges_only() {
     let f = fixture();
-    let target = PruningTarget::Node(f.document.clone());
-    f.store.pruning_protection_set(&target, &f.ctx).unwrap();
-    let batch = WriteBatch::new(
-        f.ctx.workspace_id.clone(),
-        vec![Op::Tombstone {
-            id: f.document.clone(),
-            reason: "producer omission".into(),
-        }],
-    );
-    f.store.apply_batch(batch.clone(), &f.ctx).unwrap();
+    let report = finish(&f, 100);
+    assert_eq!(report["skipped_cap"], false, "{report}");
+    assert_eq!(report["deleted"], 3, "{report}");
+    // the named provenance and the ingest structure stay
     assert!(
-        f.store
-            .job_get(&f.job.job, &f.ctx.workspace_id)
-            .unwrap()
-            .is_some()
-    );
-    assert!(f.store.get(&f.document, false).unwrap().is_some());
-    f.store.pruning_protection_clear(&target, &f.ctx).unwrap();
-    f.store.apply_batch(batch, &f.ctx).unwrap();
-    assert!(
-        f.store
-            .job_get(&f.job.job, &f.ctx.workspace_id)
-            .unwrap()
-            .is_none()
+        rels(&f)
+            .iter()
+            .all(|rel| rel == "DERIVED_FROM" || rel == "PART_OF")
     );
 }
 
 #[test]
-fn late_holder_finish_cannot_retire_after_ownership_is_lost() {
+fn late_holder_finish_cannot_delete_after_ownership_is_lost() {
     use kaban_core::LeaseStore;
     let mut f = fixture();
     f.job.job = JobId::from_digest(&[92; 32]);
@@ -272,18 +245,17 @@ fn late_holder_finish_cannot_retire_after_ownership_is_lost() {
         .lease_acquire("ingest:invented:source", "new-worker", 300)
         .unwrap()
         .unwrap();
-    let before = serde_json::to_value(edges(&f)).unwrap();
+    let before = edges(&f);
     let result = f.store.job_finish(request(&f, 100), &f.ctx, &mut |_, _| {
         Ok(JobFinishStateUpdate {
             report_json: "{}".into(),
-            audit: vec![],
         })
     });
     assert!(
         matches!(result, Err(StoreError::LeaseLost { .. })),
         "late holder finalization must fail with lease_lost"
     );
-    assert_eq!(serde_json::to_value(edges(&f)).unwrap(), before);
+    assert_eq!(edges(&f), before);
     assert_eq!(
         f.store
             .job_get(&f.job.job, &f.job.workspace)
@@ -294,141 +266,9 @@ fn late_holder_finish_cannot_retire_after_ownership_is_lost() {
 }
 
 #[test]
-fn extractor_reindex_retires_only_its_claims_preserving_human_and_other_layer_support() {
-    use kaban_core::{GovernanceStore, PruningTarget};
-    let f = fixture();
-    f.store
-        .pruning_protection_set(&PruningTarget::Node(f.record.clone()), &f.ctx)
-        .unwrap();
-    apply(
-        &f.store,
-        vec![],
-        vec![
-            claim(
-                &f.record,
-                &f.target,
-                "RELATES_TO",
-                "di-not-node",
-                Layer::Human,
-            ),
-            claim(
-                &f.old_chunk,
-                &f.orphan,
-                "EVIDENCE_FOR",
-                "di-not-node",
-                Layer::Gliner,
-            ),
-        ],
-        &f.ctx,
-    );
-    let report = f.store.jobs_reindex(Layer::Llm, 1, &f.ctx).unwrap();
-    assert!(
-        report.transactions >= 4,
-        "bounded one-row retirement batches"
-    );
-    let remaining = edges(&f);
-    assert!(
-        remaining
-            .iter()
-            .any(|edge| edge.rel == "RELATES_TO" && edge.props["owner"] == "human")
-    );
-    assert!(remaining.iter().any(|edge| edge.rel == "EVIDENCE_FOR"));
-    assert!(!remaining.iter().any(|edge| edge.rel == "DERIVED_FROM"));
-}
-
-#[test]
-fn explicit_reindex_then_same_source_submit_restores_only_named_reset_claims() {
-    let mut f = fixture();
-    f.store.jobs_reindex(Layer::Llm, 1, &f.ctx).unwrap();
-    assert!(!edges(&f).iter().any(|edge| edge.rel == "RELATES_TO"));
-    f.job.job = JobId::from_digest(&[93; 32]);
-    f.job.dialect = "llm".into();
-    f.store.job_open(&f.job).unwrap();
-    let mut batch = WriteBatch::new(f.ctx.workspace_id.clone(), vec![]);
-    batch.edge_diff = EdgeDiff::None;
-    batch.assertions = vec![claim(
-        &f.record,
-        &f.target,
-        "RELATES_TO",
-        "di-not-node",
-        Layer::Llm,
-    )];
-    let request = kaban_core::JobSubmitRequest {
-        job: f.job.job.clone(),
-        contract: JobSubmitContract::from_job(&f.job).unwrap(),
-        document: f.document.clone(),
-        source_rev: f.rev.clone(),
-        chunks: vec![f.chunk.clone()],
-        batch,
-    };
-    f.store
-        .job_submit(request, &f.ctx, &mut |job, _| {
-            Ok(kaban_core::JobSubmitStateUpdate {
-                plan_json: job.plan_json.clone(),
-                named_edges: vec![(
-                    f.record.to_string(),
-                    f.target.to_string(),
-                    "RELATES_TO".into(),
-                )],
-            })
-        })
-        .unwrap();
-    assert!(
-        edges(&f).iter().any(|edge| edge.rel == "RELATES_TO"),
-        "explicit unchanged-source submit must restore exactly its reindexed claim"
-    );
-    assert!(
-        !edges(&f).iter().any(|edge| edge.rel == "EVIDENCE_FOR"),
-        "omitted reset claim stays retired"
-    );
-}
-
-#[test]
-fn omitted_claims_retire_atomically_and_replay_never_resurrects_them() {
-    let f = fixture();
-    assert!(edges(&f).iter().any(|e| e.rel == "RELATES_TO"));
-    let report: Value = serde_json::from_str(&finish(&f, 100)).unwrap();
-    assert_eq!(report["retired"], 3);
-    assert_eq!(report["deleted"], 3);
-    assert_eq!(report["orphans"], json!([f.orphan]));
-    let remaining = edges(&f);
-    assert!(
-        remaining
-            .iter()
-            .any(|e| e.rel == "DERIVED_FROM" && e.src == f.record.as_str())
-    );
-    assert!(
-        !remaining
-            .iter()
-            .any(|e| e.rel == "RELATES_TO" || e.rel == "EVIDENCE_FOR")
-    );
-    assert_eq!(
-        f.store.get(&f.orphan, true).unwrap().unwrap().lifecycle,
-        Lifecycle::Active
-    );
-    let ids = f
-        .store
-        .changes_read(0, 10000)
-        .unwrap()
-        .into_iter()
-        .filter(|c| c.entity == kaban_core::ChangeEntity::Assertion)
-        .filter_map(|c| c.id.parse().ok())
-        .collect::<Vec<_>>();
-    f.store.redecide_assertions(&ids).unwrap();
-    assert_eq!(
-        serde_json::to_value(edges(&f)).unwrap(),
-        serde_json::to_value(remaining).unwrap()
-    );
-}
-
-#[test]
-fn cap_and_overflow_skip_every_retirement_and_delete() {
-    use kaban_core::{GovernanceStore, PruningTarget};
+fn cap_and_overflow_skip_every_delete() {
     for overflow in [false, true] {
         let mut f = fixture();
-        f.store
-            .pruning_protection_set(&PruningTarget::Node(f.record.clone()), &f.ctx)
-            .unwrap();
         if overflow {
             let mut plan: Value = serde_json::from_str(&f.job.plan_json).unwrap();
             plan["submit_state"]["overflow"] = json!(true);
@@ -443,6 +283,7 @@ fn cap_and_overflow_skip_every_retirement_and_delete() {
                     b.edge_diff = EdgeDiff::None;
                     b
                 },
+                redactions: 0,
             };
             f.job = f
                 .store
@@ -455,25 +296,24 @@ fn cap_and_overflow_skip_every_retirement_and_delete() {
                 .unwrap()
                 .job;
         }
-        let before = serde_json::to_value(edges(&f)).unwrap();
-        let report: Value =
-            serde_json::from_str(&finish(&f, if overflow { 100 } else { 2 })).unwrap();
-        assert_eq!(report["skipped_cap"], true);
-        assert_eq!(report["retired"], 0);
-        assert_eq!(report["deleted"], 0);
-        assert_eq!(serde_json::to_value(edges(&f)).unwrap(), before);
+        let before = edges(&f);
+        let report = finish(&f, if overflow { 100 } else { 2 });
+        assert_eq!(report["skipped_cap"], true, "{report}");
+        assert_eq!(report["deleted"], 0, "{report}");
+        assert_eq!(edges(&f), before);
     }
 }
 
 #[test]
-fn callback_failure_rolls_back_retirement_report_and_lifecycle() {
+fn callback_failure_rolls_back_edge_deletion_report_and_lifecycle() {
     let f = fixture();
-    let before = serde_json::to_value(edges(&f)).unwrap();
+    let before = edges(&f);
     let changes = f.store.changes_read(0, 10000).unwrap();
     let result = f
         .store
         .job_finish(request(&f, 100), &f.ctx, &mut |_, outcome| {
-            assert_eq!(outcome.retired_assertions, 3);
+            // the deletes ran inside the transaction before the callback failed
+            assert_eq!(outcome.deleted_edges, 3);
             Err(StoreError::InvalidName("test".into(), "injected_failure"))
         });
     assert!(result.is_err());
@@ -484,146 +324,12 @@ fn callback_failure_rolls_back_retirement_report_and_lifecycle() {
             .unwrap(),
         f.job
     );
-    assert_eq!(serde_json::to_value(edges(&f)).unwrap(), before);
+    assert_eq!(edges(&f), before, "every deleted edge is back");
     assert_eq!(f.store.changes_read(0, 10000).unwrap(), changes);
 }
 
 #[test]
-fn already_read_finish_retries_return_exact_retained_bytes_and_prune_is_bounded() {
-    let f = fixture();
-    let first = finish(&f, 100);
-    let changes = f.store.changes_read(0, 10000).unwrap();
-    assert_eq!(finish(&f, 100), first);
-    assert_eq!(f.store.changes_read(0, 10000).unwrap(), changes);
-    let row = f
-        .store
-        .job_get(&f.job.job, &f.job.workspace)
-        .unwrap()
-        .unwrap();
-    assert_eq!(row.status, JobStatus::Finished);
-    assert_eq!(row.expires_at - row.finished_at.unwrap(), 7 * 86400);
-    assert_eq!(
-        f.store
-            .jobs_prune(&WorkspaceId::new("foreign"), row.expires_at, 64)
-            .unwrap(),
-        0
-    );
-    assert_eq!(
-        f.store
-            .jobs_prune(&row.workspace, row.expires_at - 1, 64)
-            .unwrap(),
-        0
-    );
-    assert_eq!(
-        f.store
-            .jobs_prune(&row.workspace, row.expires_at, 0)
-            .unwrap(),
-        0
-    );
-    assert_eq!(
-        f.store
-            .jobs_prune(&row.workspace, row.expires_at, 1)
-            .unwrap(),
-        1
-    );
-    assert!(f.store.job_get(&row.job, &row.workspace).unwrap().is_none());
-    assert!(matches!(
-        f.store
-            .job_finish(request(&f, 100), &f.ctx, &mut |_, _| unreachable!()),
-        Err(StoreError::NotFound(_))
-    ));
-}
-
-#[test]
-fn human_foreign_owner_source_and_human_retired_provenance_survive() {
-    let f = fixture();
-    apply(
-        &f.store,
-        vec![edge(&f.record, &f.target, "ABOUT", "kaban-ingest")],
-        vec![
-            claim(
-                &f.record,
-                &f.target,
-                "RELATES_TO",
-                "human-source",
-                Layer::Human,
-            ),
-            claim(
-                &f.chunk,
-                &f.target,
-                "EVIDENCE_FOR",
-                "other-source",
-                Layer::Llm,
-            ),
-        ],
-        &f.ctx,
-    );
-    let mut observed = Vec::new();
-    f.store
-        .rescan_assertions("observe-1", &mut |a, _| {
-            if a.layer == Layer::Llm && a.predicate.as_deref() == Some("DERIVED_FROM") {
-                observed.push(a.key.0.clone());
-            }
-            None
-        })
-        .unwrap();
-    let key = observed.first().unwrap();
-    f.store
-        .deprecate_assertion(key, "human choice", &f.ctx)
-        .unwrap();
-    let mut prior = None;
-    f.store
-        .rescan_assertions("observe-2", &mut |a, _| {
-            if &a.key.0 == key {
-                prior = Some((a.rank, a.rank_reason.clone()));
-            }
-            None
-        })
-        .unwrap();
-    finish(&f, 100);
-    let foreign = f
-        .store
-        .traverse(&TraverseQuery {
-            start_ids: vec![f.chunk.clone()],
-            max_depth: 1,
-            ..Default::default()
-        })
-        .unwrap();
-    assert!(
-        foreign
-            .edges
-            .iter()
-            .any(|e| e.rel == "EVIDENCE_FOR" && e.dst == f.target.as_str())
-    );
-    let remaining = edges(&f);
-    assert!(
-        remaining
-            .iter()
-            .any(|e| e.rel == "ABOUT" && e.props["owner"] == "kaban-ingest")
-    );
-    assert!(
-        remaining
-            .iter()
-            .any(|e| e.rel == "RELATES_TO" && e.props["owner"] == "human")
-    );
-    let mut after = None;
-    f.store
-        .rescan_assertions("observe-3", &mut |a, _| {
-            if &a.key.0 == key {
-                after = Some((a.rank, a.rank_reason.clone()));
-            }
-            None
-        })
-        .unwrap();
-    assert_eq!(after, prior);
-    assert_eq!(
-        f.store.get(&f.record, true).unwrap().unwrap().governance,
-        Governance::Proposed
-    );
-}
-
-#[test]
-fn historical_chunk_evidence_retires_after_prior_finished_job_is_pruned() {
+fn historical_chunk_evidence_is_deleted_after_the_prior_finished_job_is_pruned() {
     let f = fixture();
     let mut prior = f.job.clone();
     prior.job = JobId::from_digest(&[11; 32]);
@@ -641,42 +347,182 @@ fn historical_chunk_evidence_retires_after_prior_finished_job_is_pruned() {
             .unwrap()
             .is_none()
     );
-    let report: Value = serde_json::from_str(&finish(&f, 100)).unwrap();
-    assert_eq!(report["retired"], 3);
-    assert!(!edges(&f).iter().any(|e| e.rel == "EVIDENCE_FOR"));
+    let report = finish(&f, 100);
+    assert_eq!(report["deleted"], 3, "{report}");
+    assert!(!rels(&f).iter().any(|rel| rel == "EVIDENCE_FOR"));
 }
 
-#[test]
-fn deleted_after_preparation_finish_and_submit_cannot_publish() {
-    let f = fixture();
-    let req = request(&f, 100);
+/// Every edge touching a fixture node, keyed by `(src, dst, rel)`, as comparable JSON.
+fn all_edges(f: &Fixture) -> std::collections::BTreeMap<(String, String, String), Value> {
     f.store
-        .forget(&f.document, kaban_core::ForgetMode::Purge, &f.ctx)
-        .unwrap();
-    assert!(matches!(
-        f.store.job_finish(req, &f.ctx, &mut |_, _| unreachable!()),
-        Err(StoreError::NotFound(_))
-    ));
-    let id = NodeId::new();
-    let req = kaban_core::JobSubmitRequest {
-        job: f.job.job.clone(),
-        contract: JobSubmitContract::from_job(&f.job).unwrap(),
-        document: f.document.clone(),
-        source_rev: f.rev.clone(),
-        chunks: vec![f.chunk.clone()],
-        batch: {
-            let mut b = WriteBatch::new(
-                f.ctx.workspace_id.clone(),
-                vec![node(&id, "Fact", "late", json!({}))],
+        .traverse(&TraverseQuery {
+            start_ids: vec![
+                f.document.clone(),
+                f.chunk.clone(),
+                f.old_chunk.clone(),
+                f.record.clone(),
+                f.orphan.clone(),
+                f.target.clone(),
+            ],
+            max_depth: 1,
+            ..Default::default()
+        })
+        .unwrap()
+        .edges
+        .into_iter()
+        .map(|e| {
+            (
+                (e.src.clone(), e.dst.clone(), e.rel.clone()),
+                serde_json::to_value(e).unwrap(),
+            )
+        })
+        .collect()
+}
+
+fn key(src: &NodeId, dst: &NodeId, rel: &str) -> (String, String, String) {
+    (src.to_string(), dst.to_string(), rel.into())
+}
+
+/// PC-20 (2) producer isolation across extractor dialects on one source: a finish deletes only
+/// its own producer's omitted rows. Each ordering writes the first producer's fixture, then a
+/// second producer's rows over the same records (its own provenance for `target`, relations out
+/// of the first producer's `record`, evidence from both chunks), finishes the first job, then
+/// opens and finishes a job of the second dialect that names one of its rows.
+#[test]
+fn a_finish_never_deletes_another_extractor_producers_rows() {
+    for (first, second) in [("llm", "gliner"), ("gliner", "llm")] {
+        let mut f = fixture_for(first);
+        let theirs = vec![
+            submitted_edge(second, &f.target, &f.document, "DERIVED_FROM"),
+            submitted_edge(second, &f.record, &f.orphan, "RELATES_TO"),
+            submitted_edge(second, &f.target, &f.record, "RELATES_TO"),
+            submitted_edge(second, &f.chunk, &f.record, "EVIDENCE_FOR"),
+            submitted_edge(second, &f.old_chunk, &f.target, "EVIDENCE_FOR"),
+        ];
+        let their_keys = [
+            key(&f.target, &f.document, "DERIVED_FROM"),
+            key(&f.record, &f.orphan, "RELATES_TO"),
+            key(&f.target, &f.record, "RELATES_TO"),
+            key(&f.chunk, &f.record, "EVIDENCE_FOR"),
+            key(&f.old_chunk, &f.target, "EVIDENCE_FOR"),
+        ];
+        let mut batch = WriteBatch::new(f.ctx.workspace_id.clone(), theirs);
+        batch.edge_diff = EdgeDiff::None;
+        f.store.apply_batch(batch, &f.ctx).unwrap();
+        let before = all_edges(&f);
+        let report = finish(&f, 100);
+        assert_eq!(report["deleted"], 3, "{first} then {second}: {report}");
+        let after = all_edges(&f);
+        for k in &their_keys {
+            assert_eq!(
+                after.get(k),
+                before.get(k),
+                "{first} finish kept {second}'s row {k:?} byte for byte"
             );
-            b.edge_diff = EdgeDiff::None;
-            b
-        },
-    };
-    assert!(
-        f.store
-            .job_submit(req, &f.ctx, &mut |_, _| unreachable!())
-            .is_err()
+        }
+        let mine = key(&f.record, &f.document, "DERIVED_FROM");
+        assert!(after.contains_key(&mine), "{first}'s named row stays");
+        for k in [
+            key(&f.orphan, &f.document, "DERIVED_FROM"),
+            key(&f.record, &f.target, "RELATES_TO"),
+            key(&f.old_chunk, &f.orphan, "EVIDENCE_FOR"),
+        ] {
+            assert!(
+                !after.contains_key(&k),
+                "{first}'s omitted row {k:?} is gone"
+            );
+        }
+
+        let mut other = f.job.clone();
+        other.job = JobId::from_digest(&[12; 32]);
+        other.dialect = second.into();
+        other.plan_json = json!({"v":1,"document_id":f.document,"chunks":[{"id":f.chunk}],"submit_state":{"named_records":[]},"finished_report_json":null}).to_string();
+        other.named_edges = vec![(
+            f.chunk.to_string(),
+            f.record.to_string(),
+            "EVIDENCE_FOR".into(),
+        )];
+        f.store.job_open(&other).unwrap();
+        f.job = other;
+        let report = finish(&f, 100);
+        assert_eq!(report["deleted"], 4, "{second} after {first}: {report}");
+        let last = all_edges(&f);
+        assert_eq!(
+            last.get(&mine),
+            after.get(&mine),
+            "{second} finish kept {first}'s row byte for byte"
+        );
+        assert!(last.contains_key(&key(&f.chunk, &f.record, "EVIDENCE_FOR")));
+        for k in &their_keys[..3] {
+            assert!(
+                !last.contains_key(k),
+                "{second}'s omitted row {k:?} is gone"
+            );
+        }
+        assert!(!last.contains_key(&their_keys[4]));
+    }
+}
+
+/// A producer rerun that omits a document `ABOUT` it wrote before deletes it, counted with the
+/// rest of its omitted rows; an authored `ABOUT` and another producer's `ABOUT` from the same
+/// document stay byte for byte. A failing report callback restores the deleted `ABOUT`.
+#[test]
+fn a_rerun_without_about_deletes_its_own_document_about_edge_only() {
+    let f = fixture();
+    let mut batch = WriteBatch::new(
+        f.ctx.workspace_id.clone(),
+        vec![
+            submitted_edge("llm", &f.document, &f.target, "ABOUT"),
+            edge(
+                &f.document,
+                &f.orphan,
+                "ABOUT",
+                json!({"producer":"authored"}),
+            ),
+            submitted_edge("gliner", &f.document, &f.record, "ABOUT"),
+        ],
     );
-    assert!(f.store.get(&id, true).unwrap().is_none());
+    batch.edge_diff = EdgeDiff::None;
+    f.store.apply_batch(batch, &f.ctx).unwrap();
+    let before = all_edges(&f);
+    let mine = key(&f.document, &f.target, "ABOUT");
+    assert!(before.contains_key(&mine));
+
+    let result = f
+        .store
+        .job_finish(request(&f, 100), &f.ctx, &mut |_, outcome| {
+            assert_eq!(outcome.deleted_edges, 4, "the ABOUT is in the population");
+            Err(StoreError::InvalidName("test".into(), "injected_failure"))
+        });
+    assert!(result.is_err());
+    assert_eq!(all_edges(&f), before, "rollback restores the ABOUT");
+
+    let report = finish(&f, 100);
+    assert_eq!(report["deleted"], 4, "{report}");
+    let after = all_edges(&f);
+    assert!(!after.contains_key(&mine), "the omitted ABOUT is gone");
+    for k in [
+        key(&f.document, &f.orphan, "ABOUT"),
+        key(&f.document, &f.record, "ABOUT"),
+    ] {
+        assert_eq!(after.get(&k), before.get(&k), "{k:?} stays byte for byte");
+    }
+}
+
+/// The document `ABOUT` rows count against the finish cap: a cap the population fits without
+/// them skips every delete with them.
+#[test]
+fn document_about_edges_count_against_the_finish_cap() {
+    let f = fixture();
+    // without ABOUT: 4 named-or-owned edges plus 2 records fit a cap of 6
+    let mut batch = WriteBatch::new(
+        f.ctx.workspace_id.clone(),
+        vec![submitted_edge("llm", &f.document, &f.target, "ABOUT")],
+    );
+    batch.edge_diff = EdgeDiff::None;
+    f.store.apply_batch(batch, &f.ctx).unwrap();
+    let before = all_edges(&f);
+    let report = finish(&f, 6);
+    assert_eq!(report["skipped_cap"], true, "{report}");
+    assert_eq!(all_edges(&f), before);
 }

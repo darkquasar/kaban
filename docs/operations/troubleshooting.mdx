@@ -87,15 +87,14 @@ fully indexed. If older stored content is withheld on output, review the
 1. Confirm the same database and bound workspace as the write. The default
    workspace depends on the Git root directory name; outside Git it is `default`.
 2. Check whether ingestion actually admitted content. Per-document failures,
-   blocked content, forgotten documents, and candidates pending review are not
-   equivalent to searchable accepted content.
+   blocked content and forgotten documents are not searchable content.
 3. Start with words actually present in the text. Embedding similarity is
    unavailable; a text query is not a semantic search request.
-4. Check optional layer state in `stats`/`doctor`. Gazetteer linking is not on by
-   default. A reset layer has no regenerated links until explicit ingestion.
+4. Check optional producer state in `stats`/`doctor`. Gazetteer linking is not on by
+   default.
 5. If diagnostics identify a derived-index problem, use
    [full-text maintenance](maintenance.mdx#full-text-maintenance) or
-   [layer reset and re-ingestion](maintenance.mdx#layer-reset-and-re-ingestion)
+   [re-ingestion](maintenance.mdx#re-ingestion)
    as appropriate. Neither recreates missing source content.
 
 Do not broaden reads to all workspaces merely to hide a configuration error.
@@ -103,21 +102,22 @@ For a document explicitly forgotten earlier, an ordinary directory scan may
 skip it. Re-admission is a deliberate choice: naming that file explicitly, or
 using `--include-forgotten`, changes that behavior.
 
-## Stale derived state or sync conflicts
+## Stale derived state or a refused database
 
-An open that fails with "another session holds the database; the schema migration needs it
-to itself" found another kaban process using a database still on the previous schema: close
-the other kaban processes and retry (spec 05 OWN-M: the migration runs once, exclusively).
+An open that fails with "database schema version N is not the version 14 this kaban
+serves: no upgrade path exists; create a fresh project and re-ingest" found a database of
+another schema version. There is no migration: every verb, `serve` and the library refuse
+it with a non-zero exit, and its files and directory stay unchanged. Point kaban at a fresh
+database and re-ingest. "the database is not a kaban v14 project" means the main file
+records no kaban schema while a non-empty `-wal` lies beside it; move both aside or create
+a fresh project. `doctor` reports either refusal as a failed `schema_version` check and
+exits `0`; a hook prints `{}`, notes the refusal on stderr and exits `0`.
 
-Use `doctor` to distinguish a text index problem from a stale code snapshot or a record
-conflict. `reindex text` rebuilds the Tantivy text index from the database; it does not run
-`kaban-index`. `reindex layer gazetteer` resets generated links; it does not fetch
-or re-ingest documents automatically.
+Use `doctor` to distinguish a text index problem from a stale code snapshot. `reindex text` rebuilds the Tantivy text index from the database; it does not run
+`kaban-index`, and it does not fetch or re-ingest documents.
 
-For an equal-revision record conflict, inspect both representations and follow
-[conflict resolution](maintenance.mdx#resolve-conflicts-deliberately).
-If a sync report says `deferred`, another process may hold the repository lock;
-let it finish before retrying. Do not delete `.kaban/` or lock-related state.
+Do not delete `.kaban/` or lock-related state to clear an error; another process may
+still hold the database.
 
 ## MCP protocol errors on startup
 

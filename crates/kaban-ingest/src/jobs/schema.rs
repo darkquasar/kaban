@@ -61,23 +61,18 @@ pub fn target_schema(
     lint(&wire)?;
     let names = stored_names(&kinds);
     let mut allowed_edges = Vec::new();
-    for rel in ontology.rels.values().filter(|rel| {
-        !rel.governed_semantics
-            && !matches!(
-                rel.id.name.as_str(),
-                "SUPERSEDES" | "INVALIDATES" | "CONTRADICTS" | "GOVERNS"
-            )
-    }) {
-        let ends = |ends: &[kaban_core::ontology::resolve::RelEnd]| -> Vec<String> {
+    // the extractor trust rule (PC-20): no lifecycle-affecting rel, named or by its `on_link`
+    // effect, is ever offered to an extractor
+    for rel in ontology
+        .rels
+        .values()
+        .filter(|rel| !kaban_core::is_lifecycle_rel(&rel.id.name) && rel.on_link.is_none())
+    {
+        let ends = |ends: &[kaban_core::Qualified]| -> Vec<String> {
             if ends.is_empty() {
                 return names.clone();
             }
-            ends.iter()
-                .filter_map(|end| match end {
-                    kaban_core::ontology::resolve::RelEnd::Kind(id) => Some(stored_name(id)),
-                    kaban_core::ontology::resolve::RelEnd::Path => None,
-                })
-                .collect()
+            ends.iter().map(stored_name).collect()
         };
         for from in ends(&rel.from) {
             for to in ends(&rel.to) {
@@ -92,7 +87,6 @@ pub fn target_schema(
         semantics: "Fill fields only from source text; absent fields stay absent; quotes are verbatim. Published props are restricted to declared non-internal fields, including empty props for undeclared schemas; core validation is unchanged.".into(),
         allowed_edges,
         kaban_adds: vec![["record".into(), "DERIVED_FROM".into(), "Document".into()], ["Chunk".into(), "EVIDENCE_FOR".into(), "record".into()]],
-        governance: crate::extract::structured_prep::dialect::GOVERNANCE.into(),
     })
 }
 

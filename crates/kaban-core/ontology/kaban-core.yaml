@@ -2,24 +2,19 @@
 # `core` kinds and rels that were the `schema.rs` SEED_LABELS / SEED_RELS rows before E1.3. The
 # store derives its builtin seed rows from this file (one place of truth); free-form kinds carry
 # an open `props_schema` ({type: object}) because the spec default is closed. Embedded in the
-# binary with `include_str!` (kaban_core::shipped). `index: {stamp: none}` (engine-spec §3.1
-# "Indexing meta-config", OWN-65, AMD-14): ingested document rows carry no commit sha; every other
-# kind keeps the default `commit` (the `post-commit` hook stamps it, core-spec F13).
+# binary with `include_str!` (kaban_core::shipped).
 ontology: core
 version: 1
 kinds:
   Document:
     description: "An ingested document (docs-ingest)."
     props_schema: {type: object}
-    index: {stamp: none}
   Section:
     description: "A section of an ingested document."
     props_schema: {type: object}
-    index: {stamp: none}
   Chunk:
     description: "A retrievable chunk of a section."
     props_schema: {type: object}
-    index: {stamp: none}
   Entity:
     description: "A named thing: project, file, symbol, service, person."
     props_schema: {type: object}
@@ -29,7 +24,6 @@ kinds:
   Tag:
     description: "A tag node for TAGGED edges."
     props_schema: {type: object}
-    index: {stamp: none}
 rels:
   MENTIONS: {from: [], to: [], directed: true, description: "Mentions an entity."}
   ABOUT: {from: [], to: [], directed: true, description: "Memory is about an Entity."}
