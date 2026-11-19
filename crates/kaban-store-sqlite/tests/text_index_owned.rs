@@ -1,6 +1,6 @@
 //! The store owns its text index (spec 11 T7): every open composes it over the catalog, a
-//! commit is searchable as soon as it returns, and recall and purge never hold the store's
-//! lock while the adapter runs.
+//! commit is searchable as soon as it returns, and recall never holds the store's lock while
+//! the adapter runs.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // test code: failures are the assertion
 
@@ -62,9 +62,7 @@ fn a_fresh_file_store_recalls_and_a_reopen_serves_at_once() {
 #[test]
 fn recall_never_holds_the_store_lock_while_the_adapter_runs() {
     use kaban_core::query_budget::QueryBudget;
-    use kaban_core::text_index::{
-        PurgeOutcome, Searched, TextHit, TextIndex, TextQuery, TextSnapshot,
-    };
+    use kaban_core::text_index::{Searched, TextHit, TextIndex, TextQuery, TextSnapshot};
     use std::sync::{Arc, OnceLock, Weak};
 
     /// Scripted hits, read back through the store on every search.
@@ -86,12 +84,6 @@ fn recall_never_holds_the_store_lock_while_the_adapter_runs() {
             Ok(Searched::Hits {
                 hits: vec![self.hit.clone()],
                 exhausted: true,
-            })
-        }
-        fn purge(&self, _rids: &[i64]) -> kaban_core::Result<PurgeOutcome> {
-            Ok(PurgeOutcome {
-                cleaned: true,
-                detail: None,
             })
         }
     }
@@ -130,7 +122,7 @@ fn recall_never_holds_the_store_lock_while_the_adapter_runs() {
 fn a_seed_whose_row_changed_between_revalidation_and_fusion_is_dropped() {
     use kaban_core::query_budget::QueryBudget;
     use kaban_core::text_index::{
-        MatchMode, PurgeOutcome, Searched, TextHit, TextIndex, TextQuery, TextSnapshot,
+        MatchMode, Searched, TextHit, TextIndex, TextQuery, TextSnapshot,
     };
     use std::sync::Mutex;
 
@@ -166,12 +158,6 @@ fn a_seed_whose_row_changed_between_revalidation_and_fusion_is_dropped() {
                 exhausted: true,
             })
         }
-        fn purge(&self, _rids: &[i64]) -> kaban_core::Result<PurgeOutcome> {
-            Ok(PurgeOutcome {
-                cleaned: true,
-                detail: None,
-            })
-        }
     }
 
     let s = Scratch::new("t8a-owned", "stale-seed");
@@ -202,64 +188,4 @@ fn a_seed_whose_row_changed_between_revalidation_and_fusion_is_dropped() {
         (now.text.as_str(), now.rev),
         ("wombat instead", note.rev + 1)
     );
-}
-
-/// Constraint 1 for the purge (review t8a-5 leftover): `forget(Purge)` runs the adapter's
-/// hygiene after its transaction committed and with the connection lock released. An adapter
-/// whose `purge` re-enters the store completes; with the lock held across it it would
-/// deadlock.
-#[cfg(feature = "text-index-override")]
-#[test]
-fn purge_never_holds_the_store_lock_while_the_adapter_runs() {
-    use kaban_core::ForgetMode;
-    use kaban_core::query_budget::QueryBudget;
-    use kaban_core::text_index::{PurgeOutcome, Searched, TextIndex, TextQuery, TextSnapshot};
-    use std::sync::{Arc, OnceLock, Weak};
-
-    struct Reentrant(OnceLock<Weak<SqliteStore>>);
-
-    impl TextIndex for Reentrant {
-        fn search(
-            &self,
-            _at: &TextSnapshot<'_>,
-            _query: &TextQuery<'_>,
-            _budget: &QueryBudget,
-        ) -> kaban_core::Result<Searched> {
-            Ok(Searched::Hits {
-                hits: vec![],
-                exhausted: true,
-            })
-        }
-        fn purge(&self, _rids: &[i64]) -> kaban_core::Result<PurgeOutcome> {
-            let store = self.0.get().and_then(Weak::upgrade).unwrap();
-            // re-enters the store: a lock held across the erasure would deadlock here
-            let _head = store.changes_head()?;
-            Ok(PurgeOutcome {
-                cleaned: true,
-                detail: None,
-            })
-        }
-    }
-
-    let store = SqliteStore::open_memory().unwrap();
-    let note = created(&store, "Fact", "quokka by the shore");
-    let adapter = Arc::new(Reentrant(OnceLock::new()));
-    let store = Arc::new(store.with_text_index(Box::new(Arc::clone(&adapter))));
-    adapter.0.set(Arc::downgrade(&store)).ok().unwrap();
-
-    let worker = {
-        let store = Arc::clone(&store);
-        let id = NodeId::parse(&note.id).unwrap();
-        std::thread::spawn(move || store.forget(&id, ForgetMode::Purge, &common::ctx()))
-    };
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !worker.is_finished() {
-        assert!(
-            Instant::now() < deadline,
-            "forget(Purge) holds the store lock while the adapter runs: deadlock"
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    let outcome = worker.join().unwrap().unwrap();
-    assert!(outcome.revoked, "{outcome:?}");
 }

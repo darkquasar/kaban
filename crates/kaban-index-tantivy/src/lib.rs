@@ -31,9 +31,7 @@ use crate::schema::{ACTIVE, Fields};
 pub use crate::writer::{merge, segment};
 use kaban_core::config::Recall;
 use kaban_core::query_budget::{BudgetExceeded, QueryBudget};
-use kaban_core::text_index::{
-    IndexRow, PurgeOutcome, Searched, TextIndex, TextQuery, TextSnapshot,
-};
+use kaban_core::text_index::{IndexRow, Searched, TextIndex, TextQuery, TextSnapshot};
 use kaban_core::{BackendSource, Ontology, StoreError};
 use std::path::Path;
 use std::sync::RwLock;
@@ -236,16 +234,6 @@ impl TextIndex for TantivyIndex {
             }
             Err(error) => Err(error.into()),
         }
-    }
-
-    /// The adapter keeps nothing of its own: the purged records' tombstones hide them from
-    /// every read of the catalog, and the catalog's purge pass rewrites the tiers that hold
-    /// them, so nothing is claimed cleaned here.
-    fn purge(&self, _rids: &[i64]) -> kaban_core::Result<PurgeOutcome> {
-        Ok(PurgeOutcome {
-            cleaned: false,
-            detail: Some("tombstoned in the catalog; its purge pass rewrites the tiers".into()),
-        })
     }
 }
 

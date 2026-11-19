@@ -19,9 +19,7 @@ mod common;
 use common::{Scratch, created, ctx, nid};
 use kaban_core::config::{CatalogCfg, Recall, SealOps};
 use kaban_core::query_budget::QueryBudget;
-use kaban_core::text_index::{
-    MatchMode, PurgeOutcome, Searched, SeedFilter, TextIndex, TextQuery, TextSnapshot,
-};
+use kaban_core::text_index::{MatchMode, Searched, SeedFilter, TextIndex, TextQuery, TextSnapshot};
 use kaban_core::{ForgetMode, MemoryStore, Node, RecallQuery};
 use kaban_index_tantivy::TantivyIndex;
 use kaban_store_sqlite::catalog_testing::{self, Window};
@@ -202,9 +200,6 @@ impl TextIndex for HeldReader {
         self.counts.lock().unwrap().extend([before, after]);
         released.expect("the test never released the held reader");
         self.index.search(at, q, budget)
-    }
-    fn purge(&self, rids: &[i64]) -> kaban_core::Result<PurgeOutcome> {
-        self.index.purge(rids)
     }
 }
 

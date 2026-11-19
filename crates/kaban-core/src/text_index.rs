@@ -125,20 +125,9 @@ pub struct TextSnapshot<'a> {
     pub sediment: &'a [&'a [u8]],
 }
 
-/// What [`TextIndex::purge`] achieved: whether the purged records' tokens left the index's
-/// storage, with the adapter's reason when they did not (a held checkpoint, a failed merge).
-/// Never an error: the purge itself already committed, so its hygiene is a reported outcome.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PurgeOutcome {
-    /// The index holds nothing of the purged records any more.
-    pub cleaned: bool,
-    /// Why not, when `cleaned` is false.
-    pub detail: Option<String>,
-}
-
 /// The text-search seam. Adapters are constructed with their dependencies (the ontology, the
-/// recall configuration); the trait carries only the operations callers use: the read
-/// (`search`) and the post-purge hygiene (`purge`). Record content never crosses here.
+/// recall configuration); the trait carries only the read (`search`): a purge rewrites the
+/// catalog's tiers, never the adapter. Record content never crosses here.
 pub trait TextIndex {
     /// Seed candidates for a recall from the catalog snapshot `at` (spec 11 T7), charged to
     /// `budget`.
@@ -152,13 +141,6 @@ pub trait TextIndex {
         query: &TextQuery<'_>,
         budget: &QueryBudget,
     ) -> Result<Searched>;
-
-    /// Post-purge hygiene for the purged `rids`: make their tokens leave the index's storage
-    /// and report whether they did.
-    ///
-    /// # Errors
-    /// A backend failure before the hygiene ran; a held or failed step is a [`PurgeOutcome`].
-    fn purge(&self, rids: &[i64]) -> Result<PurgeOutcome>;
 }
 
 impl<T: TextIndex + ?Sized> TextIndex for &T {
@@ -170,9 +152,6 @@ impl<T: TextIndex + ?Sized> TextIndex for &T {
     ) -> Result<Searched> {
         (**self).search(at, query, budget)
     }
-    fn purge(&self, rids: &[i64]) -> Result<PurgeOutcome> {
-        (**self).purge(rids)
-    }
 }
 
 impl<T: TextIndex + ?Sized> TextIndex for Arc<T> {
@@ -183,9 +162,6 @@ impl<T: TextIndex + ?Sized> TextIndex for Arc<T> {
         budget: &QueryBudget,
     ) -> Result<Searched> {
         (**self).search(at, query, budget)
-    }
-    fn purge(&self, rids: &[i64]) -> Result<PurgeOutcome> {
-        (**self).purge(rids)
     }
 }
 
@@ -226,7 +202,7 @@ pub struct IndexRow {
 /// whatever the snapshot.
 #[cfg(any(test, feature = "test-fake"))]
 pub mod fake {
-    use super::{MatchMode, PurgeOutcome, Searched, TextHit, TextIndex, TextQuery, TextSnapshot};
+    use super::{MatchMode, Searched, TextHit, TextIndex, TextQuery, TextSnapshot};
     use crate::Result;
     use crate::query_budget::QueryBudget;
 
@@ -264,13 +240,6 @@ pub mod fake {
                 }
             }))
         }
-
-        fn purge(&self, _rids: &[i64]) -> Result<PurgeOutcome> {
-            Ok(PurgeOutcome {
-                cleaned: true,
-                detail: None,
-            })
-        }
     }
 }
 
@@ -278,9 +247,7 @@ pub mod fake {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // test code: failures are the assertion
 mod tests {
     use super::fake::FakeIndex;
-    use super::{
-        MatchMode, PurgeOutcome, Searched, SeedFilter, TextHit, TextIndex, TextQuery, TextSnapshot,
-    };
+    use super::{MatchMode, Searched, SeedFilter, TextHit, TextIndex, TextQuery, TextSnapshot};
     use crate::RecallQuery;
     use crate::query_budget::QueryBudget;
 
@@ -332,7 +299,7 @@ mod tests {
     }
 
     /// Continuation pages through the full order, through a reference or an `Arc` (the blanket
-    /// impls forward); a purge reports cleaned.
+    /// impls forward).
     #[test]
     fn skip_continues_through_a_reference_or_an_arc() {
         let q = RecallQuery::default();
@@ -347,12 +314,5 @@ mod tests {
         assert_eq!(search(&idx, &query(&q, MatchMode::Lexical, 2)), page);
         let by_ref: &dyn TextIndex = &*idx;
         assert_eq!(search(&by_ref, &query(&q, MatchMode::Lexical, 2)), page);
-        assert_eq!(
-            idx.purge(&[1, 2]).unwrap(),
-            PurgeOutcome {
-                cleaned: true,
-                detail: None
-            }
-        );
     }
 }
