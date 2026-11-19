@@ -8,6 +8,7 @@
 
 #![cfg(feature = "failpoints")]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // test code: failures are the assertion
+#![allow(clippy::many_single_char_names)] // the fixture's nodes are named n, a, b, c and d
 
 mod common;
 

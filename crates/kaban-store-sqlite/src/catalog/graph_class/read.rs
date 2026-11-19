@@ -3,9 +3,11 @@
 //! relation dictionary, and the node id mapping through the pin's own transaction.
 //!
 //! ```text
-//!   load_view(rows, pin, view) => pin.load_view (chain + pending rows, charged by the pin)
+//!   load_view(rows, pin, view) => pin.load_view (the chain, charged by the pin)
+//!                                 + the pending graph seqs of the snapshot
 //!     => cache (kbx, view): same generation and chain? reuse the opened extents
 //!                           chain unchanged, rows a superset? extend the prepared sediment
+//!                           (only the newer rows' payloads are read)
 //!                           a seal's leftover fits? extend that; otherwise prepare afresh
 //!     => LoadedView { opened extents, prepared sediment, relations, the transaction }
 //! ```
@@ -38,9 +40,18 @@ use kaban_index_graph::{
 use rusqlite::{Connection, OptionalExtension, Transaction};
 
 use super::{CLASSES, GraphRefused, PURGED, SEDIMENT, graph_error};
+use crate::catalog::class::ExtentClass;
 use crate::catalog::pin::{OutsidePin, Pin, PinnedView, budget_exceeded};
-use crate::catalog::tables::{ExtentId, ExtentRef, Generation, SedimentRow, SedimentSeq};
+use crate::catalog::tables::{
+    ExtentId, ExtentRef, Generation, SedimentRow, SedimentSeq, sql_int, uint,
+};
 use crate::sql_error::SqlResultExt;
+
+/// The pending rows of the class `?1`: its rows (index `cat_sediment_class`) less the consumed
+/// ones (the partial index `cat_sediment_dead`), so the scan never reads a row itself (`dead`
+/// is stored after the payload).
+const PENDING_SQL: &str = "FROM cat_sediment WHERE class = ?1
+     AND seq NOT IN (SELECT seq FROM cat_sediment WHERE dead IS NOT NULL)";
 
 /// How long a cache entry may go unused before a load drops it.
 const IDLE: Duration = Duration::from_secs(60);
@@ -259,15 +270,15 @@ fn keep(entry: Entry) {
     }
 }
 
-/// `prior` extended with the rows `pending[from..]`, under `budget`.
+/// `prior` extended with the rows of `payloads` (oldest first), under `budget`.
 fn extend(
     prior: &PreparedSediment,
-    pending: &[&SedimentRow],
+    payloads: &[Vec<u8>],
     budget: &QueryBudget,
 ) -> Result<PreparedSediment> {
-    let decoded = pending
+    let decoded = payloads
         .iter()
-        .map(|r| Records::decode(&r.payload, budget))
+        .map(|p| Records::decode(p, budget))
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(graph_error)?;
     prior.extend(&decoded, budget).map_err(graph_error)
@@ -328,15 +339,12 @@ pub(crate) fn load_view<'t>(
     view: &ViewName,
     budget: &QueryBudget,
 ) -> Result<LoadedView<'t>> {
-    let pinned = pin.load_view(rows, view, CLASSES)?;
+    // the chain alone: the base class stages no sediment, so the pin copies no payload; the
+    // pending graph rows are read here, and only those the cache has not prepared yet
+    let pinned = pin.load_view(rows, view, &[ExtentClass::GraphBase])?;
     let chain = graph_chain(&pinned);
-    let pending: Vec<&SedimentRow> = pinned
-        .sediment()
-        .iter()
-        .filter(|r| r.class == SEDIMENT)
-        .collect();
     let ids: Vec<ExtentId> = chain.iter().map(|e| e.id).collect();
-    let seqs: Vec<SedimentSeq> = pending.iter().map(|r| r.seq).collect();
+    let (seqs, _seqs_charge) = pending_seqs(rows, view, budget)?;
     let name = view.to_string();
     let prior = cached(pin, &name);
     let same = prior
@@ -359,10 +367,12 @@ pub(crate) fn load_view<'t>(
     });
     let (prepared, first_batch, held) =
         carried.unwrap_or_else(|| (Arc::new(PreparedSediment::empty()), 0, 0));
-    let sediment = if held == pending.len() {
-        prepared
-    } else {
-        Arc::new(extend(&prepared, &pending[held..], budget)?)
+    let sediment = match seqs.get(held) {
+        None => prepared,
+        Some(&from) => {
+            let (payloads, _charge) = payloads_from(rows, from, budget)?;
+            Arc::new(extend(&prepared, &payloads, budget)?)
+        }
     };
     let rels = Rels::read(rows)?;
     let rels_charge = budget.reserve(rels.bytes()).map_err(budget_exceeded)?;
@@ -387,6 +397,86 @@ pub(crate) fn load_view<'t>(
         rels,
         _rels_charge: rels_charge,
     })
+}
+
+/// The pending graph sediment rows of `view` in the snapshot `rows` (only `main` has any), in
+/// sequence order, with their charge to `budget`. Read from the indexes alone
+/// ([`PENDING_SQL`]): no row's payload is touched.
+///
+/// # Errors
+/// The budget's and SQLite's errors.
+fn pending_seqs(
+    rows: &Connection,
+    view: &ViewName,
+    budget: &QueryBudget,
+) -> Result<(Vec<SedimentSeq>, Option<BudgetLease>)> {
+    if *view != ViewName::Main {
+        return Ok((Vec::new(), None));
+    }
+    let n: i64 = rows
+        .query_row(
+            &format!("SELECT count(*) {PENDING_SQL}"),
+            [SEDIMENT.as_str()],
+            |r| r.get(0),
+        )
+        .sql()?;
+    let n = usize::try_from(n).unwrap_or(0);
+    let charge = budget
+        .reserve((n * size_of::<SedimentSeq>()) as u64)
+        .map_err(budget_exceeded)?;
+    let mut seqs = Vec::with_capacity(n);
+    let mut stmt = rows
+        .prepare(&format!("SELECT seq {PENDING_SQL} ORDER BY seq"))
+        .sql()?;
+    let mut found = stmt.query([SEDIMENT.as_str()]).sql()?;
+    while let Some(r) = found.next().sql()? {
+        if seqs.len() == n {
+            break;
+        }
+        seqs.push(SedimentSeq(uint(r, 0).sql()?));
+    }
+    Ok((seqs, Some(charge)))
+}
+
+/// The payloads of the pending graph rows from `from` on in the snapshot `rows`, oldest
+/// first, with their charge to `budget`.
+///
+/// # Errors
+/// The budget's and SQLite's errors.
+fn payloads_from(
+    rows: &Connection,
+    from: SedimentSeq,
+    budget: &QueryBudget,
+) -> Result<(Vec<Vec<u8>>, BudgetLease)> {
+    let from = sql_int(from.0).sql()?;
+    let (n, bytes): (i64, i64) = rows
+        .query_row(
+            "SELECT count(*), COALESCE(sum(length(payload)), 0) FROM cat_sediment
+             WHERE dead IS NULL AND class = ?1 AND seq >= ?2",
+            rusqlite::params![SEDIMENT.as_str(), from],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .sql()?;
+    let n = usize::try_from(n).unwrap_or(0);
+    let held = n * size_of::<Vec<u8>>() + usize::try_from(bytes).unwrap_or(0);
+    let charge = budget.reserve(held as u64).map_err(budget_exceeded)?;
+    let mut out = Vec::with_capacity(n);
+    let mut stmt = rows
+        .prepare(
+            "SELECT payload FROM cat_sediment WHERE dead IS NULL AND class = ?1 AND seq >= ?2
+             ORDER BY seq",
+        )
+        .sql()?;
+    let mut found = stmt
+        .query(rusqlite::params![SEDIMENT.as_str(), from])
+        .sql()?;
+    while let Some(r) = found.next().sql()? {
+        if out.len() == n {
+            break;
+        }
+        out.push(r.get::<_, Vec<u8>>(0).sql()?);
+    }
+    Ok((out, charge))
 }
 
 /// One view's graph at a pin, loaded through the pin's own transaction (spec 11 T11): the

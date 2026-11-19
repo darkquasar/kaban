@@ -251,9 +251,9 @@ impl IndexClass for GraphClass {
                             .edges
                             .iter()
                             .filter(|e| kept(e.src) && kept(e.dst))
-                            .cloned()
+                            .copied()
                             .collect(),
-                        nodes: r.nodes.iter().filter(|o| kept(o.node)).cloned().collect(),
+                        nodes: r.nodes.iter().filter(|o| kept(o.node)).copied().collect(),
                         facts: r.facts.iter().filter(|f| kept(f.node)).cloned().collect(),
                     }
                 })
