@@ -50,17 +50,6 @@ fn store_with_two_nodes() -> (SqliteStore, [(String, i64); 2]) {
         let rid = rid(&store.lock(), &node.id);
         made.push((node.id, rid));
     }
-    // the text class staged the two remembers: these tests count what their own commit
-    // stages, so the fixture starts from no sediment and no generation
-    {
-        let conn = store.lock();
-        store
-            .catalog()
-            .outside_commit(|| {
-                conn.execute_batch("DELETE FROM cat_sediment; DELETE FROM cat_generation")
-            })
-            .unwrap();
-    }
     let [a, b] = <[_; 2]>::try_from(made).unwrap();
     (store, [a, b])
 }

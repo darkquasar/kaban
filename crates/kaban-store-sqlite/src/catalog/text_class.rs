@@ -31,6 +31,9 @@ use super::commit::Stage;
 use super::pin::{Pin, PinnedView};
 use super::tables::{ExtentRef, SedimentRow};
 
+/// The classes a text read loads: the text tiers and their pending packs.
+const TEXT: &[ExtentClass] = &[ExtentClass::TextTier];
+
 /// The memory ceiling of one commit's staging (its RAM segment and the rows it reads).
 const STAGE_MEMORY_BYTES: u64 = 256 << 20;
 
@@ -65,10 +68,14 @@ impl IndexClass for TextClass {
         Ok(())
     }
 
-    /// Counts pending segments; the plan's 32-segment trigger is the `seal_ops.text` default
-    /// (T7 leaves tombstone rows out of the count).
+    /// Due when more than `ops` pending packs carry a segment (`seal_ops.text`, default 32): a
+    /// pack of tombstones only adds no segment to a search.
     fn seal_due(&self, rows: &[&SedimentRow], ops: u32) -> Result<bool> {
-        Ok(rows.len() >= ops as usize)
+        let segments = rows
+            .iter()
+            .filter(|r| kaban_index_tantivy::has_segment(&r.payload))
+            .count();
+        Ok(segments > ops as usize)
     }
 
     /// The pending packs `rows` merged into one tier.
@@ -128,7 +135,7 @@ impl Catalog {
         // `main`'s last use is never consulted (retention never retires it): no write per read
         let (pin, inputs) = {
             let conn = conn.lock().unwrap_or_else(PoisonError::into_inner);
-            let pin = self.pin_untouched(&conn, budget, &[ViewName::Main])?;
+            let pin = self.pin_untouched(&conn, budget, &[(ViewName::Main, TEXT)])?;
             let inputs = text_inputs(&pin, &conn, self.kbx.clone())?;
             (pin, inputs)
         };
@@ -154,7 +161,7 @@ struct TextInputs {
 /// # Errors
 /// As `Pin::load_view`.
 fn text_inputs(pin: &Pin, conn: &Connection, kbx: PathBuf) -> Result<TextInputs> {
-    let view = pin.load_view(conn, &ViewName::Main)?;
+    let view = pin.load_view(conn, &ViewName::Main, TEXT)?;
     let tiers = view
         .chain()
         .iter()
@@ -178,7 +185,6 @@ impl TextInputs {
         self.view
             .sediment()
             .iter()
-            .filter(|r| r.class == ExtentClass::TextTier)
             .map(|r| r.payload.as_slice())
             .collect()
     }

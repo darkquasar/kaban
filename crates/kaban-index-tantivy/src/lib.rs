@@ -102,10 +102,8 @@ pub type Result<T> = std::result::Result<T, Error>;
 impl From<Error> for StoreError {
     fn from(error: Error) -> Self {
         match error {
-            // the budget's own refusal, so a caller (compaction's retry) recognizes it
-            Error::Budget(refused) => Self::Backend {
-                source: BackendSource::new(refused),
-            },
+            // the budget's own refusal, so a caller (compaction's skip) recognizes it
+            Error::Budget(refused) => Self::BudgetExceeded(refused),
             error => Self::Backend {
                 source: BackendSource::new(error),
             },
