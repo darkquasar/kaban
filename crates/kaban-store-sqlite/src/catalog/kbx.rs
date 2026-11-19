@@ -94,7 +94,15 @@ fn create_file(path: &Path) -> io::Result<File> {
 
 pub(super) fn create_dir(path: &Path) -> io::Result<()> {
     match rustix::fs::mkdir(path, Mode::RWXU) {
-        Ok(()) | Err(rustix::io::Errno::EXIST) => {}
+        Ok(()) => {
+            // mkdir is filtered by umask. Restore owner write permission before a
+            // recovery creates its maintenance lock, without following a replacement
+            // symlink or changing the mode of an existing directory.
+            let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+            let dir = rustix::fs::open(path, flags, Mode::empty())?;
+            rustix::fs::fchmod(&dir, Mode::RWXU)?;
+        }
+        Err(rustix::io::Errno::EXIST) => {}
         Err(e) => return Err(e.into()),
     }
     if !std::fs::symlink_metadata(path)?.is_dir() {

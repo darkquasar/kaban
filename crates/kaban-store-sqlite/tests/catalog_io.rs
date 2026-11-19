@@ -150,6 +150,41 @@ fn a_failed_sync_of_the_catalog_directory_entries_refuses_the_open_and_a_later_o
     a_failed_creation_sync_refuses_the_open_and_a_later_open_completes_it("create_dir_entries");
 }
 
+#[test]
+fn pins_creation_preserves_existing_directory_modes_and_refuses_other_types() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
+    let s = Scratch::new("catalog-pins", "existing-mode");
+    let pins = s.0.join("kaban.kbx.pins");
+    std::fs::create_dir(&pins).unwrap();
+    std::fs::set_permissions(&pins, std::fs::Permissions::from_mode(0o750)).unwrap();
+    let store = SqliteStore::open(&s.db(), &s.keys()).unwrap();
+    assert_eq!(std::fs::metadata(&pins).unwrap().mode() & 0o777, 0o750);
+    drop(store);
+
+    for linked in [false, true] {
+        let s = Scratch::new("catalog-pins", &format!("wrong-type-{linked}"));
+        let pins = s.0.join("kaban.kbx.pins");
+        let target = s.0.join("untouched");
+        if linked {
+            std::fs::create_dir(&target).unwrap();
+            std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o750)).unwrap();
+            symlink(&target, &pins).unwrap();
+        } else {
+            std::fs::write(&pins, b"untouched file").unwrap();
+        }
+        let error = SqliteStore::open(&s.db(), &s.keys()).unwrap_err();
+        assert!(matches!(error, StoreError::FileMode(_)), "{error:?}");
+        if linked {
+            assert_eq!(std::fs::metadata(&target).unwrap().mode() & 0o777, 0o750);
+            assert_eq!(std::fs::read_dir(&target).unwrap().count(), 0);
+            assert!(std::fs::symlink_metadata(&pins).unwrap().is_symlink());
+        } else {
+            assert_eq!(std::fs::read(&pins).unwrap(), b"untouched file");
+        }
+    }
+}
+
 /// What one reclamation of a retired extent did to the container.
 #[derive(Debug)]
 struct Reclaim {
