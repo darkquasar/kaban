@@ -167,20 +167,32 @@ impl IndexClass for TextClass {
         if catalog.container.is_none() {
             return Ok(());
         }
-        let maintenance = catalog.maintenance_budget();
-        let budget = QueryBudget::new(maintenance.memory_bytes, Some(maintenance.deadline));
+        let hold = catalog.maintenance_hold()?.map(Arc::new);
         catalog.commit(rows, Durability::Normal, |txn| {
-            let (active, _charged) = crate::index_rows::active_rows(txn.conn(), &budget)?;
-            let tier = rebuilt_tier(&active, REBUILD_BATCH_ROWS, &budget)?;
-            let generation = sql_int(txn.generation()?.0).sql()?;
-            retire_text(&catalog.kbx, txn.conn(), generation, &budget)?;
-            let extent = catalog.append_extent(ExtentClass::TextTier, &tier)?;
-            // a deadline or cancellation since the last check publishes nothing
-            budget.check()?;
-            txn.publish(extent, &[ViewName::Main])?;
-            Ok(())
+            rebuild_in(catalog, txn, |class, bytes| {
+                kbx::append(&catalog.kbx, class, bytes, hold)
+            })
         })
     }
+}
+
+/// Rebuild in the caller's transaction and maintenance ownership.
+pub(super) fn rebuild_in(
+    catalog: &Catalog,
+    txn: &mut super::commit::Txn<'_>,
+    append: impl FnOnce(ExtentClass, &[u8]) -> Result<kbx::Unpublished>,
+) -> Result<()> {
+    let maintenance = catalog.maintenance_budget();
+    let budget = QueryBudget::new(maintenance.memory_bytes, Some(maintenance.deadline));
+    let (active, _charged) = crate::index_rows::active_rows(txn.conn(), &budget)?;
+    let tier = rebuilt_tier(&active, REBUILD_BATCH_ROWS, &budget)?;
+    let generation = sql_int(txn.generation()?.0).sql()?;
+    retire_text(&catalog.kbx, txn.conn(), generation, &budget)?;
+    let extent = append(ExtentClass::TextTier, &tier)?;
+    // a deadline or cancellation since the last check publishes nothing
+    budget.check()?;
+    txn.publish(extent, &[ViewName::Main])?;
+    Ok(())
 }
 
 /// One tier of `rows`, indexed `batch` rows per writer under `budget`: each batch's pack is
@@ -285,6 +297,7 @@ fn retire_text(kbx: &Path, conn: &Connection, generation: i64, budget: &QueryBud
             .sql()?;
         }
     }
+    super::tables::renumber_chains(conn, budget)?;
     conn.execute(
         "UPDATE cat_sediment SET dead = ?1 WHERE class = ?2 AND dead IS NULL",
         rusqlite::params![generation, class],

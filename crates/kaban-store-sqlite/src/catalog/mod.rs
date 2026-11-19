@@ -134,7 +134,7 @@ impl Catalog {
     /// the catalog tables among them).
     pub(crate) fn open(db_path: &Path, conn: &mut Connection) -> Result<Self> {
         let mut catalog = Self::open_as_is(db_path, conn)?;
-        catalog.create_artefacts()?;
+        catalog.open_writable(conn)?;
         Ok(catalog)
     }
 

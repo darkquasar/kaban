@@ -92,7 +92,7 @@ fn create_file(path: &Path) -> io::Result<File> {
     Ok(File::from(fd))
 }
 
-fn create_dir(path: &Path) -> io::Result<()> {
+pub(super) fn create_dir(path: &Path) -> io::Result<()> {
     match rustix::fs::mkdir(path, Mode::RWXU) {
         Ok(()) | Err(rustix::io::Errno::EXIST) => {}
         Err(e) => return Err(e.into()),

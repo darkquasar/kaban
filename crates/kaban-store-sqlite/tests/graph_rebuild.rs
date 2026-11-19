@@ -86,6 +86,73 @@ fn graph_kbx_bytes(db: &Path) -> u64 {
 }
 
 #[test]
+fn ordinary_reopen_restores_mixed_classes_without_a_rebuild_helper() {
+    use kaban_core::text_index::{MatchMode, Searched, SeedFilter, TextQuery};
+    let s = Scratch::new("kaban-recovery", "mixed");
+    let store = open(&s);
+    let a = nid(&created(&store, "Fact", "zebra alpha").id);
+    let b = nid(&created(&store, "Fact", "zebra beta").id);
+    store
+        .link(&a, &b, "RELATES_TO", None, None, &ctx())
+        .unwrap();
+    catalog_testing::rebuild_graph(&store).unwrap();
+    store.reindex_text().unwrap();
+    let c = nid(&created(&store, "Fact", "zebra pending").id);
+    store
+        .link(&b, &c, "RELATES_TO", None, None, &ctx())
+        .unwrap();
+    let probes = [a, b, c];
+    let before = record(&store, &probes);
+    let text = |store: &SqliteStore| {
+        let query = kaban_core::RecallQuery::default();
+        match store
+            .search_text(&TextQuery {
+                text: "zebra",
+                mode: MatchMode::Lexical,
+                filter: SeedFilter::of(&query),
+                limit: 10,
+                sufficient: 10,
+                skip: 0,
+            })
+            .unwrap()
+        {
+            Searched::Hits { hits, .. } => hits.len(),
+            Searched::Unavailable => 0,
+        }
+    };
+    assert_eq!(text(&store), 3);
+    let rows = rusqlite::Connection::open(s.db()).unwrap();
+    let first: String = rows
+        .query_row(
+            "SELECT class FROM cat_extent WHERE kbx_offset = 0",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(first, "graph_base");
+    drop(rows);
+    drop(store);
+    std::fs::remove_file(s.db().with_file_name("kaban.kbx")).unwrap();
+    let store = SqliteStore::open(&s.db(), &s.keys()).unwrap();
+    assert_eq!(
+        text(&store),
+        3,
+        "ordinary reopen restores sealed and pending text"
+    );
+    assert_eq!(
+        record(&store, &probes),
+        before,
+        "graph answers and local ids"
+    );
+    store.reindex_text().unwrap();
+    store.reindex_graph().unwrap();
+    assert_eq!(text(&store), 3, "explicit combined rebuild");
+    assert_eq!(record(&store, &probes), before);
+    let verified = store.verify_catalog().unwrap();
+    assert_eq!(verified.inconsistencies(), 0, "{verified:?}");
+}
+
+#[test]
 fn a_fold_whose_engine_estimate_exceeds_its_ceiling_is_refused_by_its_budget() {
     // Arrange: a base of 2000 edges among 200 nodes and one sealed layer over it; a store of
     // the same database that folds at depth 1

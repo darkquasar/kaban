@@ -11,6 +11,34 @@ use kaban_core::query_budget::QueryBudget;
 use sha2::{Digest as _, Sha256};
 
 use super::class::{ExtentClass, ExtentLocation};
+use crate::sql_error::SqlResultExt;
+use rusqlite::Connection;
+
+/// Close gaps after class retirement without changing the order of surviving extents.
+pub(super) fn renumber_chains(conn: &Connection, budget: &QueryBudget) -> Result<()> {
+    budget.check()?;
+    // Move the existing nonnegative positions out of the destination range first. The
+    // materialized window retains their original order while assigning contiguous slots;
+    // no uncharged Rust buffer proportional to every view is copied here.
+    conn.execute("UPDATE cat_view_extent SET position = -position - 1", [])
+        .sql()?;
+    budget.check()?;
+    conn.execute(
+        "WITH positions AS MATERIALIZED (
+            SELECT view, extent_id,
+                   row_number() OVER (PARTITION BY view ORDER BY position DESC) - 1 AS slot
+            FROM cat_view_extent
+         )
+         UPDATE cat_view_extent SET position = (
+             SELECT slot FROM positions p
+             WHERE p.view = cat_view_extent.view AND p.extent_id = cat_view_extent.extent_id
+         )",
+        [],
+    )
+    .sql()?;
+    budget.check()?;
+    Ok(())
+}
 
 /// Whether `file` holds `len` bytes at `offset` whose SHA-256 is `sha`, `budget` checked per
 /// chunk: a rebuild's judgement of an old extent before it keeps its range.

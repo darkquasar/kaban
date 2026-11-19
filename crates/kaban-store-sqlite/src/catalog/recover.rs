@@ -27,7 +27,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use kaban_core::query_budget::QueryBudget;
-use kaban_core::{Durability, Result};
+use kaban_core::{Durability, Result, StoreError};
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
 
@@ -138,7 +138,129 @@ const RECOVER_WAIT: Duration = Duration::from_secs(1);
 /// How many container bytes one read of a range check or a hash takes.
 const READ_CHUNK: usize = 64 * 1024;
 
+/// A durable intent, written before creating a replacement container. Only publication of
+/// both rebuilt classes removes it, so every interrupted attempt is retried on normal open.
+const REBUILD_CONTAINER: &str = "rebuild_container";
+
+/// Exclusive maintenance ownership borrowed by both rebuilds through their commit. Unlike
+/// an ordinary append this must not reacquire the same lock shared.
+struct Replacement<'a> {
+    catalog: &'a Catalog,
+    _exclusive: File,
+}
+
+impl Replacement<'_> {
+    fn append(&self, class: super::class::ExtentClass, bytes: &[u8]) -> Result<kbx::Unpublished> {
+        kbx::append(&self.catalog.kbx, class, bytes, None)
+    }
+}
+
+fn rebuild_pending(conn: &Connection) -> Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM cat_meta WHERE key = ?1)",
+        [REBUILD_CONTAINER],
+        |r| r.get(0),
+    )
+    .sql()
+}
+
 impl Catalog {
+    /// Admit durable artefacts and restore a lost container as one shared recovery. The
+    /// maintenance lock is acquired before any writer transaction, including the marker.
+    pub(crate) fn open_writable(&mut self, conn: &mut Connection) -> Result<()> {
+        let maintenance = self.maintenance_budget();
+        let budget = QueryBudget::new(maintenance.memory_bytes, Some(maintenance.deadline));
+        let dir = self.kbx.parent().unwrap_or_else(|| Path::new("."));
+        let mut cold = conn
+            .prepare("SELECT relpath FROM cat_extent WHERE relpath IS NOT NULL")
+            .sql()?;
+        let paths = cold.query_map([], |r| r.get::<_, String>(0)).sql()?;
+        for path in paths {
+            budget.check()?;
+            let path = path.sql()?;
+            if !dir.join(&path).exists() {
+                return Err(StoreError::NotFound(format!("cold data loss: {path}")));
+            }
+        }
+        drop(cold);
+        if self
+            .kbx
+            .try_exists()
+            .map_err(|e| failed("inspect", &self.kbx, e))?
+            && !rebuild_pending(conn)?
+        {
+            return self.create_artefacts();
+        }
+        let pins = kbx::pins_dir(&self.kbx);
+        kbx::create_dir(&pins).map_err(StoreError::FileMode)?;
+        let exclusive =
+            pins::exclusive_maintenance(&pins, Duration::from_secs(10))?.ok_or_else(|| {
+                failed(
+                    "recover the missing container",
+                    &self.kbx,
+                    std::io::Error::from(std::io::ErrorKind::TimedOut),
+                )
+            })?;
+        // Recheck after the exclusive acquisition: a competing opener may have completed.
+        self.commit(conn, Durability::Full, |txn| {
+            if !self
+                .kbx
+                .try_exists()
+                .map_err(|e| failed("inspect", &self.kbx, e))?
+            {
+                let populated: bool = txn
+                    .conn()
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM cat_extent) OR EXISTS(SELECT 1 FROM node)",
+                        [],
+                        |r| r.get(0),
+                    )
+                    .sql()?;
+                if populated {
+                    txn.conn()
+                        .execute(
+                            "INSERT OR IGNORE INTO cat_meta(key, value) VALUES (?1, 1)",
+                            [REBUILD_CONTAINER],
+                        )
+                        .sql()?;
+                }
+            }
+            Ok(())
+        })?;
+        fail::point("replacement.before_create");
+        self.create_artefacts()?;
+        fail::point("replacement.after_create");
+        let replacement = Replacement {
+            catalog: self,
+            _exclusive: exclusive,
+        };
+        self.commit(conn, Durability::Full, |txn| {
+            if !rebuild_pending(txn.conn())? {
+                return Ok(());
+            }
+            // Every byte in the replacement is unpublished until this marker is cleared.
+            // Reclaim failed attempts before appending again, never after publication.
+            let file = kbx::open_existing(&self.kbx).map_err(|e| failed("open", &self.kbx, e))?;
+            let len = file.metadata().map_err(|e| failed("measure", &self.kbx, e))?.len();
+            if len != 0 {
+                self.reclaim_ranges(&[(0, len)])?;
+            }
+            txn.conn().execute("DELETE FROM cat_claim WHERE extent IN (SELECT id FROM cat_extent WHERE kbx_offset IS NOT NULL)", []).sql()?;
+            txn.conn().execute("UPDATE cat_view SET state = 'needs_reimport' WHERE name <> 'main'", []).sql()?;
+            txn.conn().execute("DELETE FROM cat_extent WHERE kbx_offset IS NOT NULL", []).sql()?;
+            // Cold references survive the loss, including their view membership. Compact
+            // their remaining positions before new derived extents are appended.
+            let maintenance = self.maintenance_budget();
+            let budget = QueryBudget::new(maintenance.memory_bytes, Some(maintenance.deadline));
+            super::tables::renumber_chains(txn.conn(), &budget)?;
+            super::text_class::rebuild_in(self, txn, |class, bytes| replacement.append(class, bytes))?;
+            super::graph_class::GraphClass::rebuild_in(self, txn, |class, bytes| replacement.append(class, bytes))?;
+            fail::point("replacement.before_commit");
+            txn.conn().execute("DELETE FROM cat_meta WHERE key = ?1", [REBUILD_CONTAINER]).sql()?;
+            Ok(())
+        })
+    }
+
     /// Recover after a crash, leaving every row present or absent (the module's rule): with
     /// the maintenance lock held exclusive, clear every claim and reclaim every unpublished
     /// range (one no row names that still holds data). While a maintenance hold is live it

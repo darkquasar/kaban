@@ -14,9 +14,9 @@
 mod common;
 
 use common::{Scratch, created, ctx, nid};
-use kaban_core::MemoryStore;
 use kaban_core::config::{CatalogCfg, SealOps};
 use kaban_core::query_budget::QueryBudget;
+use kaban_core::{IngestStore, MemoryStore};
 use kaban_store_sqlite::SqliteStore;
 use kaban_store_sqlite::catalog_testing::{self, Window};
 use std::os::unix::fs::FileExt;
@@ -366,6 +366,161 @@ impl Drop for Supervised {
     fn drop(&mut self) {
         let _ = self.0.kill();
         let _ = self.0.wait();
+    }
+}
+
+#[test]
+#[ignore = "the missing-container child role"]
+fn replacement_role() {
+    let Ok(db) = std::env::var(CRASH_DB) else {
+        return;
+    };
+    let db = std::path::Path::new(&db);
+    SqliteStore::open(db, &db.with_file_name("keys")).unwrap();
+}
+
+#[test]
+fn empty_and_diagnostic_opens_do_not_rebuild_or_advance_generations() {
+    let s = Scratch::new("kaban-replacement", "empty-and-diagnostic");
+    let store = SqliteStore::open(&s.db(), &s.keys()).unwrap();
+    let generation = || {
+        rusqlite::Connection::open(s.db())
+            .unwrap()
+            .query_row(
+                "SELECT COALESCE(max(generation), 0) FROM cat_generation",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap()
+    };
+    assert_eq!(generation(), 0, "empty creation publishes no generation");
+    assert_eq!(store.catalog_status().unwrap().classes, []);
+    drop(store);
+    std::fs::remove_file(s.0.join("kaban.kbx")).unwrap();
+    let (diagnostic, _) =
+        SqliteStore::open_diagnostic(&s.db(), &s.keys(), &kaban_core::ActorId::default()).unwrap();
+    assert!(!s.0.join("kaban.kbx").exists());
+    assert_eq!(generation(), 0);
+    drop(diagnostic);
+    let store = SqliteStore::open(&s.db(), &s.keys()).unwrap();
+    assert_eq!(generation(), 0, "empty replacement publishes no generation");
+    assert_eq!(store.catalog_status().unwrap().classes, []);
+}
+
+#[test]
+fn replacement_preserves_cold_references_and_reports_missing_cold_data() {
+    let s = Scratch::new("kaban-replacement", "cold");
+    let store = SqliteStore::open(&s.db(), &s.keys()).unwrap();
+    created(&store, "Fact", "zebra");
+    store.reindex_graph().unwrap();
+    std::fs::write(s.0.join("cold.parquet"), b"retained cold truth").unwrap();
+    catalog_testing::corrupt(&store,
+        "INSERT INTO cat_extent(class, generation, relpath) VALUES ('cold_file', 1, 'cold.parquet');
+         INSERT INTO cat_view_extent(view, position, extent_id)
+         SELECT 'main', (SELECT max(position) + 1 FROM cat_view_extent WHERE view = 'main'), max(id) FROM cat_extent;"
+    ).unwrap();
+    drop(store);
+    std::fs::remove_file(s.0.join("kaban.kbx")).unwrap();
+    let store = SqliteStore::open(&s.db(), &s.keys()).unwrap();
+    let rows = rusqlite::Connection::open(s.db()).unwrap();
+    let retained: i64 = rows
+        .query_row(
+            "SELECT count(*) FROM cat_extent WHERE relpath = 'cold.parquet'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(retained, 1);
+    let verified = store.verify_catalog().unwrap();
+    assert_eq!(verified.inconsistencies(), 0, "{verified:?}");
+    drop(rows);
+    drop(store);
+    std::fs::remove_file(s.0.join("cold.parquet")).unwrap();
+    std::fs::remove_file(s.0.join("kaban.kbx")).unwrap();
+    let error = SqliteStore::open(&s.db(), &s.keys())
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("cold data loss") && error.contains("cold.parquet"),
+        "{error}"
+    );
+    assert!(
+        !s.0.join("kaban.kbx").exists(),
+        "missing truth refuses replacement"
+    );
+}
+
+#[test]
+fn interrupted_replacement_retries_both_classes_and_preserves_reimport_views() {
+    for point in [
+        "replacement.before_create",
+        "replacement.after_create",
+        "replacement.before_commit",
+    ] {
+        let s = Scratch::new("kaban-replacement", &point.replace('.', "-"));
+        let store = SqliteStore::open(&s.db(), &s.keys()).unwrap();
+        let a = nid(&created(&store, "Fact", "zebra alpha").id);
+        let b = nid(&created(&store, "Fact", "zebra beta").id);
+        store
+            .link(&a, &b, "RELATES_TO", None, None, &ctx())
+            .unwrap();
+        store.reindex_graph().unwrap();
+        store.reindex_text().unwrap();
+        let code = format!("code@{}", "9".repeat(40));
+        catalog_testing::append_and_publish_into(&store, &pattern(3, 64), &[&code]).unwrap();
+        let before = catalog_testing::graph_contents(&store).unwrap().extents;
+        drop(store);
+        std::fs::remove_file(s.0.join("kaban.kbx")).unwrap();
+        let mut child = Supervised(
+            Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "replacement_role", "--ignored", "--nocapture"])
+                .env(CRASH_DB, s.db())
+                .env(catalog_testing::FAILPOINT_ARM, point)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        assert_eq!(child.wait(STEP).signal(), Some(9), "{point}");
+        let rows = rusqlite::Connection::open(s.db()).unwrap();
+        let pending: i64 = rows
+            .query_row(
+                "SELECT value FROM cat_meta WHERE key = 'rebuild_container'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(pending, 1);
+        assert_eq!(
+            s.0.join("kaban.kbx").exists(),
+            point != "replacement.before_create"
+        );
+        drop(rows);
+        let store = SqliteStore::open(&s.db(), &s.keys()).unwrap();
+        assert_eq!(
+            catalog_testing::graph_contents(&store).unwrap().extents,
+            before
+        );
+        let hits = store
+            .recall(&kaban_core::RecallQuery {
+                query: "zebra".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(hits.len(), 2, "{point}");
+        let verified = store.verify_catalog().unwrap();
+        assert_eq!(verified.needs_reimport, [code]);
+        assert_eq!(verified.inconsistencies(), 0, "{point}: {verified:?}");
+        let rows = rusqlite::Connection::open(s.db()).unwrap();
+        let pending: i64 = rows
+            .query_row(
+                "SELECT count(*) FROM cat_meta WHERE key = 'rebuild_container'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(pending, 0);
     }
 }
 

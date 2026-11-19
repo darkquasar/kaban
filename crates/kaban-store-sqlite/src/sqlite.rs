@@ -478,7 +478,7 @@ impl SqliteStore {
         // are created only once the key is admitted: a refused project gains none
         let mut catalog = Catalog::open_as_is(path, &mut conn)?;
         let signer = Self::project_key(&catalog, &mut conn, keys_dir, &db_id)?;
-        catalog.create_artefacts()?;
+        catalog.open_writable(&mut conn)?;
         Ok(Self::assemble(
             conn,
             catalog,

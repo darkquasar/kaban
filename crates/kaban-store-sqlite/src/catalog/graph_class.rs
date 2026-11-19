@@ -100,63 +100,75 @@ impl GraphClass {
         if catalog.container.is_none() {
             return Ok(());
         }
+        let hold = catalog.maintenance_hold()?.map(std::sync::Arc::new);
+        catalog.commit(conn, Durability::Normal, |txn| {
+            Self::rebuild_in(catalog, txn, |class, bytes| {
+                kbx::append(&catalog.kbx, class, bytes, hold)
+            })
+        })
+    }
+
+    /// Rebuild in the caller's transaction and maintenance ownership.
+    pub(super) fn rebuild_in(
+        catalog: &Catalog,
+        txn: &mut super::commit::Txn<'_>,
+        append: impl FnOnce(ExtentClass, &[u8]) -> Result<kbx::Unpublished>,
+    ) -> Result<()> {
         let maintenance = catalog.maintenance_budget();
         let mut budget = QueryBudget::new(maintenance.memory_bytes, Some(maintenance.deadline));
-        catalog.commit(conn, Durability::Normal, |txn| {
-            let rows = txn.conn();
-            let records: i64 = rows
-                .query_row(
-                    "SELECT (SELECT count(*) FROM node WHERE lifecycle <> ?1)
+        let rows = txn.conn();
+        let records: i64 = rows
+            .query_row(
+                "SELECT (SELECT count(*) FROM node WHERE lifecycle <> ?1)
                           + (SELECT count(*) FROM edge)",
-                    [PURGED],
-                    |r| r.get(0),
-                )
+                [PURGED],
+                |r| r.get(0),
+            )
+            .sql()?;
+        let _engine = reserve_engine(&budget, u64::try_from(records).unwrap_or(0))?;
+        let (rels, _rels) = read::Rels::read(rows, &budget)?;
+        let mut records = Records::default();
+        {
+            let mut stmt = rows
+                .prepare("SELECT rid FROM node WHERE lifecycle <> ?1 ORDER BY rid")
                 .sql()?;
-            let _engine = reserve_engine(&budget, u64::try_from(records).unwrap_or(0))?;
-            let (rels, _rels) = read::Rels::read(rows, &budget)?;
-            let mut records = Records::default();
-            {
-                let mut stmt = rows
-                    .prepare("SELECT rid FROM node WHERE lifecycle <> ?1 ORDER BY rid")
-                    .sql()?;
-                let rids = stmt.query_map([PURGED], |r| r.get::<_, i64>(0)).sql()?;
-                for rid in rids {
-                    catalog.budget_window(BudgetWindow::GraphLoading, &mut budget);
-                    budget.check()?;
-                    records.nodes.push(NodeOp {
-                        node: local_id(rid.sql()?)?,
-                        kind: OpKind::Add,
-                    });
-                }
-                let mut stmt = rows
-                    .prepare("SELECT src, dst, rel, confidence, created_at FROM edge")
-                    .sql()?;
-                let mut edges = stmt.query([]).sql()?;
-                while let Some(r) = edges.next().sql()? {
-                    budget.check()?;
-                    let rel: String = r.get(2).sql()?;
-                    let created_at: String = r.get(4).sql()?;
-                    records.edges.push(EdgeOp {
-                        src: local_id(r.get(0).sql()?)?,
-                        rel: rels.id(&rel)?,
-                        dst: local_id(r.get(1).sql()?)?,
-                        kind: OpKind::Add,
-                        attr: attr(r.get(3).sql()?, &created_at)?,
-                    });
-                }
+            let rids = stmt.query_map([PURGED], |r| r.get::<_, i64>(0)).sql()?;
+            for rid in rids {
+                catalog.budget_window(BudgetWindow::GraphLoading, &mut budget);
+                budget.check()?;
+                records.nodes.push(NodeOp {
+                    node: local_id(rid.sql()?)?,
+                    kind: OpKind::Add,
+                });
             }
-            budget.check()?;
-            let base = build_base(&records, 0);
-            budget.check()?;
-            let generation = sql_int(txn.generation()?.0).sql()?;
-            retire_graph_rows(catalog, txn.conn(), generation, &mut budget)?;
-            catalog.budget_window(BudgetWindow::BeforePublish, &mut budget);
-            budget.check()?;
-            let extent = catalog.append_extent(ExtentClass::GraphBase, &base)?;
-            budget.check()?;
-            txn.publish(extent, &[ViewName::Main])?;
-            Ok(())
-        })
+            let mut stmt = rows
+                .prepare("SELECT src, dst, rel, confidence, created_at FROM edge")
+                .sql()?;
+            let mut edges = stmt.query([]).sql()?;
+            while let Some(r) = edges.next().sql()? {
+                budget.check()?;
+                let rel: String = r.get(2).sql()?;
+                let created_at: String = r.get(4).sql()?;
+                records.edges.push(EdgeOp {
+                    src: local_id(r.get(0).sql()?)?,
+                    rel: rels.id(&rel)?,
+                    dst: local_id(r.get(1).sql()?)?,
+                    kind: OpKind::Add,
+                    attr: attr(r.get(3).sql()?, &created_at)?,
+                });
+            }
+        }
+        budget.check()?;
+        let base = build_base(&records, 0);
+        budget.check()?;
+        let generation = sql_int(txn.generation()?.0).sql()?;
+        retire_graph_rows(catalog, txn.conn(), generation, &mut budget)?;
+        catalog.budget_window(BudgetWindow::BeforePublish, &mut budget);
+        budget.check()?;
+        let extent = append(ExtentClass::GraphBase, &base)?;
+        budget.check()?;
+        txn.publish(extent, &[ViewName::Main])?;
+        Ok(())
     }
 }
 
@@ -712,6 +724,7 @@ fn retire_graph_rows(
             .sql()?;
         }
     }
+    super::tables::renumber_chains(rows, budget)?;
     rows.execute(
         "UPDATE cat_sediment SET dead = ?1 WHERE dead IS NULL AND class = ?2",
         rusqlite::params![generation, SEDIMENT.as_str()],
