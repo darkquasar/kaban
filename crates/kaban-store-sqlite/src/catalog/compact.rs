@@ -828,6 +828,7 @@ impl Catalog {
         }
         let name = view_name(view)?;
         let mut k = run.len();
+        let mut refused = false;
         loop {
             let unit = Unit {
                 class,
@@ -853,7 +854,13 @@ impl Catalog {
                     }))
             })?;
             let retry = outcome.is_budget() && k > 2;
-            report.refused_units += u64::from(outcome.is_budget() && !retry);
+            // A class may not support the smaller suffix. Its earlier budget refusal is
+            // still terminal unless a supported retry actually publishes.
+            report.refused_units += u64::from(
+                (outcome.is_budget() && !retry)
+                    || (refused && matches!(outcome, Outcome::Nothing)),
+            );
+            refused |= outcome.is_budget();
             outcome.record(&unit, &mut report.published, &mut report.skipped);
             if !retry {
                 return Ok(());
