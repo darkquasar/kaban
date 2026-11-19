@@ -2,19 +2,23 @@
 //! memory graph's read and write cost on a store, written as JSONL to `--out`.
 //!
 //! ```text
-//!   setup    => fresh store; main's graph base = build_base(synthetic corpus of --edges)
+//!   setup    => fresh store; one node row per corpus node (rid = local id, so ids resolve);
+//!               main's graph base = build_base(synthetic corpus of --edges)
 //!               + --sediment pending graph ops as sediment rows of 100 ops each
-//!   expand2  => per query: snapshot + cached load_view + expand(depth 2, 50 rows)
-//!               query_ms (the whole read) and expand_ms (the expand alone), p50/p99/max
+//!               (--sealed: those ops sealed into a layer by one compaction first)
+//!   expand2  => per query: snapshot + cached load_view + stable order + expand(depth 2, 50
+//!               rows) + every row's public id; query_ms (the whole read) and expand_ms (the
+//!               expand alone), p50/p99/max
 //!   hub-cap1500 => the same from node 0 (the generator's largest hub), 1500 rows
 //!   link-wal => one single-link commit after another: kaban.db-wal growth per commit
 //!   oneshot  => C6: a fresh child process opens the store, loads (validates) main's graph
 //!               and runs one small expand; each phase timed
 //! ```
 //!
-//! The `real` corpus (GRA-02's 4.9M nodes / 21.4M edges) is an argument only: it does not fit
-//! the development host, so it is refused. Measurements are run once and reported (wave 2 item
-//! 3.7); nothing here is a test.
+//! The `real` corpus (GRA-02's 4.9M nodes / 21.4M edges) is an existing store at `--store`,
+//! read in place (expand2 only, its own pending rows as they are); it is refused only when the
+//! host's physical memory is below its container's size (the graph a load maps). Measurements
+//! are run once and reported (wave 2 item 3.7); nothing here is a test.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -38,7 +42,7 @@ pub(crate) enum Case {
 pub(crate) enum Corpus {
     /// The seeded generator's Zipf graph (`--edges` edges)
     Synthetic,
-    /// GRA-02's corpus (not on this host)
+    /// GRA-02's corpus: an existing store at `--store`
     Real,
 }
 
@@ -57,6 +61,12 @@ pub(crate) struct Args {
     /// Pending graph ops kept in main's sediment, comma separated (one run each)
     #[arg(long, default_value = "0")]
     sediment: String,
+    /// Seal the pending graph ops into a layer before measuring
+    #[arg(long)]
+    sealed: bool,
+    /// The store directory of the `real` corpus (its `kaban.db` and `kaban.kbx`)
+    #[arg(long)]
+    store: Option<PathBuf>,
     /// Timed queries (or link commits) per run
     #[arg(long, default_value_t = 1_000)]
     queries: u32,
@@ -85,9 +95,10 @@ pub(crate) fn run(args: &Args) -> ExitCode {
         args.corpus,
         args.edges,
         &args.sediment,
+        args.sealed,
         args.queries,
     );
-    let _ = (&args.out, &args.oneshot_child);
+    let _ = (&args.out, &args.oneshot_child, &args.store);
     crate::cli::stubs::not_available("bench graph", "feature bench")
 }
 
@@ -99,7 +110,7 @@ mod imp {
     use std::time::{Duration, Instant};
 
     use anyhow::{Context, Result, bail};
-    use kaban_core::config::CatalogCfg;
+    use kaban_core::config::{CatalogCfg, SealOps};
     use kaban_core::query_budget::QueryBudget;
     use kaban_core::{
         Actor, BackendSource, IngestStore, MemoryStore, NewNode, NodeId, Op, StoreError,
@@ -127,14 +138,13 @@ mod imp {
     const CHILD_DEADLINE: Duration = Duration::from_mins(15);
 
     pub(super) fn run(args: &Args) -> Result<ExitCode> {
-        if matches!(args.corpus, Corpus::Real) {
-            bail!("corpus real (4.9M nodes / 21.4M edges) is not available on this host");
-        }
         if let Some(dir) = &args.oneshot_child {
             return oneshot_child(dir);
         }
-        let lines = match args.case {
-            Case::Expand2 => {
+        let lines = match (args.corpus, args.case) {
+            (Corpus::Real, Case::Expand2) => vec![real(args)?],
+            (Corpus::Real, _) => bail!("corpus real measures expand2 only"),
+            (Corpus::Synthetic, Case::Expand2) => {
                 let mut lines = Vec::new();
                 for ops in args.sediment.split(',') {
                     let ops: usize = ops.trim().parse().context("--sediment")?;
@@ -142,9 +152,11 @@ mod imp {
                 }
                 lines
             }
-            Case::HubCap1500 => vec![reads("hub-cap1500", args, 0, HUB, Some(LocalId(0)))?],
-            Case::LinkWal => vec![link_wal(args.queries)?],
-            Case::Oneshot => vec![oneshot(args.edges)?],
+            (Corpus::Synthetic, Case::HubCap1500) => {
+                vec![reads("hub-cap1500", args, 0, HUB, Some(LocalId(0)))?]
+            }
+            (Corpus::Synthetic, Case::LinkWal) => vec![link_wal(args.queries)?],
+            (Corpus::Synthetic, Case::Oneshot) => vec![oneshot(args.edges)?],
         };
         let mut out = std::fs::File::create(&args.out)
             .with_context(|| format!("creating {}", args.out.display()))?;
@@ -164,11 +176,16 @@ mod imp {
         Ok(dir)
     }
 
-    /// A store in `dir` whose catalog never checkpoints during a run.
+    /// A store in `dir` whose catalog never checkpoints during a run and seals any pending
+    /// graph op when it compacts (only `--sealed` compacts).
     fn open(dir: &Path) -> Result<SqliteStore> {
         Ok(
             SqliteStore::open(&dir.join("kaban.db"), &dir.join("keys"))?.with_catalog_config(
                 CatalogCfg {
+                    seal_ops: SealOps {
+                        graph: 1,
+                        ..SealOps::default()
+                    },
                     checkpoint_interval_ms: 3_600_000,
                     ..CatalogCfg::default()
                 },
@@ -176,12 +193,38 @@ mod imp {
         )
     }
 
+    /// One committed node row per corpus node, `rid` = its local id and a `NodeId` that sorts
+    /// as the rid, so public ids resolve and the stable order is the corpus's; the graph ops
+    /// that commit stages are consumed at once (the corpus base already holds the nodes).
+    fn node_rows(store: &SqliteStore, nodes: u32) -> Result<()> {
+        catalog_testing::corrupt(
+            store,
+            &format!(
+                "WITH RECURSIVE i(k) AS (SELECT 0 UNION ALL SELECT k + 1 FROM i WHERE k + 1 < {nodes})
+                 INSERT INTO node(rid, id, kind, text, created_at, updated_at, workspace_id,
+                                  content_hash)
+                 SELECT k, printf('00000000-0000-7000-8000-%012x', k), 'Fact', 'node ' || k,
+                        '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z', 'default',
+                        printf('%064x', k)
+                 FROM i"
+            ),
+        )?;
+        catalog_testing::corrupt(
+            store,
+            "UPDATE cat_sediment SET dead = generation
+             WHERE class = 'graph_layer' AND dead IS NULL",
+        )?;
+        Ok(())
+    }
+
     /// A store in `dir` whose main graph is the synthetic corpus of `edges` edges as its base,
-    /// plus `ops` pending graph ops; the corpus's node count.
-    fn setup(dir: &Path, edges: u64, ops: usize) -> Result<(SqliteStore, u32)> {
+    /// with a node row per corpus node, plus `ops` pending graph ops (sealed into one layer
+    /// when `sealed`); the corpus's node count.
+    fn setup(dir: &Path, edges: u64, ops: usize, sealed: bool) -> Result<(SqliteStore, u32)> {
         let store = open(dir)?;
         let corpus = synthetic::generate(SEED, edges);
         let nodes = u32::try_from(corpus.nodes.len())?;
+        node_rows(&store, nodes)?;
         let base = build_base(&corpus, nodes);
         drop(corpus);
         catalog_testing::publish_graph_base(&store, &base)?;
@@ -193,6 +236,18 @@ mod imp {
                 ..Records::default()
             };
             catalog_testing::stage_graph_sediment(&store, &row.encode())?;
+        }
+        if sealed && ops > 0 {
+            let report = store.compact()?;
+            let rows: usize = report
+                .published
+                .iter()
+                .filter(|c| c.class == "graph_layer")
+                .map(|c| c.sediment_rows)
+                .sum();
+            if rows != ops.div_ceil(ROW_OPS) {
+                bail!("--sealed: the compaction sealed {rows} graph rows: {report:?}");
+            }
         }
         Ok((store, nodes))
     }
@@ -208,7 +263,8 @@ mod imp {
     }
 
     /// One read through the store: a snapshot, main's graph loaded (cached after the first
-    /// load) and one expand from `start`. Returns (whole read ms, expand ms, rows, truncated).
+    /// load) with its stable order, one expand from `start` and every row's public id. Returns
+    /// (whole read ms, expand ms, rows, truncated).
     fn read(store: &SqliteStore, start: LocalId, caps: Caps) -> Result<(f64, f64, usize, bool)> {
         let b = budget();
         let began = Instant::now();
@@ -223,7 +279,11 @@ mod imp {
                 &b,
             )
             .map_err(graph_error)?;
-            Ok((ms(t.elapsed()), r.nodes.len(), r.truncated))
+            let expand_ms = ms(t.elapsed());
+            for &(n, _) in &r.nodes {
+                g.node_id(n)?;
+            }
+            Ok((expand_ms, r.nodes.len(), r.truncated))
         })?;
         Ok((ms(began.elapsed()), expand_ms, rows, truncated))
     }
@@ -250,42 +310,99 @@ mod imp {
     ) -> Result<Value> {
         let dir = scratch(case)?;
         let built = Instant::now();
-        let (store, nodes) = setup(&dir, args.edges, ops)?;
+        let (store, nodes) = setup(&dir, args.edges, ops, args.sealed)?;
         let setup_ms = ms(built.elapsed());
+        let starts: Vec<LocalId> = (0..nodes).map(LocalId).collect();
+        let mut line = timed(&store, &starts, from, args.queries, caps)?;
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+        line["case"] = json!(case);
+        line["corpus"] = json!("synthetic");
+        line["edges"] = json!(args.edges);
+        line["nodes"] = json!(nodes);
+        line["sediment_ops"] = json!(ops);
+        line["sealed"] = json!(args.sealed && ops > 0);
+        line["setup_ms"] = json!(setup_ms);
+        Ok(line)
+    }
+
+    /// `queries` reads (after one untimed first load) from seeded picks of `starts`, or all
+    /// from `from`.
+    fn timed(
+        store: &SqliteStore,
+        starts: &[LocalId],
+        from: Option<LocalId>,
+        queries: u32,
+        caps: Caps,
+    ) -> Result<Value> {
+        let Some(&first) = starts.first() else {
+            bail!("the graph has no node");
+        };
         let mut seed = SEED;
         let mut next = move || {
             seed = seed
                 .wrapping_mul(6_364_136_223_846_793_005)
                 .wrapping_add(1_442_695_040_888_963_407);
-            LocalId(u32::try_from((seed >> 33) % u64::from(nodes)).unwrap_or(0))
+            let at = usize::try_from((seed >> 33) % starts.len() as u64).unwrap_or(0);
+            starts.get(at).copied().unwrap_or(first)
         };
-        let (first_ms, ..) = read(&store, from.unwrap_or(LocalId(0)), caps)?;
+        let (first_ms, ..) = read(store, from.unwrap_or(first), caps)?;
         let (mut query, mut expand_ms, mut rows) = (Vec::new(), Vec::new(), Vec::new());
         let mut truncated = 0_u32;
-        for _ in 0..args.queries {
-            let (q, e, n, t) = read(&store, from.unwrap_or_else(&mut next), caps)?;
+        for _ in 0..queries {
+            let (q, e, n, t) = read(store, from.unwrap_or_else(&mut next), caps)?;
             query.push(q);
             expand_ms.push(e);
             rows.push(n as f64);
             truncated += u32::from(t);
         }
-        drop(store);
-        let _ = std::fs::remove_dir_all(&dir);
         Ok(json!({
-            "case": case,
-            "corpus": "synthetic",
-            "edges": args.edges,
-            "nodes": nodes,
-            "sediment_ops": ops,
             "caps": { "depth": caps.depth, "rows": caps.rows },
-            "queries": args.queries,
-            "setup_ms": setup_ms,
+            "queries": queries,
             "first_read_ms": first_ms,
             "query_ms": quantiles(query),
             "expand_ms": quantiles(expand_ms),
             "rows": quantiles(rows),
             "truncated": truncated,
         }))
+    }
+
+    /// The host's physical memory in bytes (`MemTotal` of `/proc/meminfo`, as the catalog
+    /// configuration reads it), `None` where it is not known.
+    fn physical_memory() -> Option<u64> {
+        let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
+        let kib: u64 = meminfo
+            .lines()
+            .find_map(|l| l.strip_prefix("MemTotal:"))?
+            .trim()
+            .strip_suffix("kB")?
+            .trim()
+            .parse()
+            .ok()?;
+        Some(kib * 1024)
+    }
+
+    /// expand2 on the `real` corpus: the store at `--store`, read in place, from seeded picks
+    /// of its present nodes. Refused when the host's physical memory is below the size of its
+    /// container (what a load maps).
+    fn real(args: &Args) -> Result<Value> {
+        let Some(dir) = &args.store else {
+            bail!("corpus real needs --store <the corpus store directory>");
+        };
+        let kbx = std::fs::metadata(dir.join("kaban.kbx"))
+            .with_context(|| format!("the corpus container in {}", dir.display()))?
+            .len();
+        if let Some(memory) = physical_memory().filter(|&m| m < kbx) {
+            bail!("corpus real needs {kbx} bytes of memory for its graph; this host has {memory}");
+        }
+        let store = open(dir)?;
+        let starts = catalog_testing::present_local_ids(&store)?;
+        let mut line = timed(&store, &starts, None, args.queries, EXPAND)?;
+        line["case"] = json!("expand2");
+        line["corpus"] = json!("real");
+        line["nodes"] = json!(starts.len());
+        line["kbx_bytes"] = json!(kbx);
+        Ok(line)
     }
 
     /// `links` single-link commits between fresh nodes: the WAL growth of each.
@@ -331,7 +448,7 @@ mod imp {
     fn oneshot(edges: u64) -> Result<Value> {
         let dir = scratch("oneshot")?;
         let built = Instant::now();
-        let (store, nodes) = setup(&dir, edges, 0)?;
+        let (store, nodes) = setup(&dir, edges, 0, false)?;
         let setup_ms = ms(built.elapsed());
         drop(store);
         let kbx = std::fs::metadata(dir.join("kaban.kbx")).map_or(0, |m| m.len());

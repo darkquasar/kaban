@@ -991,6 +991,28 @@ pub fn graph_cache_holds(store: &SqliteStore) -> Result<bool> {
         })
 }
 
+/// The local ids of `store`'s present nodes (their rows not `purged`), ascending: a bench's
+/// start nodes.
+///
+/// # Errors
+/// SQLite errors; a rid outside the local id range.
+pub fn present_local_ids(store: &SqliteStore) -> Result<Vec<kaban_index_graph::LocalId>> {
+    let conn = store.lock();
+    let mut stmt = conn
+        .prepare("SELECT rid FROM node WHERE lifecycle <> 'purged' ORDER BY rid")
+        .sql()?;
+    let rids = stmt.query_map([], |r| r.get::<_, i64>(0)).sql()?;
+    rids.map(|rid| {
+        let rid = rid.sql()?;
+        u32::try_from(rid)
+            .map(kaban_index_graph::LocalId)
+            .map_err(|e| StoreError::Backend {
+                source: kaban_core::BackendSource::new(e),
+            })
+    })
+    .collect()
+}
+
 /// Rebuild `store`'s memory graph from its rows ([`GraphClass::rebuild_main`]).
 ///
 /// # Errors
