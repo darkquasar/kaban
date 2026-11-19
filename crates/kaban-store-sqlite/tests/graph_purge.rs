@@ -22,7 +22,7 @@ use kaban_core::query_budget::QueryBudget;
 use kaban_core::{ForgetMode, MemoryStore, NodeId};
 use kaban_index_graph::{Base, Caps, Direction, Layer, LocalId, RelSelection, expand};
 use kaban_store_sqlite::catalog_testing::{self, GraphContents};
-use kaban_store_sqlite::{SqliteStore, WorkKind};
+use kaban_store_sqlite::{CompactBudget, SqliteStore, WorkKind};
 use tantivy::directory::OwnedBytes;
 
 fn budget() -> QueryBudget {
@@ -102,6 +102,63 @@ fn extents_mentioning(contents: &GraphContents, n: LocalId) -> Vec<usize> {
         })
         .map(|(i, _)| i)
         .collect()
+}
+
+#[test]
+fn a_seal_split_between_a_purged_nodes_edge_and_its_removal_leaves_no_entry_for_it() {
+    // Arrange: n has 300 edges in the base; then one pending row adds n -> x (small) and the
+    // next removes n and its edges (large); the purge rewrites the chain without n
+    let s = Scratch::new("kaban-t11-purge", "split");
+    let db = s.db();
+    let store = open(&s);
+    let [n, x] = ["n", "x"].map(|t| nid(&created(&store, "Fact", t).id));
+    let others: Vec<NodeId> = (0..300)
+        .map(|i| NodeId::parse(&created(&store, "Fact", &format!("m{i}")).id).unwrap())
+        .collect();
+    for m in &others {
+        link(&store, &n, m);
+    }
+    compact(&store);
+    link(&store, &n, &x);
+    store.forget(&n, ForgetMode::Purge, &ctx()).unwrap();
+    let rid_n = LocalId(rid(&db, &n));
+    let purged = catalog_testing::purge(&store, &[i64::from(rid_n.0)]).unwrap();
+    assert!(purged.skipped.is_empty(), "{:?}", purged.skipped);
+    let pending = catalog_testing::graph_contents(&store).unwrap().sediment.len();
+    assert_eq!(pending, 2, "the edge row and the removal row are pending");
+
+    // Act: compact under the smallest budget (in 1 KiB steps) that seals anything, so the
+    // halved unit holds the edge row alone; then seal the rest
+    let mut split = None;
+    for kib in 1..=4096_u64 {
+        let report = catalog_testing::compact(
+            &store,
+            CompactBudget {
+                memory_bytes: kib << 10,
+                deadline: Duration::from_secs(30),
+            },
+        )
+        .unwrap();
+        if let Some(c) = report
+            .published
+            .iter()
+            .find(|c| c.class == "graph_layer" && c.kind == WorkKind::Seal)
+        {
+            split = Some(c.sediment_rows);
+            break;
+        }
+    }
+    assert_eq!(split, Some(1), "a seal of the edge row alone");
+    compact(&store);
+
+    // Assert: every row sealed, and no live graph extent holds an entry for n
+    let after = catalog_testing::graph_contents(&store).unwrap();
+    assert!(after.sediment.is_empty(), "every pending row sealed");
+    assert_eq!(
+        extents_mentioning(&after, rid_n),
+        Vec::<usize>::new(),
+        "no graph extent holds an entry for the purged n"
+    );
 }
 
 #[test]

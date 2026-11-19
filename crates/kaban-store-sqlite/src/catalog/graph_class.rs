@@ -203,9 +203,9 @@ impl IndexClass for GraphClass {
     /// The layer of `rows` (main's pending graph rows, oldest first) over main's graph chain at
     /// the pin; over an empty chain, that layer flattened into a base. Seals from the cached
     /// prepared sediment when it holds exactly these rows first (amendment 3.6), otherwise
-    /// prepares them under `budget`. A node the rows leave removed that the chain does not hold
-    /// (a purged one among them) is left out with its edges ([`vanished`]), so its id never
-    /// returns into an extent.
+    /// prepares them under `budget`. A node the rows name that the chain does not hold and the
+    /// rows do not leave added (a purged one) is left out with its edges ([`vanished`]), so its
+    /// id never returns into an extent.
     fn seal(
         &self,
         pin: &Pin,
@@ -413,20 +413,32 @@ pub(crate) fn graph_error(e: GraphError) -> StoreError {
     }
 }
 
-/// The nodes `batches` (oldest first) leave removed, their newest node op a removal, that
-/// `parent` does not hold: sorted. Their ops change nothing the chain holds, so a seal leaves
-/// them and their edges out. This relies on the memory graph's rows: an edge row needs both of
-/// its nodes, so a node the chain does not hold has no edge there either.
+/// The nodes `batches` (one seal unit, oldest first) name that `parent` does not hold and
+/// whose newest node op in the unit is not an add (a removal, or none at all): sorted. Such a
+/// node is purged or about to be: an edge row needs both of its nodes, and a unit is always the
+/// oldest pending rows, so a live node is either in the chain or added by the unit before its
+/// edges. Its ops change nothing the chain holds, so a seal leaves it, its edges and its facts
+/// out, whichever unit holds them: a unit that ends with its edge, before the row that removes
+/// it, never writes the purged id back into a layer (the rule holds per unit, so no split of
+/// the pending rows resurrects it).
 fn vanished(batches: &[DecodedRecords], parent: &View<'_>) -> Vec<LocalId> {
     let mut newest = std::collections::BTreeMap::new();
     for b in batches {
-        for op in &b.records().nodes {
-            newest.insert(op.node, op.kind);
+        let r = b.records();
+        for e in &r.edges {
+            newest.entry(e.src).or_insert(None);
+            newest.entry(e.dst).or_insert(None);
+        }
+        for f in &r.facts {
+            newest.entry(f.node).or_insert(None);
+        }
+        for op in &r.nodes {
+            newest.insert(op.node, Some(op.kind));
         }
     }
     newest
         .into_iter()
-        .filter(|&(n, kind)| kind == OpKind::Remove && !parent.contains(n))
+        .filter(|&(n, kind)| kind != Some(OpKind::Add) && !parent.contains(n))
         .map(|(n, _)| n)
         .collect()
 }
