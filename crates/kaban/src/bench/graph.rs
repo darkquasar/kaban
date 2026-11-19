@@ -212,23 +212,8 @@ mod imp {
     /// as the rid, so public ids resolve and the stable order is the corpus's; the graph ops
     /// that commit stages are consumed at once (the corpus base already holds the nodes).
     fn node_rows(store: &SqliteStore, nodes: u32) -> Result<()> {
-        catalog_testing::corrupt(
-            store,
-            &format!(
-                "WITH RECURSIVE i(k) AS (SELECT 0 UNION ALL SELECT k + 1 FROM i WHERE k + 1 < {nodes})
-                 INSERT INTO node(rid, id, kind, text, created_at, updated_at, workspace_id,
-                                  content_hash)
-                 SELECT k, printf('00000000-0000-7000-8000-%012x', k), 'Fact', 'node ' || k,
-                        '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z', 'default',
-                        printf('%064x', k)
-                 FROM i"
-            ),
-        )?;
-        catalog_testing::corrupt(
-            store,
-            "UPDATE cat_sediment SET dead = generation
-             WHERE class = 'graph_layer' AND dead IS NULL",
-        )?;
+        catalog_testing::seed_nodes(store, nodes)?;
+        catalog_testing::consume_graph_sediment(store)?;
         Ok(())
     }
 

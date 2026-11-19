@@ -884,6 +884,51 @@ pub fn corrupt(store: &SqliteStore, sql: &str) -> Result<()> {
         })
 }
 
+/// Insert `n` committed node rows in one catalog commit of `store`, `rid` = `k` for `k` in
+/// `0..n` and a `NodeId` that sorts as the rid (a bench's corpus nodes).
+///
+/// # Errors
+/// The commit's errors.
+pub fn seed_nodes(store: &SqliteStore, n: u32) -> Result<()> {
+    store
+        .catalog()
+        .commit(&mut store.lock(), Durability::Normal, |txn| {
+            let mut insert = txn
+                .conn()
+                .prepare(
+                    "INSERT INTO node(rid, id, kind, text, created_at, updated_at, workspace_id,
+                                      content_hash)
+                     VALUES (?1, ?2, 'Fact', ?3, '2024-01-01T00:00:00Z',
+                             '2024-01-01T00:00:00Z', 'default', ?4)",
+                )
+                .sql()?;
+            for k in 0..n {
+                insert
+                    .execute(rusqlite::params![
+                        k,
+                        format!("00000000-0000-7000-8000-{k:012x}"),
+                        format!("node {k}"),
+                        format!("{k:064x}"),
+                    ])
+                    .sql()?;
+            }
+            Ok(())
+        })
+}
+
+/// Mark every pending graph sediment row of `store` consumed at its own generation, in one
+/// catalog commit (a bench whose base already holds what those rows staged).
+///
+/// # Errors
+/// The commit's errors.
+pub fn consume_graph_sediment(store: &SqliteStore) -> Result<()> {
+    corrupt(
+        store,
+        "UPDATE cat_sediment SET dead = generation
+         WHERE class = 'graph_layer' AND dead IS NULL",
+    )
+}
+
 /// `main`'s memory graph at one snapshot, as the graph suites read it (T11): the merged view,
 /// local ids by `NodeId` and back, relation ids and the public tie order (prepared only when
 /// asked for). Local ids never leave the store outside these suites (INV-2).
