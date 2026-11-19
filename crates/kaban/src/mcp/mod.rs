@@ -857,6 +857,9 @@ mod tests {
             self.0.fetch_add(1, Ordering::SeqCst);
             Ok(true)
         }
+        fn reindex_graph(&self) -> Result<(), StoreError> {
+            Ok(())
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]

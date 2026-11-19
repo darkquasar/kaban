@@ -13,6 +13,7 @@
 //!   commit ==> stage: changed rids => active rows => RAM segment + tombstones => cat_sediment
 //!   read   ==> pin(main) => tiers (kbx spans) + text sediment => TextSnapshot => search_at
 //!   seal   ==> due pending packs => merge (hidden documents dropped) => one tier in main
+//!   rebuild==> every active row => one tier in main; old tiers and packs retire (one commit)
 //! ```
 
 use std::path::PathBuf;
@@ -20,7 +21,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use kaban_core::query_budget::QueryBudget;
 use kaban_core::text_index::{ExtentSpan, TextSnapshot};
-use kaban_core::{Result, ViewName};
+use kaban_core::{Durability, Result, ViewName};
 use rusqlite::Connection;
 use tantivy::directory::OwnedBytes;
 
@@ -29,7 +30,8 @@ use super::capture::BatchChanges;
 use super::class::{ExtentClass, ExtentLocation, IndexClass};
 use super::commit::Stage;
 use super::pin::{Pin, PinnedView};
-use super::tables::{ExtentRef, SedimentRow};
+use super::tables::{ExtentRef, SedimentRow, sql_int};
+use crate::sql_error::SqlResultExt;
 
 /// The classes a text read loads: the text tiers and their pending packs.
 const TEXT: &[ExtentClass] = &[ExtentClass::TextTier];
@@ -119,10 +121,53 @@ impl IndexClass for TextClass {
         Ok(None)
     }
 
-    /// Rebuilds nothing yet.
-    fn rebuild(&self, _catalog: &Catalog, _rows: &mut Connection) -> Result<()> {
-        Ok(())
+    /// Rebuild `main`'s text from the rows (spec 11 7.2.7), in one commit on the writer
+    /// connection `rows`: one tier of every active row replaces every text tier and pending
+    /// text pack, which retire (and are reclaimed once no pin reaches them). A catalog without
+    /// a container (in memory) holds only sediment: nothing to rebuild.
+    fn rebuild(&self, catalog: &Catalog, rows: &mut Connection) -> Result<()> {
+        if catalog.container.is_none() {
+            return Ok(());
+        }
+        catalog.commit(rows, Durability::Normal, |txn| {
+            let budget = QueryBudget::new(STAGE_MEMORY_BYTES, None);
+            let (active, _charged) = crate::index_rows::active_rows(txn.conn(), &budget)?;
+            let tier = kaban_index_tantivy::segment(&active, &[], &budget)?;
+            let generation = sql_int(txn.generation()?.0).sql()?;
+            retire_text(txn.conn(), generation)?;
+            let extent = catalog.append_extent(ExtentClass::TextTier, &tier)?;
+            txn.publish(extent, &[ViewName::Main])?;
+            Ok(())
+        })
     }
+}
+
+/// Retire every text tier (out of every chain, its claim cleared, dead since `generation`) and
+/// every pending text pack (dead at `generation`).
+fn retire_text(conn: &Connection, generation: i64) -> Result<()> {
+    let class = ExtentClass::TextTier.as_str();
+    let extents = "SELECT id FROM cat_extent WHERE class = ?1";
+    conn.execute(
+        &format!("DELETE FROM cat_view_extent WHERE extent_id IN ({extents})"),
+        [class],
+    )
+    .sql()?;
+    conn.execute(
+        &format!("DELETE FROM cat_claim WHERE extent IN ({extents})"),
+        [class],
+    )
+    .sql()?;
+    conn.execute(
+        "UPDATE cat_extent SET dead_since = ?1 WHERE class = ?2 AND dead_since IS NULL",
+        rusqlite::params![generation, class],
+    )
+    .sql()?;
+    conn.execute(
+        "UPDATE cat_sediment SET dead = ?1 WHERE class = ?2 AND dead IS NULL",
+        rusqlite::params![generation, class],
+    )
+    .sql()?;
+    Ok(())
 }
 
 impl Catalog {

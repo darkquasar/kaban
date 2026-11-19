@@ -132,6 +132,9 @@ impl CatalogMaintenance for StoreCatalog {
     fn checkpoint_if_due(&self) -> Result<bool, StoreError> {
         Ok(self.0.checkpoint_if_due()?.is_some())
     }
+    fn reindex_graph(&self) -> Result<(), StoreError> {
+        self.0.reindex_graph()
+    }
 }
 
 /// The text, graph and code index states from the catalog's per-class counts.

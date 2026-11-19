@@ -277,3 +277,34 @@ fn a_commit_and_a_seal_between_two_pages_of_one_recall_neither_duplicate_nor_ski
         .unwrap();
     assert_eq!(fresh.len(), 1, "{fresh:?}");
 }
+
+/// `kaban reindex text` (spec 11 7.2.7, PC-7): the text index is rebuilt from the rows through
+/// the catalog's text class, in one commit that retires the old packs and tiers, so a damaged
+/// pack no longer stands between a recall and the record, and the rebuild reports the rows.
+#[test]
+fn a_reindex_rebuilds_the_text_from_the_rows_past_a_damaged_pack() {
+    // Arrange: one record whose only text pack is damaged
+    let s = Scratch::new("kaban-t7-text", "reindex");
+    let store = SqliteStore::open(&s.db(), &s.keys()).unwrap();
+    created(&store, "Fact", "quokka rebuilt from the rows");
+    rusqlite::Connection::open(s.db())
+        .unwrap()
+        .execute(
+            "UPDATE cat_sediment SET payload = x'00' WHERE class = 'text_tier'",
+            [],
+        )
+        .unwrap();
+    assert_eq!(seeds(&store, "quokka"), Searched::Unavailable, "damaged");
+
+    // Act
+    let rows = kaban_core::IngestStore::reindex_text(&store).unwrap();
+
+    // Assert
+    assert_eq!(rows, 1);
+    assert_eq!(
+        seed_count(&store, "quokka"),
+        1,
+        "{:?}",
+        seeds(&store, "quokka")
+    );
+}

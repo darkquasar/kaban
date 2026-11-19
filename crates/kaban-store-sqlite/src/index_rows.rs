@@ -4,10 +4,12 @@
 //! an ontology redeployment is seen by the next read, never by a cached map.
 
 use crate::catalog::phase::Reader;
-use crate::ident::{FIELDS, FTS_FIELDS, Fields, summary_projection_over};
+use crate::ident::{FIELDS, FTS_FIELDS, Fields, committed_fields, summary_projection_over};
+use crate::sql_error::SqlResultExt;
 use kaban_core::Result;
 use kaban_core::query_budget::{BudgetLease, GrowError, QueryBudget};
 use kaban_core::text_index::IndexRow;
+use rusqlite::Connection;
 use rusqlite::types::ValueRef;
 use serde_json::Value;
 use std::convert::Infallible;
@@ -58,6 +60,42 @@ pub(crate) fn staged_rows(
     match (refused, decoded) {
         (Some(refusal), _) => Err(refusal.into()),
         (None, decoded) => Ok((decoded?, lease)),
+    }
+}
+
+/// Every active row in `rid` order, read on `conn` (spec 11 T7: the text class's rebuild, in
+/// its commit's writer phase), each charged on `budget` before it is decoded, with its place
+/// in the growing vector.
+///
+/// # Errors
+/// SQLite's; a stored value that does not decode; the budget's refusal.
+pub(crate) fn active_rows(
+    conn: &Connection,
+    budget: &QueryBudget,
+) -> Result<(Vec<IndexRow>, BudgetLease)> {
+    let committed = committed_fields(conn)?;
+    let sql = select(committed.as_ref(), "");
+    let ident_fields = committed.map(|(ident, _)| ident).unwrap_or_default();
+    let slot = u64::try_from(2 * size_of::<IndexRow>()).unwrap_or(u64::MAX);
+    let mut lease = budget.reserve(0)?;
+    let mut refused = None;
+    let mut stmt = conn.prepare(&sql).sql()?;
+    let decoded = stmt
+        .query_map([], |r| {
+            let charge = row_charge(r)?.saturating_add(slot);
+            let refusal = match lease.grow_with(charge, || Ok::<_, Infallible>(())) {
+                Ok(()) => return decode(r, &ident_fields),
+                Err(GrowError::Budget(refusal)) => refusal,
+                Err(GrowError::Alloc(never)) => match never {},
+            };
+            refused = Some(refusal);
+            Err(rusqlite::Error::InvalidQuery)
+        })
+        .sql()?
+        .collect::<rusqlite::Result<Vec<_>>>();
+    match (refused, decoded) {
+        (Some(refusal), _) => Err(refusal.into()),
+        (None, decoded) => Ok((decoded.sql()?, lease)),
     }
 }
 

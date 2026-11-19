@@ -81,6 +81,12 @@ pub trait CatalogMaintenance: Send + Sync {
     /// # Errors
     /// Store errors.
     fn checkpoint_if_due(&self) -> Result<bool, StoreError>;
+    /// Rebuild the memory graph from the canonical rows through its catalog class (spec 11
+    /// 7.2.7, `kaban reindex graph`).
+    ///
+    /// # Errors
+    /// Store errors.
+    fn reindex_graph(&self) -> Result<(), StoreError>;
 }
 
 /// The capability surface: store + denylist policy + keyed-hash signer.
@@ -217,10 +223,17 @@ impl KabanApi {
             ReindexTarget::Text | ReindexTarget::All => Some(self.store.reindex_text()?),
             ReindexTarget::Graph => None,
         };
-        // the memory graph has no index on the catalog to rebuild until T11
+        // the graph rebuilds through the store's catalog: `true` only once that call succeeded
+        let graph_rebuilt = match (which, &self.catalog) {
+            (ReindexTarget::Graph | ReindexTarget::All, Some(catalog)) => {
+                catalog.reindex_graph()?;
+                true
+            }
+            _ => false,
+        };
         Ok(ReindexReport {
             rows,
-            graph_rebuilt: false,
+            graph_rebuilt,
         })
     }
 
@@ -427,6 +440,9 @@ mod tests {
         }
         fn checkpoint_if_due(&self) -> Result<bool, StoreError> {
             Ok(false)
+        }
+        fn reindex_graph(&self) -> Result<(), StoreError> {
+            Ok(())
         }
     }
 

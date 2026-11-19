@@ -130,10 +130,11 @@ fn reindex_defaults_to_every_index_and_rebuilds_text_from_the_rows() {
     let all = document(&kaban(&s, &["reindex"]));
     let graph = document(&kaban(&s, &["reindex", "graph"]));
 
-    // Assert: the graph has no catalog index to rebuild until T11
+    // Assert: both rebuild through their catalog class (spec 11 7.2.7); text reports its rows
     assert_eq!(all["rows"], 1, "{all}");
-    assert_eq!(all["graph_rebuilt"], false, "{all}");
+    assert_eq!(all["graph_rebuilt"], true, "{all}");
     assert_eq!(graph["rows"], Value::Null, "{graph}");
+    assert_eq!(graph["graph_rebuilt"], true, "{graph}");
 }
 
 #[test]

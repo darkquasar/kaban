@@ -121,8 +121,8 @@ pub enum ReindexTarget {
 pub struct ReindexReport {
     /// Active rows the text index re-indexed (`None`: text was not asked for).
     pub rows: Option<u64>,
-    /// Whether the memory graph was rebuilt: `false` while the graph has no index on the
-    /// catalog to rebuild (until spec 11 T11).
+    /// Whether the memory graph was rebuilt through its catalog class (`false`: not asked
+    /// for, or no catalog wired).
     pub graph_rebuilt: bool,
 }
 

@@ -20,6 +20,7 @@ mod rescan;
 
 use crate::anchors;
 use crate::catalog::Catalog;
+use crate::catalog::class::ExtentClass;
 use crate::changelog;
 use crate::connection::{CgRead, LiveGuard, NoFileBacking, prepare_database_files};
 use crate::connection::{database_file_modes, open_existing_as_is};
@@ -197,7 +198,8 @@ impl SqliteStore {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    /// The store's shared connection.
+    /// The store's shared connection (the recall unit tests and the catalog's test helpers).
+    #[cfg(any(test, feature = "failpoints"))]
     pub(crate) fn connection(&self) -> &SharedConnection {
         &self.conn
     }
@@ -230,6 +232,27 @@ impl SqliteStore {
     /// The seed index behind the text-search seam.
     pub(crate) fn seed_index(&self) -> &(dyn kaban_core::text_index::TextIndex + Send + Sync) {
         self.text_index.text_index()
+    }
+
+    /// Rebuild the memory graph from the canonical rows, through the catalog's graph class
+    /// (spec 11 7.2.7, `kaban reindex graph`).
+    ///
+    /// # Errors
+    /// The class's rebuild error.
+    pub fn reindex_graph(&self) -> Result<()> {
+        self.rebuild_class(ExtentClass::GraphBase)
+    }
+
+    /// Rebuild the catalog class that owns the `of` extents from the rows, through its
+    /// `IndexClass::rebuild` on the writer connection.
+    fn rebuild_class(&self, of: ExtentClass) -> Result<()> {
+        let class = self
+            .catalog
+            .classes()
+            .into_iter()
+            .find(|class| class.classes().contains(&of))
+            .ok_or_else(|| StoreError::NotFound(format!("index class {}", of.as_str())))?;
+        class.rebuild(&self.catalog, &mut self.lock())
     }
 
     /// The ontology this store ranks and projects under.
@@ -1534,9 +1557,10 @@ impl IngestStore for SqliteStore {
     fn gazetteer_set_fresh(&self, document: &NodeId, workspace: &WorkspaceId) -> Result<bool> {
         artifacts::set_fresh(&self.lock(), document, workspace)
     }
-    /// The rebuild of the store's text index from the canonical rows (spec 11 T7: through the
-    /// catalog's text class).
+    /// The rebuild of the store's text index from the canonical rows, through the catalog's
+    /// text class (spec 11 7.2.7).
     fn reindex_text(&self) -> Result<u64> {
+        self.rebuild_class(ExtentClass::TextTier)?;
         self.lock()
             .query_row(
                 "SELECT count(*) FROM node WHERE lifecycle = 'active'",
