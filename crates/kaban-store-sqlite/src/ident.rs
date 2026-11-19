@@ -66,8 +66,9 @@ pub(crate) fn summary_projection_over(fields: &Fields, alias: &str, body: &str) 
 
 /// Commit the ontology's field maps in the caller's transaction. A changed ontology replaces
 /// both maps atomically; other connections read the committed map on each projection, rather
-/// than holding a stale connection-local field cache.
-pub(crate) fn deploy(conn: &Connection, ontology: &Ontology, force: bool) -> Result<u64> {
+/// than holding a stale connection-local field cache. `true` when the maps were replaced (the
+/// text indexed under the old ones is stale).
+pub(crate) fn deploy(conn: &Connection, ontology: &Ontology, force: bool) -> Result<bool> {
     let ident_fields = ontology
         .kinds
         .iter()
@@ -97,7 +98,7 @@ pub(crate) fn committed_fields(conn: &Connection) -> Result<Option<(Fields, Fiel
 }
 
 /// Bare open preserves the last explicit ontology deployment, including schema upgrades.
-pub(crate) fn ensure(conn: &Connection, fallback: &Ontology) -> Result<u64> {
+pub(crate) fn ensure(conn: &Connection, fallback: &Ontology) -> Result<bool> {
     if let Some((ident, fts)) = committed_fields(conn)? {
         deploy_fields(conn, &ident, &fts, false)
     } else {
@@ -110,7 +111,7 @@ fn deploy_fields(
     ident_fields: &Fields,
     fts_fields: &Fields,
     force: bool,
-) -> Result<u64> {
+) -> Result<bool> {
     let version: u32 = conn
         .query_row(
             "SELECT value FROM index_meta WHERE key='schema_version'",
@@ -121,7 +122,7 @@ fn deploy_fields(
         .parse()
         .unwrap_or(1);
     if version < 4 {
-        return Ok(0);
+        return Ok(false);
     }
     let fields = serde_json::to_string(ident_fields)?;
     let projection_fields = serde_json::to_string(fts_fields)?;
@@ -185,7 +186,7 @@ fn deploy_fields(
         && terms_version.as_deref() == Some(IDENT_TERMS_VERSION)
         && current_projection.as_deref() == Some(projection_fields.as_str())
     {
-        return Ok(0);
+        return Ok(false);
     }
     conn.execute_batch("DROP TRIGGER IF EXISTS node_changes_au;")
         .sql()?;
@@ -198,5 +199,5 @@ fn deploy_fields(
     ] {
         conn.execute("INSERT INTO index_meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", params![key,value]).sql()?;
     }
-    Ok(0)
+    Ok(true)
 }

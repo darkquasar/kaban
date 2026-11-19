@@ -13,7 +13,7 @@ use common::{Scratch, created, ctx, nid};
 use kaban_core::config::{CatalogCfg, Recall, SealOps};
 use kaban_core::query_budget::QueryBudget;
 use kaban_core::text_index::{MatchMode, Searched, SeedFilter, TextIndex, TextQuery, TextSnapshot};
-use kaban_core::{ForgetMode, MemoryStore, Node, RecallQuery};
+use kaban_core::{ForgetMode, MemoryStore, NewNode, Node, Ontology, RecallQuery};
 use kaban_index_tantivy::TantivyIndex;
 use kaban_store_sqlite::catalog_testing::{self, Window};
 use kaban_store_sqlite::{CompactBudget, SqliteStore};
@@ -426,4 +426,59 @@ fn hot_bodies_read_back_byte_equal_and_no_text_extent_holds_their_text() {
         "a pending text pack holds the body"
     );
     assert_eq!(seed_count(&store, "lantern"), 2, "the bodies are indexed");
+}
+
+/// The shipped ontology with `Fact`'s identifier fields set to `fields`.
+fn fact_ident_fields(fields: &[&str]) -> Arc<Ontology> {
+    let mut ontology = kaban_core::shipped::resolved().unwrap();
+    for (name, kind) in &mut ontology.kinds {
+        if kaban_core::stored_name(name) == "Fact" {
+            kind.ident_fields = fields.iter().map(|f| (*f).to_owned()).collect();
+        }
+    }
+    Arc::new(ontology)
+}
+
+/// T7 end review M4 (SS-09): a changed identifier-field declaration rebuilds the text in the
+/// same operation, so a record written under the old declaration is found under the new
+/// projection only.
+#[test]
+fn a_changed_projection_rebuilds_the_text_under_the_new_declaration() {
+    // Arrange: `Fact` projects `props.alpha`; one record holds both fields
+    let s = Scratch::new("kaban-t7-text", "projection");
+    let store = SqliteStore::open(&s.db(), &s.keys())
+        .unwrap()
+        .with_ontology(fact_ident_fields(&["props.alpha"]))
+        .unwrap();
+    store
+        .remember(
+            NewNode {
+                kind: "Fact".into(),
+                text: "filler".into(),
+                props: Some(serde_json::json!({"alpha": "zebra_one", "beta": "quokka_two"})),
+                ..Default::default()
+            },
+            &[],
+            &ctx(),
+        )
+        .unwrap();
+    assert_eq!(
+        seed_count(&store, "zebra"),
+        1,
+        "fixture: the old projection"
+    );
+    assert_eq!(
+        seed_count(&store, "quokka"),
+        0,
+        "fixture: not yet projected"
+    );
+
+    // Act: the declaration changes to `props.beta`
+    let store = store
+        .with_ontology(fact_ident_fields(&["props.beta"]))
+        .unwrap();
+
+    // Assert
+    assert_eq!(seed_count(&store, "quokka"), 1, "the new projection");
+    assert_eq!(seed_count(&store, "zebra"), 0, "the old projection");
 }

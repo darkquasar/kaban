@@ -350,18 +350,23 @@ impl SqliteStore {
     }
 
     /// The same store ranking and projecting under `ontology` (the service's loaded ontology)
-    /// instead of the shipped one.
+    /// instead of the shipped one. A changed `fts_fields` or `ident_fields` declaration is
+    /// another projection (SS-09): the text is rebuilt under it here, through the text class
+    /// under the maintenance budget, before the store serves a search.
     ///
     /// # Errors
     /// Backend errors redeploying the identifier projection or rebuilding the index.
     pub fn with_ontology(mut self, ontology: Arc<Ontology>) -> Result<Self> {
         self.rules = RwLock::new(Arc::new(RuleSet::from_ontology(&ontology)));
         self.ontology = ontology;
-        {
+        let changed = {
             let mut conn = self.lock();
             self.catalog.commit(&mut conn, Durability::Normal, |txn| {
                 crate::ident::deploy(txn.conn(), &self.ontology, false)
-            })?;
+            })?
+        };
+        if changed {
+            self.rebuild_class(ExtentClass::TextTier)?;
         }
         self.configure_index();
         Ok(self)
