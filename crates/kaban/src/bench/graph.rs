@@ -1,12 +1,394 @@
-//! `kaban bench graph` (spec 11): registered by T6; its owning task fills it.
+//! `kaban bench graph` (spec 11 T11 Step 7; GRA-02, GRA-04, wave 2 items 3.1, 3.6 and 7.3): the
+//! memory graph's read and write cost on a store, written as JSONL to `--out`.
+//!
+//! ```text
+//!   setup    => fresh store; main's graph base = build_base(synthetic corpus of --edges)
+//!               + --sediment pending graph ops as sediment rows of 100 ops each
+//!   expand2  => per query: snapshot + cached load_view + expand(depth 2, 50 rows)
+//!               query_ms (the whole read) and expand_ms (the expand alone), p50/p99/max
+//!   hub-cap1500 => the same from node 0 (the generator's largest hub), 1500 rows
+//!   link-wal => one single-link commit after another: kaban.db-wal growth per commit
+//!   oneshot  => C6: a fresh child process opens the store, loads (validates) main's graph
+//!               and runs one small expand; each phase timed
+//! ```
+//!
+//! The `real` corpus (GRA-02's 4.9M nodes / 21.4M edges) is an argument only: it does not fit
+//! the development host, so it is refused. Measurements are run once and reported (wave 2 item
+//! 3.7); nothing here is a test.
 
+use std::path::PathBuf;
 use std::process::ExitCode;
 
-/// The graph bench's arguments (empty until its owning task fills them).
-#[derive(clap::Args)]
-pub(crate) struct Args {}
+/// What the bench measures.
+#[derive(Clone, Copy, clap::ValueEnum)]
+pub(crate) enum Case {
+    /// Depth-2 expand from seeded nodes, for each `--sediment` value
+    Expand2,
+    /// WAL bytes per single-link commit
+    LinkWal,
+    /// Depth-2 expand from the highest-degree node with a 1500-row cap
+    #[value(name = "hub-cap1500")]
+    HubCap1500,
+    /// A fresh process: open, validate and one small expand (C6)
+    Oneshot,
+}
 
-/// Not delivered yet: refused with exit 4.
-pub(crate) fn run(_args: &Args) -> ExitCode {
-    super::not_delivered("graph")
+/// The graph the bench builds.
+#[derive(Clone, Copy, clap::ValueEnum)]
+pub(crate) enum Corpus {
+    /// The seeded generator's Zipf graph (`--edges` edges)
+    Synthetic,
+    /// GRA-02's corpus (not on this host)
+    Real,
+}
+
+/// `bench graph` arguments.
+#[derive(clap::Args)]
+pub(crate) struct Args {
+    /// What to measure
+    #[arg(long, value_enum)]
+    case: Case,
+    /// The graph to measure on
+    #[arg(long, value_enum, default_value = "synthetic")]
+    corpus: Corpus,
+    /// Edges of the synthetic corpus
+    #[arg(long, default_value_t = 1_000_000)]
+    edges: u64,
+    /// Pending graph ops kept in main's sediment, comma separated (one run each)
+    #[arg(long, default_value = "0")]
+    sediment: String,
+    /// Timed queries (or link commits) per run
+    #[arg(long, default_value_t = 1_000)]
+    queries: u32,
+    /// The JSONL output file
+    #[arg(long, default_value = "graph.jsonl")]
+    out: PathBuf,
+    /// The one-shot child: the store directory it opens
+    #[arg(long, hide = true)]
+    oneshot_child: Option<PathBuf>,
+}
+
+/// Run the bench.
+#[cfg(feature = "bench")]
+pub(crate) fn run(args: &Args) -> ExitCode {
+    imp::run(args).unwrap_or_else(|e| {
+        crate::cli::output::print_failure(&e);
+        ExitCode::FAILURE
+    })
+}
+
+/// Without the `bench` feature: refused with exit 4.
+#[cfg(not(feature = "bench"))]
+pub(crate) fn run(args: &Args) -> ExitCode {
+    let _ = (
+        args.case,
+        args.corpus,
+        args.edges,
+        &args.sediment,
+        args.queries,
+    );
+    let _ = (&args.out, &args.oneshot_child);
+    crate::cli::stubs::not_available("bench graph", "feature bench")
+}
+
+#[cfg(feature = "bench")]
+mod imp {
+    use std::io::Write;
+    use std::path::Path;
+    use std::process::ExitCode;
+    use std::time::{Duration, Instant};
+
+    use anyhow::{Context, Result, bail};
+    use kaban_core::config::CatalogCfg;
+    use kaban_core::query_budget::QueryBudget;
+    use kaban_core::{
+        Actor, BackendSource, IngestStore, MemoryStore, NewNode, NodeId, Op, StoreError,
+        WorkspaceId, WriteBatch, WriteCtx,
+    };
+    use kaban_index_graph::{Caps, Direction, LocalId, Records, RelSelection, build_base, expand};
+    use kaban_store_sqlite::{SqliteStore, catalog_testing};
+    use serde_json::{Value, json};
+
+    use super::{Args, Case, Corpus};
+    use crate::bench::synthetic;
+
+    /// The corpus seed and the pending sediment's.
+    const SEED: u64 = 0x7_6;
+    const SEDIMENT_SEED: u64 = 0x7_7;
+    /// Graph ops per pending sediment row (one small commit each).
+    const ROW_OPS: usize = 100;
+    /// The per-call default row cap and the ceiling (wave 2 item 3.1).
+    const EXPAND: Caps = Caps { depth: 2, rows: 50 };
+    const HUB: Caps = Caps {
+        depth: 2,
+        rows: 1_500,
+    };
+    /// The bound of the one-shot child.
+    const CHILD_DEADLINE: Duration = Duration::from_mins(15);
+
+    pub(super) fn run(args: &Args) -> Result<ExitCode> {
+        if matches!(args.corpus, Corpus::Real) {
+            bail!("corpus real (4.9M nodes / 21.4M edges) is not available on this host");
+        }
+        if let Some(dir) = &args.oneshot_child {
+            return oneshot_child(dir);
+        }
+        let lines = match args.case {
+            Case::Expand2 => {
+                let mut lines = Vec::new();
+                for ops in args.sediment.split(',') {
+                    let ops: usize = ops.trim().parse().context("--sediment")?;
+                    lines.push(reads("expand2", args, ops, EXPAND, None)?);
+                }
+                lines
+            }
+            Case::HubCap1500 => vec![reads("hub-cap1500", args, 0, HUB, Some(LocalId(0)))?],
+            Case::LinkWal => vec![link_wal(args.queries)?],
+            Case::Oneshot => vec![oneshot(args.edges)?],
+        };
+        let mut out = std::fs::File::create(&args.out)
+            .with_context(|| format!("creating {}", args.out.display()))?;
+        for line in &lines {
+            writeln!(out, "{line}")?;
+            crate::cli::output::print_json(line, crate::cli::output::Format::Compact)?;
+        }
+        Ok(ExitCode::SUCCESS)
+    }
+
+    /// A fresh scratch directory for one run.
+    fn scratch(name: &str) -> Result<std::path::PathBuf> {
+        let dir =
+            std::env::temp_dir().join(format!("kaban-graph-run-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir)?;
+        Ok(dir)
+    }
+
+    /// A store in `dir` whose catalog never checkpoints during a run.
+    fn open(dir: &Path) -> Result<SqliteStore> {
+        Ok(
+            SqliteStore::open(&dir.join("kaban.db"), &dir.join("keys"))?.with_catalog_config(
+                CatalogCfg {
+                    checkpoint_interval_ms: 3_600_000,
+                    ..CatalogCfg::default()
+                },
+            )?,
+        )
+    }
+
+    /// A store in `dir` whose main graph is the synthetic corpus of `edges` edges as its base,
+    /// plus `ops` pending graph ops; the corpus's node count.
+    fn setup(dir: &Path, edges: u64, ops: usize) -> Result<(SqliteStore, u32)> {
+        let store = open(dir)?;
+        let corpus = synthetic::generate(SEED, edges);
+        let nodes = u32::try_from(corpus.nodes.len())?;
+        let base = build_base(&corpus, nodes);
+        drop(corpus);
+        catalog_testing::publish_graph_base(&store, &base)?;
+        drop(base);
+        let pending = synthetic::generate(SEDIMENT_SEED, ops as u64).edges;
+        for chunk in pending.chunks(ROW_OPS) {
+            let row = Records {
+                edges: chunk.to_vec(),
+                ..Records::default()
+            };
+            catalog_testing::stage_graph_sediment(&store, &row.encode())?;
+        }
+        Ok((store, nodes))
+    }
+
+    fn budget() -> QueryBudget {
+        QueryBudget::new(u64::MAX, Some(Duration::from_secs(60)))
+    }
+
+    fn graph_error(e: kaban_index_graph::GraphError) -> StoreError {
+        StoreError::Backend {
+            source: BackendSource::new(e),
+        }
+    }
+
+    /// One read through the store: a snapshot, main's graph loaded (cached after the first
+    /// load) and one expand from `start`. Returns (whole read ms, expand ms, rows, truncated).
+    fn read(store: &SqliteStore, start: LocalId, caps: Caps) -> Result<(f64, f64, usize, bool)> {
+        let b = budget();
+        let began = Instant::now();
+        let (expand_ms, rows, truncated) = catalog_testing::with_main_graph(store, &b, |g| {
+            let t = Instant::now();
+            let r = expand(
+                g.view(),
+                &[start],
+                &RelSelection::All,
+                Direction::Out,
+                caps,
+                &b,
+            )
+            .map_err(graph_error)?;
+            Ok((ms(t.elapsed()), r.nodes.len(), r.truncated))
+        })?;
+        Ok((ms(began.elapsed()), expand_ms, rows, truncated))
+    }
+
+    fn ms(d: Duration) -> f64 {
+        d.as_secs_f64() * 1e3
+    }
+
+    /// p50, p99 and max of `xs`.
+    fn quantiles(mut xs: Vec<f64>) -> Value {
+        xs.sort_by(f64::total_cmp);
+        let at = |q: f64| xs[((xs.len() - 1) as f64 * q).round() as usize];
+        json!({ "p50": at(0.5), "p99": at(0.99), "max": at(1.0) })
+    }
+
+    /// `args.queries` reads (after one untimed first load) from seeded start nodes, or all
+    /// from `from`, over a store with `ops` pending graph ops.
+    fn reads(
+        case: &str,
+        args: &Args,
+        ops: usize,
+        caps: Caps,
+        from: Option<LocalId>,
+    ) -> Result<Value> {
+        let dir = scratch(case)?;
+        let built = Instant::now();
+        let (store, nodes) = setup(&dir, args.edges, ops)?;
+        let setup_ms = ms(built.elapsed());
+        let mut seed = SEED;
+        let mut next = move || {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            LocalId(u32::try_from((seed >> 33) % u64::from(nodes)).unwrap_or(0))
+        };
+        let (first_ms, ..) = read(&store, from.unwrap_or(LocalId(0)), caps)?;
+        let (mut query, mut expand_ms, mut rows) = (Vec::new(), Vec::new(), Vec::new());
+        let mut truncated = 0_u32;
+        for _ in 0..args.queries {
+            let (q, e, n, t) = read(&store, from.unwrap_or_else(&mut next), caps)?;
+            query.push(q);
+            expand_ms.push(e);
+            rows.push(n as f64);
+            truncated += u32::from(t);
+        }
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(json!({
+            "case": case,
+            "corpus": "synthetic",
+            "edges": args.edges,
+            "nodes": nodes,
+            "sediment_ops": ops,
+            "caps": { "depth": caps.depth, "rows": caps.rows },
+            "queries": args.queries,
+            "setup_ms": setup_ms,
+            "first_read_ms": first_ms,
+            "query_ms": quantiles(query),
+            "expand_ms": quantiles(expand_ms),
+            "rows": quantiles(rows),
+            "truncated": truncated,
+        }))
+    }
+
+    /// `links` single-link commits between fresh nodes: the WAL growth of each.
+    fn link_wal(links: u32) -> Result<Value> {
+        let dir = scratch("link-wal")?;
+        let store = open(&dir)?;
+        let ctx = WriteCtx::new(WorkspaceId::default(), Actor::Agent);
+        let ids: Vec<NodeId> = (0..links * 2).map(|_| NodeId::new()).collect();
+        let ops = ids
+            .iter()
+            .enumerate()
+            .map(|(i, id)| Op::UpsertNode {
+                id: id.clone(),
+                node: NewNode {
+                    kind: "Fact".into(),
+                    text: format!("node {i}"),
+                    ..Default::default()
+                },
+            })
+            .collect();
+        store.apply_batch(WriteBatch::new(WorkspaceId::default(), ops), &ctx)?;
+        let wal = dir.join("kaban.db-wal");
+        let size = || std::fs::metadata(&wal).map_or(0, |m| m.len());
+        let mut grown = Vec::new();
+        for pair in ids.chunks(2) {
+            let before = size();
+            store.link(&pair[0], &pair[1], "RELATES_TO", None, None, &ctx)?;
+            grown.push((size() - before) as f64);
+        }
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+        let total: f64 = grown.iter().sum();
+        Ok(json!({
+            "case": "link-wal",
+            "links": links,
+            "wal_bytes_per_link_mean": total / f64::from(links),
+            "wal_bytes_per_link": quantiles(grown),
+        }))
+    }
+
+    /// C6 (wave 2 item 7.3): build the store here, then time a fresh child process's open,
+    /// validating load and one small expand.
+    fn oneshot(edges: u64) -> Result<Value> {
+        let dir = scratch("oneshot")?;
+        let built = Instant::now();
+        let (store, nodes) = setup(&dir, edges, 0)?;
+        let setup_ms = ms(built.elapsed());
+        drop(store);
+        let kbx = std::fs::metadata(dir.join("kaban.kbx")).map_or(0, |m| m.len());
+        let dir_arg = dir.as_os_str().to_owned();
+        let args = [
+            "bench".as_ref(),
+            "graph".as_ref(),
+            "--case".as_ref(),
+            "oneshot".as_ref(),
+            "--oneshot-child".as_ref(),
+            dir_arg.as_os_str(),
+        ];
+        let child = crate::bench::run_self(&args, &[], CHILD_DEADLINE)?;
+        let _ = std::fs::remove_dir_all(&dir);
+        std::io::stderr().write_all(&child.stderr)?;
+        if child.killed.is_some() || !child.status.is_some_and(|s| s.success()) {
+            bail!("the one-shot child failed");
+        }
+        let mut line: Value = serde_json::from_slice(&child.stdout).context("the child's line")?;
+        line["edges"] = json!(edges);
+        line["nodes"] = json!(nodes);
+        line["kbx_bytes"] = json!(kbx);
+        line["setup_ms"] = json!(setup_ms);
+        Ok(line)
+    }
+
+    /// The one-shot child: open, load (validate) and expand once, each timed; one JSON line.
+    fn oneshot_child(dir: &Path) -> Result<ExitCode> {
+        let began = Instant::now();
+        let store = open(dir)?;
+        let open_ms = ms(began.elapsed());
+        let b = budget();
+        let loading = Instant::now();
+        let (load_ms, expand_ms, rows) = catalog_testing::with_main_graph(&store, &b, |g| {
+            let load_ms = ms(loading.elapsed());
+            let t = Instant::now();
+            let r = expand(
+                g.view(),
+                &[LocalId(1)],
+                &RelSelection::All,
+                Direction::Out,
+                EXPAND,
+                &b,
+            )
+            .map_err(graph_error)?;
+            Ok((load_ms, ms(t.elapsed()), r.nodes.len()))
+        })?;
+        let line = json!({
+            "case": "oneshot",
+            "corpus": "synthetic",
+            "open_ms": open_ms,
+            "load_validate_ms": load_ms,
+            "expand_ms": expand_ms,
+            "rows": rows,
+            "total_ms": ms(began.elapsed()),
+        });
+        crate::cli::output::print_json(&line, crate::cli::output::Format::Compact)?;
+        Ok(ExitCode::SUCCESS)
+    }
 }

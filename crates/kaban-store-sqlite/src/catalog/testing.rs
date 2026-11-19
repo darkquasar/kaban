@@ -992,3 +992,40 @@ pub fn graph_contents(store: &SqliteStore) -> Result<GraphContents> {
         .collect();
     Ok(GraphContents { extents, sediment })
 }
+
+/// Append `bytes` (a graph base) to `store`'s container and publish it as `main`'s graph base
+/// in one commit: a bench's corpus. Returns its extent id.
+///
+/// # Errors
+/// The append's or the commit's errors.
+pub fn publish_graph_base(store: &SqliteStore, bytes: &[u8]) -> Result<u64> {
+    let extent = store
+        .catalog()
+        .append_extent(ExtentClass::GraphBase, bytes)?;
+    let id = store
+        .catalog()
+        .commit(&mut store.lock(), Durability::Normal, |txn| {
+            txn.publish(extent, &[ViewName::Main])
+        })?;
+    Ok(id.0)
+}
+
+/// Stage `payload` (encoded graph records) as one pending graph sediment row of `main` in its
+/// own commit, as a commit's staging writes one: a bench's pending ops.
+///
+/// # Errors
+/// The commit's errors.
+pub fn stage_graph_sediment(store: &SqliteStore, payload: &[u8]) -> Result<()> {
+    store
+        .catalog()
+        .commit(&mut store.lock(), Durability::Normal, |txn| {
+            let generation = sql_int(txn.generation()?.0).sql()?;
+            txn.conn()
+                .execute(
+                    "INSERT INTO cat_sediment(class, generation, payload) VALUES (?1, ?2, ?3)",
+                    rusqlite::params![ExtentClass::GraphLayer.as_str(), generation, payload],
+                )
+                .sql()?;
+            Ok(())
+        })
+}
