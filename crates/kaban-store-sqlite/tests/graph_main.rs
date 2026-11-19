@@ -1,6 +1,7 @@
 //! The memory graph on the catalog (spec 11 T11 Step 1; GRA-02, GRA-03, KER-01): an edge is
-//! traversable from every store of the database once its commit returns, with its row's
-//! attributes, and a row that maps to no graph attribute refuses its write by name.
+//! traversable from every store and every process of the database once its commit returns,
+//! with its row's attributes, and a row that maps to no graph attribute refuses its write by
+//! name.
 //!
 //! Runs with the `failpoints` feature (the graph's test access lives behind it).
 
@@ -18,7 +19,9 @@ use kaban_core::{
 use kaban_index_graph::{Caps, Direction, RelSelection, expand};
 use kaban_store_sqlite::catalog_testing;
 use kaban_store_sqlite::{SqliteStore, WorkKind};
-use std::time::Duration;
+use std::path::{Path, PathBuf};
+use std::process::{Command, ExitStatus, Stdio};
+use std::time::{Duration, Instant};
 
 fn budget() -> QueryBudget {
     QueryBudget::new(u64::MAX, Some(Duration::from_secs(10)))
@@ -78,6 +81,104 @@ fn a_link_committed_in_one_store_is_traversable_from_another_at_once() {
         unused_rel.is_some(),
         "a declared, unused relation has an id"
     );
+}
+
+/// The database the linking role opens (set only for the child process).
+const LINK_DB: &str = "KABAN_T11_LINK_DB";
+/// The file naming the two nodes the linking role links, one id per line.
+const LINK_NODES: &str = "link-nodes";
+/// How long a role of a two-process case may run before it is killed.
+const ROLE_DEADLINE: Duration = Duration::from_secs(60);
+
+/// The linking role of the two-process case: in a child process (`KABAN_T11_LINK_DB` set) open
+/// the store and link the two nodes `<dir>/link-nodes` names. A no-op elsewhere.
+#[test]
+#[ignore = "a role of the two-process visibility case"]
+fn multi_process_link_role() {
+    let Ok(db) = std::env::var(LINK_DB) else {
+        return;
+    };
+    let db = PathBuf::from(db);
+    let dir = db.parent().unwrap().to_path_buf();
+    let ids = std::fs::read_to_string(dir.join(LINK_NODES)).unwrap();
+    let [a, b]: [NodeId; 2] = ids.lines().map(nid).collect::<Vec<_>>().try_into().unwrap();
+    let store = SqliteStore::open(&db, &dir.join("keys")).unwrap();
+    store
+        .link(&a, &b, "RELATES_TO", None, None, &ctx())
+        .unwrap();
+}
+
+/// A spawned role process, killed and reaped however the test ends.
+struct Supervised(std::process::Child);
+
+impl Drop for Supervised {
+    fn drop(&mut self) {
+        // a role that already exited makes both calls no-ops
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// Run the ignored test `role` of this binary in a child process with `env` set, its stderr
+/// kept in `dir`, and wait at most `deadline` for it (the store suites' two-process helper).
+fn supervise(
+    role: &str,
+    env: (&str, &std::ffi::OsStr),
+    dir: &Path,
+    deadline: Duration,
+) -> Result<ExitStatus, String> {
+    let log = dir.join(format!("{role}.stderr"));
+    let stderr = std::fs::File::create(&log).map_err(|e| format!("{role}: {e}"))?;
+    let child = Command::new(std::env::current_exe().map_err(|e| e.to_string())?)
+        .args(["--exact", role, "--ignored", "--nocapture"])
+        .env(env.0, env.1)
+        .stdout(Stdio::null())
+        .stderr(stderr)
+        .spawn()
+        .map_err(|e| format!("{role}: spawn: {e}"))?;
+    let mut child = Supervised(child);
+    let started = Instant::now();
+    loop {
+        if let Some(status) = child.0.try_wait().map_err(|e| format!("{role}: {e}"))? {
+            return Ok(status);
+        }
+        if started.elapsed() >= deadline {
+            let _ = child.0.kill();
+            let reaped = child.0.wait();
+            let tail = std::fs::read_to_string(&log).unwrap_or_default();
+            return Err(format!(
+                "role {role} still ran after {deadline:?}: killed, reaped ({reaped:?}); stderr:\n{tail}"
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn a_link_committed_by_another_process_is_traversable_here_once_it_exits() {
+    // Arrange: process A's store with two nodes, its graph already loaded (and cached)
+    let s = Scratch::new("kaban-t11-main", "process");
+    let store = SqliteStore::open(&s.db(), &s.keys()).unwrap();
+    let [a, b] = ["a", "b"].map(|t| nid(&created(&store, "Fact", t).id));
+    assert_eq!(out_of(&store, &a), Vec::<NodeId>::new(), "no edge yet");
+    std::fs::write(
+        s.0.join(LINK_NODES),
+        format!("{}\n{}", a.as_str(), b.as_str()),
+    )
+    .unwrap();
+
+    // Act: process B links a -> b and exits
+    let status = supervise(
+        "multi_process_link_role",
+        (LINK_DB, s.db().as_os_str()),
+        &s.0,
+        ROLE_DEADLINE,
+    )
+    .unwrap();
+
+    // Assert: A traverses the edge at once, through its cached graph
+    assert!(status.success(), "the linking process failed: {status}");
+    assert_eq!(out_of(&store, &a), vec![b]);
 }
 
 #[test]
