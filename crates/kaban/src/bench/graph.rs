@@ -6,10 +6,15 @@
 //!               main's graph base = build_base(synthetic corpus of --edges)
 //!               + --sediment pending graph ops as sediment rows of 100 ops each
 //!               (--sealed: those ops sealed into a layer by one compaction first)
-//!   expand2  => per query: snapshot + cached load_view + stable order + expand(depth 2, 50
-//!               rows) + every row's public id; query_ms (the whole read) and expand_ms (the
-//!               expand alone), p50/p99/max
+//!   expand2  => per query: snapshot + cached load_view + expand(depth 2, 50 rows) + every
+//!               row's public id (no tie order: expand consumes none); query_ms (the whole
+//!               read) and expand_ms (the expand alone), p50/p99/max
 //!   hub-cap1500 => the same from node 0 (the generator's largest hub), 1500 rows
+//!   tie-order => a tie-consuming query (tie order + weighted shortest path, depth 2, 50
+//!               rows): the process's first (cold), --queries more at that generation (warm),
+//!               then rounds of one commit (one pending edge row) and two queries, the first
+//!               at the new generation (it prepares the order) and the second; whole query and
+//!               order_ms (asking for the order alone)
 //!   link-wal => one single-link commit after another: kaban.db-wal growth per commit
 //!   oneshot  => C6: a fresh child process opens the store, loads (validates) main's graph
 //!               and runs one small expand; each phase timed
@@ -35,6 +40,9 @@ pub(crate) enum Case {
     HubCap1500,
     /// A fresh process: open, validate and one small expand (C6)
     Oneshot,
+    /// The first tie-consuming query at a generation versus the second
+    #[value(name = "tie-order")]
+    TieOrder,
 }
 
 /// The graph the bench builds.
@@ -116,7 +124,9 @@ mod imp {
         Actor, BackendSource, IngestStore, MemoryStore, NewNode, NodeId, Op, StoreError,
         WorkspaceId, WriteBatch, WriteCtx,
     };
-    use kaban_index_graph::{Caps, Direction, LocalId, Records, RelSelection, build_base, expand};
+    use kaban_index_graph::{
+        Caps, Direction, LocalId, Records, RelSelection, build_base, expand, weighted_shortest_path,
+    };
     use kaban_store_sqlite::{SqliteStore, catalog_testing};
     use serde_json::{Value, json};
 
@@ -136,6 +146,8 @@ mod imp {
     };
     /// The bound of the one-shot child.
     const CHILD_DEADLINE: Duration = Duration::from_mins(15);
+    /// Commits of the tie-order case, each followed by two queries.
+    const ROUNDS: usize = 20;
 
     pub(super) fn run(args: &Args) -> Result<ExitCode> {
         if let Some(dir) = &args.oneshot_child {
@@ -157,6 +169,7 @@ mod imp {
             }
             (Corpus::Synthetic, Case::LinkWal) => vec![link_wal(args.queries)?],
             (Corpus::Synthetic, Case::Oneshot) => vec![oneshot(args.edges)?],
+            (Corpus::Synthetic, Case::TieOrder) => vec![tie_order(args)?],
         };
         let mut out = std::fs::File::create(&args.out)
             .with_context(|| format!("creating {}", args.out.display()))?;
@@ -263,7 +276,7 @@ mod imp {
     }
 
     /// One read through the store: a snapshot, main's graph loaded (cached after the first
-    /// load) with its stable order, one expand from `start` and every row's public id. Returns
+    /// load), one expand from `start` and every row's public id (no tie order). Returns
     /// (whole read ms, expand ms, rows, truncated).
     fn read(store: &SqliteStore, start: LocalId, caps: Caps) -> Result<(f64, f64, usize, bool)> {
         let b = budget();
@@ -364,6 +377,78 @@ mod imp {
             "expand_ms": quantiles(expand_ms),
             "rows": quantiles(rows),
             "truncated": truncated,
+        }))
+    }
+
+    /// One tie-consuming query: a snapshot, main's graph loaded, its tie order, one weighted
+    /// shortest path from `src` to `dst`. Returns (whole query ms, order ms).
+    fn tie_read(store: &SqliteStore, src: LocalId, dst: LocalId) -> Result<(f64, f64)> {
+        let b = budget();
+        let began = Instant::now();
+        let order_ms = catalog_testing::with_main_graph(store, &b, |g| {
+            let t = Instant::now();
+            let order = g.order()?;
+            let order_ms = ms(t.elapsed());
+            weighted_shortest_path(g.view(), src, dst, &RelSelection::All, EXPAND, &*order, &b)
+                .map_err(graph_error)?;
+            Ok(order_ms)
+        })?;
+        Ok((ms(began.elapsed()), order_ms))
+    }
+
+    /// The tie-order case (see the module documentation) on the synthetic corpus.
+    fn tie_order(args: &Args) -> Result<Value> {
+        let dir = scratch("tie-order")?;
+        let built = Instant::now();
+        let (store, nodes) = setup(&dir, args.edges, 0, false)?;
+        let setup_ms = ms(built.elapsed());
+        let mut seed = SEED;
+        let mut pick = move || {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            LocalId(u32::try_from((seed >> 33) % u64::from(nodes)).unwrap_or(0))
+        };
+        let (cold_ms, cold_order_ms) = tie_read(&store, pick(), pick())?;
+        let (mut warm, mut warm_order) = (Vec::new(), Vec::new());
+        for _ in 0..args.queries {
+            let (q, o) = tie_read(&store, pick(), pick())?;
+            warm.push(q);
+            warm_order.push(o);
+        }
+        let (mut first, mut first_order, mut second, mut second_order) =
+            (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        for edge in synthetic::generate(SEDIMENT_SEED, ROUNDS as u64).edges {
+            let row = Records {
+                edges: vec![edge],
+                ..Records::default()
+            };
+            catalog_testing::stage_graph_sediment(&store, &row.encode())?;
+            let (q, o) = tie_read(&store, pick(), pick())?;
+            first.push(q);
+            first_order.push(o);
+            let (q, o) = tie_read(&store, pick(), pick())?;
+            second.push(q);
+            second_order.push(o);
+        }
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(json!({
+            "case": "tie-order",
+            "corpus": "synthetic",
+            "edges": args.edges,
+            "nodes": nodes,
+            "queries": args.queries,
+            "rounds": ROUNDS,
+            "setup_ms": setup_ms,
+            "cold_ms": cold_ms,
+            "cold_order_ms": cold_order_ms,
+            "warm_ms": quantiles(warm),
+            "warm_order_ms": quantiles(warm_order),
+            "after_commit_first_ms": quantiles(first),
+            "after_commit_first_order_ms": quantiles(first_order),
+            "after_commit_second_ms": quantiles(second),
+            "after_commit_second_order_ms": quantiles(second_order),
         }))
     }
 
