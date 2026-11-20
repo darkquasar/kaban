@@ -329,6 +329,20 @@ class CiToolSelection(unittest.TestCase):
         self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
         self.assertIn('cargo-nextest absent', result.stderr)
 
+    def test_go_fixtures_require_both_workspace_cases_and_propagate_skips(self):
+        cases = ("index_go_drivers_real", "go_module_cache_is_an_input_on_every_tier")
+        for marker, expected in (("", 0), ("workspace", 3)):
+            with self.subTest(marker=marker):
+                result, calls = self.run_gate(args=("go-fixtures",), fail="", marker=marker)
+                self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
+                commands = [args for args in calls if args[:2] == ["nextest", "run"]]
+                self.assertEqual([args[args.index("-E") + 1] for args in commands],
+                                 [f"binary_id(kaban-index::cli) & test(={case})" for case in cases])
+                for args in commands:
+                    self.assertIn("--workspace", args)
+                    self.assertEqual(args[args.index("--no-tests") + 1], "fail")
+                self.assertIn(f"mandatory_skips: {int(bool(marker))}", result.stdout)
+
     def test_macos_retains_runtime_marker_and_child_failure_semantics(self):
         for marker, failure, expected in (('', '', 0), ('no-default', '', 3),
                                            ('', 'no-default', 37)):

@@ -311,8 +311,7 @@ jobs:
           export GOROOT="$go_root" PATH="$go_root/bin:$PATH" GOTOOLCHAIN=local
           test "$(go env GOVERSION)" = go1.27.3
           test "$("$SCIP_GO" --version)" = 0.2.9
-          cargo nextest run --locked -p kaban-index --test cli --no-fail-fast --success-output immediate \
-            -E 'test(=index_go_drivers_real) | test(=go_module_cache_is_an_input_on_every_tier)'
+          bash scripts/ci/ci.sh go-fixtures
       - name: Check the startup allocator adapter with kaban doctor
         run: |
           # one note creates the database doctor needs; only the adapter row decides this step

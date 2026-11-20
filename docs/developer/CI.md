@@ -211,6 +211,8 @@ cargo --version
 External producers live outside the checkout and `KABAN_HOME`. The current Linux
 `install-go.sh`/`install-scip-go.sh` scripts are not Darwin installers. For a new
 user-owned tools directory, these native downloads use the CI producer pin.
+scip-go 0.2.9 is unqualified on native macOS ARM64. The last native producer
+qualification used scip-go 0.2.7.
 Run with shell failure checking; do not overwrite an existing install:
 
 ```sh
