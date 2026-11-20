@@ -364,6 +364,12 @@ mod imp {
                     let (passed, actual) = exact_parity(store, rows, name, sel, oracle)?;
                     exact_pass += usize::from(passed);
                     result["class"] = json!("exact");
+                    if i == 38 {
+                        result["fixture_category"] = case["category"].clone();
+                        result["classification_reason"] = json!(
+                            "The selector resolves to the exact name configure after label correction."
+                        );
+                    }
                     result["expected"] = oracle.clone();
                     result["actual"] = actual;
                     result["pass"] = json!(passed);
@@ -417,6 +423,8 @@ mod imp {
         "publish error",
         "max props",
     ];
+    // Separate series to retain the original rotation and its published comparison.
+    const UNDERSCORE_PREFIXES: &[&str] = &["configure_conn", "snapshot_sym"];
     const FUZZY: &[&str] = &[
         "sqlitestoer",
         "configur_connection",
@@ -433,6 +441,45 @@ mod imp {
             .take(10)
             .map(|r| r.rid)
             .collect()
+    }
+
+    fn lexical_oracle(rows: &[Symbol], text: &str, rids: &[i64], limit: usize) -> (Value, bool) {
+        let prefix = text.ends_with('*') || text.contains('_');
+        let parts = kaban_core::ident::split_terms(text);
+        let eligible: BTreeSet<_> = rows
+            .iter()
+            .filter(|row| {
+                let terms: Vec<_> = [row.name.as_str(), row.tail.as_str()]
+                    .into_iter()
+                    .flat_map(|value| {
+                        std::iter::once(value).chain(kaban_core::ident::split_terms(value))
+                    })
+                    .collect();
+                parts.iter().enumerate().all(|(i, part)| {
+                    terms.iter().any(|term| {
+                        if prefix && i + 1 == parts.len() {
+                            term.get(..part.len())
+                                .is_some_and(|s| s.eq_ignore_ascii_case(part))
+                        } else {
+                            term.eq_ignore_ascii_case(part)
+                        }
+                    })
+                })
+            })
+            .map(|row| row.rid)
+            .collect();
+        let returned: BTreeSet<_> = rids.iter().copied().collect();
+        let count = limit.min(eligible.len());
+        let valid = count > 0
+            && rids.len() == count
+            && returned.len() == count
+            && returned.is_subset(&eligible);
+        let mut expected = json!({"required_parts":parts,"last_part_prefix":prefix,
+            "source_population":eligible.len(),"distinct_hits":count});
+        if eligible.len() <= limit {
+            expected["rids"] = json!(eligible);
+        }
+        (expected, valid)
     }
 
     /// Validate the six frozen S4 probes from their independently identified
@@ -493,6 +540,7 @@ mod imp {
             ("fragment", MatchMode::Lexical, FRAGMENTS),
             ("prefix", MatchMode::Lexical, PREFIXES),
             ("fuzzy", MatchMode::Fuzzy, FUZZY),
+            ("underscore_prefix", MatchMode::Lexical, UNDERSCORE_PREFIXES),
         ] {
             let queries: Vec<_> = texts
                 .iter()
@@ -515,9 +563,8 @@ mod imp {
                             !expected.is_empty() && expected == rids,
                         )
                     }
-                    "prefix" => (json!({"hits":10}), hits.len() == 10),
                     "fuzzy" => fuzzy_oracle(rows, q.text, &rids)?,
-                    _ => (json!({"min_hits":1}), !hits.is_empty()),
+                    _ => lexical_oracle(rows, q.text, &rids, q.limit),
                 };
                 results_valid &= valid;
                 writeln!(
@@ -562,6 +609,7 @@ mod imp {
                 out,
                 "{}",
                 json!({"op":"warm","class":class,"queries":texts,"order":"round robin",
+                "historical_rotation":class != "underscore_prefix",
                 "limit":10,"clock":"whole SqliteStore::search_text, including catalog pin and TextIndex::search",
                 "unit":"us","n":samples.len(),"samples_us":samples,"p50_us":p50,"p99_us":p99,
                 "results_valid":results_valid,"target_us":target_us,"original_target_us":original_target_us,
@@ -828,7 +876,42 @@ mod imp {
 
     #[cfg(test)]
     mod tests {
-        use super::{Measurement, Result, Value, report_summary};
+        use super::{Measurement, Result, Symbol, Value, lexical_oracle, report_summary};
+
+        #[test]
+        fn lexical_benchmark_checks_source_identities_for_fragments_and_prefixes() {
+            let rows: Vec<_> = [
+                (1, "open", "Db#configure_connection"),
+                (2, "other", ""),
+                (3, "SqliteStore", ""),
+            ]
+            .into_iter()
+            .map(|(rid, name, tail)| Symbol {
+                rid,
+                name: name.into(),
+                tail: tail.into(),
+                kind: String::new(),
+                label: String::new(),
+                path: String::new(),
+                line: None,
+                reference: String::new(),
+                external: 0,
+            })
+            .collect();
+            for (query, correct) in [
+                ("configure connection", 1),
+                ("configure_conn", 1),
+                ("conn*", 1),
+                ("sqlitesto*", 3),
+            ] {
+                assert!(lexical_oracle(&rows, query, &[correct], 1).1);
+                assert!(
+                    !lexical_oracle(&rows, query, &[2], 1).1,
+                    "wrong source row for {query}"
+                );
+                assert!(!lexical_oracle(&rows, query, &[correct, correct], 10).1);
+            }
+        }
 
         #[test]
         fn summary_reports_timing_misses_and_fails_incorrect_results() -> Result<()> {
