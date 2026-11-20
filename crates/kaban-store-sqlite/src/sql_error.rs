@@ -6,13 +6,15 @@
 //! `BackendSource::driver`, review RM-1), while every rendering is the content-free one of
 //! `StoreError::Backend` (core-spec S1: driver messages may quote SQL text or bound values).
 //!
-//! One family is not a backend error: SQLite's own failed sync (spec 11 KER-11, END-MED-01).
+//! A row conversion carrying the body codec's cold reference becomes [`StoreError::ColdTierAbsent`].
+//! SQLite's own failed sync is also distinguished (spec 11 KER-11, END-MED-01).
 //! A commit, a checkpoint or any statement that commits syncs through SQLite's VFS, and a
 //! failed `fsync` there is [`StoreError::StorageFatal`] like a failed sync of a catalog
 //! artefact: never retried, the driver error kept behind the same content-free holder.
 //!
 //! ```text
-//!   rusqlite::Error => extended code in SYNC_FAILURES ? => StorageFatal { op, source }
+//!   rusqlite::Error => row conversion of ColdReference ? => ColdTierAbsent
+//!                    : extended code in SYNC_FAILURES ? => StorageFatal { op, source }
 //!                                                      : => Backend { source }
 //! ```
 
@@ -35,17 +37,24 @@ fn sync_failure(e: &rusqlite::Error) -> bool {
     matches!(e, rusqlite::Error::SqliteFailure(f, _) if SYNC_FAILURES.contains(&f.extended_code))
 }
 
-/// Wrap a rusqlite failure as [`StoreError::Backend`], keeping it as the source; a failed
-/// sync inside SQLite is [`StoreError::StorageFatal`] for [`SQLITE_SYNC`] instead
-/// ([`store_error_at`]).
+/// Classify a driver failure through [`store_error_at`], using [`SQLITE_SYNC`] for a failed sync.
 pub(crate) fn backend_error(e: rusqlite::Error) -> StoreError {
     store_error_at(SQLITE_SYNC, e)
 }
 
 /// [`backend_error`] for a call that syncs on the store's behalf as the operation `op`: a
 /// failed sync is [`StoreError::StorageFatal`] naming `op`, its source the driver error behind
-/// the content-free [`BackendSource`]; any other failure is [`StoreError::Backend`].
+/// the content-free [`BackendSource`]. A decoded cold reference yields [`StoreError::ColdTierAbsent`].
+/// Other driver errors are [`StoreError::Backend`].
 pub(crate) fn store_error_at(op: &'static str, e: rusqlite::Error) -> StoreError {
+    if let rusqlite::Error::FromSqlConversionFailure(_, _, source) = &e
+        && matches!(
+            source.downcast_ref(),
+            Some(crate::body_codec::CodecError::ColdReference)
+        )
+    {
+        return StoreError::ColdTierAbsent;
+    }
     if sync_failure(&e) {
         StoreError::StorageFatal {
             op,

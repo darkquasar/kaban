@@ -11,7 +11,7 @@
 //!   format 1: the payload is one zstd frame with a checksum, compressed at level 3 with the
 //!             dictionary the id names; the frame carries the content size
 //!   format 2: reserved byte 0 in the dictionary slot | file extent id (positive i64 LE) |
-//!             row group (u32 LE). Only the scoped [`read_body`] recognizes this reference.
+//!             row group (u32 LE). Reading this reference requires the cold tier.
 //! ```
 //!
 //! Both inline formats carry the decoded length and a checksum (T8c review t8c-3): a payload cut
@@ -109,6 +109,8 @@ static DECODER: LazyLock<DecoderDictionary<'static>> =
 /// Why a stored body could not be decoded. Messages name the tag's values only, never bytes.
 #[derive(Debug)]
 pub(crate) enum CodecError {
+    /// A well-formed reference names bytes in the unavailable cold tier.
+    ColdReference,
     /// The tag names a format this binary does not know.
     UnknownFormat(u8),
     /// The tag names a dictionary this binary does not ship.
@@ -121,6 +123,7 @@ pub(crate) enum CodecError {
 impl fmt::Display for CodecError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::ColdReference => fmt::Display::fmt(&StoreError::ColdTierAbsent, f),
             Self::UnknownFormat(v) => write!(f, "unknown body format {v}"),
             Self::UnknownDictionary(id) => write!(f, "unknown body dictionary {id}"),
             Self::Corrupt(_) => f.write_str("corrupt body payload"),
@@ -132,7 +135,7 @@ impl std::error::Error for CodecError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Corrupt(e) => Some(e),
-            Self::UnknownFormat(_) | Self::UnknownDictionary(_) => None,
+            Self::ColdReference | Self::UnknownFormat(_) | Self::UnknownDictionary(_) => None,
         }
     }
 }
@@ -203,7 +206,7 @@ fn compress(plain: &[u8]) -> std::io::Result<Vec<u8>> {
 /// review t7-1).
 ///
 /// # Errors
-/// [`CodecError`]: the format or dictionary is unknown, or the payload is corrupt.
+/// [`CodecError`]: a cold reference, an unknown format or dictionary, or a corrupt payload.
 pub(crate) fn decode(stored: &[u8]) -> std::result::Result<Vec<u8>, CodecError> {
     let Some(tagged) = stored.strip_prefix(&MAGIC) else {
         return Err(corrupt("blob without the body tag"));
@@ -215,6 +218,17 @@ pub(crate) fn decode(stored: &[u8]) -> std::result::Result<Vec<u8>, CodecError> 
         0 => unframe_plain(payload),
         FORMAT_VERSION if dictionary == DICTIONARY_ID => decompress(payload),
         FORMAT_VERSION => Err(CodecError::UnknownDictionary(dictionary)),
+        COLD_REFERENCE => {
+            if dictionary == 0
+                && let Some((extent, group)) = payload.split_first_chunk::<8>()
+                && i64::from_le_bytes(*extent) > 0
+                && group.len() == size_of::<u32>()
+            {
+                Err(CodecError::ColdReference)
+            } else {
+                Err(corrupt("invalid cold body reference"))
+            }
+        }
         other => Err(CodecError::UnknownFormat(other)),
     }
 }
@@ -351,20 +365,16 @@ pub(crate) fn register(conn: &Connection) -> Result<()> {
 /// `rusqlite::Error::FromSqlConversionFailure` with the codec's or UTF-8 error as source for
 /// a blob; the driver's own errors for a text column.
 pub(crate) fn read_column(row: &rusqlite::Row<'_>, idx: usize) -> rusqlite::Result<String> {
+    let failed = |e: Box<dyn std::error::Error + Send + Sync>| {
+        rusqlite::Error::FromSqlConversionFailure(idx, rusqlite::types::Type::Blob, e)
+    };
     match row.get_ref(idx)? {
         ValueRef::Blob(bytes) => {
-            let plain = decode(bytes).map_err(|e| blob_error(idx, e))?;
-            String::from_utf8(plain).map_err(|e| blob_error(idx, e))
+            let plain = decode(bytes).map_err(|e| failed(Box::new(e)))?;
+            String::from_utf8(plain).map_err(|e| failed(Box::new(e)))
         }
         _ => row.get(idx),
     }
-}
-
-fn blob_error(
-    idx: usize,
-    error: impl std::error::Error + Send + Sync + 'static,
-) -> rusqlite::Error {
-    rusqlite::Error::FromSqlConversionFailure(idx, rusqlite::types::Type::Blob, Box::new(error))
 }
 
 /// Read the body of one record through the current catalog snapshot.
@@ -375,24 +385,8 @@ fn blob_error(
 pub(crate) fn read_body(reader: &crate::catalog::phase::Reader<'_>, rid: i64) -> Result<Vec<u8>> {
     reader
         .prepare("SELECT text FROM node WHERE rid=?")?
-        .query_row([rid], |row| {
-            if let ValueRef::Blob(bytes) = row.get_ref(0)?
-                && let Some([COLD_REFERENCE, reserved, payload @ ..]) = bytes.strip_prefix(&MAGIC)
-            {
-                if *reserved == 0
-                    && let Some((extent, group)) = payload.split_first_chunk::<8>()
-                    && i64::from_le_bytes(*extent) > 0
-                    && group.len() == size_of::<u32>()
-                {
-                    return Ok(None);
-                }
-                return Err(blob_error(0, corrupt("invalid cold body reference")));
-            }
-            read_column(row, 0).map(Some)
-        })?
-        .ok_or_else(|| StoreError::NotFound(rid.to_string()))?
-        .map(String::into_bytes)
-        .ok_or(StoreError::ColdTierAbsent)
+        .query_row([rid], |row| read_column(row, 0).map(String::into_bytes))?
+        .ok_or_else(|| StoreError::NotFound(rid.to_string()))
 }
 
 /// The writer of a body column: every body is bound as a tagged `BLOB`. Built inside the write

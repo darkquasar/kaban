@@ -140,6 +140,76 @@ fn the_scoped_body_reader_distinguishes_cold_references_from_hot_and_corrupt_val
     }
 }
 
+#[test]
+fn get_and_sql_recognize_the_same_stored_cold_body() {
+    let fixture = FileStore::new("cold-body");
+    let store = &fixture.store;
+    let RememberOutcome::Created(node) = store
+        .remember(
+            NewNode {
+                kind: "Fact".into(),
+                text: "hot body".into(),
+                ..Default::default()
+            },
+            &[],
+            &ctx(),
+        )
+        .unwrap()
+    else {
+        panic!("fresh fact");
+    };
+    let id = NodeId::parse(&node.id).unwrap();
+    let rid = rid(&store.lock(), &node.id);
+    // Install the on-disk fixture without adding a producer for the deferred cold tier.
+    let disk = Connection::open(fixture.dir.join("kaban.db")).unwrap();
+    crate::stamp::bind(&disk, &kaban_core::ActorId::default()).unwrap();
+    let mut reference = vec![0, b'K', b'Z', 2, 0];
+    reference.extend_from_slice(&8_i64.to_le_bytes());
+    reference.extend_from_slice(&3_u32.to_le_bytes());
+    let put = |value: &[u8]| {
+        disk.execute(
+            "UPDATE node SET text=? WHERE rid=?",
+            rusqlite::params![value, rid],
+        )
+        .unwrap();
+    };
+    let sql_body = || {
+        store.lock().query_row(
+            "SELECT kaban_body(text) FROM node WHERE rid=?",
+            [rid],
+            |row| row.get::<_, String>(0),
+        )
+    };
+    put(&reference);
+    assert!(matches!(
+        store.get(&id, false),
+        Err(StoreError::ColdTierAbsent)
+    ));
+    assert!(
+        sql_body()
+            .unwrap_err()
+            .to_string()
+            .contains("cold_tier_absent")
+    );
+
+    reference.pop();
+    put(&reference);
+    assert!(matches!(
+        store.get(&id, false),
+        Err(StoreError::Backend { .. })
+    ));
+    assert!(
+        sql_body()
+            .unwrap_err()
+            .to_string()
+            .contains("corrupt body payload")
+    );
+
+    put(&crate::body_codec::encode(b"x"));
+    assert_eq!(store.get(&id, false).unwrap().unwrap().text, "x");
+    assert_eq!(sql_body().unwrap(), "x");
+}
+
 /// A fresh in-memory store with two nodes; their ids and `rid`s.
 fn store_with_two_nodes() -> (SqliteStore, [(String, i64); 2]) {
     let store = SqliteStore::open_memory().unwrap();
