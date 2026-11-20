@@ -50,12 +50,19 @@ pub(crate) struct Txn<'c> {
     /// The maintenance holds of the extents it publishes: released only once the commit ends
     /// (declared after `tx`, so a rollback precedes their release too).
     holds: Vec<Arc<MaintenanceHold>>,
+    /// Changed schema projection whose existing active rows the text class must restage.
+    text_label: Option<String>,
 }
 
 impl Txn<'_> {
     /// The transaction's connection, for the writer's own statements.
     pub(crate) fn conn(&self) -> &Connection {
         &self.tx
+    }
+
+    /// A schema extension changes one label per commit.
+    pub(crate) fn reproject_text(&mut self, label: &str) {
+        self.text_label = Some(label.to_owned());
     }
 
     /// Publish `extent` in this commit: its catalog row names the generation the commit
@@ -263,6 +270,7 @@ pub(crate) struct Stage<'t> {
     conn: &'t Connection,
     phases: &'t Phases,
     staged: &'t mut Staged,
+    pub(super) text_projection: Option<(&'t str, super::compact::CompactBudget)>,
 }
 
 impl<'t> Stage<'t> {
@@ -369,6 +377,7 @@ impl Catalog {
             container: self.container,
             generation: None,
             holds: Vec::new(),
+            text_label: None,
         };
         // declared after `txn`, so it drops first: an early exit's rollback runs unrestricted
         let phase = self.phases.enter();
@@ -392,11 +401,16 @@ impl Catalog {
             generation: txn.generation,
             first: None,
         };
+        let text_projection = txn
+            .text_label
+            .as_deref()
+            .map(|label| (label, self.maintenance_budget()));
         for class in self.classes() {
             let mut handle = Stage {
                 conn: &txn.tx,
                 phases: &self.phases,
                 staged: &mut staged,
+                text_projection,
             };
             let staging = class.stage(&mut handle, &changes);
             phase.close(&txn.tx, staging)?;
@@ -547,10 +561,7 @@ impl Catalog {
     /// unit test installs its own ([`Self::set_test_derived_rows`]).
     #[cfg_attr(
         not(test),
-        expect(
-            clippy::unused_self,
-            reason = "tests may replace this catalog's hook"
-        )
+        expect(clippy::unused_self, reason = "tests may replace this catalog's hook")
     )]
     fn derived_rows(&self, derived: &Derived<'_>, changes: &BatchChanges) -> Result<()> {
         #[cfg(test)]

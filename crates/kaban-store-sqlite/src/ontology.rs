@@ -334,9 +334,16 @@ pub(crate) fn all_defs(conn: &Connection) -> Result<Vec<TypeDef>> {
 /// Insert or refresh the user definition `def` (validated by the caller): `ON CONFLICT` of the
 /// table's primary key, never touching a builtin row. `Ok(false)` when nothing changed because
 /// the row is builtin.
-pub(crate) fn extend(conn: &Connection, def: &TypeDef, now: &str) -> Result<bool> {
+pub(crate) fn extend(
+    txn: &mut crate::catalog::commit::Txn<'_>,
+    def: &TypeDef,
+    now: &str,
+) -> Result<bool> {
+    let conn = txn.conn();
     let existing = all_defs(conn)?;
-    let old = existing.iter().find(|previous| previous.kind == def.kind && previous.name == def.name);
+    let old = existing
+        .iter()
+        .find(|previous| previous.kind == def.kind && previous.name == def.name);
     crate::rollup::validate(def, &existing)?;
     let from = serde_json::to_string(&def.from_kinds)?;
     let to = serde_json::to_string(&def.to_kinds)?;
@@ -385,8 +392,16 @@ pub(crate) fn extend(conn: &Connection, def: &TypeDef, now: &str) -> Result<bool
     if changed > 0 && def.kind == "label" {
         let empty = TypeDeclaration::default();
         let previous = old.map_or(&empty, |d| &d.declaration);
-        if previous.columns != def.declaration.columns || previous.rollups != def.declaration.rollups {
+        if previous.columns != def.declaration.columns
+            || previous.rollups != def.declaration.rollups
+        {
             crate::rollup::declare(conn, &def.name, previous, &def.declaration)?;
+        }
+        if (previous.fts_fields != def.declaration.fts_fields
+            || !def.declaration.fts_fields.is_empty())
+            && crate::ident::deploy_label_text(conn, &def.name, &def.declaration.fts_fields)?
+        {
+            txn.reproject_text(&def.name);
         }
     }
     Ok(changed > 0)

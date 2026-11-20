@@ -9,7 +9,9 @@
 mod common;
 
 use kaban_api::{ApiConfig, KabanApi};
-use kaban_core::{SchemaStore, TypeDef};
+use kaban_core::{
+    IngestStore, MemoryStore, NewNode, NodeId, Op, SchemaStore, SqlValue, TypeDef, WriteBatch,
+};
 use kaban_policy::Policy;
 use kaban_store_sqlite::SqliteStore;
 use std::sync::Arc;
@@ -226,9 +228,18 @@ struct Repo {
 
 impl Repo {
     fn new(name: &str) -> Self {
+        Self::with_catalog(name, kaban_core::config::CatalogCfg::default())
+    }
+
+    fn with_catalog(name: &str, catalog: kaban_core::config::CatalogCfg) -> Self {
         let scratch = common::Scratch::new("kaban-ontology", name);
         std::fs::create_dir_all(scratch.0.join(".kaban/ontology")).unwrap();
-        let store = Arc::new(SqliteStore::open(&scratch.db(), &scratch.keys()).unwrap());
+        let store = Arc::new(
+            SqliteStore::open(&scratch.db(), &scratch.keys())
+                .unwrap()
+                .with_catalog_config(catalog)
+                .unwrap(),
+        );
         let api = api_over(&store);
         let registry = kaban_api::OntologyRegistry::new(Some(scratch.0.clone())).unwrap();
         Self {
@@ -323,7 +334,18 @@ fn incidents_yaml() -> String {
 
 #[test]
 fn the_work_file_loads_typed_columns_and_rollups_under_the_qualified_label() {
-    let repo = Repo::new("typed-work");
+    let repo = Repo::with_catalog(
+        "typed-work",
+        kaban_core::config::CatalogCfg {
+            seal_ops: kaban_core::config::SealOps {
+                text: 1,
+                graph: 1,
+                ..Default::default()
+            },
+            fold_depth: 1,
+            ..Default::default()
+        },
+    );
     let file = repo.write(
         "work.yaml",
         include_str!("../../kaban-core/fixtures/ontology/work.yaml"),
@@ -340,6 +362,135 @@ fn the_work_file_loads_typed_columns_and_rollups_under_the_qualified_label() {
     let task = serde_json::to_value(task).unwrap();
     assert_eq!(task["columns"][0]["name"], "state");
     assert_eq!(task["rollups"][0]["name"], "tasks_by_state");
+    let epics: Vec<_> = (0..50).map(|_| NodeId::new()).collect();
+    let tasks: Vec<_> = (0..1000).map(|_| NodeId::new()).collect();
+    for half in epics.chunks(25) {
+        write(
+            &repo,
+            half.iter()
+                .map(|id| record(id, "work:Epic", serde_json::json!({})))
+                .collect(),
+        );
+    }
+    assert_text_compaction(&repo, kaban_store_sqlite::WorkKind::Seal);
+    let mut ops = Vec::new();
+    for (i, id) in tasks.iter().enumerate() {
+        let state = if i % 4 == 0 { "done" } else { "open" };
+        ops.push(record(
+            id,
+            "work:Task",
+            serde_json::json!({"output":format!("taskmarker{i}"),"state":state}),
+        ));
+        ops.push(Op::UpsertEdge {
+            src: id.clone(),
+            dst: epics[i % epics.len()].clone(),
+            rel: "work:PART_OF".into(),
+            props: None,
+        });
+        if ops.len() == 1_000 {
+            write(&repo, std::mem::take(&mut ops));
+        }
+    }
+    for transition in [
+        None,
+        Some(kaban_store_sqlite::WorkKind::Seal),
+        Some(kaban_store_sqlite::WorkKind::Fold),
+    ] {
+        if let Some(kind) = transition {
+            assert_text_compaction(&repo, kind);
+        }
+        for (group, expected) in [("done", 250), ("open", 750)] {
+            assert_count(
+                &repo,
+                "work:Task",
+                "state",
+                group,
+                "tasks_by_state",
+                expected,
+            );
+        }
+        for (i, epic) in epics.iter().enumerate() {
+            let linked = repo
+                .store
+                .traverse(&kaban_core::TraverseQuery {
+                    start_ids: vec![epic.clone()],
+                    rels: vec!["work:PART_OF".into()],
+                    ..Default::default()
+                })
+                .unwrap()
+                .edges;
+            let actual = linked
+                .into_iter()
+                .map(|edge| edge.src)
+                .collect::<std::collections::BTreeSet<_>>();
+            let expected = tasks
+                .iter()
+                .skip(i)
+                .step_by(epics.len())
+                .map(ToString::to_string)
+                .collect();
+            assert_eq!(actual, expected);
+        }
+        assert_search(&repo.store, "taskmarker719", &tasks[719]);
+    }
+}
+
+fn assert_text_compaction(repo: &Repo, kind: kaban_store_sqlite::WorkKind) {
+    let report = repo.store.compact().unwrap();
+    assert!(
+        report
+            .published
+            .iter()
+            .any(|unit| unit.class == "text_tier" && unit.kind == kind),
+        "expected {kind:?}, got {report:?}"
+    );
+}
+
+fn record(id: &NodeId, kind: &str, props: serde_json::Value) -> Op {
+    Op::UpsertNode {
+        id: id.clone(),
+        node: NewNode {
+            kind: kind.into(),
+            text: format!("Record {id}"),
+            props: Some(props),
+            ..Default::default()
+        },
+    }
+}
+
+fn write(repo: &Repo, ops: Vec<Op>) {
+    repo.store
+        .apply_batch(
+            WriteBatch::new(Default::default(), ops),
+            &kaban_core::WriteCtx::new(Default::default(), kaban_core::Actor::Agent),
+        )
+        .unwrap();
+}
+
+fn assert_count(repo: &Repo, label: &str, field: &str, group: &str, name: &str, expected: i64) {
+    let raw = rusqlite::Connection::open(repo.scratch.db()).unwrap();
+    let count = raw.query_row("SELECT count(*) FROM node WHERE kind=? AND lifecycle='active' AND json_extract(props,?)=?",
+        rusqlite::params![label,format!("$.{field}"),group],|row| row.get::<_,i64>(0)).unwrap();
+    assert_eq!(count, expected);
+    assert_eq!(
+        repo.store
+            .rollup(name, &[SqlValue::Text(group.into())])
+            .unwrap(),
+        SqlValue::Integer(count)
+    );
+}
+
+fn assert_search(store: &SqliteStore, term: &str, id: &NodeId) {
+    let hits = store
+        .recall(&kaban_core::RecallQuery {
+            query: term.into(),
+            ..Default::default()
+        })
+        .unwrap();
+    assert!(
+        hits.iter().any(|hit| hit.node.id == id.as_str()),
+        "declared output field must be searchable for {term}"
+    );
 }
 
 #[test]
@@ -358,6 +509,176 @@ fn schema_extend_registers_the_tool_call_columns_and_rollups() {
     let result = serde_json::to_value(result).unwrap();
     assert_eq!(result["columns"][0]["name"], "tool");
     assert_eq!(result["rollups"][0]["name"], "calls_by_tool");
+    let ids: Vec<_> = (0..100).map(|_| NodeId::new()).collect();
+    let mut ops = Vec::new();
+    for (i, id) in ids.iter().enumerate() {
+        let tool = if i % 5 == 0 { "edit" } else { "read" };
+        ops.push(record(
+            id,
+            "ToolCall",
+            serde_json::json!({"tool":tool,"ms":i,"output":format!("toolmarker{i}")}),
+        ));
+        if i > 0 {
+            ops.push(Op::UpsertEdge {
+                src: id.clone(),
+                dst: ids[i - 1].clone(),
+                rel: "RELATES_TO".into(),
+                props: None,
+            });
+        }
+    }
+    write(&repo, ops);
+    assert_count(&repo, "ToolCall", "tool", "edit", "calls_by_tool", 20);
+    assert_count(&repo, "ToolCall", "tool", "read", "calls_by_tool", 80);
+    let last = repo.store.get(&ids[99], false).unwrap().unwrap();
+    assert_eq!(last.props["ms"], 99);
+    let edges = repo
+        .store
+        .traverse(&kaban_core::TraverseQuery {
+            start_ids: vec![ids[99].clone()],
+            ..Default::default()
+        })
+        .unwrap()
+        .edges;
+    assert!(
+        edges
+            .iter()
+            .any(|e| e.src == ids[99].as_str() && e.dst == ids[98].as_str())
+    );
+    assert_search(&repo.store, "toolmarker99", &ids[99]);
+    let reopened = SqliteStore::open(&repo.scratch.db(), &repo.scratch.keys()).unwrap();
+    assert_search(&reopened, "toolmarker99", &ids[99]);
+}
+
+#[test]
+fn changing_declared_text_reprojects_existing_rows_or_rolls_back_the_declaration() {
+    let repo = Repo::new("reproject-label");
+    let extend = |kind: &str, fields: &[&str]| {
+        repo.api.schema_extend(
+            serde_json::from_value(serde_json::json!({
+                "kind":"label", "name":kind, "description":"record", "fts_fields":fields
+            }))
+            .unwrap(),
+        )
+    };
+    extend("Report", &[]).unwrap();
+    extend("Memo", &["props.note"]).unwrap();
+    let other = SqliteStore::open(&repo.scratch.db(), &repo.scratch.keys()).unwrap();
+    let id = NodeId::new();
+    let memo = NodeId::new();
+    write(
+        &repo,
+        vec![
+            record(
+                &id,
+                "Report",
+                serde_json::json!({"note":"ultramarine", "next":"cinnabar"}),
+            ),
+            record(&memo, "Memo", serde_json::json!({"note":"saffron"})),
+        ],
+    );
+    let previous_ident = repo.meta("ident_fields_resolved");
+    let raw = rusqlite::Connection::open(repo.scratch.db()).unwrap();
+    raw.execute_batch(
+        "CREATE TRIGGER refuse_projection BEFORE INSERT ON cat_sediment
+        WHEN new.class='text_tier' BEGIN SELECT raise(ABORT,'projection refused'); END;",
+    )
+    .unwrap();
+    let metadata = repo.meta("fts_fields_resolved");
+    assert!(
+        extend("Report", &["props.note"]).is_err(),
+        "a failed text stage must refuse schema_extend"
+    );
+    assert_eq!(repo.meta("fts_fields_resolved"), metadata);
+    assert!(
+        repo.store
+            .schema()
+            .unwrap()
+            .into_iter()
+            .find(|d| d.name == "Report")
+            .unwrap()
+            .declaration
+            .fts_fields
+            .is_empty()
+    );
+    raw.execute_batch("DROP TRIGGER refuse_projection").unwrap();
+    extend("Report", &["props.note"]).unwrap();
+    assert_search(&other, "ultramarine", &id);
+    extend("Report", &["props.next"]).unwrap();
+    assert_search(&other, "cinnabar", &id);
+    assert_search(&other, "saffron", &memo);
+    assert!(
+        other
+            .recall(&kaban_core::RecallQuery {
+                query: "ultramarine".into(),
+                ..Default::default()
+            })
+            .unwrap()
+            .iter()
+            .all(|hit| hit.node.id != id.as_str())
+    );
+    assert_eq!(repo.meta("ident_fields_resolved"), previous_ident);
+    assert_eq!(
+        repo.meta("ident_terms_version").as_deref(),
+        Some(kaban_core::ident::TEXT_ANALYZER_VERSION)
+    );
+    repo.store
+        .set_index_meta("ident_terms_version", "pending")
+        .unwrap();
+    extend("Report", &[]).unwrap();
+    assert_eq!(repo.meta("ident_terms_version").as_deref(), Some("pending"));
+    let reopened = SqliteStore::open(&repo.scratch.db(), &repo.scratch.keys()).unwrap();
+    assert_search(&reopened, "saffron", &memo);
+    assert!(
+        reopened
+            .recall(&kaban_core::RecallQuery {
+                query: "cinnabar".into(),
+                ..Default::default()
+            })
+            .unwrap()
+            .iter()
+            .all(|hit| hit.node.id != id.as_str())
+    );
+}
+
+#[test]
+fn declaration_strings_pass_the_schema_write_and_read_policy() {
+    let repo = Repo::new("declaration-policy");
+    let policy = Policy::parse(b"words: [{term: nightjar, action: reject, id: codename}]").unwrap();
+    let strict = KabanApi::with_config(
+        Arc::clone(&repo.store) as Arc<dyn kaban_core::GraphStore>,
+        Policy::from_file(policy, "test".into()).unwrap(),
+        repo.store.signer(),
+        ApiConfig::default(),
+    );
+    let request = || {
+        serde_json::from_value(serde_json::json!({
+            "kind": "label", "name": "Report", "description": "A report",
+            "columns": [{"name": "nightjar", "ty": "text"}]
+        }))
+        .unwrap()
+    };
+    let err = strict.schema_extend(request()).unwrap_err();
+    assert!(
+        matches!(&err, kaban_api::ApiError::Rejected {rules, ..} if rules.iter().any(|rule| rule == "codename"))
+    );
+    assert!(!err.to_string().contains("nightjar"));
+    assert!(
+        repo.store
+            .schema()
+            .unwrap()
+            .iter()
+            .all(|d| d.name != "Report")
+    );
+    repo.api.schema_extend(request()).unwrap();
+    assert!(
+        strict
+            .schema_describe()
+            .unwrap()
+            .labels
+            .iter()
+            .all(|d| d.name != "Report")
+    );
 }
 
 /// EN-F2: a user namespace loads under stored `ns:Kind` names, `schema_describe` shows the

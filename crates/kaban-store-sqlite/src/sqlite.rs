@@ -1450,7 +1450,7 @@ impl SchemaStore for SqliteStore {
             ..def
         };
         let extended = self.catalog.commit(&mut conn, Durability::Normal, |txn| {
-            ontology::extend(txn.conn(), &def, &now_iso())
+            ontology::extend(txn, &def, &now_iso())
         })?;
         if !extended {
             return Err(StoreError::Builtin(def.name));

@@ -69,13 +69,34 @@ impl IndexClass for TextClass {
         let mut rids: Vec<i64> = changes.nodes().iter().map(|c| c.rid).collect();
         rids.sort_unstable();
         rids.dedup();
-        if rids.is_empty() {
-            return Ok(());
+        if !rids.is_empty() {
+            let budget = QueryBudget::new(STAGE_MEMORY_BYTES, None);
+            stage_rows(txn, &rids, &budget)?;
         }
-        let budget = QueryBudget::new(STAGE_MEMORY_BYTES, None);
-        let (rows, _charged) = crate::index_rows::staged_rows(&txn.reader(), &rids, &budget)?;
-        let pack = kaban_index_tantivy::segment(&rows, &rids, &budget)?;
-        txn.put_sediment(ExtentClass::TextTier, &pack)?;
+        if let Some((label, maintenance)) = txn.text_projection {
+            let budget = QueryBudget::new(maintenance.memory_bytes, Some(maintenance.deadline));
+            let limit = u32::try_from(REBUILD_BATCH_ROWS).unwrap_or(u32::MAX);
+            let _ids = budget.reserve(u64::from(limit) * 2 * size_of::<i64>() as u64)?;
+            let mut first = i64::MIN;
+            loop {
+                budget.check()?;
+                let rids = txn
+                    .reader()
+                    .prepare(
+                        "SELECT rid FROM node WHERE kind=?1 AND lifecycle='active' AND rid>=?2
+                     ORDER BY rid LIMIT ?3",
+                    )?
+                    .query_map(rusqlite::params![label, first, limit], |row| {
+                        row.get::<_, i64>(0)
+                    })?;
+                let Some(last) = rids.last() else { break };
+                stage_rows(txn, &rids, &budget)?;
+                let Some(next) = last.checked_add(1) else {
+                    break;
+                };
+                first = next;
+            }
+        }
         Ok(())
     }
 
@@ -176,6 +197,14 @@ impl IndexClass for TextClass {
             })
         })
     }
+}
+
+/// Replace the text of these row identities in this commit's sediment.
+fn stage_rows(txn: &mut Stage<'_>, rids: &[i64], budget: &QueryBudget) -> Result<()> {
+    let (rows, _charged) = crate::index_rows::staged_rows(&txn.reader(), rids, budget)?;
+    let pack = kaban_index_tantivy::segment(&rows, rids, budget)?;
+    txn.put_sediment(ExtentClass::TextTier, &pack)?;
+    Ok(())
 }
 
 /// Rebuild in the caller's transaction and maintenance ownership.

@@ -102,6 +102,30 @@ pub(crate) fn deploy(conn: &Connection, ontology: &Ontology, force: bool) -> Res
     deploy_fields(conn, &ident_fields, &fts_fields, force)
 }
 
+/// Change just this label's projection. The same commit restages its active rows.
+pub(crate) fn deploy_label_text(conn: &Connection, label: &str, paths: &[String]) -> Result<bool> {
+    let Some((ident, mut fts)) = committed_fields(conn)? else {
+        return Ok(false);
+    };
+    if fts.get(label).map_or(&[][..], Vec::as_slice) == paths {
+        return Ok(false);
+    }
+    fts.insert(label.to_owned(), paths.to_vec());
+    let already_current: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM index_meta WHERE key=?1 AND value=?2)",
+            params![VERSION, TEXT_ANALYZER_VERSION],
+            |row| row.get(0),
+        )
+        .sql()?;
+    deploy_fields(conn, &ident, &fts, false)?;
+    // Only this label is restaged. An unrelated pending rebuild must survive.
+    if already_current {
+        mark_indexed(conn)?;
+    }
+    Ok(true)
+}
+
 pub(crate) fn committed_fields(conn: &Connection) -> Result<Option<(Fields, Fields)>> {
     let read = |key| -> Result<Option<Fields>> {
         let value: Option<String> = conn
