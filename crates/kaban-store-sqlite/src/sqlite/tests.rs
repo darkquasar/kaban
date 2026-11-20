@@ -1068,3 +1068,384 @@ fn a_second_first_opener_never_succeeds_before_the_version_is_in_the_main_file()
         Some(crate::LATEST_SCHEMA_VERSION.to_string())
     );
 }
+
+fn sealed_text_store(dir: &Scratch) -> SqliteStore {
+    let store = SqliteStore::open(&dir.db(), &dir.keys()).unwrap();
+    store.remember(mk("Fact", "quokka"), &[], &ctx()).unwrap();
+    store.reindex_text().unwrap();
+    store
+}
+
+fn text_query<'a>(text: &'a str, recall: &'a RecallQuery) -> TextQuery<'a> {
+    use kaban_core::text_index::{MatchMode, SeedFilter};
+    TextQuery {
+        text,
+        mode: MatchMode::Lexical,
+        filter: SeedFilter::of(recall),
+        limit: 10,
+        sufficient: 10,
+        skip: 0,
+    }
+}
+
+fn text_cache_budget(store: &SqliteStore) -> QueryBudget {
+    let Attached::Tantivy(_, recent) = &store.text_index else {
+        panic!()
+    };
+    recent.budget()
+}
+
+fn search_sealed(store: &SqliteStore) -> QueryBudget {
+    let recall = RecallQuery::default();
+    let query = text_query("quokka", &recall);
+    store
+        .with_text_snapshot(|index, at, budget| {
+            assert_eq!(at.tiers.len(), 1);
+            assert_eq!(at.sediment.len(), 0);
+            let hits = index.search(at, &query, budget)?;
+            assert!(matches!(hits, Searched::Hits { hits, .. } if hits.len() == 1));
+            Ok(())
+        })
+        .unwrap();
+    text_cache_budget(store)
+}
+
+#[test]
+fn a_sealed_text_reader_releases_its_retained_charge_on_close() {
+    let dir = Scratch::new("text-reader-close");
+    let store = sealed_text_store(&dir);
+    let charged = search_sealed(&store);
+    assert!(
+        charged.live_bytes() > 0,
+        "the sealed reader retains its budget lease"
+    );
+    drop(store);
+    assert_eq!(charged.live_bytes(), 0);
+}
+
+#[test]
+fn an_idle_store_releases_its_reader_while_a_peer_reclaims_the_tier() {
+    let dir = Scratch::new("text-reader-idle");
+    let mut store = sealed_text_store(&dir);
+    let peer = SqliteStore::open(&dir.db(), &dir.keys()).unwrap();
+    let Attached::Tantivy(_, recent) = &mut store.text_index else {
+        panic!()
+    };
+    recent.idle = Duration::from_millis(100);
+    let old_extent: i64 = peer
+        .lock()
+        .query_row(
+            "SELECT id FROM cat_extent WHERE class = 'text_tier' AND dead_since IS NULL",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let charged = search_sealed(&store);
+    assert!(charged.live_bytes() > 0);
+
+    peer.reindex_text().unwrap();
+    let released = peer
+        .catalog()
+        .reclaim_through(&mut peer.lock(), u64::MAX)
+        .unwrap();
+    assert!(
+        released
+            .reclaimed
+            .contains(&u64::try_from(old_extent).unwrap()),
+        "the cached copy holds no catalog pin"
+    );
+    let timeout = std::time::Instant::now() + Duration::from_secs(3);
+    while charged.live_bytes() > 0 && std::time::Instant::now() < timeout {
+        peer.catalog()
+            .reclaim_through(&mut peer.lock(), u64::MAX)
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(
+        charged.live_bytes(),
+        0,
+        "true idle releases the reader without local work"
+    );
+    assert!(search_sealed(&store).live_bytes() > 0);
+}
+
+#[test]
+fn a_warm_text_reader_applies_current_weights_and_the_current_budget() {
+    use kaban_core::query_budget::Limit;
+    let dir = Scratch::new("text-reader-budget");
+    let store = sealed_text_store(&dir);
+    let recall = RecallQuery::default();
+    let q = text_query("quokka", &recall);
+    // The separate retention quota leaves even a small query allowance available.
+    let small = QueryBudget::new(96 << 10, None);
+    let expected = store
+        .catalog
+        .with_text(&store.conn, &store.text_index, &small, |index, at| {
+            index.search(at, &q, &small)
+        })
+        .unwrap();
+    assert_eq!(small.live_bytes(), 0);
+    assert_eq!(store.search_text(&q).unwrap(), expected);
+
+    let mut config = kaban_core::config::Recall::default();
+    config.column_weights.insert("text".into(), 20.0);
+    let store = store.with_recall_config(config).unwrap();
+    store
+        .with_text_snapshot(|index, at, budget| {
+            let ranked = index.search(at, &q, budget)?;
+            let ordinary = store.text_index.tantivy().unwrap().search(at, &q, budget)?;
+            assert_eq!(ranked, ordinary);
+            assert_ne!(ranked, expected, "changed weights reach the warm searcher");
+            for (limit, b) in [
+                (Limit::Memory, QueryBudget::new(0, None)),
+                (
+                    Limit::Time,
+                    QueryBudget::new(u64::MAX, Some(Duration::ZERO)),
+                ),
+                (Limit::Cancelled, QueryBudget::new(u64::MAX, None)),
+            ] {
+                if limit == Limit::Cancelled {
+                    b.cancel();
+                }
+                let result = index.search(at, &q, &b);
+                assert!(matches!(result, Err(StoreError::BudgetExceeded(e)) if e.limit == limit));
+                assert_eq!(b.live_bytes(), 0);
+            }
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn replacing_a_container_at_the_same_generation_and_span_invalidates_its_reader() {
+    let dir = Scratch::new("text-reader-inode");
+    let store = sealed_text_store(&dir);
+    let charged = search_sealed(&store);
+    let container = dir.0.join("kaban.kbx");
+    let replacement = dir.0.join("replacement.kbx");
+    let file = std::fs::File::create_new(&replacement).unwrap();
+    file.set_len(std::fs::metadata(&container).unwrap().len())
+        .unwrap();
+    std::fs::rename(replacement, container).unwrap();
+
+    let recall = RecallQuery::default();
+    assert_eq!(
+        store.search_text(&text_query("quokka", &recall)).unwrap(),
+        Searched::Unavailable
+    );
+    assert!(charged.live_bytes() <= crate::tantivy::TIMER_BYTES);
+}
+
+#[test]
+fn a_pinned_reader_finishes_after_a_peer_write_and_a_new_search() {
+    let dir = Scratch::new("text-reader-active");
+    let store = sealed_text_store(&dir);
+    let peer = SqliteStore::open(&dir.db(), &dir.keys()).unwrap();
+    let owner = search_sealed(&store);
+    let recall = RecallQuery::default();
+    let q = text_query("quokka", &recall);
+    store
+        .with_text_snapshot(|old, at, budget| {
+            let before = old.search(at, &q, budget)?;
+            let _node = peer.remember(mk("Fact", "another quokka"), &[], &ctx())?;
+            let Searched::Hits { hits, .. } = store.search_text(&q)? else {
+                panic!()
+            };
+            assert_eq!(hits.len(), 2, "the fresh pin observes pending text");
+            assert_eq!(
+                old.search(at, &q, budget)?,
+                before,
+                "refills use the original snapshot"
+            );
+            assert!(
+                owner.live_bytes() > crate::tantivy::TIMER_BYTES,
+                "an active read still owns its copy"
+            );
+            Ok(())
+        })
+        .unwrap();
+    assert!(
+        owner.live_bytes() <= crate::tantivy::TIMER_BYTES,
+        "only the expiring timer can remain"
+    );
+}
+
+#[test]
+fn an_older_reader_finishing_after_a_new_observation_cannot_be_retained() {
+    let dir = Scratch::new("text-reader-late");
+    let peer = sealed_text_store(&dir);
+    let store = SqliteStore::open(&dir.db(), &dir.keys()).unwrap();
+    let recall = RecallQuery::default();
+    let q = text_query("quokka", &recall);
+    peer.with_text_snapshot(|old, at, budget| {
+        let expected = old.search(at, &q, budget)?;
+        let (id, published): (i64, i64) = peer.lock().query_row(
+            "SELECT id, generation FROM cat_extent WHERE class='text_tier' AND dead_since IS NULL",
+            [], |r| Ok((r.get(0)?, r.get(1)?))
+        ).unwrap();
+        let tier = (u64::try_from(id).unwrap(), u64::try_from(published).unwrap(), at.tiers[0]);
+        // Pause two misses after observing the real old snapshot. Its pin stays live
+        // while a newer unsealed read and then a newer sealed read finish.
+        let first = store.text_index.observe(at.generation, at.kbx, Some(tier));
+        peer.remember(mk("Fact", "another quokka"), &[], &ctx())?;
+        assert!(matches!(store.search_text(&q)?, Searched::Hits { hits, .. } if hits.len() == 2));
+        let late = QueryBudget::new(64 << 20, None);
+        store.text_index.with_reader(first, &late, |reader| {
+            assert_eq!(reader.search(at, &q, &late)?, expected);
+            Ok(())
+        })?;
+        assert_eq!(text_cache_budget(&store).live_bytes(), 0, "the pending observation fences an old fill");
+
+        let second = store.text_index.observe(at.generation, at.kbx, Some(tier));
+        peer.reindex_text()?;
+        let current = store.with_text_snapshot(|reader, now, current| {
+            assert!(matches!(reader.search(now, &q, current)?, Searched::Hits { hits, .. } if hits.len() == 2));
+            Ok((now.generation, now.tiers[0]))
+        })?;
+        store.text_index.with_reader(second, &late, |reader| {
+            assert_eq!(reader.search(at, &q, &late)?, expected);
+            Ok(())
+        })?;
+        assert_eq!(late.live_bytes(), 0, "late completion cannot displace the newer reader");
+        let (id, published): (i64, i64) = store.lock().query_row(
+            "SELECT id, generation FROM cat_extent WHERE class='text_tier' AND dead_since IS NULL",
+            [], |r| Ok((r.get(0)?, r.get(1)?))
+        ).unwrap();
+        let new_tier = (u64::try_from(id).unwrap(), u64::try_from(published).unwrap(), current.1);
+        assert!(matches!(store.text_index.observe(current.0, at.kbx, Some(new_tier)), crate::tantivy::Selection::Hit(_)));
+        Ok(())
+    }).unwrap();
+}
+
+#[test]
+fn an_oversized_sealed_tier_searches_under_the_ordinary_budget() {
+    use kaban_core::text_index::IndexRow;
+
+    let dir = Scratch::new("text-reader-oversized");
+    let store = SqliteStore::open(&dir.db(), &dir.keys()).unwrap();
+    let row = IndexRow {
+        rid: 17,
+        id: "test-id".into(),
+        revision: 1,
+        kind: "Fact".into(),
+        workspace_id: "default".into(),
+        text: "quokka".into(),
+        summary: String::new(),
+        stored_summary: None,
+        tags: vec![],
+        ident_values: vec![],
+        anchor_keys: vec![],
+    };
+    // A valid one-segment pack with more than four MiB of identity tombstones.
+    // Tombstones in the same pack cannot hide its own document.
+    let tombstones: Vec<i64> = (1..=530_000).collect();
+    let pack = kaban_index_tantivy::segment(&[row], &tombstones, &QueryBudget::new(64 << 20, None))
+        .unwrap();
+    let extent = store
+        .catalog
+        .append_extent(ExtentClass::TextTier, &pack)
+        .unwrap();
+    store
+        .catalog
+        .commit(&mut store.lock(), Durability::Normal, |txn| {
+            txn.publish(extent, &[kaban_core::ViewName::Main])
+        })
+        .unwrap();
+
+    let q = RecallQuery::default();
+    let query = text_query("quokka", &q);
+    let charged = store.with_text_snapshot(|reader, at, budget| {
+        let ordinary = store.text_index.tantivy().unwrap().search(at, &query, budget)?;
+        assert!(matches!(&ordinary, Searched::Hits { hits, .. } if hits.len() == 1 && hits[0].rid == 17));
+        assert_eq!(reader.search(at, &query, budget)?, ordinary);
+        Ok(budget.clone())
+    }).unwrap();
+    assert_eq!(
+        text_cache_budget(&store).live_bytes() + charged.live_bytes(),
+        0,
+        "an oversized tier has no retained copy"
+    );
+}
+
+#[test]
+fn a_rolled_back_write_preserves_the_reader_and_a_peer_purge_retires_it() {
+    let dir = Scratch::new("text-reader-purge");
+    let store = sealed_text_store(&dir);
+    let peer = SqliteStore::open(&dir.db(), &dir.keys()).unwrap();
+    let charged = search_sealed(&store);
+    let query = RecallQuery {
+        query: "quokka".into(),
+        ..Default::default()
+    };
+    let original = store.recall(&query).unwrap();
+    assert_eq!(original.len(), 1);
+
+    let invalid = LinkReq {
+        rel: "unknown-rel".into(),
+        from: Some(nid(&original[0].node.id)),
+        to: None,
+        confidence: None,
+    };
+    assert!(
+        peer.remember(mk("Fact", "rolled back quokka"), &[invalid], &ctx())
+            .is_err()
+    );
+    let kept = charged.live_bytes();
+    assert_eq!(search_sealed(&store).live_bytes(), kept);
+    assert!(charged.live_bytes() > 0);
+
+    peer.forget(&nid(&original[0].node.id), ForgetMode::Purge, &ctx())
+        .unwrap();
+    let q = text_query("quokka", &query);
+    assert!(
+        matches!(store.search_text(&q).unwrap(), Searched::Hits { hits, .. } if hits.is_empty())
+    );
+    assert!(charged.live_bytes() <= crate::tantivy::TIMER_BYTES);
+    assert!(store.recall(&query).unwrap().is_empty());
+}
+
+#[test]
+fn retaining_a_cold_reader_leaves_the_callers_full_collector_budget_available() {
+    let dir = Scratch::new("text-reader-headroom");
+    let store = sealed_text_store(&dir);
+    let reference = SqliteStore::open(&dir.db(), &dir.keys()).unwrap();
+    let q = RecallQuery::default();
+    let mut query = text_query("quokka", &q);
+    query.limit = 5_000;
+    let memory = 1536 << 10;
+    let expected = reference
+        .with_text_snapshot(|_, at, _| {
+            reference.text_index.tantivy().unwrap().search(
+                at,
+                &query,
+                &QueryBudget::new(memory, None),
+            )
+        })
+        .unwrap();
+    let budget = QueryBudget::new(memory, None);
+    let actual = store
+        .catalog
+        .with_text(&store.conn, &store.text_index, &budget, |reader, at| {
+            reader.search(at, &query, &budget)
+        });
+    assert_eq!(
+        actual.unwrap_or_else(|error| panic!("retention stole the collector's budget: {error:?}")),
+        expected
+    );
+}
+
+#[test]
+fn a_full_retention_quota_leaves_a_searchable_tier_on_the_ordinary_path() {
+    let dir = Scratch::new("text-reader-quota");
+    let store = sealed_text_store(&dir);
+    let quota = text_cache_budget(&store);
+    let occupied = quota.reserve(17 << 20).unwrap();
+    let recall = RecallQuery::default();
+    let query = text_query("quokka", &recall);
+    let expected = store.search_text(&query).unwrap();
+    assert!(matches!(&expected, Searched::Hits { hits, .. } if hits.len() == 1));
+    assert_eq!(quota.live_bytes(), occupied.bytes());
+    drop(occupied);
+    assert_eq!(store.search_text(&query).unwrap(), expected);
+    assert!(quota.live_bytes() > crate::tantivy::TIMER_BYTES);
+}

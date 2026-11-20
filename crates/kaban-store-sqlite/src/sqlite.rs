@@ -36,7 +36,7 @@ use crate::sql_error::SqlResultExt;
 use crate::tantivy::{Attached, SharedConnection};
 use crate::traverse;
 use kaban_core::query_budget::QueryBudget;
-use kaban_core::text_index::{Searched, TextQuery, TextSnapshot};
+use kaban_core::text_index::{Searched, TextIndex, TextQuery, TextSnapshot};
 use kaban_core::{
     ActorId, BatchReport, Change, ChangeLogStore, Edge, FailurePatch, ForgetMode, ForgetOutcome,
     Hit, IndexMeta, IngestStore, Lease, LeaseStore, Lifecycle, LinkReq, MemoryStore, Method,
@@ -212,11 +212,13 @@ impl SqliteStore {
     /// Run `f` over the text of the latest catalog generation under one recall budget.
     fn with_text_snapshot<T>(
         &self,
-        f: impl FnOnce(&TextSnapshot<'_>, &QueryBudget) -> Result<T>,
+        f: impl FnOnce(&dyn TextIndex, &TextSnapshot<'_>, &QueryBudget) -> Result<T>,
     ) -> Result<T> {
         let budget = QueryBudget::new(RECALL_MEMORY_BYTES, Some(RECALL_DEADLINE));
         self.catalog
-            .with_text(&self.conn, &budget, |at| f(at, &budget))
+            .with_text(&self.conn, &self.text_index, &budget, |index, at| {
+                f(index, at, &budget)
+            })
     }
 
     /// The text index's seed candidates for `query` at the latest catalog generation, before
@@ -225,13 +227,7 @@ impl SqliteStore {
     /// # Errors
     /// The pin's, the budget's or the index's error.
     pub fn search_text(&self, query: &TextQuery<'_>) -> Result<Searched> {
-        let index = self.seed_index();
-        self.with_text_snapshot(|at, budget| index.search(at, query, budget))
-    }
-
-    /// The seed index behind the text-search seam.
-    pub(crate) fn seed_index(&self) -> &(dyn kaban_core::text_index::TextIndex + Send + Sync) {
-        self.text_index.text_index()
+        self.with_text_snapshot(|index, at, budget| index.search(at, query, budget))
     }
 
     /// Rebuild the memory graph from the canonical rows, through the catalog's graph class
@@ -779,9 +775,10 @@ impl SqliteStore {
     ) -> Self {
         let ontology = shipped_ontology();
         let recall = kaban_core::config::Recall::default();
-        let text_index = Attached::Tantivy(Arc::new(kaban_index_tantivy::TantivyIndex::new(
-            &ontology, &recall,
-        )));
+        let text_index = Attached::Tantivy(
+            Arc::new(kaban_index_tantivy::TantivyIndex::new(&ontology, &recall)),
+            crate::tantivy::Recent::default(),
+        );
         Self {
             text_index,
             conn: Arc::new(Mutex::new(conn)),
@@ -1121,8 +1118,7 @@ impl MemoryStore for SqliteStore {
         eligible: &dyn Fn(&Node) -> bool,
     ) -> Result<Vec<Hit>> {
         // recall takes the lock per statement and never across an adapter call
-        let index = self.seed_index();
-        self.with_text_snapshot(|at, budget| {
+        self.with_text_snapshot(|index, at, budget| {
             recall::recall_with(
                 &recall::Access(&self.conn),
                 &self.ontology,

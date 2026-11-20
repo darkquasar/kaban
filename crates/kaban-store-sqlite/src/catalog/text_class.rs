@@ -331,18 +331,33 @@ impl Catalog {
     pub(crate) fn with_text<T>(
         &self,
         conn: &Mutex<Connection>,
+        index: &crate::tantivy::Attached,
         budget: &QueryBudget,
-        f: impl FnOnce(&TextSnapshot<'_>) -> Result<T>,
+        f: impl FnOnce(&dyn kaban_core::text_index::TextIndex, &TextSnapshot<'_>) -> Result<T>,
     ) -> Result<T> {
         // `main`'s last use is never consulted (retention never retires it): no write per read
-        let (pin, inputs) = {
+        let (pin, inputs, selected) = {
             let conn = conn.lock().unwrap_or_else(PoisonError::into_inner);
             let pin = self.pin_untouched(&conn, budget, &[(ViewName::Main, TEXT)])?;
             let inputs = text_inputs(&pin, &conn, self.kbx.clone())?;
-            (pin, inputs)
+            let mut tiers = inputs
+                .view
+                .chain()
+                .iter()
+                .filter(|e| e.class == ExtentClass::TextTier);
+            let tier = match (tiers.next(), tiers.next(), inputs.tiers.as_slice()) {
+                (Some(e), None, [span]) if inputs.view.sediment().is_empty() => {
+                    Some((e.id.0, e.generation.0, *span))
+                }
+                _ => None,
+            };
+            let selected = index.observe(inputs.generation, &inputs.kbx, tier);
+            (pin, inputs, selected)
         };
         let sediment = inputs.sediment();
-        let out = f(&inputs.snapshot(&sediment));
+        let out = index.with_reader(selected, budget, |reader| {
+            f(reader, &inputs.snapshot(&sediment))
+        });
         drop(pin);
         out
     }
