@@ -35,7 +35,7 @@ use std::collections::HashMap;
 use std::convert::Infallible;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use tantivy::directory::error::{DeleteError, LockError, OpenReadError, OpenWriteError};
 use tantivy::directory::{
     Directory, DirectoryLock, FileHandle, Lock, OwnedBytes, WatchCallback, WatchHandle, WritePtr,
@@ -47,6 +47,14 @@ use tantivy::{DocId, DocSet, Index, IndexSettings, Searcher, Segment, TERMINATED
 const MAGIC: &[u8; 4] = b"KBXT";
 const VERSION: u8 = 1;
 const META: &str = "meta.json";
+
+/// The format fields of meta.json are identical for every catalog snapshot. Only the
+/// segment list comes from the pinned packs.
+static META_PREFIX: LazyLock<String> = LazyLock::new(|| {
+    let settings = serde_json::json!(IndexSettings::default());
+    let schema = serde_json::json!(crate::schema::schema().0);
+    format!(r#"{{"index_settings":{settings},"opstamp":0,"schema":{schema},"segments":"#)
+});
 
 /// The tombstones a loop of this module visits between two budget checks.
 pub(crate) const TOMBSTONE_BATCH: usize = 1024;
@@ -330,12 +338,9 @@ pub(crate) fn open(packs: &[OwnedBytes], budget: &QueryBudget) -> Result<Opened>
             positions.insert(segment.id, position);
         }
     }
-    let meta = serde_json::to_vec(&serde_json::json!({
-        "index_settings": IndexSettings::default(),
-        "segments": segments,
-        "schema": crate::schema::schema().0,
-        "opstamp": 0,
-    }))?;
+    let mut meta = META_PREFIX.as_bytes().to_vec();
+    serde_json::to_writer(&mut meta, &segments)?;
+    meta.push(b'}');
     budget.check()?;
     let index = Index::open(PackDirectory {
         files: Arc::new(files),
