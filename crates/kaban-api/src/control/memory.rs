@@ -58,11 +58,63 @@ pub const METHOD_VALUES: &[&str] = &[
 
 const RECALL_MODES: &[&str] = &["lexical", "fuzzy"];
 
+const COLUMN_TYPES: &[&str] = &["integer", "real", "text", "timestamp"];
+// Count is a string. Sum is an object whose value names a column and is scanned as content.
+const ROLLUP_UNIT_OPS: &[&str] = &["count"];
+
 /// `stats.indexes[].index` wire values (`IndexName`, `rename_all = "snake_case"`; PC-16).
 const INDEX_NAMES: &[&str] = &["text", "graph", "code"];
 
 /// The memory tools' rows of [`super::REGISTRY`].
 pub(super) const ROWS: &[ControlEntry] = &[
+    entry(
+        "schema_describe",
+        Direction::Response,
+        "labels[].columns[].ty",
+        Shape::Enum(COLUMN_TYPES),
+    ),
+    entry(
+        "schema_describe",
+        Direction::Response,
+        "labels[].rollups[].op",
+        Shape::Enum(ROLLUP_UNIT_OPS),
+    ),
+    entry(
+        "schema_describe",
+        Direction::Response,
+        "relationships[].columns[].ty",
+        Shape::Enum(COLUMN_TYPES),
+    ),
+    entry(
+        "schema_describe",
+        Direction::Response,
+        "relationships[].rollups[].op",
+        Shape::Enum(ROLLUP_UNIT_OPS),
+    ),
+    entry(
+        "schema_extend",
+        Direction::Request,
+        "columns[].ty",
+        Shape::Enum(COLUMN_TYPES),
+    ),
+    entry(
+        "schema_extend",
+        Direction::Request,
+        "rollups[].op",
+        Shape::Enum(ROLLUP_UNIT_OPS),
+    ),
+    entry(
+        "schema_extend",
+        Direction::Response,
+        "columns[].ty",
+        Shape::Enum(COLUMN_TYPES),
+    ),
+    entry(
+        "schema_extend",
+        Direction::Response,
+        "rollups[].op",
+        Shape::Enum(ROLLUP_UNIT_OPS),
+    ),
     entry("remember", Direction::Request, "links[].to", Shape::NodeId),
     entry(
         "remember",
