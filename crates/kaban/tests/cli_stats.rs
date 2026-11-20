@@ -105,13 +105,8 @@ fn tool_resource_and_cli_share_the_producers_and_preserve_old_fields() {
 }
 
 /// Count canonical records even when rebuilding their index would exceed the budget.
-fn inspect_degraded_project(missing_container: bool) {
-    let name = if missing_container {
-        "missing"
-    } else {
-        "stale"
-    };
-    let scratch = common::Scratch::new("kaban-stats", name);
+fn inspect_degraded_project(projection_marker: Option<&str>) {
+    let scratch = common::Scratch::new("kaban-stats", projection_marker.unwrap_or("missing"));
     let store = SqliteStore::open(&scratch.db(), &scratch.home().join("keys")).unwrap();
     store
         .remember(
@@ -139,15 +134,17 @@ fn inspect_degraded_project(missing_container: bool) {
     let ontologies = scratch.0.join(".kaban/ontology");
     std::fs::create_dir_all(&ontologies).unwrap();
     std::fs::write(ontologies.join("invalid.yaml"), "ontology: [").unwrap();
-    if missing_container {
-        std::fs::remove_file(&container).unwrap();
-    } else {
+    let original_container = if let Some(marker) = projection_marker {
         conn.execute(
-            "UPDATE index_meta SET value='old' WHERE key='ident_terms_version'",
-            [],
+            "UPDATE index_meta SET value=?1 WHERE key='ident_terms_version'",
+            [marker],
         )
         .unwrap();
-    }
+        Some(std::fs::read(&container).unwrap())
+    } else {
+        std::fs::remove_file(&container).unwrap();
+        None
+    };
     std::fs::write(
         scratch.home().join("config.yaml"),
         "catalog:\n  maintenance_memory_mib: 16\n",
@@ -160,10 +157,7 @@ fn inspect_degraded_project(missing_container: bool) {
     assert_eq!(stats["nodes"], 1, "{stats}");
     assert_eq!(stats["by_kind"]["Fact"], 1, "{stats}");
     assert_eq!(stats["edges"], 0, "{stats}");
-    assert_eq!(container.exists(), !missing_container);
-    if missing_container {
-        assert_eq!(stats["index_container"], "missing", "{stats}");
-    } else {
+    if let Some(expected) = projection_marker {
         let marker: String = conn
             .query_row(
                 "SELECT value FROM index_meta WHERE key='ident_terms_version'",
@@ -171,7 +165,11 @@ fn inspect_degraded_project(missing_container: bool) {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(marker, "old");
+        assert_eq!(marker, expected);
+        assert_eq!(Some(std::fs::read(&container).unwrap()), original_container);
+    } else {
+        assert!(!container.exists());
+        assert_eq!(stats["index_container"], "missing", "{stats}");
     }
     for text in [stderr.as_ref(), &stats.to_string()] {
         assert!(
@@ -183,12 +181,17 @@ fn inspect_degraded_project(missing_container: bool) {
 
 #[test]
 fn stats_counts_with_a_missing_container_and_leaves_it_missing() {
-    inspect_degraded_project(true);
+    inspect_degraded_project(None);
 }
 
 #[test]
 fn stats_counts_with_a_stale_projection_and_leaves_it_stale() {
-    inspect_degraded_project(false);
+    inspect_degraded_project(Some("old"));
+}
+
+#[test]
+fn stats_counts_with_a_pending_projection_and_leaves_it_pending() {
+    inspect_degraded_project(Some("pending"));
 }
 
 #[test]
