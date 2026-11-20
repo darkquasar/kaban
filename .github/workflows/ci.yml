@@ -303,6 +303,15 @@ jobs:
         env:
           KABAN_CI_ARTIFACT_DIR: ${{ runner.temp }}/ci-artifacts-functional
         run: bash scripts/ci/ci.sh functional
+      - name: Verify the real Go fixtures with Go 1.27.3
+        timeout-minutes: 15
+        run: |
+          go_root=$(sudo bash scripts/ci/install-go.sh /usr/lib/kaban-ci-go-1.27.3 1.27.3)
+          sudo ln -sfn "$go_root/bin/go" /usr/bin/go
+          export GOROOT="$go_root" PATH="$go_root/bin:$PATH" GOTOOLCHAIN=local
+          test "$(go env GOVERSION)" = go1.27.3
+          test "$("$SCIP_GO" --version)" = 0.2.9
+          bash scripts/ci/ci.sh go-fixtures
       - name: Check the startup allocator adapter with kaban doctor
         run: |
           # one note creates the database doctor needs; only the adapter row decides this step

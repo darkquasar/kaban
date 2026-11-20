@@ -153,6 +153,14 @@ backend-shadow refusal, repeated-output determinism and output-collision preserv
 This is producer qualification; it establishes neither the exact macOS 15.0 floor nor
 release/hosted-CI readiness. Xcode layouts are admitted, but this run used CLT.
 
+The current scip-go 0.2.9 pin was checked on Linux ARM64 with Go 1.26.0 and
+1.27.3. Both retain the dependency call and the 48 implementation relationships
+in each archived Go fixture pass. The producer adds declaration ranges that
+place two references under their declaring symbols. Go 1.27.3 also exposes three
+additional standard-library implementations of the fixture interface `Conn`.
+The live test records these changes in `fixtures/codegraph/go-drivers/scip-go-0.2.9/`.
+The archived 0.2.7 inputs and their row expectations provide the ingest control.
+
 Use the pinned native tools from [CI setup](CI.md#native-arm64-macos-setup), retaining
 the external npm package lock. Install producers outside both the indexed checkout and
 `KABAN_HOME`; they are separate from the two application binaries. Build the Rust source

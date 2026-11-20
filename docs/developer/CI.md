@@ -210,8 +210,10 @@ cargo --version
 
 External producers live outside the checkout and `KABAN_HOME`. The current Linux
 `install-go.sh`/`install-scip-go.sh` scripts are not Darwin installers. For a new
-user-owned tools directory, these native downloads match the existing fixture
-versions. Run with shell failure checking; do not overwrite an existing install:
+user-owned tools directory, these native downloads use the CI producer pin.
+scip-go 0.2.9 is unqualified on native macOS ARM64. The last native producer
+qualification used scip-go 0.2.7.
+Run with shell failure checking; do not overwrite an existing install:
 
 ```sh
 set -euo pipefail
@@ -222,8 +224,8 @@ kaban_downloads=$(mktemp -d "${TMPDIR:-/tmp}/kaban-native-downloads.XXXXXXXX")
 curl -fSL https://dl.google.com/go/go1.26.0.darwin-arm64.tar.gz -o "$kaban_downloads/go.tar.gz"
 printf '%s  %s\n' b1640525dfe68f066d56f200bef7bf4dce955a1a893bd061de6754c211431023 "$kaban_downloads/go.tar.gz" | shasum -a 256 --check
 tar -xzf "$kaban_downloads/go.tar.gz" -C "$kaban_tools"
-curl -fSL https://github.com/scip-code/scip-go/releases/download/v0.2.7/scip-go-darwin-arm64.tar.gz -o "$kaban_downloads/scip-go.tar.gz"
-printf '%s  %s\n' f21b505452a8dbb270c18ec66690e583801f9e96cff1d72e84c004b7374ec672 "$kaban_downloads/scip-go.tar.gz" | shasum -a 256 --check
+curl -fSL https://github.com/scip-code/scip-go/releases/download/v0.2.9/scip-go-darwin-arm64.tar.gz -o "$kaban_downloads/scip-go.tar.gz"
+printf '%s  %s\n' 3d8a0c14d0617debcf0c38debe4532d201c89c38a85eaac641da2200bb36d68f "$kaban_downloads/scip-go.tar.gz" | shasum -a 256 --check
 tar -xzf "$kaban_downloads/scip-go.tar.gz" -C "$kaban_tools/bin" scip-go
 chmod -R go-w "$kaban_tools/go"
 "$MISE" exec -- npm install --prefix "$kaban_tools/typescript" --save-exact @sourcegraph/scip-typescript@0.4.0
@@ -236,7 +238,7 @@ go version
 ```
 
 Go's checksum comes from the [official download metadata](https://go.dev/dl/?mode=json&include=all);
-scip-go's comes from the [v0.2.7 release](https://github.com/scip-code/scip-go/releases/tag/v0.2.7).
+scip-go's comes from the [v0.2.9 release](https://github.com/scip-code/scip-go/releases/tag/v0.2.9).
 The native setup produced TypeScript 5.9.3 through scip-typescript 0.4.0; retain
 the external installation's package lock and integrity metadata. Installation
 and version checks do not prove real producer-to-query behavior. Building the

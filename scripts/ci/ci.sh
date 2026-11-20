@@ -7,11 +7,12 @@ cd "$kaban_ci_dir/../.." || exit
 
 if [ "$#" -eq 1 ] && [ "$1" = "--help" ]; then
   cat <<'HELP'
-Usage: bash scripts/ci/ci.sh [all|quality|helpers|functional|pdf|macos|producer|gnu|musl]
+Usage: bash scripts/ci/ci.sh [all|quality|helpers|functional|go-fixtures|pdf|macos|producer|gnu|musl]
 No argument means all: quality + helpers + functional + PDF + GNU + musl gates.
 quality: fmt, three Clippy variants, deny and dependency boundaries.
 helpers: Python build/catalog tests and shell syntax (no Rust tools needed).
 functional: workspace/no-default/kaban-vtab nextest suites and library doctests.
+go-fixtures: both real Go producer fixtures with the selected Go toolchain.
 pdf: full PDF-enabled ingest nextest suite and its library doctest.
 macos: focused native ARM64 boundaries, full-feature ingest and public app paths.
 KABAN_MACOS_PRODUCER_QUALIFY=1 adds Darwin producer qualification; default 0.
@@ -37,7 +38,7 @@ if [ "$#" -gt 1 ]; then
 fi
 kaban_group=${1:-all}
 case "$kaban_group" in
-  all|quality|helpers|functional|pdf|macos|producer|gnu|musl) ;;
+  all|quality|helpers|functional|go-fixtures|pdf|macos|producer|gnu|musl) ;;
   *) echo "Unknown group: $kaban_group; see --help" >&2; exit 2 ;;
 esac
 # Native hosted step summaries retain incomplete status even though Actions marks
@@ -159,7 +160,7 @@ try:
                 for resource in ("lib/rustlib/src/rust/library/Cargo.toml", "libexec/rust-analyzer-proc-macro-srv"):
                     if not (toolchain / resource).is_file():
                         incomplete(f"producer resource absent: {toolchain / resource}; install pinned rust-src/toolchain")
-        if group in ("quality", "functional", "pdf", "macos"):
+        if group in ("quality", "functional", "go-fixtures", "pdf", "macos"):
             commands = probe([cargo, "--list"])
             tool = "deny" if group == "quality" else "nextest"
             if tool not in [line.split()[0] for line in commands.splitlines() if line.split()]:
@@ -173,9 +174,9 @@ try:
             executable("jq")
         if group in ("functional", "gnu", "macos"):
             probe([executable("node"), "--version"], f"v{pins['node']}")
-            if group != "macos":
-                for tool in ("go", os.environ.get("SCIP_GO", "scip-go")):
-                    executable(tool)
+        if group in ("functional", "go-fixtures", "gnu"):
+            for tool in ("go", os.environ.get("SCIP_GO", "scip-go")):
+                executable(tool)
         if group in ("functional", "pdf", "producer", "gnu", "musl", "macos"):
             executable("cc")
         executable("git")
@@ -310,6 +311,14 @@ functional() {
   # Alone, without the CLI's process-bootstrap feature, so the embedding-only tests run.
   step rust_runner "${CARGO:-cargo}" nextest run -p kaban-vtab --locked --success-output immediate
   step doctests
+}
+
+go-fixtures() {
+  local fixture
+  for fixture in index_go_drivers_real go_module_cache_is_an_input_on_every_tier; do
+    step rust_runner "$CARGO" nextest run --workspace --locked --no-tests fail --success-output immediate \
+      -E "binary_id(kaban-index::cli) & test(=$fixture)"
+  done
 }
 
 pdf() {

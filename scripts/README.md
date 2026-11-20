@@ -24,9 +24,11 @@ deny, Python and Node come from `mise.toml`. Missing required nextest/deny or wr
 versions exit 3 before compilation; there is no fallback test suite. The small
 `ci/preflight.py` checks effective tools without replacing product trust checks.
 
-Hosted CI installs Go 1.26.0 and scip-go 0.2.7 with SHA-256 checks using
+Hosted CI installs Go 1.26.0 and scip-go 0.2.9 with SHA-256 checks using
 `ci/install-go.sh` and `ci/install-scip-go.sh`. Both accept an absolute destination
-outside the checkout; Go requires a new destination directory. CI installs Go at
+outside the checkout. Go requires a new destination directory and accepts an optional
+version (default 1.26.0). The functional job also runs both real Go fixtures with
+Go 1.27.3. The full suite installs Go at
 `/usr/lib/kaban-ci-go-1.26.0` and exposes it through PATH and `/usr/bin/go`.
 The namespace view already exposes `/usr/lib` read-only, letting version probes
 read Go's root; some fixtures also use a minimal system PATH. Kaban's executable

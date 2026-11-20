@@ -93,7 +93,8 @@ live under `KABAN_HOME/keys/`; repository trust and snapshots live under
 `KABAN_HOME/codegraph/<repo-id>/`. Keep these locations private and outside repositories.
 
 Language producers are [separate installs](code-graph.md). Qualified versions include
-Go 1.26.0/scip-go 0.2.7, Node 22.23.4/scip-typescript 0.4.0 and Rust 1.99.0 with
+scip-go 0.2.9 with Go 1.26.0 and 1.27.3 on Linux ARM64,
+Go 1.26.0/scip-go 0.2.7 on native macOS ARM64, Node 22.23.4/scip-typescript 0.4.0 and Rust 1.99.0 with
 producer 0.1.0-dev. Rust producer qualification covers Linux ARM64 GNU and native
 macOS ARM64 with root-owned CLT; runner-owned Xcode is correctly refused. Install
 producers outside both indexed repositories and KABAN_HOME. Explicitly trust and
