@@ -313,7 +313,7 @@ const OPENER_ALLOWLIST: [(&str, &str, &str); 4] = [
     ),
     (
         "sqlite.rs",
-        "init_schema",
+        "seed_schema",
         "open-time seed and identity rows, before admission and version publication: the \
          catalog opens only after publication (CMP-01) and the seed writes no node or edge row",
     ),
