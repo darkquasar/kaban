@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, BTreeSet};
 /// Also installed transactionally when reopening an earlier database of the supported version.
 pub(crate) const TABLES: &str = "CREATE TABLE IF NOT EXISTS rollup(
     name TEXT NOT NULL, key BLOB NOT NULL, members INTEGER NOT NULL, nonnull INTEGER NOT NULL,
-    value ANY, PRIMARY KEY(name,key)) STRICT, WITHOUT ROWID;
+    value ANY, PRIMARY KEY(name,key)) STRICT;
     CREATE TABLE IF NOT EXISTS rollup_input(seq INTEGER PRIMARY KEY, name TEXT NOT NULL, key BLOB,
         delta INTEGER NOT NULL, amount ANY, real_sum INTEGER NOT NULL) STRICT;";
 

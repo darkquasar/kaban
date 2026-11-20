@@ -200,7 +200,7 @@ pub(crate) fn run(mut cli: Cli) -> ExitCode {
                 Some(crate::BenchCg::Crash(args)) => return crate::bench::crash::run(args),
                 Some(crate::BenchCg::Text(args)) => return crate::bench::text::run(args),
                 Some(crate::BenchCg::Graph(args)) => return crate::bench::graph::run(args),
-                Some(crate::BenchCg::Rollup) => return crate::bench::rollup::run(),
+                Some(crate::BenchCg::Rollup(args)) => return crate::bench::rollup::run(args),
                 Some(crate::BenchCg::Query) => return crate::bench::query::run(),
                 Some(crate::BenchCg::Code) => return crate::bench::code::run(),
                 Some(crate::BenchCg::Git) => return crate::bench::git::run(),

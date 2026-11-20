@@ -893,6 +893,21 @@ pub fn corrupt(store: &SqliteStore, sql: &str) -> Result<()> {
         })
 }
 
+/// Recount the rollup benchmark's group, count and cost from the canonical node properties.
+/// The benchmark opens a second store for this scan.
+///
+/// # Errors
+/// A stored benchmark row has an unexpected type, or the read fails.
+pub fn recount_rollup_bench(store: &SqliteStore) -> Result<Vec<(i64, i64, f64)>> {
+    let conn = store.lock();
+    conn.prepare(
+        "SELECT json_extract(props,'$.bucket') AS bucket, count(*), sum(json_extract(props,'$.cost'))
+         FROM node WHERE kind='RollupRecord' AND lifecycle='active'
+         GROUP BY bucket ORDER BY bucket",
+    ).sql()?.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .sql()?.collect::<rusqlite::Result<_>>().sql()
+}
+
 /// Insert `n` committed node rows in one catalog commit of `store`, `rid` = `k` for `k` in
 /// `0..n` and a `NodeId` that sorts as the rid (a bench's corpus nodes).
 ///

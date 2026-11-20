@@ -161,7 +161,7 @@ enum BenchCg {
     /// The memory graph bench
     Graph(bench::graph::Args),
     /// The rollup bench
-    Rollup,
+    Rollup(bench::rollup::Args),
     /// The query bench
     Query,
     /// The code graph bench

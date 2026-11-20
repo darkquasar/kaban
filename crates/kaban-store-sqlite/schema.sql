@@ -142,7 +142,7 @@ CREATE TABLE kind_stats(workspace_id TEXT NOT NULL, ns TEXT NOT NULL, kind TEXT 
 CREATE TABLE rollup(
   name TEXT NOT NULL, key BLOB NOT NULL, members INTEGER NOT NULL, nonnull INTEGER NOT NULL,
   value ANY, PRIMARY KEY(name,key)
-) STRICT, WITHOUT ROWID;
+) STRICT;
 
 CREATE TABLE rollup_input(
   seq INTEGER PRIMARY KEY, name TEXT NOT NULL, key BLOB, delta INTEGER NOT NULL, amount ANY,
