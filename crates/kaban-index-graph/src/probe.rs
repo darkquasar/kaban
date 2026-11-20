@@ -320,7 +320,7 @@ mod cancellation {
 
     impl StableOrder for ById {
         fn rank(&self, n: LocalId) -> Result<TieRank, GraphError> {
-            Ok(TieRank(n.0))
+            Ok(TieRank(u128::from(n.0).to_be_bytes()))
         }
     }
 

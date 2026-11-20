@@ -25,7 +25,7 @@ pub(crate) mod seam;
 pub(crate) mod stats;
 pub(crate) mod stubs;
 
-use crate::{Cli, Cmd, OpenError};
+use crate::{Cli, Cmd, OpenError, OpenMode};
 use clap::error::ErrorKind;
 use output::{EXIT_FAILURE, EXIT_INVALID, Format};
 use serde_json::Value;
@@ -41,6 +41,8 @@ pub(crate) trait ToolArgs {
     /// Whether the subcommand writes: then the bounded checkpoint runs after its
     /// acknowledgement ([`compact::after_ack`], KER-09).
     const WRITES: bool = false;
+    /// Whether startup inspects an existing project or prepares it for service.
+    const OPEN_MODE: OpenMode = OpenMode::Service;
     /// Whether any argument was given (then `--stdin-json` is refused).
     fn any_given(&self) -> bool;
     /// The raw request as one JSON object. A missing required argument or a structured flag
@@ -111,9 +113,10 @@ fn load_policy(path: Option<&std::path::Path>) -> Result<kaban_policy::Policy, E
 /// Open the service for a subcommand ([`crate::open_api`]), reporting a failure with its
 /// outer message (RM-1) and choosing its exit code: a refused configuration or environment is
 /// 4, a store or key failure 5.
-fn open_or_exit(cli: Cli, policy: kaban_policy::Policy) -> Result<kaban_api::KabanApi, ExitCode> {
+fn open_service_for(cli: Cli, mode: OpenMode) -> Result<kaban_api::KabanApi, ExitCode> {
+    let policy = load_policy(cli.policy.as_deref())?;
     let db = cli.db.clone();
-    crate::open_api(cli, policy).map_err(|e| {
+    crate::open_api(cli, policy, mode).map_err(|e| {
         e.report(&db);
         ExitCode::from(match e {
             OpenError::Config(_) | OpenError::Other(_) => EXIT_INVALID,
@@ -136,8 +139,7 @@ fn keys_dir() -> Result<std::path::PathBuf, ExitCode> {
 
 /// Load the policy, then open the service (the order the messages are most useful in).
 fn open_service(cli: Cli) -> Result<kaban_api::KabanApi, ExitCode> {
-    let policy = load_policy(cli.policy.as_deref())?;
-    open_or_exit(cli, policy)
+    open_service_for(cli, OpenMode::Service)
 }
 
 /// Run the parsed command line to completion and return the process exit code. Nothing here
@@ -196,9 +198,9 @@ pub(crate) fn run(mut cli: Cli) -> ExitCode {
             match &cg {
                 Some(crate::BenchCg::Catalog(args)) => return crate::bench::catalog::run(args),
                 Some(crate::BenchCg::Crash(args)) => return crate::bench::crash::run(args),
-                Some(crate::BenchCg::Text) => return crate::bench::text::run(),
+                Some(crate::BenchCg::Text(args)) => return crate::bench::text::run(args),
                 Some(crate::BenchCg::Graph(args)) => return crate::bench::graph::run(args),
-                Some(crate::BenchCg::Rollup) => return crate::bench::rollup::run(),
+                Some(crate::BenchCg::Rollup(args)) => return crate::bench::rollup::run(args),
                 Some(crate::BenchCg::Query) => return crate::bench::query::run(),
                 Some(crate::BenchCg::Code) => return crate::bench::code::run(),
                 Some(crate::BenchCg::Git) => return crate::bench::git::run(),
@@ -355,7 +357,7 @@ fn run_tool_command<A: ToolArgs>(
             Err(code) => return code,
         }
     };
-    match open_service(cli) {
+    match open_service_for(cli, A::OPEN_MODE) {
         Ok(api) if A::WRITES => compact::after_ack(&api, run(&api, raw, format)),
         Ok(api) => run(&api, raw, format),
         Err(code) => code,

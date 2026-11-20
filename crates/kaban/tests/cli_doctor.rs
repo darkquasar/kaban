@@ -140,7 +140,7 @@ fn stale_identifier_marker_requires_explicit_reindex_and_doctor_never_repairs_it
     assert_eq!(check(&report(&out), "ident_terms_version")["ok"], true);
     assert_eq!(
         store.index_meta().unwrap().get("ident_terms_version"),
-        Some(kaban_core::ident::IDENT_TERMS_VERSION)
+        Some(kaban_core::ident::TEXT_ANALYZER_VERSION)
     );
     assert_eq!(
         serde_json::to_value(store.get(&ids[0], false).unwrap()).unwrap(),

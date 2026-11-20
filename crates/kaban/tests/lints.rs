@@ -372,3 +372,22 @@ fn no_trusted_internal_outside_runners() {
         found.join("\n")
     );
 }
+
+#[test]
+fn identifiers_have_one_shared_splitter() {
+    let root = workspace_root();
+    let files: Vec<_> = sources(&root, false)
+        .into_iter()
+        .filter(|p| {
+            p.components()
+                .nth(2)
+                .is_some_and(|c| c.as_os_str() == "src")
+        })
+        .collect();
+    let splitters = scan(&root, &files, &[], |line| line.contains("fn split_terms("));
+    let legacy = scan(&root, &files, &[], |line| line.contains("fn ident_terms("));
+    assert!(
+        splitters.len() == 1 && legacy.is_empty(),
+        "expected one shared splitter and zero legacy derivations: {splitters:?}, {legacy:?}"
+    );
+}

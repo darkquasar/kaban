@@ -145,29 +145,14 @@ fn project(
         .collect()
 }
 
-/// The words of a symbol name the textual tier matches on: split at `_` and at a lower-to-upper
-/// case change (`ingest_finish` -> `ingest`, `finish`; `FromFullName` -> `from`, `full`,
-/// `name`), lowercased, words shorter than [`TEXTUAL_MIN_WORD`] dropped; empty when nothing
-/// qualifies (the tier then answers nothing).
+/// The textual tier uses the shared identifier parts, lowercased, whose length reaches
+/// [`TEXTUAL_MIN_WORD`].
 fn name_words(name: &str) -> Vec<String> {
-    let mut words = Vec::new();
-    let mut word = String::new();
-    let mut prev_lower = false;
-    for c in name.chars() {
-        let boundary = c == '_' || !c.is_alphanumeric() || (c.is_uppercase() && prev_lower);
-        if boundary && !word.is_empty() {
-            words.push(std::mem::take(&mut word));
-        }
-        if c.is_alphanumeric() {
-            word.extend(c.to_lowercase());
-        }
-        prev_lower = c.is_lowercase() || c.is_ascii_digit();
-    }
-    if !word.is_empty() {
-        words.push(word);
-    }
-    words.retain(|w| w.chars().count() >= TEXTUAL_MIN_WORD);
-    words
+    kaban_core::ident::split_terms(name)
+        .into_iter()
+        .map(str::to_lowercase)
+        .filter(|word| word.chars().count() >= TEXTUAL_MIN_WORD)
+        .collect()
 }
 
 #[cfg(test)]
@@ -183,6 +168,7 @@ mod tests {
             ["admit", "inherited", "fds"]
         );
         assert_eq!(name_words("a_of_b"), Vec::<String>::new());
-        assert_eq!(name_words("HTTPServer2"), ["httpserver2"]);
+        assert_eq!(name_words("ÜberHTTP2Adapter"), ["über", "http2", "adapter"]);
+        assert_eq!(name_words("HTTPServer2"), ["http", "server2"]);
     }
 }

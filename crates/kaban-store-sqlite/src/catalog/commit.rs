@@ -50,12 +50,19 @@ pub(crate) struct Txn<'c> {
     /// The maintenance holds of the extents it publishes: released only once the commit ends
     /// (declared after `tx`, so a rollback precedes their release too).
     holds: Vec<Arc<MaintenanceHold>>,
+    /// Changed schema projection whose existing active rows the text class must restage.
+    text_label: Option<String>,
 }
 
 impl Txn<'_> {
     /// The transaction's connection, for the writer's own statements.
     pub(crate) fn conn(&self) -> &Connection {
         &self.tx
+    }
+
+    /// A schema extension changes one label per commit.
+    pub(crate) fn reproject_text(&mut self, label: &str) {
+        self.text_label = Some(label.to_owned());
     }
 
     /// Publish `extent` in this commit: its catalog row names the generation the commit
@@ -235,10 +242,6 @@ pub(crate) struct Derived<'t> {
 
 impl<'t> Derived<'t> {
     /// The hook's reads of this commit's rows.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "T13's rollup maintenance reads through it")
-    )]
     pub(crate) fn reader(&self) -> Reader<'t> {
         Reader::new(self.conn, self.phases)
     }
@@ -248,10 +251,6 @@ impl<'t> Derived<'t> {
     ///
     /// # Errors
     /// SQLite's, the authorizer's refusal among them.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "T13's rollup maintenance writes through it")
-    )]
     pub(crate) fn execute(&self, sql: &str, params: impl Params) -> Result<usize> {
         let mut stmt = self.conn.prepare(sql).sql()?;
         stmt.execute(params).sql()
@@ -271,6 +270,7 @@ pub(crate) struct Stage<'t> {
     conn: &'t Connection,
     phases: &'t Phases,
     staged: &'t mut Staged,
+    pub(super) text_projection: Option<(&'t str, super::compact::CompactBudget)>,
 }
 
 impl<'t> Stage<'t> {
@@ -377,6 +377,7 @@ impl Catalog {
             container: self.container,
             generation: None,
             holds: Vec::new(),
+            text_label: None,
         };
         // declared after `txn`, so it drops first: an early exit's rollback runs unrestricted
         let phase = self.phases.enter();
@@ -400,11 +401,16 @@ impl Catalog {
             generation: txn.generation,
             first: None,
         };
+        let text_projection = txn
+            .text_label
+            .as_deref()
+            .map(|label| (label, self.maintenance_budget()));
         for class in self.classes() {
             let mut handle = Stage {
                 conn: &txn.tx,
                 phases: &self.phases,
                 staged: &mut staged,
+                text_projection,
             };
             let staging = class.stage(&mut handle, &changes);
             phase.close(&txn.tx, staging)?;
@@ -551,15 +557,11 @@ pub(super) fn guard_writer(conn: &mut Connection, committing: &Arc<AtomicBool>) 
 
 impl Catalog {
     /// The derived-row hook: rows derived from the commit's changes, written in its transaction
-    /// before the index classes stage. T5 has none; T13 installs rollup maintenance here. A
+    /// before the index classes stage. A
     /// unit test installs its own ([`Self::set_test_derived_rows`]).
     #[cfg_attr(
         not(test),
-        expect(
-            clippy::unused_self,
-            clippy::unnecessary_wraps,
-            reason = "the hook's shape: T13 writes rollups through `derived` and can fail"
-        )
+        expect(clippy::unused_self, reason = "tests may replace this catalog's hook")
     )]
     fn derived_rows(&self, derived: &Derived<'_>, changes: &BatchChanges) -> Result<()> {
         #[cfg(test)]
@@ -571,8 +573,7 @@ impl Catalog {
         {
             return hook(derived, changes);
         }
-        let _ = (derived, changes);
-        Ok(())
+        crate::rollup::maintain(derived, changes)
     }
 
     /// Install a unit test's derived-row hook: every later commit runs it in the hook phase.

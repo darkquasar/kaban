@@ -1,11 +1,8 @@
-//! The fixed field set (spec 05 SS-08). The ontology decides what goes into the fields (the
-//! kinds' `fts_fields` projection reaches `summary` through the store, the `ident_fields` and
-//! anchors feed `ident_terms`, the per-kind `column_weights` become query boosts); the fields
-//! themselves are the FTS5 index's four content columns plus the retrieval keys and the filter
-//! fields. Nothing is stored: a hit's `rid` comes from a fast column, and the record body lives
-//! in SQLite only.
+//! Search fields over one catalog row. The projected summary holds the declared prose fields,
+//! `name` holds whole identifiers, and `code` holds the parts of all declared text.
+//! Search returns the fast row id and keeps the record body in the canonical store.
 
-use crate::analyzers::{FOLDED, IDENT, STEMMED};
+use crate::analyzers::{CODE_IDENT, CODE_NAME, FOLDED, STEMMED};
 use tantivy::schema::{
     FAST, Field, INDEXED, IndexRecordOption, STRING, Schema, TextFieldIndexing, TextOptions,
 };
@@ -15,8 +12,7 @@ pub(crate) const RID: &str = "rid";
 pub(crate) const REVISION: &str = "revision";
 pub(crate) const KIND: &str = "kind";
 
-/// The content fields in the FTS5 column order (`text`, `summary`, `tags`, `ident_terms`),
-/// which is also the order of the column weights.
+/// Existing configuration keys for the four individually weighted fields.
 pub(crate) const CONTENT: [&str; 4] = ["text", "summary", "tags", "ident_terms"];
 
 /// The lifecycle value every indexed row carries: the index holds active rows only.
@@ -37,10 +33,14 @@ pub(crate) struct Fields {
     pub(crate) workspace: Field,
     pub(crate) lifecycle: Field,
     pub(crate) tag: Field,
-    /// [`CONTENT`]: stemmed text, with positions for phrases.
+    /// Fields corresponding to the weights in [`CONTENT`].
     pub(crate) content: [Field; 4],
-    /// The unstemmed, folded copy of text and summary the fuzzy terms run against.
+    /// Unstemmed, folded text, projected summary, tags, identifier values and anchor keys.
     pub(crate) fuzzy: Field,
+    /// Identifier parts and positions for code-aware operands on all declared text.
+    pub(crate) code: Field,
+    /// Complete, case-folded identifiers.
+    pub(crate) name: Field,
 }
 
 /// The schema and its fields.
@@ -66,8 +66,10 @@ pub(crate) fn schema() -> (Schema, Fields) {
             builder.add_text_field(CONTENT[0], text(STEMMED, positions)),
             builder.add_text_field(CONTENT[1], text(STEMMED, positions)),
             builder.add_text_field(CONTENT[2], text(STEMMED, positions)),
-            builder.add_text_field(CONTENT[3], text(IDENT, positions)),
+            builder.add_text_field("identifier", text(CODE_IDENT, positions)),
         ],
+        code: builder.add_text_field("code", text(CODE_IDENT, positions)),
+        name: builder.add_text_field("name", text(CODE_NAME, IndexRecordOption::WithFreqs)),
         fuzzy: builder.add_text_field("fuzzy", text(FOLDED, IndexRecordOption::WithFreqs)),
     };
     (builder.build(), fields)

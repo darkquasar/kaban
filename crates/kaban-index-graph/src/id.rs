@@ -49,9 +49,9 @@ pub enum Direction {
     Both,
 }
 
-/// A node's unique rank in public `NodeId` lexical order.
+/// A node's canonical UUID bytes, in public `NodeId` lexical order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct TieRank(pub u32);
+pub struct TieRank(pub [u8; 16]);
 
 /// Ranks local ids in public `NodeId` order, prepared by the store from the selected snapshot.
 pub trait StableOrder {

@@ -284,6 +284,12 @@ pub fn build_dictionary(
             offset += count;
         }
     }
+    let frequent = |term: &str| {
+        document_count > 0
+            && f64::from(document_frequency.get(term).copied().unwrap_or(0))
+                / f64::from(document_count)
+                > cfg.corpus_freq_cutoff
+    };
     if cfg.v4_symbols
         && let Some(snapshot) = snapshot
     {
@@ -298,6 +304,14 @@ pub fn build_dictionary(
             )?;
             for symbol in page {
                 if let Some(targets) = symbols.get(&symbol.key) {
+                    // A generated phrase needs at least one distinctive part. The
+                    // canonical name and other explicit aliases retain their usual policy.
+                    let split_name = admitted(policy, &symbol.name).and_then(|name| {
+                        let parts = kaban_core::ident::split_terms(&name);
+                        (parts.len() > 1
+                            && parts.iter().any(|part| !frequent(&norm_term(part, true))))
+                        .then(|| parts.join(" "))
+                    });
                     for target in targets {
                         for raw in [
                             &symbol.name,
@@ -306,6 +320,9 @@ pub fn build_dictionary(
                             &symbol.ident_terms,
                         ] {
                             insert(raw, target, Method::Symbol, DictSource::V4Symbols);
+                        }
+                        if let Some(alias) = &split_name {
+                            insert(alias, target, Method::Symbol, DictSource::V4Symbols);
                         }
                     }
                 }
@@ -322,11 +339,7 @@ pub fn build_dictionary(
             let lowercase_word = targets
                 .values()
                 .all(|(_, _, surface)| surface.chars().all(char::is_lowercase));
-            !(lowercase_word
-                && document_count > 0
-                && f64::from(document_frequency.get(normalized).copied().unwrap_or(0))
-                    / f64::from(document_count)
-                    > cfg.corpus_freq_cutoff)
+            !(lowercase_word && frequent(normalized))
         })
         .map(|(normalized, targets)| {
             let ambiguous = targets.len() > cfg.max_targets as usize;

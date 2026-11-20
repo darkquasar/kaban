@@ -1,0 +1,21 @@
+ontology: work
+version: 1
+extends: [core]
+kinds:
+  Epic:
+    description: A work initiative.
+    props_schema: {type: object}
+  Task:
+    description: A unit of work within an epic.
+    props_schema: {type: object}
+    fts_fields: [props.output]
+    columns:
+      - {name: state, ty: text, indexed: true}
+    rollups:
+      - {name: tasks_by_state, label: "work:Task", group_by: [state], op: count}
+rels:
+  PART_OF:
+    directed: true
+    from: ["work:Task"]
+    to: ["work:Epic"]
+    description: The epic containing a task.

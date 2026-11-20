@@ -7,6 +7,15 @@
 -- (PC-16), and `node.rid` is never reused (PC-1). No FTS5 or trigram objects, no
 -- `ident_terms` column, bodies (`node.text`) are tagged BLOBs; the change-log trigger
 -- `node_changes_au` over the canonical columns is deployed by `ident.rs` at open, not here.
+-- Every canonical row and change references the tuple that stamped its last write.
+CREATE TABLE writer(
+  id INTEGER PRIMARY KEY,
+  actor_id TEXT NOT NULL,
+  instance_id TEXT,
+  pack_lineage_id TEXT,
+  UNIQUE(actor_id, instance_id, pack_lineage_id)
+);
+
 CREATE TABLE edge(
   id TEXT PRIMARY KEY,
   src INTEGER NOT NULL REFERENCES node(rid) ON DELETE CASCADE,
@@ -14,11 +23,9 @@ CREATE TABLE edge(
   rel TEXT NOT NULL,
   confidence REAL,
   created_at TEXT NOT NULL,
-  props TEXT NOT NULL DEFAULT '{}', workspace_id TEXT NOT NULL DEFAULT 'default', producer TEXT, method TEXT, score REAL, source_id TEXT, offset INTEGER, len INTEGER, actor_id TEXT, instance_id TEXT, pack_lineage_id TEXT,
-  UNIQUE(src, dst, rel)
+  props TEXT NOT NULL DEFAULT '{}', workspace_id TEXT NOT NULL DEFAULT 'default', producer TEXT, method TEXT, score REAL, source_id TEXT, offset INTEGER, len INTEGER, writer_id INTEGER REFERENCES writer(id),
+  UNIQUE(src, rel, dst)
 );
-
-CREATE INDEX edge_src ON edge(src, rel);
 
 CREATE INDEX edge_dst ON edge(dst, rel);
 
@@ -49,8 +56,8 @@ CREATE TABLE "node"(
   dup_key TEXT,
   repo TEXT,
   commit_sha TEXT,
-  session_id TEXT
-, actor_id TEXT, instance_id TEXT, pack_lineage_id TEXT);
+  session_id TEXT,
+  writer_id INTEGER REFERENCES writer(id));
 
 CREATE INDEX node_kind ON node(kind, lifecycle);
 
@@ -82,8 +89,8 @@ CREATE TABLE "changes"(
   id TEXT NOT NULL,
   workspace_id TEXT NOT NULL,
   ts INTEGER NOT NULL DEFAULT (unixepoch()),
-  paths TEXT
-, actor_id TEXT, instance_id TEXT, pack_lineage_id TEXT);
+  paths TEXT,
+  writer_id INTEGER REFERENCES writer(id));
 
 CREATE TRIGGER node_changes_ai AFTER INSERT ON node BEGIN
   INSERT INTO changes(entity, op, id, workspace_id) VALUES ('node', 'insert', new.id, new.workspace_id);
@@ -122,12 +129,25 @@ CREATE TABLE "schema_type"(
   props_schema TEXT, builtin INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL,
   is_a TEXT NULL, mixins TEXT NOT NULL DEFAULT '[]', rules TEXT NULL, rank TEXT NULL, fts_fields TEXT NULL,
   ident_fields TEXT NULL, column_weights TEXT NULL, extract TEXT NULL, display TEXT NULL,
+  columns TEXT, rollups TEXT,
   PRIMARY KEY(ns, kind, name)
 );
 
 CREATE TABLE kind_stats(workspace_id TEXT NOT NULL, ns TEXT NOT NULL, kind TEXT NOT NULL, n_nodes INTEGER NOT NULL DEFAULT 0,
   n_sources INTEGER NOT NULL DEFAULT 0, mean_score REAL NULL, first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL,
   PRIMARY KEY(workspace_id, ns, kind));
+
+-- A declaring label owns its col_<label> STRICT table. Canonical writes capture
+-- contributions in order, then the catalog's derived phase applies them to rollup.
+CREATE TABLE rollup(
+  name TEXT NOT NULL, key BLOB NOT NULL, members INTEGER NOT NULL, nonnull INTEGER NOT NULL,
+  value ANY, PRIMARY KEY(name,key)
+) STRICT;
+
+CREATE TABLE rollup_input(
+  seq INTEGER PRIMARY KEY, name TEXT NOT NULL, key BLOB, delta INTEGER NOT NULL, amount ANY,
+  real_sum INTEGER NOT NULL
+) STRICT;
 
 CREATE TABLE derived_artifact(
   artifact_key TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, producer TEXT NOT NULL, producer_id TEXT NOT NULL,
@@ -163,17 +183,24 @@ CREATE TRIGGER edge_changes_au AFTER UPDATE OF id, src, dst, rel, confidence, cr
   INSERT INTO changes(entity, op, id, workspace_id) VALUES ('edge', 'update', new.id, new.workspace_id);
 END;
 
-CREATE TRIGGER changes_stamp AFTER INSERT ON changes WHEN new.actor_id IS NULL BEGIN
+CREATE TRIGGER changes_stamp AFTER INSERT ON changes WHEN new.writer_id IS NULL BEGIN
   SELECT RAISE(ABORT, 'writer_unbound') WHERE kaban_writer() IS NULL;
-  UPDATE changes SET (actor_id, instance_id, pack_lineage_id) = (kaban_writer(),
-      (SELECT value FROM index_meta WHERE key = 'db_id'),
-      (SELECT value FROM index_meta WHERE key = 'pack_lineage_id'))
-    WHERE seq = new.seq;
-  UPDATE node SET (actor_id, instance_id, pack_lineage_id) =
-      (SELECT actor_id, instance_id, pack_lineage_id FROM changes WHERE seq = new.seq)
+  -- UNIQUE permits repeated NULLs. Match the complete tuple with IS before inserting it.
+  INSERT INTO writer(actor_id, instance_id, pack_lineage_id)
+    SELECT actor, instance, lineage FROM (
+      SELECT kaban_writer() AS actor, (SELECT value FROM index_meta WHERE key = 'db_id') AS instance,
+             (SELECT value FROM index_meta WHERE key = 'pack_lineage_id') AS lineage
+    ) WHERE NOT EXISTS (
+      SELECT 1 FROM writer WHERE (actor_id, instance_id, pack_lineage_id) IS (actor, instance, lineage)
+    );
+  UPDATE changes SET writer_id = (
+    SELECT id FROM writer WHERE actor_id = kaban_writer()
+      AND instance_id IS (SELECT value FROM index_meta WHERE key = 'db_id')
+      AND pack_lineage_id IS (SELECT value FROM index_meta WHERE key = 'pack_lineage_id')
+  ) WHERE seq = new.seq;
+  UPDATE node SET writer_id = (SELECT writer_id FROM changes WHERE seq = new.seq)
     WHERE new.entity = 'node' AND id = new.id;
-  UPDATE edge SET (actor_id, instance_id, pack_lineage_id) =
-      (SELECT actor_id, instance_id, pack_lineage_id FROM changes WHERE seq = new.seq)
+  UPDATE edge SET writer_id = (SELECT writer_id FROM changes WHERE seq = new.seq)
     WHERE new.entity = 'edge' AND id = new.id;
 END;
 

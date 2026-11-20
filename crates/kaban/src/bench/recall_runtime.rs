@@ -653,7 +653,8 @@ fn recall(
         !fixture.exists(),
         "recall bench requires a fresh fixture repository"
     );
-    let store = SqliteStore::open_as(db, keys, actor)?.with_recall_config(engine.recall.clone())?;
+    let store = SqliteStore::open_as(db, keys, actor, engine.catalog.clone())?
+        .with_recall_config(engine.recall.clone())?;
     let sqlite = Arc::new(store);
     let mut corpus = Corpus::new(SEED);
     fixture_repo(&fixture, &corpus)?;
@@ -731,7 +732,12 @@ fn edges(
     let entries: Vec<SourceIdentity> =
         serde_json::from_value(input["recall_evaluation"]["corpus"]["source_map"].clone())?;
     let map = SourceMap { entries };
-    let sqlite = Arc::new(SqliteStore::open_as(db, keys, actor)?);
+    let sqlite = Arc::new(SqliteStore::open_as(
+        db,
+        keys,
+        actor,
+        engine.catalog.clone(),
+    )?);
     let api = KabanApi::with_config(
         sqlite.clone(),
         policy,

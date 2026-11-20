@@ -8,6 +8,15 @@ use serde_json::Value;
 /// `schema_extend` input.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 pub struct SchemaExtendRequest {
+    /// Typed columns projected from this label's properties.
+    #[serde(default)]
+    pub columns: Vec<kaban_core::ontology::ColumnDecl>,
+    /// Named counts and sums over the label's active rows.
+    #[serde(default)]
+    pub rollups: Vec<kaban_core::ontology::RollupDecl>,
+    /// Extra property paths searchable through the text index.
+    #[serde(default)]
+    pub fts_fields: Vec<String>,
     /// "label" (node kind) or "rel" (relationship type)
     pub kind: String,
     /// `PascalCase` for labels, `UPPER_SNAKE_CASE` for rels.

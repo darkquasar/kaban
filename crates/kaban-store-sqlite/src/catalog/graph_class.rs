@@ -22,6 +22,7 @@
 //! flattened), so the first graph extent of a chain is opened as a base and the rest as layers,
 //! whatever class name compaction gave them.
 
+mod order;
 mod read;
 
 #[cfg_attr(
@@ -49,6 +50,7 @@ use super::failpoint::BudgetWindow;
 use super::kbx;
 use super::pin::{Pin, budget_exceeded};
 use super::tables::{ExtentRef, SedimentRow, holds, sql_int, uint};
+use crate::rows::rfc3339_ms;
 use crate::sql_error::SqlResultExt;
 
 /// The classes of the graph's extents: compaction names a seal's extent after the first.
@@ -598,76 +600,6 @@ fn attr(confidence: Option<f64>, created_at: &str) -> Result<Attr> {
     let ts =
         rfc3339_ms(created_at).ok_or_else(|| GraphRefused::Timestamp(created_at.to_owned()))?;
     Ok(Attr { weight, ts })
-}
-
-/// `s` as epoch milliseconds when it is an RFC 3339 date-time (`YYYY-MM-DDTHH:MM:SS`, an
-/// optional fraction, then `Z` or `±HH:MM` with hours 0-23 and minutes 0-59); `None`
-/// otherwise. Digits below a millisecond are
-/// truncated.
-#[expect(
-    clippy::many_single_char_names,
-    reason = "the date fields and the civil-date algorithm's own names"
-)]
-fn rfc3339_ms(s: &str) -> Option<i64> {
-    let b = s.as_bytes();
-    let num = |r: std::ops::Range<usize>| -> Option<i64> {
-        b.get(r)?.iter().try_fold(0_i64, |acc, d| {
-            d.is_ascii_digit().then(|| acc * 10 + i64::from(d - b'0'))
-        })
-    };
-    let at = |i: usize, c: &[u8]| b.get(i).is_some_and(|x| c.contains(x));
-    if !(at(4, b"-") && at(7, b"-") && at(10, b"Tt ") && at(13, b":") && at(16, b":")) {
-        return None;
-    }
-    let (y, mo, d) = (num(0..4)?, num(5..7)?, num(8..10)?);
-    let (h, mi, sec) = (num(11..13)?, num(14..16)?, num(17..19)?);
-    let mut i = 19;
-    let mut ms = 0;
-    if at(i, b".") {
-        let start = i + 1;
-        i = start;
-        while b.get(i).is_some_and(u8::is_ascii_digit) {
-            i += 1;
-        }
-        let digits = (i - start).min(3);
-        if digits == 0 {
-            return None;
-        }
-        ms = num(start..start + digits)? * 10_i64.pow(u32::try_from(3 - digits).ok()?);
-    }
-    let offset_min = match b.get(i..)? {
-        [b'Z' | b'z'] => 0,
-        [sign @ (b'+' | b'-'), _, _, b':', _, _] => {
-            let (oh, om) = (num(i + 1..i + 3)?, num(i + 4..i + 6)?);
-            if oh > 23 || om > 59 {
-                return None;
-            }
-            let m = oh * 60 + om;
-            if *sign == b'+' { m } else { -m }
-        }
-        _ => return None,
-    };
-    let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
-    let month_days = match mo {
-        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
-        4 | 6 | 9 | 11 => 30,
-        2 if leap => 29,
-        2 => 28,
-        _ => return None,
-    };
-    if !(1..=month_days).contains(&d) || h > 23 || mi > 59 || sec > 60 {
-        return None;
-    }
-    // days from the civil date (Howard Hinnant's algorithm)
-    let yy = if mo <= 2 { y - 1 } else { y };
-    let era = yy.div_euclid(400);
-    let yoe = yy - era * 400;
-    let mp = (mo + 9) % 12;
-    let doy = (153 * mp + 2) / 5 + d - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    let days = era * 146_097 + doe - 719_468;
-    let secs = days * 86_400 + h * 3_600 + mi * 60 + sec - offset_min * 60;
-    Some(secs * 1_000 + ms)
 }
 
 /// One graph extent row as the rebuild judges it: id, range, content hash and liveness.

@@ -262,13 +262,13 @@ impl KabanApi {
         report.push("text_index", true, "catalog");
         match &metadata {
             Ok(meta) => {
-                let current =
-                    meta.get("ident_terms_version") == Some(kaban_core::ident::IDENT_TERMS_VERSION);
+                let current = meta.get("ident_terms_version")
+                    == Some(kaban_core::ident::TEXT_ANALYZER_VERSION);
                 report.push(
                     "ident_terms_version",
                     current,
                     if current {
-                        kaban_core::ident::IDENT_TERMS_VERSION
+                        kaban_core::ident::TEXT_ANALYZER_VERSION
                     } else {
                         "not current; run kaban reindex text"
                     },

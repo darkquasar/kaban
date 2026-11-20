@@ -2,23 +2,40 @@
 #![allow(clippy::unwrap_used)]
 
 use kaban_api::{BudgetSource, RunFlags, budgets};
-use kaban_core::Producer;
 use kaban_core::config::EngineConfig;
+use kaban_core::{Actor, ActorId, MemoryStore, NewNode, Producer, WorkspaceId, WriteCtx};
 use kaban_store_sqlite::{ProducerRunOutcome, SqliteStore};
 use serde_json::{Value, json};
 use std::fmt::Write;
-use std::process::Command;
-use std::time::Duration;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 mod common;
 
 fn stats_cli(scratch: &common::Scratch, args: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_kaban"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_kaban"))
+        .current_dir(&scratch.0)
         .env("KABAN_HOME", scratch.home())
         .args(["--json", "--db", scratch.db().to_str().unwrap(), "stats"])
         .args(args)
-        .output()
-        .unwrap()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let timed_out = loop {
+        if child.try_wait().unwrap().is_some() {
+            break false;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            break true;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let output = child.wait_with_output().unwrap();
+    assert!(!timed_out, "stats timed out: {output:?}");
+    output
 }
 
 #[test]
@@ -31,7 +48,7 @@ fn tool_resource_and_cli_share_the_producers_and_preserve_old_fields() {
             .record_producer_run(Producer::Gazetteer, 42, ProducerRunOutcome::Failed)
             .unwrap();
     }
-    let mut server = common::Server::start(&scratch);
+    let mut server = common::Server::start_at(&scratch, &scratch.0);
     let id = server.request("tools/call", &json!({"name":"stats","arguments":{}}));
     let result = server.response(id, Duration::from_secs(10)).unwrap();
     assert_ne!(result["result"]["isError"], true, "{result}");
@@ -55,12 +72,14 @@ fn tool_resource_and_cli_share_the_producers_and_preserve_old_fields() {
         "schema_version",
         "policy",
         "stores",
+        "indexes",
     ] {
         assert!(tool.get(field).is_some(), "missing {field}: {tool}");
         assert_eq!(tool[field], resource[field], "{field}");
         assert_eq!(tool[field], cli[field], "{field}");
     }
     for value in [&tool, &resource, &cli] {
+        assert!(value.get("index_container").is_none(), "{value}");
         assert!(value["db_bytes"].as_u64().is_some_and(|bytes| bytes > 0));
         // seven rows (PC-16): authored, hook_events, document_ingest, gazetteer, extractor,
         // scip_import, git_history; no `layers` matrix
@@ -83,6 +102,96 @@ fn tool_resource_and_cli_share_the_producers_and_preserve_old_fields() {
         "producers_default",
         serde_json::to_string_pretty(&tool["producers"]).unwrap()
     );
+}
+
+/// Count canonical records even when rebuilding their index would exceed the budget.
+fn inspect_degraded_project(projection_marker: Option<&str>) {
+    let scratch = common::Scratch::new("kaban-stats", projection_marker.unwrap_or("missing"));
+    let store = SqliteStore::open(&scratch.db(), &scratch.home().join("keys")).unwrap();
+    store
+        .remember(
+            NewNode {
+                kind: "Fact".to_owned(),
+                text: "quokka".to_owned(),
+                ..Default::default()
+            },
+            &[],
+            &WriteCtx::new(WorkspaceId::default(), Actor::Agent),
+        )
+        .unwrap();
+    drop(store);
+    let conn = rusqlite::Connection::open(scratch.db()).unwrap();
+    SqliteStore::bind_writer(&conn, &ActorId::default()).unwrap();
+    conn.execute(
+        "UPDATE node SET props=json_object('padding', ?1)",
+        ["x".repeat(8 << 20)],
+    )
+    .unwrap();
+    let container = scratch.0.join("kaban.kbx");
+    // Service startup would attempt to load this new ontology. An inspection of an
+    // existing project must still be able to describe the committed records.
+    std::fs::create_dir(scratch.0.join(".git")).unwrap();
+    let ontologies = scratch.0.join(".kaban/ontology");
+    std::fs::create_dir_all(&ontologies).unwrap();
+    std::fs::write(ontologies.join("invalid.yaml"), "ontology: [").unwrap();
+    let original_container = if let Some(marker) = projection_marker {
+        conn.execute(
+            "UPDATE index_meta SET value=?1 WHERE key='ident_terms_version'",
+            [marker],
+        )
+        .unwrap();
+        Some(std::fs::read(&container).unwrap())
+    } else {
+        std::fs::remove_file(&container).unwrap();
+        None
+    };
+    std::fs::write(
+        scratch.home().join("config.yaml"),
+        "catalog:\n  maintenance_memory_mib: 16\n",
+    )
+    .unwrap();
+    let output = stats_cli(&scratch, &["--workspace-id", "*"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    let stats: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(stats["nodes"], 1, "{stats}");
+    assert_eq!(stats["by_kind"]["Fact"], 1, "{stats}");
+    assert_eq!(stats["edges"], 0, "{stats}");
+    if let Some(expected) = projection_marker {
+        let marker: String = conn
+            .query_row(
+                "SELECT value FROM index_meta WHERE key='ident_terms_version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(marker, expected);
+        assert_eq!(Some(std::fs::read(&container).unwrap()), original_container);
+    } else {
+        assert!(!container.exists());
+        assert_eq!(stats["index_container"], "missing", "{stats}");
+    }
+    for text in [stderr.as_ref(), &stats.to_string()] {
+        assert!(
+            !text.contains("reindex") && !text.contains("repair"),
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn stats_counts_with_a_missing_container_and_leaves_it_missing() {
+    inspect_degraded_project(None);
+}
+
+#[test]
+fn stats_counts_with_a_stale_projection_and_leaves_it_stale() {
+    inspect_degraded_project(Some("old"));
+}
+
+#[test]
+fn stats_counts_with_a_pending_projection_and_leaves_it_pending() {
+    inspect_degraded_project(Some("pending"));
 }
 
 #[test]

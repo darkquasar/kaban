@@ -402,3 +402,63 @@ fn a_lease_lost_between_the_read_and_the_ack_leaves_the_cursor_and_a_rerun_re_co
     // the cursor moved; every counter is identical
     assert_eq!(stats_after, stats_before, "identical store state");
 }
+
+#[cfg(feature = "failpoints")]
+#[test]
+fn in_memory_compaction_keeps_the_change_tail_and_every_unread_change() {
+    use kaban_store_sqlite::catalog_testing;
+
+    for (consumers, expected) in [
+        (false, vec![4, 100_002, 100_003, 100_004]),
+        (true, vec![2, 3, 4, 100_002, 100_003, 100_004]),
+    ] {
+        let store = SqliteStore::open_memory().unwrap();
+        let mut nodes = Vec::new();
+        for i in 1..=6 {
+            nodes.push(created(&store, "Fact", &format!("retention row {i}")));
+        }
+        let start = nid(&nodes[0].id);
+        store
+            .link(
+                &start,
+                &nid(&nodes[1].id),
+                "RELATES_TO",
+                Some(0.75),
+                None,
+                &ctx(),
+            )
+            .unwrap();
+        let traversal = kaban_core::TraverseQuery {
+            start_ids: vec![start],
+            ..Default::default()
+        };
+        let graph = || serde_json::to_value(store.traverse(&traversal).unwrap()).unwrap();
+        let before = graph();
+        assert_eq!(before["edges"].as_array().unwrap().len(), 1);
+        // Leave a gap so the boundary can be exercised with seven genuine changes.
+        catalog_testing::corrupt(
+            &store,
+            "UPDATE changes SET seq = seq + 99997 WHERE seq >= 5; DELETE FROM projections",
+        )
+        .unwrap();
+        if consumers {
+            catalog_testing::corrupt(
+                &store,
+                "INSERT INTO projections(name, last_seq) VALUES('slow', 100002), ('fast', 100004)",
+            )
+            .unwrap();
+        }
+        store.compact().unwrap();
+        assert_eq!(seqs(&store), expected);
+        assert_eq!(graph(), before);
+        for node in nodes {
+            let stored = store.get(&nid(&node.id), false).unwrap().unwrap();
+            assert_eq!(
+                serde_json::to_value(stored).unwrap(),
+                serde_json::to_value(node).unwrap()
+            );
+        }
+        created(&store, "Fact", "after the retention pass");
+        assert_eq!(seqs(&store).last().copied(), Some(100_005));
+    }
+}

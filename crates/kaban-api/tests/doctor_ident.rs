@@ -7,7 +7,7 @@ use common::Scratch;
 use kaban_api::{DoctorContext, DoctorReport, KabanApi};
 use kaban_core::{
     Actor, DatabaseFileModes, IngestStore, MemoryStore, NewNode, NodeId, RememberOutcome,
-    WorkspaceId, WriteCtx, ident::IDENT_TERMS_VERSION,
+    WorkspaceId, WriteCtx, ident::TEXT_ANALYZER_VERSION,
 };
 use kaban_policy::Policy;
 use kaban_store_sqlite::{LATEST_SCHEMA_VERSION, SqliteStore};
@@ -57,7 +57,7 @@ fn current_and_noncurrent_markers_are_diagnosed_without_mutation_or_disclosure()
     let api = KabanApi::new(store.clone(), Policy::empty(), store.signer());
     let canary = "RAW_IDENT_METADATA_CANARY";
     for marker in [
-        Some(IDENT_TERMS_VERSION),
+        Some(TEXT_ANALYZER_VERSION),
         Some("0"),
         None,
         Some(canary),
@@ -76,9 +76,9 @@ fn current_and_noncurrent_markers_are_diagnosed_without_mutation_or_disclosure()
         let canonical = serde_json::to_value(store.get(&id, false).unwrap()).unwrap();
         let report = api.doctor(&context(&scratch));
         let row = ident_check(&report);
-        assert_eq!(row.ok, marker == Some(IDENT_TERMS_VERSION));
+        assert_eq!(row.ok, marker == Some(TEXT_ANALYZER_VERSION));
         if row.ok {
-            assert_eq!(row.detail, IDENT_TERMS_VERSION);
+            assert_eq!(row.detail, TEXT_ANALYZER_VERSION);
             assert!(report.ok, "{report:?}");
         } else {
             assert!(!report.ok);

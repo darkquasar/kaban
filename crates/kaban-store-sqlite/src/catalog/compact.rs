@@ -613,6 +613,24 @@ impl Catalog {
             self.record_refused(&mut step(conn), report.refused_units)?;
         }
         report.reclaim = self.reclaim(&mut step(conn))?;
+        self.commit(&mut step(conn), Durability::Normal, |txn| {
+            let conn = txn.conn();
+            crate::changelog::prune(conn, 100_000)?;
+            // The maximum allocates the next generation. Surviving catalog rows
+            // retain their publication and retirement generations. Active readers
+            // have their own SQL snapshot; detached readers hold their inputs.
+            conn.execute_batch(
+                "DELETE FROM cat_generation
+                 WHERE generation < (SELECT max(generation) FROM cat_generation)
+                   AND generation NOT IN (
+                     SELECT generation FROM cat_extent
+                     UNION ALL SELECT dead_since FROM cat_extent WHERE dead_since IS NOT NULL
+                     UNION ALL SELECT generation FROM cat_sediment
+                     UNION ALL SELECT dead FROM cat_sediment WHERE dead IS NOT NULL
+                   )",
+            )
+            .sql()
+        })?;
         report.vacuumed_pages = self.vacuum(&mut step(conn))?;
         report.checkpoint = self.checkpoint_if_due(&step(conn))?;
         Ok(report)

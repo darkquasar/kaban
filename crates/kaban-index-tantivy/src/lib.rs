@@ -28,9 +28,9 @@ mod writer;
 pub use crate::kbx_dir::has_segment;
 use crate::query::Weights;
 use crate::schema::{ACTIVE, Fields};
-pub use crate::writer::{merge, segment};
+pub use crate::writer::{merge, rebuild_batch, segment};
 use kaban_core::config::Recall;
-use kaban_core::query_budget::{BudgetExceeded, QueryBudget};
+use kaban_core::query_budget::{BudgetExceeded, BudgetLease, QueryBudget};
 use kaban_core::text_index::{IndexRow, Searched, TextIndex, TextQuery, TextSnapshot};
 use kaban_core::{BackendSource, Ontology, StoreError};
 use std::path::Path;
@@ -172,21 +172,110 @@ impl TantivyIndex {
         }
         drop((per_segment, found_with));
         hidden.sort_unstable();
+        self.search_reader(&searcher, q, &hidden, budget)
+    }
+
+    fn search_reader(
+        &self,
+        searcher: &tantivy::Searcher,
+        q: &TextQuery<'_>,
+        hidden: &[DocAddress],
+        budget: &QueryBudget,
+    ) -> Result<Searched> {
+        budget.check()?;
         let weights = self
             .weights
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
-        let out = query::run_hiding(&self.fields, &weights, &searcher, q, &hidden, budget)?;
+        let out = query::run_hiding(&self.fields, &weights, searcher, q, hidden, budget)?;
         budget.check()?;
         Ok(out)
     }
 }
 
-/// One row as a document: the keys, the filter fields, the four content fields and the fuzzy
-/// copy. The `ident_terms` field takes the five inputs of the identifier derivation (text, the
-/// stored summary, the tags, the `ident_fields` values, the anchor keys), each expanded by its
-/// analyzer; the FTS5 `tags` column is the JSON array, whose tokens are the tags' own.
+/// An immutable searcher over one owned sealed pack. The copied pack, reader and
+/// reservation have the same lifetime. A single pack has no older documents to hide.
+#[derive(Debug)]
+pub struct SealedReader {
+    searcher: tantivy::Searcher,
+    _charge: BudgetLease,
+}
+
+impl SealedReader {
+    /// Reservation for one small, owned pack. Postings, field norms, FSTs and term-info
+    /// tables slice the copied bytes. Three additional pack lengths cover decoded component
+    /// and skip tables. The fixed allowance covers the schema, all its per-field inverted
+    /// readers, tokenizers, directory and owner handles. No stored blocks are cached.
+    #[must_use]
+    pub const fn reservation(len: u64) -> Option<u64> {
+        if len <= 4 << 20 {
+            Some((768 << 10) + 4 * len)
+        } else {
+            None
+        }
+    }
+
+    /// Open a tier from the same descriptor the store observed under its pin, with a
+    /// reservation obtained before any allocation. The current query pays for transient
+    /// decoding and controls cancellation and the deadline. A malformed pack is unavailable.
+    ///
+    /// # Errors
+    /// Read, index, cancellation or deadline errors.
+    pub fn open(
+        mut file: std::fs::File,
+        span: kaban_core::text_index::ExtentSpan,
+        charge: BudgetLease,
+        budget: &QueryBudget,
+    ) -> kaban_core::Result<Option<Self>> {
+        use std::io::{Read as _, Seek as _, SeekFrom};
+
+        budget.check()?;
+
+        if Self::reservation(span.len).is_none_or(|bytes| charge.bytes() < bytes) {
+            return Ok(None);
+        }
+        let mut bytes = vec![0; usize::try_from(span.len).map_err(|_| Error::Corrupt("tier"))?];
+        file.seek(SeekFrom::Start(span.offset)).map_err(Error::Io)?;
+        file.read_exact(&mut bytes).map_err(Error::Io)?;
+        budget.check()?;
+        let opened = match kbx_dir::open(&[OwnedBytes::new(bytes)], budget) {
+            Ok(opened) => opened,
+            Err(error @ Error::Corrupt(_)) => {
+                tracing::error!(%error, "the catalog's text snapshot is unavailable");
+                return Ok(None);
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let reader: IndexReader = opened
+            .index
+            .reader_builder()
+            .reload_policy(ReloadPolicy::Manual)
+            .doc_store_cache_num_blocks(0)
+            .try_into()
+            .map_err(Error::Tantivy)?;
+        budget.check()?;
+        Ok(Some(Self {
+            searcher: reader.searcher(),
+            _charge: charge,
+        }))
+    }
+
+    /// Run a query with the adapter's current configuration and the caller's budget.
+    ///
+    /// # Errors
+    /// The search or budget error, as for the ordinary adapter.
+    pub fn search(
+        &self,
+        adapter: &TantivyIndex,
+        query: &TextQuery<'_>,
+        budget: &QueryBudget,
+    ) -> kaban_core::Result<Searched> {
+        search_result(adapter.search_reader(&self.searcher, query, &[], budget))
+    }
+}
+
+/// Project canonical content, code terms, whole names, and fuzzy surface forms.
 fn document(fields: &Fields, row: &IndexRow) -> TantivyDocument {
     let mut doc = TantivyDocument::default();
     doc.add_text(fields.id, &row.id);
@@ -202,19 +291,38 @@ fn document(fields: &Fields, row: &IndexRow) -> TantivyDocument {
     doc.add_text(text, &row.text);
     doc.add_text(summary, &row.summary);
     doc.add_text(tags, row.tags.join(" "));
+    for name in row.ident_values.iter().chain(&row.anchor_keys) {
+        doc.add_text(ident, name);
+        doc.add_text(fields.name, name);
+        doc.add_text(fields.fuzzy, name);
+    }
     for input in std::iter::once(&row.text)
-        .chain(row.stored_summary.as_ref())
+        .chain(std::iter::once(&row.summary))
         .chain(&row.tags)
         .chain(&row.ident_values)
         .chain(&row.anchor_keys)
     {
-        doc.add_text(ident, input);
+        doc.add_text(fields.code, input);
+    }
+    for token in identifier_tokens(row) {
+        doc.add_text(ident, token);
     }
     doc.add_text(fields.fuzzy, &row.text);
-    if let Some(stored) = &row.stored_summary {
-        doc.add_text(fields.fuzzy, stored);
+    doc.add_text(fields.fuzzy, &row.summary);
+    for tag in &row.tags {
+        doc.add_text(fields.fuzzy, tag);
     }
     doc
+}
+
+/// Preserve the configured identifier weight on identifier-shaped prose tokens.
+fn identifier_tokens(row: &IndexRow) -> impl Iterator<Item = &str> {
+    use kaban_core::ident::{QueryClass, classify};
+    std::iter::once(&row.text)
+        .chain(std::iter::once(&row.summary))
+        .chain(&row.tags)
+        .flat_map(|s| s.split_whitespace())
+        .filter(|token| classify(token) == QueryClass::Identifier)
 }
 
 /// The bytes [`document`] hands the writer for `row`: every value it adds, as often as it
@@ -222,18 +330,22 @@ fn document(fields: &Fields, row: &IndexRow) -> TantivyDocument {
 pub(crate) fn indexed_bytes(row: &IndexRow) -> u64 {
     let len = |s: &String| s.len() as u64;
     let tags: u64 = row.tags.iter().map(len).sum();
-    let stored = row.stored_summary.as_ref().map_or(0, len);
     let keys = [&row.id, &row.kind, &row.workspace_id]
         .into_iter()
         .map(len)
         .sum::<u64>();
     keys + ACTIVE.len() as u64
         + 3 * len(&row.text)
-        + len(&row.summary)
-        + 2 * stored
-        + 3 * tags
-        + row.ident_values.iter().map(len).sum::<u64>()
-        + row.anchor_keys.iter().map(len).sum::<u64>()
+        + 3 * len(&row.summary)
+        + 4 * tags
+        + row.tags.len().saturating_sub(1) as u64
+        + identifier_tokens(row).map(|s| s.len() as u64).sum::<u64>()
+        + 4 * row
+            .ident_values
+            .iter()
+            .chain(&row.anchor_keys)
+            .map(len)
+            .sum::<u64>()
 }
 
 impl TextIndex for TantivyIndex {
@@ -245,14 +357,18 @@ impl TextIndex for TantivyIndex {
         query: &TextQuery<'_>,
         budget: &QueryBudget,
     ) -> kaban_core::Result<Searched> {
-        match self.search_snapshot(at, query, budget) {
-            Ok(searched) => Ok(searched),
-            Err(error @ Error::Corrupt(_)) => {
-                tracing::error!(%error, "the catalog's text snapshot is unavailable");
-                Ok(Searched::Unavailable)
-            }
-            Err(error) => Err(error.into()),
+        search_result(self.search_snapshot(at, query, budget))
+    }
+}
+
+fn search_result(result: Result<Searched>) -> kaban_core::Result<Searched> {
+    match result {
+        Ok(searched) => Ok(searched),
+        Err(error @ Error::Corrupt(_)) => {
+            tracing::error!(%error, "the catalog's text snapshot is unavailable");
+            Ok(Searched::Unavailable)
         }
+        Err(error) => Err(error.into()),
     }
 }
 

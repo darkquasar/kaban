@@ -157,11 +157,11 @@ enum BenchCg {
     /// Kill children at catalog crash points, then recover and verify
     Crash(bench::crash::Args),
     /// The text index bench
-    Text,
+    Text(bench::text::Args),
     /// The memory graph bench
     Graph(bench::graph::Args),
     /// The rollup bench
-    Rollup,
+    Rollup(bench::rollup::Args),
     /// The query bench
     Query,
     /// The code graph bench
@@ -364,10 +364,21 @@ impl OpenError {
     }
 }
 
-/// Assemble the service for `serve` and `rescan`: the code-graph provider (its key read, never
+/// How a CLI command opens an existing project.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OpenMode {
+    Service,
+    Inspect,
+}
+
+/// Assemble the service: the code-graph provider (its key read, never
 /// created; a loose key is a config error before the store is opened), the store with its key
 /// and the bound workspace.
-fn open_api(cli: Cli, policy: kaban_policy::Policy) -> Result<kaban_api::KabanApi, OpenError> {
+fn open_api(
+    cli: Cli,
+    policy: kaban_policy::Policy,
+    mode: OpenMode,
+) -> Result<kaban_api::KabanApi, OpenError> {
     let home = kaban_home().map_err(OpenError::Other)?;
     // the code side of the join (stage1-plan CG5.2, G1-F8, G1-S7): the only place a provider
     // is built; hooks (`assemble_api` callers) never get one
@@ -385,20 +396,18 @@ fn open_api(cli: Cli, policy: kaban_policy::Policy) -> Result<kaban_api::KabanAp
     // (exit 4) naming the loader's category and the field path, never a value
     let engine = load_engine()?;
     // the store owns its text index (spec 11 T7): a class of its catalog, searchable at commit
-    let store = kaban_store_sqlite::SqliteStore::open_as(&cli.db, &keys_dir, &cli.actor_id)
+    let open = match mode {
+        OpenMode::Service => kaban_store_sqlite::SqliteStore::open_as,
+        OpenMode::Inspect => kaban_store_sqlite::SqliteStore::open_for_stats,
+    };
+    let store = open(&cli.db, &keys_dir, &cli.actor_id, engine.catalog.clone())
         .map_err(OpenError::Store)?
         .with_recall_config(engine.recall.clone())
-        .map_err(OpenError::Store)?
-        .with_catalog_config(engine.catalog.clone())
         .map_err(OpenError::Store)?;
+    let initialize = mode == OpenMode::Service || store.migration().from != store.migration().to;
     let store = Arc::new(store);
     let catalog = Arc::new(cli::compact::StoreCatalog(Arc::clone(&store)));
-    // the one registry of this process (engine-plan E1.5): the service reads every mixin
-    // decision from it, and `kaban ontology load` loads through it
-    let registry = kaban_api::OntologyRegistry::new(ontology_root()).map_err(open_error)?;
-    let api = assemble_api_with(cli, policy, store, engine)?
-        .with_registry(Arc::new(registry))
-        .with_catalog(catalog);
+    let api = assemble_api_with(cli, policy, store, engine)?.with_catalog(catalog);
     let api = match codegraph {
         Some(wiring) => api.with_snapshot_provider(wiring.dir, wiring.provider),
         None => api,
@@ -406,7 +415,12 @@ fn open_api(cli: Cli, policy: kaban_policy::Policy) -> Result<kaban_api::KabanAp
     // the startup ontology load (engine-spec EN-F2): `.kaban/ontology/*.yaml` of the enclosing
     // repository in sorted path order; hooks (`assemble_api` callers) skip it, as they never
     // create or migrate anything either
-    load_ontologies(&api)?;
+    if initialize {
+        let registry = kaban_api::OntologyRegistry::new(ontology_root()).map_err(open_error)?;
+        let api = api.with_registry(Arc::new(registry));
+        load_ontologies(&api)?;
+        return Ok(api);
+    }
     Ok(api)
 }
 

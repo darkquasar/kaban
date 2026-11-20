@@ -15,6 +15,12 @@ use serde_json::Value;
 /// `stats` tool. Used by the service layer's remember/query/mutate paths, the MCP adapter and
 /// the bench.
 pub trait MemoryStore: Send + Sync {
+    /// Read a declared aggregate for the ordered, typed group key.
+    /// A group with no members counts zero and sums to NULL.
+    ///
+    /// # Errors
+    /// An unknown rollup, an invalid key, or a storage error.
+    fn rollup(&self, name: &str, key: &[crate::SqlValue]) -> Result<crate::SqlValue>;
     /// Store a node and its inline links atomically; exact duplicates return
     /// `Existing`.
     ///

@@ -22,6 +22,9 @@ const WRITER_BASE_BYTES: u64 = 12 << 20;
 /// runs (measured: under 1 for prose, about 3 for words no other row holds; the growth past the
 /// reservation is charged per document).
 const WRITER_BYTES_PER_INPUT_BYTE: u64 = 1;
+/// Target at most 1 MiB of projected fields per rebuild writer. High-cardinality input
+/// grows the term and posting arenas while earlier batch packs are still in memory.
+const REBUILD_BATCH_INPUT_BYTES: u64 = 1 << 20;
 
 #[cfg(test)]
 thread_local! {
@@ -45,15 +48,49 @@ pub fn segment(
     tombstones: &[i64],
     budget: &QueryBudget,
 ) -> kaban_core::Result<Vec<u8>> {
-    Ok(build_segment(rows, tombstones, budget)?)
+    let input = rows.iter().map(crate::indexed_bytes).sum();
+    Ok(build_segment(rows, tombstones, input, budget)?)
 }
 
-fn build_segment(rows: &[IndexRow], tombstones: &[i64], budget: &QueryBudget) -> Result<Vec<u8>> {
+/// Index the first rebuild batch and return its pack and the remaining rows. The row and
+/// projected-byte targets bound each batch. A single larger row is indexed whole under
+/// the same budget. Empty input produces an empty pack.
+///
+/// # Errors
+/// The budget's refusal or a Tantivy failure.
+pub fn rebuild_batch<'a>(
+    rows: &'a [IndexRow],
+    max_rows: usize,
+    budget: &QueryBudget,
+) -> kaban_core::Result<(Vec<u8>, &'a [IndexRow])> {
+    let mut input = 0u64;
+    let mut count = 0;
+    for row in rows.iter().take(max_rows.max(1)) {
+        budget.check()?;
+        let next = input.saturating_add(crate::indexed_bytes(row));
+        if count != 0 && next > REBUILD_BATCH_INPUT_BYTES {
+            break;
+        }
+        input = next;
+        count += 1;
+        if input >= REBUILD_BATCH_INPUT_BYTES {
+            break;
+        }
+    }
+    let (batch, remaining) = rows.split_at(count);
+    Ok((build_segment(batch, &[], input, budget)?, remaining))
+}
+
+fn build_segment(
+    rows: &[IndexRow],
+    tombstones: &[i64],
+    input: u64,
+    budget: &QueryBudget,
+) -> Result<Vec<u8>> {
     let ram = RamDirectory::create();
     if rows.is_empty() {
         return kbx_dir::encode(tombstones, None, &ram, budget);
     }
-    let input = rows.iter().map(crate::indexed_bytes).sum::<u64>();
     let mut held = budget.reserve(
         input
             .saturating_mul(WRITER_BYTES_PER_INPUT_BYTE)

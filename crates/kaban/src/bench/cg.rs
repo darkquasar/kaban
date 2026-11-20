@@ -559,7 +559,12 @@ impl Session {
         };
         drop(first);
 
-        let store = Arc::new(SqliteStore::open_as(db, keys, actor)?);
+        let store = Arc::new(SqliteStore::open_as(
+            db,
+            keys,
+            actor,
+            kaban_core::config::CatalogCfg::default(),
+        )?);
         let signer = store.signer();
         let api = KabanApi::with_config(
             store,

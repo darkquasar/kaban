@@ -27,6 +27,8 @@ use std::sync::Arc;
 pub enum MatchMode {
     /// Term matching with the adapter's analyzer and ranking (FTS5: BM25 over `node_fts`).
     Lexical,
+    /// Whole, case-folded identifier lookup.
+    Exact,
     /// Misspelling-tolerant matching.
     Fuzzy,
 }
@@ -170,7 +172,7 @@ impl<T: TextIndex + ?Sized> TextIndex for Arc<T> {
 /// the searchable inputs. `summary` is the record's `fts_fields` projection, computed by the
 /// store exactly as the FTS5 `summary` column is; `ident_values` and `anchor_keys` are the
 /// identifier inputs beside text, summary and tags, so the adapter derives the identifier terms
-/// with [`crate::ident::ident_terms`] and never reads a derived column.
+/// with [`crate::ident::split_terms`] and never reads a derived column.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndexRow {
     /// The record UUID.
@@ -190,7 +192,7 @@ pub struct IndexRow {
     /// The projected summary (stored summary plus the kind's `fts_fields`): the FTS5 `summary`
     /// column's text.
     pub summary: String,
-    /// The stored summary as written: the identifier derivation's and the fuzzy index's input.
+    /// The stored summary as written, before projection adds the kind's declared text fields.
     pub stored_summary: Option<String>,
     /// The values of the kind's `ident_fields`.
     pub ident_values: Vec<String>,
@@ -223,7 +225,7 @@ pub mod fake {
             _budget: &QueryBudget,
         ) -> Result<Searched> {
             let hits = match query.mode {
-                MatchMode::Lexical => &self.lexical,
+                MatchMode::Lexical | MatchMode::Exact => &self.lexical,
                 MatchMode::Fuzzy => &self.fuzzy,
             };
             Ok(hits.as_ref().map_or(Searched::Unavailable, |all| {

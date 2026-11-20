@@ -27,6 +27,189 @@ fn ctx() -> WriteCtx {
     WriteCtx::new(WorkspaceId::default(), Actor::Agent)
 }
 
+#[test]
+fn phase_close_refuses_a_rollup_contribution_after_the_freeze() {
+    let store = SqliteStore::open_memory().unwrap();
+    // Present the phase-close check with a queued contribution. It must detect it
+    // independently of the authorizer that normally prevents the late write.
+    for phase in [super::phase::Phase::Derived, super::phase::Phase::Stage] {
+        let result = store.catalog().commit(&mut store.lock(), Durability::Normal, |txn| {
+            txn.conn().execute("INSERT INTO main.rollup_input(name,key,delta,real_sum) VALUES ('late',NULL,0,0)", []).unwrap();
+            let phases = super::phase::Phases::default();
+            let guard = phases.enter();
+            guard.set(phase);
+            guard.close(txn.conn(), Ok(()))
+        });
+        assert!(
+            result.is_err(),
+            "a contribution after freeze must refuse {phase:?}"
+        );
+        assert_eq!(count(&store.lock(), "SELECT count(*) FROM rollup_input"), 0);
+    }
+}
+
+#[test]
+fn the_scoped_body_reader_returns_the_hot_bytes_from_the_current_commit() {
+    let (store, [(_, rid), _]) = store_with_two_nodes();
+    let body = "A harbour ünicode body. ".repeat(256);
+    let expected = body.clone();
+    store
+        .catalog()
+        .set_test_derived_rows(Box::new(move |derived, _| {
+            assert_eq!(
+                crate::body_codec::read_body(&derived.reader(), rid)?,
+                expected.as_bytes()
+            );
+            assert!(matches!(
+                crate::body_codec::read_body(&derived.reader(), -1),
+                Err(StoreError::NotFound(_))
+            ));
+            Ok(())
+        }));
+    store
+        .catalog()
+        .commit(&mut store.lock(), Durability::Normal, |txn| {
+            let bytes = crate::body_codec::Writer::for_connection(txn.conn())?.stored(&body);
+            txn.conn()
+                .execute(
+                    "UPDATE node SET text=? WHERE rid=?",
+                    rusqlite::params![bytes, rid],
+                )
+                .unwrap();
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn the_scoped_body_reader_distinguishes_cold_references_from_hot_and_corrupt_values() {
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute("CREATE TABLE node(rid INTEGER PRIMARY KEY, text)", [])
+        .unwrap();
+    let phases = super::phase::Phases::default();
+    let reader = super::phase::Reader::new(&conn, &phases);
+    let read = |stored: &dyn rusqlite::ToSql| {
+        conn.execute("INSERT OR REPLACE INTO node VALUES (1, ?)", [stored])
+            .unwrap();
+        crate::body_codec::read_body(&reader, 1)
+    };
+    let mut reference = vec![0, b'K', b'Z', 2, 0];
+    reference.extend_from_slice(&42_i64.to_le_bytes());
+    reference.extend_from_slice(&0_u32.to_le_bytes());
+    assert!(matches!(read(&reference), Err(StoreError::ColdTierAbsent)));
+
+    let compressed = "a body that benefits from compression ".repeat(50);
+    for (body, format) in [("x", 0), (compressed.as_str(), 1)] {
+        let blob = crate::body_codec::encode(body.as_bytes());
+        assert_eq!(blob[3], format);
+        assert_eq!(read(&blob).unwrap(), body.as_bytes());
+    }
+    let legacy = std::str::from_utf8(&reference).unwrap();
+    assert_eq!(
+        read(&legacy).unwrap(),
+        reference,
+        "TEXT is always plaintext"
+    );
+
+    let mut bad_header = reference.clone();
+    bad_header[4] = 1;
+    let mut unknown = reference.clone();
+    unknown[3] = 9;
+    let mut invalid_extent = reference.clone();
+    invalid_extent[5..13].fill(0);
+    let mut trailing = reference.clone();
+    trailing.push(0);
+    let mut bad_hot = crate::body_codec::encode(b"x");
+    bad_hot.pop();
+    for (blob, reason) in [
+        (reference[..4].to_vec(), "corrupt body payload"),
+        (
+            reference[..reference.len() - 1].to_vec(),
+            "corrupt body payload",
+        ),
+        (bad_header, "corrupt body payload"),
+        (unknown, "unknown body format 9"),
+        (invalid_extent, "corrupt body payload"),
+        (trailing, "corrupt body payload"),
+        (bad_hot, "corrupt body payload"),
+    ] {
+        let Err(StoreError::Backend { source }) = read(&blob) else {
+            panic!("expected a conversion failure for {blob:?}");
+        };
+        assert!(source.driver().to_string().contains(reason), "{blob:?}");
+    }
+}
+
+#[test]
+fn get_and_sql_recognize_the_same_stored_cold_body() {
+    let fixture = FileStore::new("cold-body");
+    let store = &fixture.store;
+    let RememberOutcome::Created(node) = store
+        .remember(
+            NewNode {
+                kind: "Fact".into(),
+                text: "hot body".into(),
+                ..Default::default()
+            },
+            &[],
+            &ctx(),
+        )
+        .unwrap()
+    else {
+        panic!("fresh fact");
+    };
+    let id = NodeId::parse(&node.id).unwrap();
+    let rid = rid(&store.lock(), &node.id);
+    // Install the on-disk fixture without adding a producer for the deferred cold tier.
+    let disk = Connection::open(fixture.dir.join("kaban.db")).unwrap();
+    crate::stamp::bind(&disk, &kaban_core::ActorId::default()).unwrap();
+    let mut reference = vec![0, b'K', b'Z', 2, 0];
+    reference.extend_from_slice(&8_i64.to_le_bytes());
+    reference.extend_from_slice(&3_u32.to_le_bytes());
+    let put = |value: &[u8]| {
+        disk.execute(
+            "UPDATE node SET text=? WHERE rid=?",
+            rusqlite::params![value, rid],
+        )
+        .unwrap();
+    };
+    let sql_body = || {
+        store.lock().query_row(
+            "SELECT kaban_body(text) FROM node WHERE rid=?",
+            [rid],
+            |row| row.get::<_, String>(0),
+        )
+    };
+    put(&reference);
+    assert!(matches!(
+        store.get(&id, false),
+        Err(StoreError::ColdTierAbsent)
+    ));
+    assert!(
+        sql_body()
+            .unwrap_err()
+            .to_string()
+            .contains("cold_tier_absent")
+    );
+
+    reference.pop();
+    put(&reference);
+    assert!(matches!(
+        store.get(&id, false),
+        Err(StoreError::Backend { .. })
+    ));
+    assert!(
+        sql_body()
+            .unwrap_err()
+            .to_string()
+            .contains("corrupt body payload")
+    );
+
+    put(&crate::body_codec::encode(b"x"));
+    assert_eq!(store.get(&id, false).unwrap().unwrap().text, "x");
+    assert_eq!(sql_body().unwrap(), "x");
+}
+
 /// A fresh in-memory store with two nodes; their ids and `rid`s.
 fn store_with_two_nodes() -> (SqliteStore, [(String, i64); 2]) {
     let store = SqliteStore::open_memory().unwrap();
@@ -2037,4 +2220,39 @@ fn a_replaced_run_with_a_gap_in_its_own_class_is_refused() {
     };
     let text = source.driver().to_string();
     assert!(text.contains("is not consecutive"), "{text}");
+}
+
+#[test]
+fn writes_before_and_after_replacing_a_rollup_count_once_in_the_final_declaration() {
+    use crate::sql_error::SqlResultExt;
+    use kaban_core::{SchemaStore, SqlValue, TypeDef};
+    let store = SqliteStore::open_memory().unwrap();
+    let mut def: TypeDef = serde_json::from_value(serde_json::json!({
+        "kind":"label", "name":"Counter", "description":"counter", "columns":[{"name":"n","ty":"integer"}],
+        "rollups":[{"name":"total","label":"Counter","op":"count"}]
+    })).unwrap();
+    store.schema_extend(def.clone()).unwrap();
+    store
+        .remember(
+            NewNode {
+                kind: "Counter".into(),
+                text: "counter".into(),
+                props: Some(serde_json::json!({"n":1})),
+                ..Default::default()
+            },
+            &[],
+            &ctx(),
+        )
+        .unwrap();
+    def.declaration.rollups[0].op = kaban_core::ontology::RollupOp::Sum("n".into());
+    store
+        .catalog()
+        .commit(&mut store.lock(), Durability::Normal, |txn| {
+            txn.conn().execute("UPDATE col_Counter SET n=5", []).sql()?;
+            crate::ontology::extend(txn, &def, "2026-11-20T00:00:00Z")?;
+            txn.conn().execute("UPDATE col_Counter SET n=7", []).sql()?;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(store.rollup("total", &[]).unwrap(), SqlValue::Integer(7));
 }

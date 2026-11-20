@@ -55,16 +55,30 @@ impl TypeTable {
 
     /// The projection [`row_typedef`] decodes: the stored name is rebuilt from `(ns, name)` by
     /// the decoder, and `ns` is `NULL` on the old shape (derived by the API layer there).
-    const fn columns(self) -> &'static str {
-        match self {
+    fn columns(self, conn: &Connection) -> Result<&'static str> {
+        Ok(match self {
             Self::Stored => {
-                "kind, name, description, from_kinds, to_kinds, directed, props_schema, builtin, NULL, NULL, NULL, NULL, NULL, NULL"
+                "kind, name, description, from_kinds, to_kinds, directed, props_schema, builtin, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL"
+            }
+            Self::Qualified if !has_declared_columns(conn)? => {
+                "kind, name, description, from_kinds, to_kinds, directed, props_schema, builtin, ns, rules, rank, column_weights, extract, display, NULL, NULL, fts_fields"
             }
             Self::Qualified => {
-                "kind, name, description, from_kinds, to_kinds, directed, props_schema, builtin, ns, rules, rank, column_weights, extract, display"
+                "kind, name, description, from_kinds, to_kinds, directed, props_schema, builtin, ns, rules, rank, column_weights, extract, display, columns, rollups, fts_fields"
             }
-        }
+        })
     }
+}
+
+/// As-is opens may inspect the supported format from before typed declarations.
+pub(crate) fn has_declared_columns(conn: &Connection) -> Result<bool> {
+    conn.query_row(
+        // MAX returns NULL for a missing table, which the bool conversion reports as a storage error.
+        "SELECT max(name='columns') FROM pragma_table_info('schema_type')",
+        [],
+        |row| row.get(0),
+    )
+    .sql()
 }
 
 /// One builtin `schema_type` row resolved from the shipped files: identity, description, the
@@ -210,6 +224,15 @@ pub(crate) fn seed(conn: &Connection, now: &str) -> Result<()> {
             }
         }
         TypeTable::Qualified => {
+            // The open transaction already holds the write lock. A project written before
+            // typed declarations has the same supported schema version and keeps its data.
+            // Once a declaration installs expression indexes or triggers using this adapter's
+            // functions, writers and integrity checks require a binary registering those functions.
+            // Earlier v14 binaries have no feature gate for these newer declarations.
+            if !has_declared_columns(conn)? {
+                conn.execute_batch("ALTER TABLE schema_type ADD COLUMN columns TEXT; ALTER TABLE schema_type ADD COLUMN rollups TEXT;").sql()?;
+            }
+            conn.execute_batch(crate::rollup::TABLES).sql()?;
             let mut st = conn.prepare_cached(&format!(
                 "INSERT OR IGNORE INTO schema_type({BUILTIN_COLS}, builtin, created_at) VALUES ({BUILTIN_BINDS}, 1, ?)"
             )).sql()?;
@@ -295,7 +318,7 @@ pub(crate) fn rel_def(conn: &Connection, stored_rel: &str) -> Result<Option<Type
     let (where_sql, binds) = locate(table, "rel", stored_rel);
     conn.prepare_cached(&format!(
         "SELECT {} FROM schema_type WHERE {where_sql}",
-        table.columns()
+        table.columns(conn)?
     ))
     .sql()?
     .query_row(rusqlite::params_from_iter(binds), row_typedef)
@@ -309,7 +332,7 @@ pub(crate) fn all_defs(conn: &Connection) -> Result<Vec<TypeDef>> {
     let mut defs = conn
         .prepare_cached(&format!(
             "SELECT {} FROM schema_type ORDER BY kind, builtin DESC, name",
-            table.columns()
+            table.columns(conn)?
         ))
         .sql()?
         .query_map([], row_typedef)
@@ -324,7 +347,17 @@ pub(crate) fn all_defs(conn: &Connection) -> Result<Vec<TypeDef>> {
 /// Insert or refresh the user definition `def` (validated by the caller): `ON CONFLICT` of the
 /// table's primary key, never touching a builtin row. `Ok(false)` when nothing changed because
 /// the row is builtin.
-pub(crate) fn extend(conn: &Connection, def: &TypeDef, now: &str) -> Result<bool> {
+pub(crate) fn extend(
+    txn: &mut crate::catalog::commit::Txn<'_>,
+    def: &TypeDef,
+    now: &str,
+) -> Result<bool> {
+    let conn = txn.conn();
+    let existing = all_defs(conn)?;
+    let old = existing
+        .iter()
+        .find(|previous| previous.kind == def.kind && previous.name == def.name);
+    crate::rollup::validate(def, &existing)?;
     let from = serde_json::to_string(&def.from_kinds)?;
     let to = serde_json::to_string(&def.to_kinds)?;
     let schema = def.props_schema.as_ref().map(ToString::to_string);
@@ -358,15 +391,32 @@ pub(crate) fn extend(conn: &Connection, def: &TypeDef, now: &str) -> Result<bool
             }
             let [rules, rank, column_weights, extract, display] = def.declaration.texts();
             conn.execute(
-                "INSERT INTO schema_type(ns, kind, name, description, from_kinds, to_kinds, directed, props_schema, builtin, created_at, rules, rank, column_weights, extract, display) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)
+                "INSERT INTO schema_type(ns, kind, name, description, from_kinds, to_kinds, directed, props_schema, builtin, created_at, rules, rank, column_weights, extract, display, columns, rollups, fts_fields) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                  ON CONFLICT(ns, kind, name) DO UPDATE SET description = excluded.description, from_kinds = excluded.from_kinds, to_kinds = excluded.to_kinds, directed = excluded.directed, props_schema = excluded.props_schema,
-                   rules = excluded.rules, rank = excluded.rank, column_weights = excluded.column_weights, extract = excluded.extract, display = excluded.display
+                   rules = excluded.rules, rank = excluded.rank, column_weights = excluded.column_weights, extract = excluded.extract, display = excluded.display,
+                   columns = excluded.columns, rollups = excluded.rollups, fts_fields = excluded.fts_fields
                  WHERE schema_type.builtin = 0",
-                params![ns, def.kind, bare, def.description, from, to, i64::from(def.directed), schema, now, rules, rank, column_weights, extract, display],
+                params![ns, def.kind, bare, def.description, from, to, i64::from(def.directed), schema, now, rules, rank, column_weights, extract, display,
+                    serde_json::to_string(&def.declaration.columns)?, serde_json::to_string(&def.declaration.rollups)?, serde_json::to_string(&def.declaration.fts_fields)?],
             )
             .sql()?
         }
     };
+    if changed > 0 && def.kind == "label" {
+        let empty = TypeDeclaration::default();
+        let previous = old.map_or(&empty, |d| &d.declaration);
+        if previous.columns != def.declaration.columns
+            || previous.rollups != def.declaration.rollups
+        {
+            crate::rollup::declare(conn, &def.name, previous, &def.declaration)?;
+        }
+        if (previous.fts_fields != def.declaration.fts_fields
+            || !def.declaration.fts_fields.is_empty())
+            && crate::ident::deploy_label_text(conn, &def.name, &def.declaration.fts_fields)?
+        {
+            txn.reproject_text(&def.name);
+        }
+    }
     Ok(changed > 0)
 }
 

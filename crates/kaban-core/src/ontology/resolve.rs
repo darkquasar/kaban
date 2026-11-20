@@ -109,6 +109,10 @@ impl FromIterator<Ns> for NamespaceSet {
 /// A kind after inheritance and mixins.
 #[derive(Debug, Clone)]
 pub struct ResolvedKind {
+    /// Typed columns of this label.
+    pub columns: Vec<super::ColumnDecl>,
+    /// Named aggregates for this label.
+    pub rollups: Vec<super::RollupDecl>,
     /// Identity.
     pub id: Qualified,
     /// Human description (required on a kind).
@@ -430,6 +434,9 @@ pub fn resolve_with(
         if body.is_a.is_some() || !body.mixins.is_empty() {
             return Err(conflict(q, "mixin_is_a"));
         }
+        if !body.columns.is_empty() || !body.rollups.is_empty() {
+            return Err(conflict(q, "mixin_label_declaration"));
+        }
         if let Some(schema) = &body.props_schema {
             Schema::parse(schema, limits)?;
         }
@@ -600,6 +607,8 @@ fn resolve_kind(
         .ok_or_else(|| file_error(&path("description")))?;
     let mut merged = MergedSchema::default();
     let mut resolved = ResolvedKind {
+        columns: body.columns.clone(),
+        rollups: body.rollups.clone(),
         id: q.clone(),
         description,
         is_a: None,

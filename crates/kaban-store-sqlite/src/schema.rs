@@ -348,6 +348,7 @@ mod tests {
             [],
         )
         .unwrap();
+        crate::stamp::ensure_pack_lineage(&conn).unwrap();
         let insert = |id: &str| -> i64 {
             conn.execute(
                 "INSERT INTO node(id, kind, text, created_at, updated_at, workspace_id, content_hash)

@@ -7,9 +7,8 @@
 //!
 //! The triggers and the queue are TEMP objects of the writer connection: created at open,
 //! never stored in the database file, they see exactly the writes of that connection. An update
-//! trigger fires on the canonical columns only: the writer stamp (`actor_id`, `instance_id`,
-//! `pack_lineage_id`, which `changes_stamp` sets after every change-log row) is not a change of
-//! its own.
+//! trigger fires on the canonical columns only. After a change-log insert, `changes_stamp`
+//! copies the `writer_id` reference to the canonical row without queuing another change.
 //!
 //! Writes the AFTER triggers cannot see are refused or captured, never lost: SQLite fires no
 //! delete trigger for a row a REPLACE conflict removes (recursive triggers stay off: the stamp
@@ -107,6 +106,7 @@ pub(crate) struct EdgeChange {
 /// The frozen change set of one commit, in capture order.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct BatchChanges {
+    pub(crate) rollups: Vec<crate::rollup::Input>,
     nodes: Vec<NodeChange>,
     edges: Vec<EdgeChange>,
 }
@@ -245,7 +245,18 @@ fn capture_ddl() -> String {
 /// # Errors
 /// SQLite errors.
 pub(crate) fn install(conn: &Connection) -> Result<()> {
-    conn.execute_batch(&capture_ddl()).sql()
+    crate::rollup::register(conn)?;
+    conn.execute_batch(&capture_ddl()).sql()?;
+    let rollups = if crate::rollup::installed(conn)? {
+        " UNION ALL SELECT 1 FROM main.rollup_input"
+    } else {
+        ""
+    };
+    conn.execute_batch(&format!(
+        "CREATE TEMP VIEW IF NOT EXISTS cat_pending_capture AS
+        SELECT 1 FROM temp.cat_capture{rollups}"
+    ))
+    .sql()
 }
 
 /// Discard whatever the queue holds: the end of every drain. Every row write of the writer
@@ -264,7 +275,10 @@ pub(crate) fn reset(conn: &Connection) -> Result<()> {
 /// # Errors
 /// SQLite errors, or a queue row this module did not write.
 pub(crate) fn drain(conn: &Connection) -> Result<BatchChanges> {
-    let mut changes = BatchChanges::default();
+    let mut changes = BatchChanges {
+        rollups: crate::rollup::drain(conn)?,
+        ..BatchChanges::default()
+    };
     {
         let mut stmt = conn
             .prepare(
@@ -347,15 +361,13 @@ mod tests {
                created_at TEXT, updated_at TEXT, valid_from TEXT, valid_to TEXT,
                source_session TEXT, agent_id TEXT, workspace_id TEXT, props TEXT,
                content_hash TEXT, lifecycle TEXT, store_scope TEXT, path_scope TEXT, rev INTEGER,
-               dup_key TEXT, repo TEXT, commit_sha TEXT, session_id TEXT, actor_id TEXT,
-               instance_id TEXT, pack_lineage_id TEXT);
+               dup_key TEXT, repo TEXT, commit_sha TEXT, session_id TEXT, writer_id INTEGER);
              CREATE TABLE edge(id TEXT PRIMARY KEY,
                src INTEGER NOT NULL REFERENCES node(rid) ON DELETE CASCADE,
                dst INTEGER NOT NULL REFERENCES node(rid) ON DELETE CASCADE,
                rel TEXT NOT NULL, confidence REAL, created_at TEXT, props TEXT,
                workspace_id TEXT, producer TEXT, method TEXT, score REAL, source_id TEXT,
-               offset INTEGER, len INTEGER, actor_id TEXT, instance_id TEXT,
-               pack_lineage_id TEXT, UNIQUE(src, dst, rel));",
+               offset INTEGER, len INTEGER, writer_id INTEGER, UNIQUE(src, rel, dst));",
         )
         .unwrap();
         install(&conn).unwrap();
@@ -428,8 +440,8 @@ mod tests {
 
         // Act: a stamp on both tables, then a lifecycle change and a moved edge
         conn.execute_batch(
-            "UPDATE node SET actor_id = 'x' WHERE rid = 1;
-             UPDATE edge SET actor_id = 'x' WHERE id = 'a';
+            "UPDATE node SET writer_id = 7 WHERE rid = 1;
+             UPDATE edge SET writer_id = 7 WHERE id = 'a';
              UPDATE node SET lifecycle = 'archived' WHERE rid = 1;
              UPDATE edge SET dst = 1, src = 2 WHERE id = 'a';",
         )
@@ -609,8 +621,8 @@ mod tests {
                ON CONFLICT DO NOTHING;
              INSERT OR IGNORE INTO edge(id, src, dst, rel, producer)
                VALUES ('a', 1, 2, 'RELATES_TO', 'rules');
-             UPDATE edge SET actor_id = 'x' WHERE id = 'a';
-             UPDATE node SET actor_id = 'x' WHERE rid = 1;",
+             UPDATE edge SET writer_id = 7 WHERE id = 'a';
+             UPDATE node SET writer_id = 7 WHERE rid = 1;",
         )
         .unwrap();
         let changes = drain(&conn).unwrap();

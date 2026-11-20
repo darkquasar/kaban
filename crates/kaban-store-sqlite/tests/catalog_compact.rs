@@ -854,3 +854,72 @@ fn compaction_ticks_the_checkpoint_only_once_its_interval_elapsed() {
     assert!(first.checkpoint.is_some(), "{first:?}");
     assert_eq!(second.checkpoint, None, "{second:?}");
 }
+
+#[test]
+fn generation_retention_preserves_references_and_readers_across_compaction() {
+    let scratch = Scratch::new("kaban-compact", "retained-generations");
+    let reader = SqliteStore::open(&scratch.db(), &scratch.keys()).unwrap();
+    let writer = SqliteStore::open(&scratch.db(), &scratch.keys()).unwrap();
+    let extent = catalog_testing::append_and_publish(&writer, b"pinned extent").unwrap();
+    let conn = rusqlite::Connection::open(scratch.db()).unwrap();
+    let extent_generation: i64 = conn
+        .query_row(
+            "SELECT generation FROM cat_extent WHERE id = ?1",
+            [i64::try_from(extent).unwrap()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    // Make the snapshot maximum an otherwise unreferenced generation.
+    conn.execute("INSERT INTO cat_generation VALUES(1000)", [])
+        .unwrap();
+    let detached = catalog_testing::pin(&reader, &budget()).unwrap();
+    assert_eq!(detached.view().generation(), 1000);
+    catalog_testing::with_snapshot(&reader, &budget(), |active| {
+        assert_eq!(active.generation(), 1000);
+        // Each retained reference names a different generation. Retirement above
+        // both pins leaves the extent in place during physical reclamation.
+        conn.execute_batch(
+            "INSERT INTO cat_generation VALUES(1001),(1002),(1003),(1004),(1005),(1006);
+             INSERT INTO cat_extent(class,generation,dead_since,relpath)
+               VALUES('test',1001,1002,'file-extent');
+             INSERT INTO cat_sediment(class,generation,dead,payload) VALUES('test',1003,NULL,X'00'),('test',1003,1004,X'00');"
+        ).unwrap();
+        writer.compact()?;
+        assert_eq!(active.read(extent)?.as_deref(), Some(b"pinned extent".as_slice()));
+        assert_eq!(detached.view().read(extent)?.as_deref(), Some(b"pinned extent".as_slice()));
+        let generations: Vec<i64> = conn.prepare("SELECT generation FROM cat_generation ORDER BY generation")
+            .unwrap().query_map([], |r| r.get(0)).unwrap().collect::<Result<_, _>>().unwrap();
+        assert_eq!(generations, [extent_generation, 1001, 1002, 1003, 1006]);
+        Ok(())
+    }).unwrap();
+    catalog_testing::append_and_publish(&writer, b"after pruning").unwrap();
+    let next = catalog_testing::pin(&writer, &budget()).unwrap();
+    assert_eq!(next.view().generation(), 1007);
+}
+
+#[test]
+fn in_memory_compaction_keeps_generations_still_referenced_after_reclamation() {
+    let store = SqliteStore::open_memory().unwrap();
+    created(&store, "Fact", "old change");
+    created(&store, "Fact", "new change");
+    // A retirement may commit between physical reclamation and history pruning.
+    // Insert that row at the start of the latter transaction, deterministically.
+    catalog_testing::corrupt(
+        &store,
+        "INSERT INTO cat_generation VALUES(101),(102),(103),(104);
+         UPDATE changes SET seq = 100002 WHERE seq = 2;
+         DELETE FROM projections;
+         CREATE TEMP TRIGGER retirement AFTER DELETE ON changes BEGIN
+           INSERT INTO cat_sediment(class,generation,dead,payload) VALUES('test',101,102,X'00');
+         END;",
+    )
+    .unwrap();
+    store.compact().unwrap();
+    catalog_testing::corrupt(
+        &store,
+        "CREATE TEMP TABLE expected (generations TEXT NOT NULL CHECK(generations = '101,102,104'));
+         INSERT INTO expected SELECT group_concat(generation, ',' ORDER BY generation)
+           FROM cat_generation WHERE generation >= 101;",
+    )
+    .unwrap_or_else(|e| panic!("{}", driver_text(&e)));
+}

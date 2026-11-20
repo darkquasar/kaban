@@ -10,9 +10,11 @@
 //!             zstd did not pay, or the body is above the decode bound)
 //!   format 1: the payload is one zstd frame with a checksum, compressed at level 3 with the
 //!             dictionary the id names; the frame carries the content size
+//!   format 2: reserved byte 0 in the dictionary slot | file extent id (positive i64 LE) |
+//!             row group (u32 LE). Reading this reference requires the cold tier.
 //! ```
 //!
-//! Every format carries the decoded length and a checksum (T8c review t8c-3): a payload cut
+//! Both inline formats carry the decoded length and a checksum (T8c review t8c-3): a payload cut
 //! short or altered in place, even to valid UTF-8, fails the read instead of reading as a
 //! shorter or different body. [`decode`] returns the exact original bytes for a format 0 body
 //! and a format 1 body under the shipped dictionary, and refuses everything else by name
@@ -71,6 +73,8 @@ use zstd::zstd_safe::{CParameter, get_frame_content_size};
 pub(crate) const MAGIC: [u8; 3] = [0, b'K', b'Z'];
 /// The format this binary writes (1: one zstd frame under the shipped dictionary).
 pub(crate) const FORMAT_VERSION: u8 = 1;
+/// The stored reference to a file extent and row group. Hot writers emit only formats 0 and 1.
+const COLD_REFERENCE: u8 = 2;
 /// The id of the shipped dictionary in every encoded body's tag.
 pub(crate) const DICTIONARY_ID: u8 = 1;
 /// Magic, format version and dictionary id.
@@ -105,6 +109,8 @@ static DECODER: LazyLock<DecoderDictionary<'static>> =
 /// Why a stored body could not be decoded. Messages name the tag's values only, never bytes.
 #[derive(Debug)]
 pub(crate) enum CodecError {
+    /// A well-formed reference names bytes in the unavailable cold tier.
+    ColdReference,
     /// The tag names a format this binary does not know.
     UnknownFormat(u8),
     /// The tag names a dictionary this binary does not ship.
@@ -117,6 +123,7 @@ pub(crate) enum CodecError {
 impl fmt::Display for CodecError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::ColdReference => fmt::Display::fmt(&StoreError::ColdTierAbsent, f),
             Self::UnknownFormat(v) => write!(f, "unknown body format {v}"),
             Self::UnknownDictionary(id) => write!(f, "unknown body dictionary {id}"),
             Self::Corrupt(_) => f.write_str("corrupt body payload"),
@@ -128,7 +135,7 @@ impl std::error::Error for CodecError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Corrupt(e) => Some(e),
-            Self::UnknownFormat(_) | Self::UnknownDictionary(_) => None,
+            Self::ColdReference | Self::UnknownFormat(_) | Self::UnknownDictionary(_) => None,
         }
     }
 }
@@ -199,7 +206,7 @@ fn compress(plain: &[u8]) -> std::io::Result<Vec<u8>> {
 /// review t7-1).
 ///
 /// # Errors
-/// [`CodecError`]: the format or dictionary is unknown, or the payload is corrupt.
+/// [`CodecError`]: a cold reference, an unknown format or dictionary, or a corrupt payload.
 pub(crate) fn decode(stored: &[u8]) -> std::result::Result<Vec<u8>, CodecError> {
     let Some(tagged) = stored.strip_prefix(&MAGIC) else {
         return Err(corrupt("blob without the body tag"));
@@ -211,6 +218,17 @@ pub(crate) fn decode(stored: &[u8]) -> std::result::Result<Vec<u8>, CodecError> 
         0 => unframe_plain(payload),
         FORMAT_VERSION if dictionary == DICTIONARY_ID => decompress(payload),
         FORMAT_VERSION => Err(CodecError::UnknownDictionary(dictionary)),
+        COLD_REFERENCE => {
+            if dictionary == 0
+                && let Some((extent, group)) = payload.split_first_chunk::<8>()
+                && i64::from_le_bytes(*extent) > 0
+                && group.len() == size_of::<u32>()
+            {
+                Err(CodecError::ColdReference)
+            } else {
+                Err(corrupt("invalid cold body reference"))
+            }
+        }
         other => Err(CodecError::UnknownFormat(other)),
     }
 }
@@ -357,6 +375,18 @@ pub(crate) fn read_column(row: &rusqlite::Row<'_>, idx: usize) -> rusqlite::Resu
         }
         _ => row.get(idx),
     }
+}
+
+/// Read the body of one record through the current catalog snapshot.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "T14 consumes the scoped body reader")
+)]
+pub(crate) fn read_body(reader: &crate::catalog::phase::Reader<'_>, rid: i64) -> Result<Vec<u8>> {
+    reader
+        .prepare("SELECT text FROM node WHERE rid=?")?
+        .query_row([rid], |row| read_column(row, 0).map(String::into_bytes))?
+        .ok_or_else(|| StoreError::NotFound(rid.to_string()))
 }
 
 /// The writer of a body column: every body is bound as a tagged `BLOB`. Built inside the write

@@ -60,6 +60,15 @@ impl KabanApi {
             Some(v) => Some(self.gate_json(t, "props_schema", v, &mut red)?),
             None => None,
         };
+        let declaration = kaban_core::TypeDeclaration {
+            columns: p.columns,
+            rollups: p.rollups,
+            fts_fields: p.fts_fields,
+            ..Default::default()
+        };
+        let fields = serde_json::to_value(&declaration)
+            .map_err(|_| ApiError::Invalid("invalid label declaration".into()))?;
+        self.gate_json(t, "declaration", &fields, &mut red)?;
         if !red.is_empty() {
             // schema entries cannot be redacted; record the redaction verdicts, then refuse
             return Err(ApiError::Invalid(
@@ -77,7 +86,7 @@ impl KabanApi {
             directed: p.directed.unwrap_or(true),
             props_schema,
             builtin: false,
-            declaration: kaban_core::TypeDeclaration::default(),
+            declaration,
         };
         Ok(self.store.schema_extend(def)?)
     }

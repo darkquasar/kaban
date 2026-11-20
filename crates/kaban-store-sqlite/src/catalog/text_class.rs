@@ -44,7 +44,7 @@ const TEXT: &[ExtentClass] = &[ExtentClass::TextTier];
 /// byte per indexed byte, the body indexed three times).
 const STAGE_MEMORY_BYTES: u64 = 512 << 20;
 
-/// The rows a rebuild indexes per writer (PC-17): each batch is its own segment under its own
+/// The maximum rows a rebuild indexes per writer (PC-17): each batch is its own segment under its own
 /// reservation, and the batches are merged under the budget.
 const REBUILD_BATCH_ROWS: usize = 1024;
 
@@ -69,13 +69,36 @@ impl IndexClass for TextClass {
         let mut rids: Vec<i64> = changes.nodes().iter().map(|c| c.rid).collect();
         rids.sort_unstable();
         rids.dedup();
-        if rids.is_empty() {
-            return Ok(());
+        if !rids.is_empty() {
+            let budget = QueryBudget::new(STAGE_MEMORY_BYTES, None);
+            stage_rows(txn, &rids, &budget)?;
         }
-        let budget = QueryBudget::new(STAGE_MEMORY_BYTES, None);
-        let (rows, _charged) = crate::index_rows::staged_rows(&txn.reader(), &rids, &budget)?;
-        let pack = kaban_index_tantivy::segment(&rows, &rids, &budget)?;
-        txn.put_sediment(ExtentClass::TextTier, &pack)?;
+        if let Some((label, maintenance)) = txn.text_projection {
+            // Refuse the declaration together with its partially staged rows on exhaustion.
+            // The caller can retry under a larger configured maintenance budget.
+            let budget = QueryBudget::new(maintenance.memory_bytes, Some(maintenance.deadline));
+            let limit = u32::try_from(REBUILD_BATCH_ROWS).unwrap_or(u32::MAX);
+            let _ids = budget.reserve(u64::from(limit) * 2 * size_of::<i64>() as u64)?;
+            let mut first = i64::MIN;
+            loop {
+                budget.check()?;
+                let rids = txn
+                    .reader()
+                    .prepare(
+                        "SELECT rid FROM node WHERE kind=?1 AND lifecycle='active' AND rid>=?2
+                     ORDER BY rid LIMIT ?3",
+                    )?
+                    .query_map(rusqlite::params![label, first, limit], |row| {
+                        row.get::<_, i64>(0)
+                    })?;
+                let Some(last) = rids.last() else { break };
+                stage_rows(txn, &rids, &budget)?;
+                let Some(next) = last.checked_add(1) else {
+                    break;
+                };
+                first = next;
+            }
+        }
         Ok(())
     }
 
@@ -178,6 +201,14 @@ impl IndexClass for TextClass {
     }
 }
 
+/// Replace the text of these row identities in this commit's sediment.
+fn stage_rows(txn: &mut Stage<'_>, rids: &[i64], budget: &QueryBudget) -> Result<()> {
+    let (rows, _charged) = crate::index_rows::staged_rows(&txn.reader(), rids, budget)?;
+    let pack = kaban_index_tantivy::segment(&rows, rids, budget)?;
+    txn.put_sediment(ExtentClass::TextTier, &pack)?;
+    Ok(())
+}
+
 /// Rebuild in the caller's transaction and maintenance ownership.
 pub(super) fn rebuild_in(
     catalog: &Catalog,
@@ -193,25 +224,29 @@ pub(super) fn rebuild_in(
     // a deadline or cancellation since the last check publishes nothing
     budget.check()?;
     txn.publish(extent, &[ViewName::Main])?;
-    Ok(())
+    crate::ident::mark_indexed(txn.conn())
 }
 
-/// One tier of `rows`, indexed `batch` rows per writer under `budget`: each batch's pack is
-/// charged while it is held, then the packs are merged into one.
+/// One tier of `rows`, indexed in batches bounded by row count and projected bytes under
+/// `budget`. Each pack is charged while held for the merge.
 ///
 /// # Errors
 /// The budget's refusal; Tantivy failures.
-fn rebuilt_tier(rows: &[IndexRow], batch: usize, budget: &QueryBudget) -> Result<Vec<u8>> {
-    if rows.len() <= batch {
-        return kaban_index_tantivy::segment(rows, &[], budget);
-    }
+fn rebuilt_tier(mut rows: &[IndexRow], batch: usize, budget: &QueryBudget) -> Result<Vec<u8>> {
     let mut packs = Vec::new();
     let mut held = Vec::new();
-    for rows in rows.chunks(batch.max(1)) {
-        let pack = kaban_index_tantivy::segment(rows, &[], budget)?;
+    loop {
+        let (pack, remaining) = kaban_index_tantivy::rebuild_batch(rows, batch, budget)?;
+        if packs.is_empty() && remaining.is_empty() {
+            return Ok(pack);
+        }
         let bytes = pack.len() + size_of::<OwnedBytes>();
         held.push(budget.reserve(u64::try_from(bytes).unwrap_or(u64::MAX))?);
         packs.push(OwnedBytes::new(pack));
+        if remaining.is_empty() {
+            break;
+        }
+        rows = remaining;
     }
     kaban_index_tantivy::merge(&packs, &[], None, budget)?
         .ok_or_else(|| StoreError::NotFound("the merged rebuild batches".into()))
@@ -327,18 +362,33 @@ impl Catalog {
     pub(crate) fn with_text<T>(
         &self,
         conn: &Mutex<Connection>,
+        index: &crate::tantivy::Attached,
         budget: &QueryBudget,
-        f: impl FnOnce(&TextSnapshot<'_>) -> Result<T>,
+        f: impl FnOnce(&dyn kaban_core::text_index::TextIndex, &TextSnapshot<'_>) -> Result<T>,
     ) -> Result<T> {
         // `main`'s last use is never consulted (retention never retires it): no write per read
-        let (pin, inputs) = {
+        let (pin, inputs, selected) = {
             let conn = conn.lock().unwrap_or_else(PoisonError::into_inner);
             let pin = self.pin_untouched(&conn, budget, &[(ViewName::Main, TEXT)])?;
             let inputs = text_inputs(&pin, &conn, self.kbx.clone())?;
-            (pin, inputs)
+            let mut tiers = inputs
+                .view
+                .chain()
+                .iter()
+                .filter(|e| e.class == ExtentClass::TextTier);
+            let tier = match (tiers.next(), tiers.next(), inputs.tiers.as_slice()) {
+                (Some(e), None, [span]) if inputs.view.sediment().is_empty() => {
+                    Some((e.id.0, e.generation.0, *span))
+                }
+                _ => None,
+            };
+            let selected = index.observe(inputs.generation, &inputs.kbx, tier);
+            (pin, inputs, selected)
         };
         let sediment = inputs.sediment();
-        let out = f(&inputs.snapshot(&sediment));
+        let out = index.with_reader(selected, budget, |reader| {
+            f(reader, &inputs.snapshot(&sediment))
+        });
         drop(pin);
         out
     }
@@ -554,5 +604,27 @@ mod tests {
         let mut rids: Vec<i64> = hits.iter().map(|h| h.rid).collect();
         rids.sort_unstable();
         assert_eq!(rids, vec![1, 2, 3, 4, 5, 6]);
+    }
+
+    #[test]
+    fn a_rebuild_below_the_row_limit_indexes_large_rows_and_refuses_an_unaffordable_row() {
+        let rows: Vec<_> = (1..=2)
+            .map(|rid| large_row(rid, "quokka", 384 << 10))
+            .collect();
+        let low = QueryBudget::new(8 << 20, None);
+        let refused = super::rebuilt_tier(&rows[..1], super::REBUILD_BATCH_ROWS, &low);
+        assert!(matches!(
+            refused,
+            Err(StoreError::BudgetExceeded(BudgetExceeded {
+                limit: Limit::Memory,
+                ..
+            }))
+        ));
+        assert_eq!(low.live_bytes(), 0);
+
+        let budget = QueryBudget::new(20 << 20, None);
+        let tier = super::rebuilt_tier(&rows, super::REBUILD_BATCH_ROWS, &budget).unwrap();
+        assert!(kaban_index_tantivy::has_segment(&tier));
+        assert_eq!(budget.live_bytes(), 0);
     }
 }

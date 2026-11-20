@@ -1,19 +1,6 @@
-//! Typed queries (spec 05 SS-08): no query parser, the operand grammar is `fts_expr`'s (an
-//! explicit phrase, or one token with a trailing prefix marker), every operand matches any of
-//! the four content fields under the column weights as boosts, the filter fields join as
-//! zero-score `Must` clauses so they bound the match set before the top-k and never match text,
-//! and the page is cut from the total order `(score desc, rid asc)` computed over the whole
-//! match set (no pruning: a pruned collector breaks ties by document address, which changes
-//! across merges; SS-08 wants the same order whatever the segment layout).
-//!
-//! Adapter-specific ranking differences (documented, not hidden): Tantivy's BM25 scores each
-//! field separately and sums the boosted scores where FTS5's `bm25()` weights term frequencies
-//! inside one formula; Snowball English stems where FTS5 runs Porter; a prefix operand matches
-//! at constant score; a fuzzy hit scores by the exact term's BM25 plus one constant per matched
-//! fuzzy term where the trigram table ranks by trigram BM25; the `ident_terms` field is fed its
-//! five inputs separately, so a term shared by two inputs counts twice where the column counts
-//! it once. A prefix is never a ranking difference in membership: it expands to every term of
-//! the dictionary under it, like FTS5's `token*` ([`expansions`]).
+//! Typed lexical, whole-name and fuzzy queries over catalog text. The compound identifier
+//! operand stays a conjunction when lexical retrieval widens. Field weights affect BM25,
+//! filters apply before collection, and every page uses the total order (score desc, rid asc).
 
 use crate::schema::{ACTIVE, CONTENT, Fields, RID};
 use crate::{Error, Result};
@@ -26,18 +13,21 @@ use std::cmp::Reverse;
 use std::collections::BTreeSet;
 use tantivy::collector::TopDocs;
 use tantivy::query::{
-    Bm25StatisticsProvider, BooleanQuery, BoostQuery, ConstScoreQuery, EmptyQuery, FuzzyTermQuery,
-    Occur, PhrasePrefixQuery, PhraseQuery, Query, TermQuery,
+    Bm25StatisticsProvider, BooleanQuery, BoostQuery, ConstScoreQuery, DisjunctionMaxQuery,
+    EmptyQuery, FuzzyTermQuery, Occur, PhrasePrefixQuery, PhraseQuery, Query, TermQuery,
 };
 use tantivy::schema::{Field, IndexRecordOption};
 use tantivy::{DocAddress, DocId, Index, Score, Searcher, SegmentReader, Term};
 
 /// EN-F29 defaults for [`CONTENT`], as `recall.rs` has them.
-const DEFAULT_COLUMN_WEIGHTS: [f64; 4] = [1.0, 1.5, 1.0, 2.0];
+const DEFAULT_COLUMN_WEIGHTS: [f64; 4] = [1.0, 1.5, 1.0, CODE_BOOST as f64];
 /// A query longer than this is cut (Turso's guard; the grammar is linear, the cut is a cap).
 const MAX_QUERY_BYTES: usize = 16 * 1024;
 /// At most this many operands take part.
 const MAX_OPERANDS: usize = 64;
+/// Whole names take precedence over identifier parts in lexical ranking.
+const NAME_BOOST: f32 = 4.0;
+const CODE_BOOST: f32 = 2.0;
 /// At most this many fuzzy terms per query (the trigram expression caps its grams at 64).
 const MAX_FUZZY_TERMS: usize = 32;
 /// Tokens shorter than this are not fuzzy-matched (a trigram needs three characters).
@@ -96,18 +86,18 @@ impl Weights {
 struct Operand {
     words: String,
     prefix: bool,
+    quoted: bool,
 }
 
-/// `fts_expr`'s parse: quoted phrases keep every word; a bare word splits on separators
-/// (`_-.` are kept inside a token), drops one-character tokens and carries its prefix marker
-/// on its last token.
+/// Quoted phrases retain order. Bare operands preserve identifier and path separators, drop
+/// single-character operands, and accept a trailing prefix marker.
 fn operands(query: &str) -> Vec<Operand> {
     let mut end = query.len().min(MAX_QUERY_BYTES);
     while !query.is_char_boundary(end) {
         end -= 1;
     }
     let split = |s: &str| -> Vec<String> {
-        s.split(|c: char| !c.is_alphanumeric() && !"_-.".contains(c))
+        s.split(|c: char| !c.is_alphanumeric() && !"_-.:/".contains(c))
             .filter(|w| !w.is_empty())
             .map(str::to_owned)
             .collect()
@@ -120,6 +110,7 @@ fn operands(query: &str) -> Vec<Operand> {
             let words = split(phrase);
             if !words.is_empty() {
                 out.push(Operand {
+                    quoted: true,
                     words: words.join(" "),
                     prefix: false,
                 });
@@ -139,6 +130,7 @@ fn operands(query: &str) -> Vec<Operand> {
             for (i, words) in tokens.into_iter().enumerate() {
                 out.push(Operand {
                     words,
+                    quoted: false,
                     prefix: prefix && i == last,
                 });
             }
@@ -285,23 +277,95 @@ fn content(
     ops: &[Operand],
     occur: Occur,
     weights: Columns,
+    identifier: bool,
     budget: &QueryBudget,
 ) -> Result<Option<Box<dyn Query>>> {
     let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
     for op in ops {
-        let tokens = tokens(searcher.index(), fields.content[0], &op.words)?;
-        if tokens.is_empty() {
+        let stemmed = tokens(searcher.index(), fields.content[0], &op.words)?;
+        if stemmed.is_empty() {
             continue;
         }
-        let mut per_field: Vec<(Occur, Box<dyn Query>)> = Vec::with_capacity(CONTENT.len());
-        for (field, weight) in fields.content.iter().zip(weights) {
+        let code = fields.code;
+        let parts = tokens(searcher.index(), code, &op.words)?;
+        // A hyphen or sentence punctuation alone does not turn prose into code.
+        // Internal dots in qualified names still count as identifier separators.
+        let compound = !op.quoted
+            && parts.len() > 1
+            && (!op.words.contains(['-', '.']) || classify(&op.words) == QueryClass::Identifier);
+        let mut per_field: Vec<(Occur, Box<dyn Query>)> = Vec::new();
+        let prefix = op.prefix || (compound && op.words.contains('_'));
+        if compound || op.quoted {
+            let code_query = if compound {
+                let mut required = Vec::with_capacity(parts.len());
+                for (i, part) in parts.iter().enumerate() {
+                    required.push((
+                        Occur::Must,
+                        operand_on(
+                            searcher,
+                            code,
+                            std::slice::from_ref(part),
+                            prefix && i + 1 == parts.len(),
+                            budget,
+                        )?,
+                    ));
+                }
+                Box::new(BooleanQuery::new(required)) as Box<dyn Query>
+            } else {
+                operand_on(searcher, code, &parts, op.prefix, budget)?
+            };
+            per_field.push((
+                Occur::Should,
+                Box::new(BoostQuery::new(code_query, weights[3])),
+            ));
+        }
+        if !op.prefix && !op.quoted {
+            let name = tokens(searcher.index(), fields.name, &op.words)?;
+            if let Some(term) = name.first() {
+                per_field.push((
+                    Occur::Should,
+                    Box::new(BoostQuery::new(
+                        raw_term(fields.name, term),
+                        weights[3] * (NAME_BOOST / CODE_BOOST),
+                    )),
+                ));
+            }
+        }
+        if !compound && !parts.is_empty() {
+            let mut identifier_query =
+                operand_on(searcher, fields.content[3], &parts, op.prefix, budget)?;
+            if op.prefix && parts.len() == 1 {
+                let name = tokens(searcher.index(), fields.name, &op.words)?;
+                let whole = operand_on(searcher, fields.name, &name, true, budget)?;
+                // The whole spelling can cross a case boundary. Count a prefix that
+                // also matches a part only once, as a single identifier-field match.
+                identifier_query =
+                    Box::new(DisjunctionMaxQuery::new(vec![identifier_query, whole]));
+            }
             per_field.push((
                 Occur::Should,
                 Box::new(BoostQuery::new(
-                    operand_on(searcher, *field, &tokens, op.prefix, budget)?,
-                    weight,
+                    identifier_query,
+                    if identifier {
+                        2.0 * weights[3]
+                    } else {
+                        weights[3]
+                    },
                 )),
             ));
+        }
+        // The established explicit snake prefix also matches a prose phrase, including on
+        // a projection containing only ordinary text (e.g. "shore_quok*" in "shore quokka").
+        if !compound || (op.prefix && op.words.contains('_') && stemmed.len() == parts.len()) {
+            for (field, weight) in fields.content[..3].iter().zip(weights) {
+                per_field.push((
+                    Occur::Should,
+                    Box::new(BoostQuery::new(
+                        operand_on(searcher, *field, &stemmed, op.prefix, budget)?,
+                        weight,
+                    )),
+                ));
+            }
         }
         clauses.push((occur, Box::new(BooleanQuery::new(per_field))));
     }
@@ -322,18 +386,13 @@ fn lexical(
     filter: &SeedFilter<'_>,
     budget: &QueryBudget,
 ) -> Result<Option<Box<dyn Query>>> {
-    let boost = |mut w: Columns| {
-        if identifier {
-            w[3] *= 2.0;
-        }
-        w
-    };
     let Some(default) = content(
         searcher,
         fields,
         ops,
         occur,
-        boost(weights.defaults),
+        weights.defaults,
+        identifier,
         budget,
     )?
     else {
@@ -345,7 +404,7 @@ fn lexical(
         let mut branches: Vec<(Occur, Box<dyn Query>)> = Vec::new();
         let mut others: Vec<(Occur, Box<dyn Query>)> = vec![(Occur::Must, default)];
         for (kind, profile) in &weights.profiles {
-            if let Some(q) = content(searcher, fields, ops, occur, boost(*profile), budget)? {
+            if let Some(q) = content(searcher, fields, ops, occur, *profile, identifier, budget)? {
                 branches.push((
                     Occur::Should,
                     Box::new(BooleanQuery::new(vec![
@@ -367,10 +426,27 @@ fn lexical(
     Ok(Some(Box::new(BooleanQuery::new(all))))
 }
 
-/// The fuzzy query: per distinct query token (folded, three characters or more, at most
-/// [`MAX_FUZZY_TERMS`]) the exact term's BM25 plus a distance-1 fuzzy term (transpositions
-/// cost one; a `*`-marked token matches as a fuzzy prefix); any token may match; then the
-/// filters.
+/// Rank an exact surface match above its distance-one neighbours; short parts are exact.
+fn fuzzy_term(field: Field, text: &str, prefix: bool) -> Box<dyn Query> {
+    if text.chars().count() < MIN_FUZZY_CHARS {
+        return raw_term(field, text);
+    }
+    let term = Term::from_field_text(field, text);
+    let fuzzy = if prefix {
+        FuzzyTermQuery::new_prefix(term.clone(), 1, true)
+    } else {
+        FuzzyTermQuery::new(term.clone(), 1, true)
+    };
+    Box::new(BooleanQuery::new(vec![
+        (
+            Occur::Should,
+            Box::new(TermQuery::new(term, IndexRecordOption::WithFreqs)),
+        ),
+        (Occur::Should, Box::new(fuzzy)),
+    ]))
+}
+
+/// Each fuzzy operand matches its whole surface spelling or all of its code parts.
 fn fuzzy(
     searcher: &Searcher,
     fields: &Fields,
@@ -378,36 +454,43 @@ fn fuzzy(
     filter: &SeedFilter<'_>,
 ) -> Result<Option<Box<dyn Query>>> {
     let mut seen = BTreeSet::new();
-    for word in text.split_whitespace() {
-        let prefix = word.ends_with('*');
-        for token in tokens(searcher.index(), fields.fuzzy, word.trim_end_matches('*'))? {
-            if token.chars().count() >= MIN_FUZZY_CHARS && seen.len() < MAX_FUZZY_TERMS {
-                seen.insert((token, prefix));
-            }
+    let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
+    let mut remaining = MAX_FUZZY_TERMS;
+    for op in operands(text) {
+        if !seen.insert((op.words.clone(), op.prefix)) {
+            continue;
         }
+        let parts = tokens(searcher.index(), fields.code, &op.words)?;
+        if parts.is_empty()
+            || parts.len() > remaining
+            || !parts
+                .iter()
+                .any(|part| part.chars().count() >= MIN_FUZZY_CHARS)
+        {
+            continue;
+        }
+        remaining -= parts.len();
+        let required = parts
+            .iter()
+            .enumerate()
+            .map(|(i, part)| {
+                (
+                    Occur::Must,
+                    fuzzy_term(fields.code, part, op.prefix && i + 1 == parts.len()),
+                )
+            })
+            .collect();
+        let mut alternatives: Vec<(Occur, Box<dyn Query>)> =
+            vec![(Occur::Should, Box::new(BooleanQuery::new(required)))];
+        let surface = tokens(searcher.index(), fields.fuzzy, &op.words)?;
+        if let [word] = surface.as_slice() {
+            alternatives.push((Occur::Should, fuzzy_term(fields.fuzzy, word, op.prefix)));
+        }
+        clauses.push((Occur::Should, Box::new(BooleanQuery::new(alternatives))));
     }
-    if seen.is_empty() {
+    if clauses.is_empty() {
         return Ok(None);
     }
-    let clauses: Vec<(Occur, Box<dyn Query>)> = seen
-        .into_iter()
-        .map(|(token, prefix)| {
-            let term = Term::from_field_text(fields.fuzzy, &token);
-            let fuzzy = if prefix {
-                FuzzyTermQuery::new_prefix(term.clone(), 1, true)
-            } else {
-                FuzzyTermQuery::new(term.clone(), 1, true)
-            };
-            let exact = TermQuery::new(term, IndexRecordOption::WithFreqs);
-            (
-                Occur::Should,
-                Box::new(BooleanQuery::new(vec![
-                    (Occur::Should, Box::new(exact) as Box<dyn Query>),
-                    (Occur::Should, Box::new(fuzzy)),
-                ])) as Box<dyn Query>,
-            )
-        })
-        .collect();
     let mut all: Vec<(Occur, Box<dyn Query>)> =
         vec![(Occur::Must, Box::new(BooleanQuery::new(clauses)))];
     all.extend(filters(fields, filter));
@@ -597,6 +680,26 @@ pub(crate) fn run_hiding(
                 }
             }
         }
+        MatchMode::Exact => {
+            let name = tokens(searcher.index(), fields.name, q.text.trim())?;
+            let Some(term) = name.first().filter(|s| !s.is_empty()) else {
+                return Ok(empty);
+            };
+            let mut all = filters(fields, &q.filter);
+            all.push((
+                Occur::Must,
+                Box::new(ConstScoreQuery::new(raw_term(fields.name, term), 1.0)),
+            ));
+            top(
+                searcher,
+                fields,
+                &BooleanQuery::new(all),
+                q.skip,
+                q.limit.saturating_add(1),
+                hidden,
+                budget,
+            )?
+        }
         MatchMode::Fuzzy => {
             let Some(query) = fuzzy(searcher, fields, q.text, &q.filter)? else {
                 return Ok(empty);
@@ -696,17 +799,14 @@ mod tests {
     /// the prefix marker on the last token of its word only.
     #[test]
     fn operands_mirror_fts_expr() {
-        let op = |words: &str, prefix| Operand {
+        let op = |words: &str, prefix, quoted| Operand {
+            quoted,
             words: words.into(),
             prefix,
         };
         assert_eq!(
             operands(r#"a "two words" foo/bar_baz* x"#),
-            vec![
-                op("two words", false),
-                op("foo", false),
-                op("bar_baz", true)
-            ]
+            vec![op("two words", false, true), op("foo/bar_baz", true, false)]
         );
         assert_eq!(operands("  "), vec![]);
         let long = "quokka ".repeat(5_000);

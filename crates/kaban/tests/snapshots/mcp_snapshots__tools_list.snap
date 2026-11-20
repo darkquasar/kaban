@@ -7951,6 +7951,56 @@ expression: tools
     "name": "schema_describe",
     "outputSchema": {
       "$defs": {
+        "ColumnDecl": {
+          "additionalProperties": false,
+          "description": "A typed column projected from the property of the same name.",
+          "properties": {
+            "indexed": {
+              "default": false,
+              "description": "Create a secondary index on the column.",
+              "type": "boolean"
+            },
+            "name": {
+              "description": "Property and column name.",
+              "type": "string"
+            },
+            "ty": {
+              "$ref": "#/$defs/ColumnType",
+              "description": "Required type of non-null values."
+            }
+          },
+          "required": [
+            "name",
+            "ty",
+            "indexed"
+          ],
+          "type": "object"
+        },
+        "ColumnType": {
+          "description": "The scalar types a label can store in a column.",
+          "oneOf": [
+            {
+              "const": "integer",
+              "description": "Signed 64-bit integer.",
+              "type": "string"
+            },
+            {
+              "const": "real",
+              "description": "Floating-point number.",
+              "type": "string"
+            },
+            {
+              "const": "text",
+              "description": "UTF-8 text.",
+              "type": "string"
+            },
+            {
+              "const": "timestamp",
+              "description": "A timestamp stored as text.",
+              "type": "string"
+            }
+          ]
+        },
         "Naming": {
           "description": "Naming conventions echoed by `schema_describe`.",
           "properties": {
@@ -7969,6 +8019,62 @@ expression: tools
           ],
           "type": "object"
         },
+        "RollupDecl": {
+          "additionalProperties": false,
+          "description": "A named aggregate over active rows of one label.",
+          "properties": {
+            "group_by": {
+              "default": [],
+              "description": "Ordered columns forming a group key; empty for a total.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "label": {
+              "description": "Canonical stored label name.",
+              "type": "string"
+            },
+            "name": {
+              "description": "Database-wide aggregate name.",
+              "type": "string"
+            },
+            "op": {
+              "$ref": "#/$defs/RollupOp",
+              "description": "Aggregate maintained for each group."
+            }
+          },
+          "required": [
+            "name",
+            "label",
+            "group_by",
+            "op"
+          ],
+          "type": "object"
+        },
+        "RollupOp": {
+          "description": "How a row contributes to its group.",
+          "oneOf": [
+            {
+              "const": "count",
+              "description": "Count all eligible rows.",
+              "type": "string"
+            },
+            {
+              "additionalProperties": false,
+              "description": "Sum the non-null values of the named numeric column.",
+              "properties": {
+                "sum": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "sum"
+              ],
+              "type": "object"
+            }
+          ]
+        },
         "TypeDef": {
           "description": "A schema entry: a node kind (`label`) or a relationship type (`rel`).",
           "properties": {
@@ -7979,6 +8085,13 @@ expression: tools
             },
             "column_weights": {
               "description": "The `column_weights` block (EN-F29)."
+            },
+            "columns": {
+              "description": "Typed columns projected from this label's properties.",
+              "items": {
+                "$ref": "#/$defs/ColumnDecl"
+              },
+              "type": "array"
             },
             "description": {
               "description": "Human description.",
@@ -7998,6 +8111,13 @@ expression: tools
             "from_kinds": {
               "default": [],
               "description": "For rels: allowed source kinds (empty = any).",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "fts_fields": {
+              "description": "Extra property paths searchable through the text index.",
               "items": {
                 "type": "string"
               },
@@ -8025,6 +8145,13 @@ expression: tools
             },
             "rank": {
               "description": "The `rank` block (EN-F29)."
+            },
+            "rollups": {
+              "description": "Named aggregates over active rows of the label.",
+              "items": {
+                "$ref": "#/$defs/RollupDecl"
+              },
+              "type": "array"
             },
             "rules": {
               "description": "The `rules` block (EN-F4)."
@@ -8091,8 +8218,122 @@ expression: tools
     },
     "description": "Register a new node kind (label, PascalCase) or relationship type (rel, UPPER_SNAKE_CASE) with a description and optional endpoint constraints, so the graph can grow new shapes at runtime. Builtin types cannot be changed.",
     "inputSchema": {
+      "$defs": {
+        "ColumnDecl": {
+          "additionalProperties": false,
+          "description": "A typed column projected from the property of the same name.",
+          "properties": {
+            "indexed": {
+              "default": false,
+              "description": "Create a secondary index on the column.",
+              "type": "boolean"
+            },
+            "name": {
+              "description": "Property and column name.",
+              "type": "string"
+            },
+            "ty": {
+              "$ref": "#/$defs/ColumnType",
+              "description": "Required type of non-null values."
+            }
+          },
+          "required": [
+            "name",
+            "ty"
+          ],
+          "type": "object"
+        },
+        "ColumnType": {
+          "description": "The scalar types a label can store in a column.",
+          "oneOf": [
+            {
+              "const": "integer",
+              "description": "Signed 64-bit integer.",
+              "type": "string"
+            },
+            {
+              "const": "real",
+              "description": "Floating-point number.",
+              "type": "string"
+            },
+            {
+              "const": "text",
+              "description": "UTF-8 text.",
+              "type": "string"
+            },
+            {
+              "const": "timestamp",
+              "description": "A timestamp stored as text.",
+              "type": "string"
+            }
+          ]
+        },
+        "RollupDecl": {
+          "additionalProperties": false,
+          "description": "A named aggregate over active rows of one label.",
+          "properties": {
+            "group_by": {
+              "default": [],
+              "description": "Ordered columns forming a group key; empty for a total.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "label": {
+              "description": "Canonical stored label name.",
+              "type": "string"
+            },
+            "name": {
+              "description": "Database-wide aggregate name.",
+              "type": "string"
+            },
+            "op": {
+              "$ref": "#/$defs/RollupOp",
+              "description": "Aggregate maintained for each group."
+            }
+          },
+          "required": [
+            "name",
+            "label",
+            "op"
+          ],
+          "type": "object"
+        },
+        "RollupOp": {
+          "description": "How a row contributes to its group.",
+          "oneOf": [
+            {
+              "const": "count",
+              "description": "Count all eligible rows.",
+              "type": "string"
+            },
+            {
+              "additionalProperties": false,
+              "description": "Sum the non-null values of the named numeric column.",
+              "properties": {
+                "sum": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "sum"
+              ],
+              "type": "object"
+            }
+          ]
+        }
+      },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
+        "columns": {
+          "default": [],
+          "description": "Typed columns projected from this label's properties.",
+          "items": {
+            "$ref": "#/$defs/ColumnDecl"
+          },
+          "type": "array"
+        },
         "description": {
           "description": "Human description (required).",
           "type": "string"
@@ -8112,6 +8353,14 @@ expression: tools
           },
           "type": "array"
         },
+        "fts_fields": {
+          "default": [],
+          "description": "Extra property paths searchable through the text index.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "kind": {
           "description": "\"label\" (node kind) or \"rel\" (relationship type)",
           "type": "string"
@@ -8122,6 +8371,14 @@ expression: tools
         },
         "props_schema": {
           "description": "Optional JSON schema for props."
+        },
+        "rollups": {
+          "default": [],
+          "description": "Named counts and sums over the label's active rows.",
+          "items": {
+            "$ref": "#/$defs/RollupDecl"
+          },
+          "type": "array"
         },
         "to_kinds": {
           "default": [],
@@ -8141,6 +8398,114 @@ expression: tools
     },
     "name": "schema_extend",
     "outputSchema": {
+      "$defs": {
+        "ColumnDecl": {
+          "additionalProperties": false,
+          "description": "A typed column projected from the property of the same name.",
+          "properties": {
+            "indexed": {
+              "default": false,
+              "description": "Create a secondary index on the column.",
+              "type": "boolean"
+            },
+            "name": {
+              "description": "Property and column name.",
+              "type": "string"
+            },
+            "ty": {
+              "$ref": "#/$defs/ColumnType",
+              "description": "Required type of non-null values."
+            }
+          },
+          "required": [
+            "name",
+            "ty",
+            "indexed"
+          ],
+          "type": "object"
+        },
+        "ColumnType": {
+          "description": "The scalar types a label can store in a column.",
+          "oneOf": [
+            {
+              "const": "integer",
+              "description": "Signed 64-bit integer.",
+              "type": "string"
+            },
+            {
+              "const": "real",
+              "description": "Floating-point number.",
+              "type": "string"
+            },
+            {
+              "const": "text",
+              "description": "UTF-8 text.",
+              "type": "string"
+            },
+            {
+              "const": "timestamp",
+              "description": "A timestamp stored as text.",
+              "type": "string"
+            }
+          ]
+        },
+        "RollupDecl": {
+          "additionalProperties": false,
+          "description": "A named aggregate over active rows of one label.",
+          "properties": {
+            "group_by": {
+              "default": [],
+              "description": "Ordered columns forming a group key; empty for a total.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "label": {
+              "description": "Canonical stored label name.",
+              "type": "string"
+            },
+            "name": {
+              "description": "Database-wide aggregate name.",
+              "type": "string"
+            },
+            "op": {
+              "$ref": "#/$defs/RollupOp",
+              "description": "Aggregate maintained for each group."
+            }
+          },
+          "required": [
+            "name",
+            "label",
+            "group_by",
+            "op"
+          ],
+          "type": "object"
+        },
+        "RollupOp": {
+          "description": "How a row contributes to its group.",
+          "oneOf": [
+            {
+              "const": "count",
+              "description": "Count all eligible rows.",
+              "type": "string"
+            },
+            {
+              "additionalProperties": false,
+              "description": "Sum the non-null values of the named numeric column.",
+              "properties": {
+                "sum": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "sum"
+              ],
+              "type": "object"
+            }
+          ]
+        }
+      },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "builtin": {
@@ -8150,6 +8515,13 @@ expression: tools
         },
         "column_weights": {
           "description": "The `column_weights` block (EN-F29)."
+        },
+        "columns": {
+          "description": "Typed columns projected from this label's properties.",
+          "items": {
+            "$ref": "#/$defs/ColumnDecl"
+          },
+          "type": "array"
         },
         "description": {
           "description": "Human description.",
@@ -8169,6 +8541,13 @@ expression: tools
         "from_kinds": {
           "default": [],
           "description": "For rels: allowed source kinds (empty = any).",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "fts_fields": {
+          "description": "Extra property paths searchable through the text index.",
           "items": {
             "type": "string"
           },
@@ -8196,6 +8575,13 @@ expression: tools
         },
         "rank": {
           "description": "The `rank` block (EN-F29)."
+        },
+        "rollups": {
+          "description": "Named aggregates over active rows of the label.",
+          "items": {
+            "$ref": "#/$defs/RollupDecl"
+          },
+          "type": "array"
         },
         "rules": {
           "description": "The `rules` block (EN-F4)."

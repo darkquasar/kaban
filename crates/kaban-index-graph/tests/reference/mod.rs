@@ -297,7 +297,7 @@ impl StableOrder for Order {
     fn rank(&self, n: LocalId) -> Result<TieRank, GraphError> {
         self.0
             .get(&n.0)
-            .map(|&r| TieRank(r))
+            .map(|&r| TieRank(u128::from(r).to_be_bytes()))
             .ok_or(GraphError::Corrupt("no rank".to_owned()))
     }
 }

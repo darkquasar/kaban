@@ -534,8 +534,10 @@ pub(super) fn run(
         &args.edge_judged,
         engine.recall.judged_min_queries as usize,
     )?;
-    let sqlite =
-        Arc::new(SqliteStore::open_as(db, keys, actor)?.with_recall_config(engine.recall.clone())?);
+    let sqlite = Arc::new(
+        SqliteStore::open_as(db, keys, actor, engine.catalog.clone())?
+            .with_recall_config(engine.recall.clone())?,
+    );
     let mut corpus = Corpus::new(SEED);
     fixture_repo(&fixture, &corpus)?;
     let api = Arc::new(KabanApi::with_config(
