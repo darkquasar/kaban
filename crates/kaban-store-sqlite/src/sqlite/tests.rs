@@ -1271,6 +1271,80 @@ fn a_pinned_reader_finishes_after_a_peer_write_and_a_new_search() {
 }
 
 #[test]
+fn overlapping_misses_for_one_sealed_tier_keep_the_first_reader() {
+    use crate::tantivy::Selection;
+    use std::sync::mpsc;
+
+    let dir = Scratch::new("text-reader-overlap");
+    let peer = sealed_text_store(&dir);
+    let store = SqliteStore::open(&dir.db(), &dir.keys()).unwrap();
+    peer.with_text_snapshot(|reference, at, budget| {
+        let query_args = RecallQuery::default();
+        let query = text_query("quokka", &query_args);
+        let expected = reference.search(at, &query, budget)?;
+        let (extent, published): (i64, i64) = peer.lock().query_row(
+            "SELECT id, generation FROM cat_extent WHERE class='text_tier' AND dead_since IS NULL",
+            [], |r| Ok((r.get(0)?, r.get(1)?)),
+        ).unwrap();
+        let tier = (
+            u64::try_from(extent).unwrap(),
+            u64::try_from(published).unwrap(),
+            at.tiers[0],
+        );
+        let observe = || store.text_index.observe(at.generation, at.kbx, Some(tier));
+
+        // A dropped selection and a cancelled construction both leave this identity available.
+        let abandoned = observe();
+        assert!(matches!(abandoned, Selection::Load { .. }));
+        drop(abandoned);
+        let cancelled = QueryBudget::new(64 << 20, None);
+        cancelled.cancel();
+        assert!(matches!(
+            store
+                .text_index
+                .with_reader(observe(), &cancelled, |_| Ok(())),
+            Err(StoreError::BudgetExceeded(_))
+        ));
+        let first = observe();
+        assert!(matches!(first, Selection::Load { .. }));
+        let (observed, after_observe) = mpsc::channel();
+        let (published, after_publish) = mpsc::channel();
+        std::thread::scope(|scope| {
+            let store = &store;
+            let query = &query;
+            let second = scope.spawn(move || {
+                let second = observe();
+                observed
+                    .send(matches!(second, Selection::Ordinary))
+                    .unwrap();
+                after_publish.recv_timeout(Duration::from_secs(5)).unwrap();
+                store
+                    .text_index
+                    .with_reader(second, budget, |reader| reader.search(at, query, budget))
+            });
+            let ordinary = after_observe.recv_timeout(Duration::from_secs(5)).unwrap();
+            let hits = store
+                .text_index
+                .with_reader(first, budget, |reader| reader.search(at, query, budget))?;
+            let warm = matches!(observe(), Selection::Hit(_));
+            published.send(()).unwrap();
+            assert_eq!(second.join().unwrap()?, expected);
+            assert_eq!(hits, expected);
+            assert!(
+                warm,
+                "a concurrent same-tier miss must let the first reader populate the slot"
+            );
+            assert!(
+                ordinary,
+                "the overlapping search must use the ordinary path"
+            );
+            Ok(())
+        })
+    })
+    .unwrap();
+}
+
+#[test]
 fn an_older_reader_finishing_after_a_new_observation_cannot_be_retained() {
     let dir = Scratch::new("text-reader-late");
     let peer = sealed_text_store(&dir);

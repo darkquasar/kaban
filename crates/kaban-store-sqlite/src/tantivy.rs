@@ -5,7 +5,7 @@
 use std::fs::File;
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::time::{Duration, Instant, SystemTime};
 
 use kaban_core::Result;
@@ -66,16 +66,11 @@ impl Attached {
                 let reader = match selected {
                     Selection::Ordinary => return use_index(index.as_ref()),
                     Selection::Hit(reader) => Some(reader),
-                    Selection::Load {
-                        epoch,
-                        key,
-                        file,
-                        charge,
-                    } => {
+                    Selection::Load { key, file, charge } => {
                         let reader =
                             SealedReader::open(file, key.span, charge, budget)?.map(Arc::new);
                         if let Some(reader) = &reader {
-                            recent.keep(epoch, key, reader);
+                            recent.keep(&key, reader);
                         }
                         reader
                     }
@@ -127,8 +122,7 @@ pub(crate) enum Selection {
     Ordinary,
     Hit(Arc<SealedReader>),
     Load {
-        epoch: u64,
-        key: Key,
+        key: Arc<Key>,
         file: File,
         charge: BudgetLease,
     },
@@ -149,7 +143,7 @@ impl Default for Recent {
     fn default() -> Self {
         Self {
             slot: Arc::new(Mutex::new(Slot {
-                epoch: 0,
+                loading: Weak::new(),
                 value: None,
                 timer: None,
                 retained: QueryBudget::new(STORE_BYTES, None),
@@ -162,7 +156,8 @@ impl Default for Recent {
 #[derive(Debug)]
 struct Slot {
     retained: QueryBudget,
-    epoch: u64,
+    // The selection owns this key until it publishes, fails or is abandoned.
+    loading: Weak<Key>,
     value: Option<Entry>,
     timer: Option<std::thread::JoinHandle<()>>,
 }
@@ -186,7 +181,7 @@ impl Slot {
 
     fn evict(&mut self) {
         self.value = None;
-        self.epoch = self.epoch.wrapping_add(1);
+        self.loading = Weak::new();
         if let Some(timer) = &self.timer {
             timer.thread().unpark();
         }
@@ -206,7 +201,7 @@ impl Drop for Recent {
     }
 }
 
-fn expire(slot: &std::sync::Weak<Mutex<Slot>>, charge: BudgetLease) {
+fn expire(slot: &Weak<Mutex<Slot>>, charge: BudgetLease) {
     loop {
         let wait = {
             let Some(slot) = slot.upgrade() else { return };
@@ -279,14 +274,14 @@ impl Recent {
                 entry.expires = now + self.idle;
                 return Selection::Hit(Arc::clone(&entry.reader));
             }
+            if slot.loading.upgrade().as_deref() == Some(&key) {
+                return Selection::Ordinary;
+            }
             slot.evict();
             if let Some(charge) = slot.reserve(bytes) {
-                return Selection::Load {
-                    epoch: slot.epoch,
-                    key,
-                    file,
-                    charge,
-                };
+                let key = Arc::new(key);
+                slot.loading = Arc::downgrade(&key);
+                return Selection::Load { key, file, charge };
             }
             return Selection::Ordinary;
         }
@@ -294,11 +289,12 @@ impl Recent {
         Selection::Ordinary
     }
 
-    fn keep(&self, epoch: u64, key: Key, reader: &Arc<SealedReader>) {
+    fn keep(&self, key: &Arc<Key>, reader: &Arc<SealedReader>) {
         let mut slot = self.slot.lock().unwrap_or_else(PoisonError::into_inner);
-        if slot.epoch != epoch {
+        if !slot.loading.ptr_eq(&Arc::downgrade(key)) {
             return;
         }
+        slot.loading = Weak::new();
         if slot.timer.is_none() {
             let Some(charge) = slot.reserve(TIMER_BYTES) else {
                 return;
@@ -315,7 +311,7 @@ impl Recent {
             slot.timer = Some(timer);
         }
         slot.value = Some(Entry {
-            key,
+            key: **key,
             reader: Arc::clone(reader),
             expires: Instant::now() + self.idle,
         });
