@@ -41,12 +41,10 @@ use super::tables::{Generation, SedimentSeq, sql_int, uint};
 use crate::sql_error::SqlResultExt;
 
 /// The tables the derived-row hook may write, by exact name (never a prefix: a listed name
-/// admits that one table of `main`). T5 has no derived rows: the list is empty, so the hook
-/// may only read. T13 adds exactly its rollup table (`rollup`) here, and nothing else: the
-/// declared-column tables (`col_<label>`) are canonical rows, written by the writer phase and
-/// captured (T13 extends the capture with their before/after values), never by the hook. The
+/// admits that one table of `main`). The declared-column tables (`col_<label>`) are
+/// canonical rows, written by the writer phase and captured with their contributions. The
 /// hook reads through `Derived::reader` and writes through `Derived::execute`.
-pub(crate) const DERIVED_TABLES: &[&str] = &[];
+pub(crate) const DERIVED_TABLES: &[&str] = &["rollup"];
 
 /// The tables an index class's staging may insert into.
 pub(crate) const STAGING_TABLES: &[&str] = &["cat_sediment", "cat_generation"];

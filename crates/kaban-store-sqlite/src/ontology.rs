@@ -219,6 +219,7 @@ pub(crate) fn seed(conn: &Connection, now: &str) -> Result<()> {
             if !present {
                 conn.execute_batch("ALTER TABLE schema_type ADD COLUMN columns TEXT; ALTER TABLE schema_type ADD COLUMN rollups TEXT;").sql()?;
             }
+            conn.execute_batch(crate::rollup::TABLES).sql()?;
             let mut st = conn.prepare_cached(&format!(
                 "INSERT OR IGNORE INTO schema_type({BUILTIN_COLS}, builtin, created_at) VALUES ({BUILTIN_BINDS}, 1, ?)"
             )).sql()?;
@@ -334,6 +335,9 @@ pub(crate) fn all_defs(conn: &Connection) -> Result<Vec<TypeDef>> {
 /// table's primary key, never touching a builtin row. `Ok(false)` when nothing changed because
 /// the row is builtin.
 pub(crate) fn extend(conn: &Connection, def: &TypeDef, now: &str) -> Result<bool> {
+    let existing = all_defs(conn)?;
+    let old = existing.iter().find(|previous| previous.kind == def.kind && previous.name == def.name);
+    crate::rollup::validate(def, &existing)?;
     let from = serde_json::to_string(&def.from_kinds)?;
     let to = serde_json::to_string(&def.to_kinds)?;
     let schema = def.props_schema.as_ref().map(ToString::to_string);
@@ -378,6 +382,13 @@ pub(crate) fn extend(conn: &Connection, def: &TypeDef, now: &str) -> Result<bool
             .sql()?
         }
     };
+    if changed > 0 && def.kind == "label" {
+        let empty = TypeDeclaration::default();
+        let previous = old.map_or(&empty, |d| &d.declaration);
+        if previous.columns != def.declaration.columns || previous.rollups != def.declaration.rollups {
+            crate::rollup::declare(conn, &def.name, previous, &def.declaration)?;
+        }
+    }
     Ok(changed > 0)
 }
 

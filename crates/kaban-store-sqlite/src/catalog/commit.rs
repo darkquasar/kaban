@@ -235,10 +235,6 @@ pub(crate) struct Derived<'t> {
 
 impl<'t> Derived<'t> {
     /// The hook's reads of this commit's rows.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "T13's rollup maintenance reads through it")
-    )]
     pub(crate) fn reader(&self) -> Reader<'t> {
         Reader::new(self.conn, self.phases)
     }
@@ -248,10 +244,6 @@ impl<'t> Derived<'t> {
     ///
     /// # Errors
     /// SQLite's, the authorizer's refusal among them.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "T13's rollup maintenance writes through it")
-    )]
     pub(crate) fn execute(&self, sql: &str, params: impl Params) -> Result<usize> {
         let mut stmt = self.conn.prepare(sql).sql()?;
         stmt.execute(params).sql()
@@ -551,14 +543,13 @@ pub(super) fn guard_writer(conn: &mut Connection, committing: &Arc<AtomicBool>) 
 
 impl Catalog {
     /// The derived-row hook: rows derived from the commit's changes, written in its transaction
-    /// before the index classes stage. T5 has none; T13 installs rollup maintenance here. A
+    /// before the index classes stage. A
     /// unit test installs its own ([`Self::set_test_derived_rows`]).
     #[cfg_attr(
         not(test),
         expect(
             clippy::unused_self,
-            clippy::unnecessary_wraps,
-            reason = "the hook's shape: T13 writes rollups through `derived` and can fail"
+            reason = "tests may replace this catalog's hook"
         )
     )]
     fn derived_rows(&self, derived: &Derived<'_>, changes: &BatchChanges) -> Result<()> {
@@ -571,8 +562,7 @@ impl Catalog {
         {
             return hook(derived, changes);
         }
-        let _ = (derived, changes);
-        Ok(())
+        crate::rollup::maintain(derived, changes)
     }
 
     /// Install a unit test's derived-row hook: every later commit runs it in the hook phase.

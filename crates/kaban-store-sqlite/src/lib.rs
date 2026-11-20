@@ -30,6 +30,7 @@ mod leases;
 mod ontology;
 mod producers;
 mod recall;
+mod rollup;
 mod rows;
 mod schema;
 mod session;

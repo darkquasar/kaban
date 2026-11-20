@@ -106,6 +106,7 @@ pub(crate) struct EdgeChange {
 /// The frozen change set of one commit, in capture order.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct BatchChanges {
+    pub(crate) rollups: Vec<crate::rollup::Input>,
     nodes: Vec<NodeChange>,
     edges: Vec<EdgeChange>,
 }
@@ -244,6 +245,7 @@ fn capture_ddl() -> String {
 /// # Errors
 /// SQLite errors.
 pub(crate) fn install(conn: &Connection) -> Result<()> {
+    crate::rollup::register(conn)?;
     conn.execute_batch(&capture_ddl()).sql()
 }
 
@@ -264,6 +266,7 @@ pub(crate) fn reset(conn: &Connection) -> Result<()> {
 /// SQLite errors, or a queue row this module did not write.
 pub(crate) fn drain(conn: &Connection) -> Result<BatchChanges> {
     let mut changes = BatchChanges::default();
+    changes.rollups = crate::rollup::drain(conn)?;
     {
         let mut stmt = conn
             .prepare(

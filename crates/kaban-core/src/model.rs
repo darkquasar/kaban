@@ -6,6 +6,22 @@ use crate::lifecycle::{Lifecycle, StoreScope};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// A SQL scalar used in rollup keys and results.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(untagged)]
+pub enum SqlValue {
+    /// SQL NULL.
+    Null,
+    /// Signed 64-bit integer.
+    Integer(i64),
+    /// Binary64 real.
+    Real(f64),
+    /// UTF-8 text, including text timestamps.
+    Text(String),
+    /// Arbitrary bytes.
+    Blob(Vec<u8>),
+}
+
 /// Input for creating a node. Every string has already passed the denylist gate.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct NewNode {

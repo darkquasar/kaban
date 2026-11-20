@@ -51,7 +51,7 @@ pub use model::{
     EdgeDiff, EdgeFilter, EdgeRescanAction, Evidence, FailureProps, ForgetMode, ForgetOutcome, Hit,
     IndexMeta, LinkReq, Location, NewNode, Node, Op, OpOutcome, OutcomeKind, RecallMode,
     RecallQuery, RedactedStrings, RememberOutcome, RescanAction, RescanCursor, RescanJudge,
-    RescanReport, TraverseDirection, TraverseQuery, TraverseResult, TypeDeclaration, TypeDef,
+    RescanReport, SqlValue, TraverseDirection, TraverseQuery, TraverseResult, TypeDeclaration, TypeDef,
     WorkspaceFilter, WriteBatch,
 };
 // view names and commit ids (spec 11 T5)

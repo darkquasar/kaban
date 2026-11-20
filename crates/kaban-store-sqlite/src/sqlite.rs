@@ -1148,6 +1148,9 @@ impl SqliteStore {
 }
 
 impl MemoryStore for SqliteStore {
+    fn rollup(&self, name: &str, key: &[kaban_core::SqlValue]) -> Result<kaban_core::SqlValue> {
+        crate::rollup::read(&self.lock(), name, key)
+    }
     fn remember_with(
         &self,
         n: NewNode,
