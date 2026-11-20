@@ -246,7 +246,17 @@ fn capture_ddl() -> String {
 /// SQLite errors.
 pub(crate) fn install(conn: &Connection) -> Result<()> {
     crate::rollup::register(conn)?;
-    conn.execute_batch(&capture_ddl()).sql()
+    conn.execute_batch(&capture_ddl()).sql()?;
+    let rollups = if crate::rollup::installed(conn)? {
+        " UNION ALL SELECT 1 FROM main.rollup_input"
+    } else {
+        ""
+    };
+    conn.execute_batch(&format!(
+        "CREATE TEMP VIEW IF NOT EXISTS cat_pending_capture AS
+        SELECT 1 FROM temp.cat_capture{rollups}"
+    ))
+    .sql()
 }
 
 /// Discard whatever the queue holds: the end of every drain. Every row write of the writer
@@ -265,8 +275,10 @@ pub(crate) fn reset(conn: &Connection) -> Result<()> {
 /// # Errors
 /// SQLite errors, or a queue row this module did not write.
 pub(crate) fn drain(conn: &Connection) -> Result<BatchChanges> {
-    let mut changes = BatchChanges::default();
-    changes.rollups = crate::rollup::drain(conn)?;
+    let mut changes = BatchChanges {
+        rollups: crate::rollup::drain(conn)?,
+        ..BatchChanges::default()
+    };
     {
         let mut stmt = conn
             .prepare(

@@ -435,6 +435,30 @@ fn the_work_file_loads_typed_columns_and_rollups_under_the_qualified_label() {
     }
 }
 
+#[test]
+fn a_mixin_cannot_declare_label_local_columns_or_rollups() {
+    let repo = Repo::new("mixin-declarations");
+    for field in [
+        "columns: [{name: cost, ty: real}]",
+        "rollups: [{name: calls, label: 'work:Task', group_by: [], op: count}]",
+    ] {
+        let text = format!(
+            "ontology: work\nversion: 1\nmixins:\n  Measured:\n    {field}\nkinds:\n  Task: {{description: task, mixins: [Measured]}}\nrels: {{}}\n"
+        );
+        let path = repo.write("work.yaml", &text);
+        let err = repo.registry.load_file(&repo.api, &path).unwrap_err();
+        assert_eq!(err.to_string(), "ontology_conflict");
+        assert!(
+            !repo
+                .store
+                .schema()
+                .unwrap()
+                .iter()
+                .any(|d| d.name == "work:Task")
+        );
+    }
+}
+
 fn assert_text_compaction(repo: &Repo, kind: kaban_store_sqlite::WorkKind) {
     let report = repo.store.compact().unwrap();
     assert!(
@@ -461,8 +485,11 @@ fn record(id: &NodeId, kind: &str, props: serde_json::Value) -> Op {
 fn write(repo: &Repo, ops: Vec<Op>) {
     repo.store
         .apply_batch(
-            WriteBatch::new(Default::default(), ops),
-            &kaban_core::WriteCtx::new(Default::default(), kaban_core::Actor::Agent),
+            WriteBatch::new(kaban_core::WorkspaceId::default(), ops),
+            &kaban_core::WriteCtx::new(
+                kaban_core::WorkspaceId::default(),
+                kaban_core::Actor::Agent,
+            ),
         )
         .unwrap();
 }
@@ -590,7 +617,7 @@ fn changing_declared_text_reprojects_existing_rows_or_rolls_back_the_declaration
         "a failed text stage must refuse schema_extend"
     );
     assert_eq!(repo.meta("fts_fields_resolved"), metadata);
-    assert!(
+    assert_eq!(
         repo.store
             .schema()
             .unwrap()
@@ -598,8 +625,8 @@ fn changing_declared_text_reprojects_existing_rows_or_rolls_back_the_declaration
             .find(|d| d.name == "Report")
             .unwrap()
             .declaration
-            .fts_fields
-            .is_empty()
+            .fts_fields,
+        Vec::<String>::new()
     );
     raw.execute_batch("DROP TRIGGER refuse_projection").unwrap();
     extend("Report", &["props.note"]).unwrap();

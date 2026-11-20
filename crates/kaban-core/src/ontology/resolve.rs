@@ -434,6 +434,9 @@ pub fn resolve_with(
         if body.is_a.is_some() || !body.mixins.is_empty() {
             return Err(conflict(q, "mixin_is_a"));
         }
+        if !body.columns.is_empty() || !body.rollups.is_empty() {
+            return Err(conflict(q, "mixin_label_declaration"));
+        }
         if let Some(schema) = &body.props_schema {
             Schema::parse(schema, limits)?;
         }

@@ -137,6 +137,18 @@ CREATE TABLE kind_stats(workspace_id TEXT NOT NULL, ns TEXT NOT NULL, kind TEXT 
   n_sources INTEGER NOT NULL DEFAULT 0, mean_score REAL NULL, first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL,
   PRIMARY KEY(workspace_id, ns, kind));
 
+-- A declaring label owns its col_<label> STRICT table. Canonical writes capture
+-- contributions in order, then the catalog's derived phase applies them to rollup.
+CREATE TABLE rollup(
+  name TEXT NOT NULL, key BLOB NOT NULL, members INTEGER NOT NULL, nonnull INTEGER NOT NULL,
+  value ANY, PRIMARY KEY(name,key)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE rollup_input(
+  seq INTEGER PRIMARY KEY, name TEXT NOT NULL, key BLOB, delta INTEGER NOT NULL, amount ANY,
+  real_sum INTEGER NOT NULL
+) STRICT;
+
 CREATE TABLE derived_artifact(
   artifact_key TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, producer TEXT NOT NULL, producer_id TEXT NOT NULL,
   source_rid INTEGER NOT NULL REFERENCES node(rid) ON DELETE CASCADE, source_rev TEXT NOT NULL,

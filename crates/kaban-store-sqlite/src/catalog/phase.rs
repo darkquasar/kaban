@@ -254,9 +254,11 @@ impl PhaseGuard<'_> {
         }
         out?;
         let changed: bool = conn
-            .query_row("SELECT EXISTS(SELECT 1 FROM temp.cat_capture)", [], |r| {
-                r.get(0)
-            })
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM temp.cat_pending_capture)",
+                [],
+                |r| r.get(0),
+            )
             .sql()?;
         if changed {
             return Err(CommitRefused {

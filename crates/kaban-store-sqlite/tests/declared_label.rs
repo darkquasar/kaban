@@ -43,9 +43,38 @@ fn a_project_created_before_declared_columns_keeps_its_rows_on_reopen() {
     drop(store);
     let conn = rusqlite::Connection::open(scratch.db()).unwrap();
     conn.execute_batch(
-        "ALTER TABLE schema_type DROP COLUMN columns; ALTER TABLE schema_type DROP COLUMN rollups;",
+        "ALTER TABLE schema_type DROP COLUMN columns; ALTER TABLE schema_type DROP COLUMN rollups;
+         DROP TABLE rollup; DROP TABLE rollup_input;",
     )
     .unwrap();
+    drop(conn);
+    let (diagnostic, _) = SqliteStore::open_diagnostic(
+        &scratch.db(),
+        &scratch.keys(),
+        &kaban_core::ActorId::parse("local").unwrap(),
+    )
+    .unwrap();
+    let labels = diagnostic.schema().unwrap();
+    assert!(
+        labels
+            .iter()
+            .any(|def| def.name == "Fact" && def.declaration.columns.is_empty())
+    );
+    let missing = kaban_core::MemoryStore::rollup(&diagnostic, "missing", &[]);
+    assert!(matches!(
+        missing,
+        Err(kaban_core::StoreError::InvalidName(_, "unknown rollup"))
+    ));
+    drop(diagnostic);
+    let conn = rusqlite::Connection::open(scratch.db()).unwrap();
+    let installed: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='rollup_input')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(!installed, "diagnostics inspect the old format in place");
     drop(conn);
     let store = SqliteStore::open(&scratch.db(), &scratch.keys()).unwrap();
     let read = kaban_core::MemoryStore::get(&store, &common::nid(&before.id), false)

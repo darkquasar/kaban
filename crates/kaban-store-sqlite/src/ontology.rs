@@ -55,16 +55,29 @@ impl TypeTable {
 
     /// The projection [`row_typedef`] decodes: the stored name is rebuilt from `(ns, name)` by
     /// the decoder, and `ns` is `NULL` on the old shape (derived by the API layer there).
-    const fn columns(self) -> &'static str {
-        match self {
+    fn columns(self, conn: &Connection) -> Result<&'static str> {
+        Ok(match self {
             Self::Stored => {
                 "kind, name, description, from_kinds, to_kinds, directed, props_schema, builtin, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL"
+            }
+            Self::Qualified if !has_declared_columns(conn)? => {
+                "kind, name, description, from_kinds, to_kinds, directed, props_schema, builtin, ns, rules, rank, column_weights, extract, display, NULL, NULL, fts_fields"
             }
             Self::Qualified => {
                 "kind, name, description, from_kinds, to_kinds, directed, props_schema, builtin, ns, rules, rank, column_weights, extract, display, columns, rollups, fts_fields"
             }
-        }
+        })
     }
+}
+
+/// As-is opens may inspect the supported format from before typed declarations.
+pub(crate) fn has_declared_columns(conn: &Connection) -> Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('schema_type') WHERE name='columns')",
+        [],
+        |row| row.get(0),
+    )
+    .sql()
 }
 
 /// One builtin `schema_type` row resolved from the shipped files: identity, description, the
@@ -212,11 +225,7 @@ pub(crate) fn seed(conn: &Connection, now: &str) -> Result<()> {
         TypeTable::Qualified => {
             // The open transaction already holds the write lock. A project written before
             // typed declarations has the same supported schema version and keeps its data.
-            let present = conn.query_row(
-                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('schema_type') WHERE name='columns')",
-                [], |r| r.get::<_, bool>(0),
-            ).sql()?;
-            if !present {
+            if !has_declared_columns(conn)? {
                 conn.execute_batch("ALTER TABLE schema_type ADD COLUMN columns TEXT; ALTER TABLE schema_type ADD COLUMN rollups TEXT;").sql()?;
             }
             conn.execute_batch(crate::rollup::TABLES).sql()?;
@@ -305,7 +314,7 @@ pub(crate) fn rel_def(conn: &Connection, stored_rel: &str) -> Result<Option<Type
     let (where_sql, binds) = locate(table, "rel", stored_rel);
     conn.prepare_cached(&format!(
         "SELECT {} FROM schema_type WHERE {where_sql}",
-        table.columns()
+        table.columns(conn)?
     ))
     .sql()?
     .query_row(rusqlite::params_from_iter(binds), row_typedef)
@@ -319,7 +328,7 @@ pub(crate) fn all_defs(conn: &Connection) -> Result<Vec<TypeDef>> {
     let mut defs = conn
         .prepare_cached(&format!(
             "SELECT {} FROM schema_type ORDER BY kind, builtin DESC, name",
-            table.columns()
+            table.columns(conn)?
         ))
         .sql()?
         .query_map([], row_typedef)

@@ -359,6 +359,18 @@ pub(crate) fn read_column(row: &rusqlite::Row<'_>, idx: usize) -> rusqlite::Resu
     }
 }
 
+/// Read the body of one record through the current catalog snapshot.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "T14 consumes the scoped body reader")
+)]
+pub(crate) fn read_body(reader: &crate::catalog::phase::Reader<'_>, rid: i64) -> Result<Vec<u8>> {
+    reader
+        .prepare("SELECT text FROM node WHERE rid=?")?
+        .query_row([rid], |row| read_column(row, 0).map(String::into_bytes))?
+        .ok_or_else(|| StoreError::NotFound(rid.to_string()))
+}
+
 /// The writer of a body column: every body is bound as a tagged `BLOB`. Built inside the write
 /// transaction through the dictionary guard ([`verify`]), so no writer ever encodes beside
 /// bodies of another dictionary.
