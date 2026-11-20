@@ -317,7 +317,12 @@ pub(crate) fn run(
             "kaban serves schema {LATEST_SCHEMA_VERSION} only (OWN-P): a corpus cannot be built at schema {schema_version}"
         );
     }
-    let sqlite = SqliteStore::open_as(db, keys_dir, actor)?;
+    let sqlite = SqliteStore::open_as(
+        db,
+        keys_dir,
+        actor,
+        kaban_core::config::CatalogCfg::default(),
+    )?;
     let signer = sqlite.signer();
     let store: Arc<dyn GraphStore> = Arc::new(sqlite);
     let open_ms = t_open.elapsed().as_secs_f64() * 1e3;

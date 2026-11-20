@@ -35,6 +35,7 @@ use crate::session;
 use crate::sql_error::SqlResultExt;
 use crate::tantivy::{Attached, SharedConnection};
 use crate::traverse;
+use kaban_core::config::CatalogCfg;
 use kaban_core::query_budget::QueryBudget;
 use kaban_core::text_index::{Searched, TextIndex, TextQuery, TextSnapshot};
 use kaban_core::{
@@ -373,16 +374,20 @@ impl SqliteStore {
     ///
     /// # Errors
     /// `StoreError::InvalidName` naming the refused key (`CatalogCfg::validate`).
-    pub fn with_catalog_config(mut self, catalog: kaban_core::config::CatalogCfg) -> Result<Self> {
-        if let Err(e) = catalog.validate() {
+    pub fn with_catalog_config(mut self, catalog: CatalogCfg) -> Result<Self> {
+        Self::validate_catalog_config(&catalog)?;
+        self.catalog.configure(catalog);
+        Ok(self)
+    }
+
+    fn validate_catalog_config(config: &CatalogCfg) -> Result<()> {
+        config.validate().map_err(|e| {
             let key = match e {
                 kaban_core::config::ConfigError::Range { path } => path,
                 _ => "catalog".into(),
             };
-            return Err(StoreError::InvalidName(key, "invalid_configuration"));
-        }
-        self.catalog.configure(catalog);
-        Ok(self)
+            StoreError::InvalidName(key, "invalid_configuration")
+        })
     }
 
     /// Compact the catalog under the configured maintenance budget (spec 11 KER-07, 7.6):
@@ -467,20 +472,28 @@ impl SqliteStore {
     /// errors, or `StoreError::Audit` when the key cannot be read or created (including a key
     /// file of the wrong length, and a missing key of an existing project).
     pub fn open(path: &Path, keys_dir: &Path) -> Result<Self> {
-        Self::open_as(path, keys_dir, &ActorId::default())
+        Self::open_as(path, keys_dir, &ActorId::default(), CatalogCfg::default())
     }
     /// [`Self::open`] writing as `actor` (spec 05 SS-26: the process's `--actor-id`). The
     /// writer is bound on the connection before the migrator runs and fixed for the store's
     /// life: every canonical write, a migration's included, stamps it with this database's
-    /// `db_id` as its instance and its `pack_lineage_id`.
+    /// `db_id` as its instance and its `pack_lineage_id`. The catalog uses `settings` for
+    /// startup recovery and any pending text rebuild before the store serves a query.
     ///
     /// # Errors
-    /// As [`Self::open`].
-    pub fn open_as(path: &Path, keys_dir: &Path, actor: &ActorId) -> Result<Self> {
+    /// As [`Self::open`], or `StoreError::InvalidName` for an invalid catalog setting.
+    pub fn open_as(
+        path: &Path,
+        keys_dir: &Path,
+        actor: &ActorId,
+        settings: CatalogCfg,
+    ) -> Result<Self> {
+        Self::validate_catalog_config(&settings)?;
         let (mut conn, db_id, report, live) = Self::open_file(path, actor, Self::CAPABILITIES)?;
         // the catalog attaches first (the key record commits through it), but its artefacts
         // are created only once the key is admitted: a refused project gains none
         let mut catalog = Catalog::open_as_is(path, &mut conn)?;
+        catalog.configure(settings);
         let signer = Self::project_key(&catalog, &mut conn, keys_dir, &db_id)?;
         catalog.open_writable(&mut conn)?;
         Self::assemble(

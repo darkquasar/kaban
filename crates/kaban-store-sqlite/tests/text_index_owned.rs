@@ -298,3 +298,26 @@ fn declared_body_and_code_fields_keep_their_ranked_hits_through_reindex() {
     assert_eq!(search("quokka", MatchMode::Lexical), [1, 2]);
     assert_eq!(search("\"shore birds\"", MatchMode::Lexical), [3]);
 }
+
+#[test]
+fn invalid_catalog_settings_are_refused_before_creating_project_files() {
+    let scratch = Scratch::new("text-format", "invalid-catalog");
+    let settings = kaban_core::config::CatalogCfg {
+        maintenance_memory_mib: 0,
+        ..Default::default()
+    };
+    let opened = SqliteStore::open_as(
+        &scratch.db(),
+        &scratch.keys(),
+        &kaban_core::ActorId::default(),
+        settings,
+    );
+    assert!(
+        matches!(opened, Err(kaban_core::StoreError::InvalidName(key, "invalid_configuration")) if key == "catalog.maintenance_memory_mib")
+    );
+    assert_eq!(
+        std::fs::read_dir(&scratch.0).unwrap().count(),
+        0,
+        "invalid settings must leave the project directory untouched"
+    );
+}

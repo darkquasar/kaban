@@ -18,7 +18,15 @@ use std::sync::Arc;
 fn the_service_stamps_the_actor_its_store_was_opened_as() {
     let s = Scratch::new("kaban-api-actor", "alice");
     let alice = ActorId::parse("alice").unwrap();
-    let store = Arc::new(SqliteStore::open_as(&s.db(), &s.keys(), &alice).unwrap());
+    let store = Arc::new(
+        SqliteStore::open_as(
+            &s.db(),
+            &s.keys(),
+            &alice,
+            kaban_core::config::CatalogCfg::default(),
+        )
+        .unwrap(),
+    );
     let api = KabanApi::new(store.clone(), Policy::empty(), store.signer());
     let written = api
         .remember(RememberRequest {

@@ -385,12 +385,15 @@ fn open_api(cli: Cli, policy: kaban_policy::Policy) -> Result<kaban_api::KabanAp
     // (exit 4) naming the loader's category and the field path, never a value
     let engine = load_engine()?;
     // the store owns its text index (spec 11 T7): a class of its catalog, searchable at commit
-    let store = kaban_store_sqlite::SqliteStore::open_as(&cli.db, &keys_dir, &cli.actor_id)
-        .map_err(OpenError::Store)?
-        .with_recall_config(engine.recall.clone())
-        .map_err(OpenError::Store)?
-        .with_catalog_config(engine.catalog.clone())
-        .map_err(OpenError::Store)?;
+    let store = kaban_store_sqlite::SqliteStore::open_as(
+        &cli.db,
+        &keys_dir,
+        &cli.actor_id,
+        engine.catalog.clone(),
+    )
+    .map_err(OpenError::Store)?
+    .with_recall_config(engine.recall.clone())
+    .map_err(OpenError::Store)?;
     let store = Arc::new(store);
     let catalog = Arc::new(cli::compact::StoreCatalog(Arc::clone(&store)));
     // the one registry of this process (engine-plan E1.5): the service reads every mixin

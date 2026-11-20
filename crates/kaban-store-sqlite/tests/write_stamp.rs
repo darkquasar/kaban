@@ -49,7 +49,13 @@ fn meta(conn: &Connection, key: &str) -> Option<String> {
 }
 
 fn bound(s: &Scratch, name: &str) -> SqliteStore {
-    SqliteStore::open_as(&s.db(), &s.keys(), &ActorId::parse(name).unwrap()).unwrap()
+    SqliteStore::open_as(
+        &s.db(),
+        &s.keys(),
+        &ActorId::parse(name).unwrap(),
+        kaban_core::config::CatalogCfg::default(),
+    )
+    .unwrap()
 }
 
 /// One rescan walk from the start under `policy_version` that rejects (tombstones) the record
