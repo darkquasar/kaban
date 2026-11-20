@@ -35,7 +35,7 @@ pub(crate) struct Fields {
     pub(crate) tag: Field,
     /// Fields corresponding to the weights in [`CONTENT`].
     pub(crate) content: [Field; 4],
-    /// The unstemmed, folded copy of text and summary the fuzzy terms run against.
+    /// Unstemmed, folded text, projected summary, tags, identifier values and anchor keys.
     pub(crate) fuzzy: Field,
     /// Identifier parts and positions for code-aware operands on all declared text.
     pub(crate) code: Field,

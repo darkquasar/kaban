@@ -1,6 +1,8 @@
 //! Gazetteer CLI control acceptance and rejection through the public binary.
 #![cfg(feature = "ingest")]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#[path = "../../kaban-api/tests/common/cg_fixture.rs"]
+mod cg_fixture;
 mod common;
 
 use common::Scratch;
@@ -295,4 +297,109 @@ fn link_modes_are_accepted_and_invalid_mode_is_refused() {
     assert!(!out.status.success());
     assert!(!String::from_utf8_lossy(&out.stdout).contains(&marker));
     assert!(!String::from_utf8_lossy(&out.stderr).contains(&marker));
+}
+
+#[test]
+fn split_symbol_alias_requires_a_distinctive_part_in_the_document_corpus() {
+    use kaban_core::config::Gazetteer;
+    use kaban_core::{
+        Actor, MemoryStore, Method, NewNode, NodeId, RememberOutcome, SnapshotAttach, WorkspaceId,
+        WriteCtx,
+    };
+    use kaban_ingest::{SnapshotSource, build_dictionary, find_mentions};
+    use kaban_policy::Policy;
+    use kaban_store_sqlite::SqliteStore;
+    use serde_json::json;
+
+    let scratch = Scratch::new("symbol-gazetteer", "frequency");
+    let store = SqliteStore::open(&scratch.db(), &scratch.home().join("keys")).unwrap();
+    let fixture = cg_fixture::build(
+        &scratch.0,
+        cg_fixture::Variant::AferoRenamed,
+        cg_fixture::AFERO_COMMIT,
+    );
+    let uri = kaban_codegraph::validate_for_attach(&fixture.path).unwrap();
+    store
+        .attach_snapshot(&SnapshotAttach::from_admitted(
+            uri.as_sql_param().to_owned(),
+            fixture.commit.clone(),
+            uri.schema_version(),
+            format!("{:?}", uri.generation()),
+        ))
+        .unwrap();
+    let workspace = WorkspaceId::default();
+    let ctx = WriteCtx::new(workspace.clone(), Actor::Agent);
+    let remember = |kind: &str, text: &str, props| {
+        let node = NewNode {
+            kind: kind.into(),
+            text: text.into(),
+            props: Some(props),
+            ..Default::default()
+        };
+        match store.remember(node, &[], &ctx).unwrap() {
+            RememberOutcome::Created(n) | RememberOutcome::Existing { node: n, .. } => {
+                NodeId::parse(&n.id).unwrap()
+            }
+        }
+    };
+    // Both documents contain "create"; just one contains "file".
+    for (title, text) in [
+        ("Setup", "Create a file for the test"),
+        ("Usage", "Create a fresh directory"),
+    ] {
+        let chunk = remember("Chunk", text, json!({}));
+        remember(
+            "Document",
+            title,
+            json!({"status": "ok", "chunk_ids": [chunk.as_str()]}),
+        );
+    }
+    let symbol = remember(
+        "CodeRef",
+        "Source anchor",
+        json!({"symbol": cg_fixture::AFERO_RENAMED_KEY}),
+    );
+    let authored = remember("Fact", "Editor action", json!({"aliases": ["Create File"]}));
+    let snapshot = SnapshotSource {
+        commit: fixture.commit,
+    };
+    let dictionary = |cutoff| {
+        build_dictionary(
+            &store,
+            &workspace,
+            Some(&snapshot),
+            &Policy::empty(),
+            &Gazetteer {
+                corpus_freq_cutoff: cutoff,
+                max_targets: 1,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+    };
+    let chunk = NodeId::new();
+    let common = dictionary(0.25);
+    let hits = find_mentions(&common, &chunk, "Select create file in the editor");
+    assert_eq!(
+        hits.len(),
+        1,
+        "only the authored alias may match a common phrase"
+    );
+    assert_eq!(
+        (&hits[0].target, hits[0].method, hits[0].ambiguous),
+        (&authored, Method::Alias, false)
+    );
+    assert_eq!(
+        find_mentions(&common, &chunk, "Call CreateFile")[0].target,
+        symbol
+    );
+
+    let distinctive = dictionary(0.5);
+    let hits = find_mentions(&distinctive, &chunk, "Select create file in the editor");
+    assert_eq!(hits.len(), 2);
+    assert!(hits.iter().all(|hit| hit.ambiguous));
+    assert!(
+        hits.iter()
+            .any(|hit| hit.target == symbol && hit.method == Method::Symbol)
+    );
 }

@@ -13,8 +13,8 @@ use std::cmp::Reverse;
 use std::collections::BTreeSet;
 use tantivy::collector::TopDocs;
 use tantivy::query::{
-    Bm25StatisticsProvider, BooleanQuery, BoostQuery, ConstScoreQuery, EmptyQuery, FuzzyTermQuery,
-    Occur, PhrasePrefixQuery, PhraseQuery, Query, TermQuery,
+    Bm25StatisticsProvider, BooleanQuery, BoostQuery, ConstScoreQuery, DisjunctionMaxQuery,
+    EmptyQuery, FuzzyTermQuery, Occur, PhrasePrefixQuery, PhraseQuery, Query, TermQuery,
 };
 use tantivy::schema::{Field, IndexRecordOption};
 use tantivy::{DocAddress, DocId, Index, Score, Searcher, SegmentReader, Term};
@@ -277,6 +277,7 @@ fn content(
     ops: &[Operand],
     occur: Occur,
     weights: Columns,
+    identifier: bool,
     budget: &QueryBudget,
 ) -> Result<Option<Box<dyn Query>>> {
     let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
@@ -287,7 +288,11 @@ fn content(
         }
         let code = fields.code;
         let parts = tokens(searcher.index(), code, &op.words)?;
-        let compound = !op.quoted && parts.len() > 1;
+        // A hyphen or sentence punctuation alone does not turn prose into code.
+        // Internal dots in qualified names still count as identifier separators.
+        let compound = !op.quoted
+            && parts.len() > 1
+            && (!op.words.contains(['-', '.']) || classify(&op.words) == QueryClass::Identifier);
         let mut per_field: Vec<(Occur, Box<dyn Query>)> = Vec::new();
         let prefix = op.prefix || (compound && op.words.contains('_'));
         if compound || op.quoted {
@@ -311,7 +316,7 @@ fn content(
             };
             per_field.push((
                 Occur::Should,
-                Box::new(BoostQuery::new(code_query, CODE_BOOST)),
+                Box::new(BoostQuery::new(code_query, weights[3])),
             ));
         }
         if !op.prefix && !op.quoted {
@@ -319,16 +324,33 @@ fn content(
             if let Some(term) = name.first() {
                 per_field.push((
                     Occur::Should,
-                    Box::new(BoostQuery::new(raw_term(fields.name, term), NAME_BOOST)),
+                    Box::new(BoostQuery::new(
+                        raw_term(fields.name, term),
+                        weights[3] * (NAME_BOOST / CODE_BOOST),
+                    )),
                 ));
             }
         }
         if !compound && !parts.is_empty() {
+            let mut identifier_query =
+                operand_on(searcher, fields.content[3], &parts, op.prefix, budget)?;
+            if op.prefix && parts.len() == 1 {
+                let name = tokens(searcher.index(), fields.name, &op.words)?;
+                let whole = operand_on(searcher, fields.name, &name, true, budget)?;
+                // The whole spelling can cross a case boundary. Count a prefix that
+                // also matches a part only once, as a single identifier-field match.
+                identifier_query =
+                    Box::new(DisjunctionMaxQuery::new(vec![identifier_query, whole]));
+            }
             per_field.push((
                 Occur::Should,
                 Box::new(BoostQuery::new(
-                    operand_on(searcher, fields.content[3], &parts, op.prefix, budget)?,
-                    weights[3],
+                    identifier_query,
+                    if identifier {
+                        2.0 * weights[3]
+                    } else {
+                        weights[3]
+                    },
                 )),
             ));
         }
@@ -364,18 +386,13 @@ fn lexical(
     filter: &SeedFilter<'_>,
     budget: &QueryBudget,
 ) -> Result<Option<Box<dyn Query>>> {
-    let boost = |mut w: Columns| {
-        if identifier {
-            w[3] *= 2.0;
-        }
-        w
-    };
     let Some(default) = content(
         searcher,
         fields,
         ops,
         occur,
-        boost(weights.defaults),
+        weights.defaults,
+        identifier,
         budget,
     )?
     else {
@@ -387,7 +404,7 @@ fn lexical(
         let mut branches: Vec<(Occur, Box<dyn Query>)> = Vec::new();
         let mut others: Vec<(Occur, Box<dyn Query>)> = vec![(Occur::Must, default)];
         for (kind, profile) in &weights.profiles {
-            if let Some(q) = content(searcher, fields, ops, occur, boost(*profile), budget)? {
+            if let Some(q) = content(searcher, fields, ops, occur, *profile, identifier, budget)? {
                 branches.push((
                     Occur::Should,
                     Box::new(BooleanQuery::new(vec![

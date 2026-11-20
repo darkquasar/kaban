@@ -192,7 +192,7 @@ pub struct IndexRow {
     /// The projected summary (stored summary plus the kind's `fts_fields`): the FTS5 `summary`
     /// column's text.
     pub summary: String,
-    /// The stored summary as written: the identifier derivation's and the fuzzy index's input.
+    /// The stored summary as written, before projection adds the kind's declared text fields.
     pub stored_summary: Option<String>,
     /// The values of the kind's `ident_fields`.
     pub ident_values: Vec<String>,
