@@ -749,9 +749,8 @@ mod imp {
             out,
             "{}",
             json!({"op":"summary","parity_pass":parity_ok,
-            "warm_pass":warm.results_valid && warm.targets_met,"warm_results_valid":warm.results_valid,
-            "warm_targets_met":warm.targets_met,"fresh_pass":index.results_valid && index.targets_met,
-            "fresh_index_results_valid":index.results_valid,"fresh_index_target_met":index.targets_met,
+            "warm_pass":warm.results_valid,"warm_targets_met":warm.targets_met,
+            "fresh_pass":index.results_valid,"fresh_index_target_met":index.targets_met,
             "fresh_store_results_valid":store_valid,"timing_targets_met":warm.targets_met && index.targets_met,
             "pass":valid})
         )?;
@@ -845,6 +844,8 @@ mod imp {
             assert!(report_summary(&mut output, true, slow, slow, true)?);
             let row: Value = serde_json::from_slice(&output)?;
             assert_eq!(row["pass"], true);
+            assert_eq!(row["warm_pass"], true);
+            assert_eq!(row["fresh_pass"], true);
             assert_eq!(row["timing_targets_met"], false);
             for (parity, warm, index, store) in [
                 (false, slow, slow, true),
