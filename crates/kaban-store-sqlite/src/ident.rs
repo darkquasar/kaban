@@ -94,11 +94,20 @@ pub(crate) fn deploy(conn: &Connection, ontology: &Ontology, force: bool) -> Res
         .iter()
         .map(|(kind, resolved)| (stored_name(kind), resolved.ident_fields.clone()))
         .collect();
-    let fts_fields = ontology
+    let mut fts_fields: Fields = ontology
         .kinds
         .iter()
         .map(|(kind, resolved)| (stored_name(kind), resolved.fts_fields.clone()))
         .collect();
+    // An ontology deployment replaces its prior projections. Runtime declarations have
+    // their own persisted source, including for labels absent from this ontology.
+    for def in crate::ontology::all_defs(conn)? {
+        if !def.builtin && def.kind == "label" && !def.declaration.fts_fields.is_empty() {
+            fts_fields
+                .entry(def.name)
+                .or_insert(def.declaration.fts_fields);
+        }
+    }
     deploy_fields(conn, &ident_fields, &fts_fields, force)
 }
 

@@ -176,10 +176,10 @@ pub struct OntologyFile {
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct KindBody {
-    /// Typed properties stored in the label's column table.
+    /// Typed properties stored in this label's column table. Each child declares its own columns.
     #[serde(default)]
     pub columns: Vec<ColumnDecl>,
-    /// Aggregates maintained for this label.
+    /// Aggregates over this exact label's active rows. Descendants declare their own aggregates.
     #[serde(default)]
     pub rollups: Vec<RollupDecl>,
     /// Human description.

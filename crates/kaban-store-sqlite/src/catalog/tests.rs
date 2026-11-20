@@ -2221,3 +2221,38 @@ fn a_replaced_run_with_a_gap_in_its_own_class_is_refused() {
     let text = source.driver().to_string();
     assert!(text.contains("is not consecutive"), "{text}");
 }
+
+#[test]
+fn writes_before_and_after_replacing_a_rollup_count_once_in_the_final_declaration() {
+    use crate::sql_error::SqlResultExt;
+    use kaban_core::{SchemaStore, SqlValue, TypeDef};
+    let store = SqliteStore::open_memory().unwrap();
+    let mut def: TypeDef = serde_json::from_value(serde_json::json!({
+        "kind":"label", "name":"Counter", "description":"counter", "columns":[{"name":"n","ty":"integer"}],
+        "rollups":[{"name":"total","label":"Counter","op":"count"}]
+    })).unwrap();
+    store.schema_extend(def.clone()).unwrap();
+    store
+        .remember(
+            NewNode {
+                kind: "Counter".into(),
+                text: "counter".into(),
+                props: Some(serde_json::json!({"n":1})),
+                ..Default::default()
+            },
+            &[],
+            &ctx(),
+        )
+        .unwrap();
+    def.declaration.rollups[0].op = kaban_core::ontology::RollupOp::Sum("n".into());
+    store
+        .catalog()
+        .commit(&mut store.lock(), Durability::Normal, |txn| {
+            txn.conn().execute("UPDATE col_Counter SET n=5", []).sql()?;
+            crate::ontology::extend(txn, &def, "2026-11-20T00:00:00Z")?;
+            txn.conn().execute("UPDATE col_Counter SET n=7", []).sql()?;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(store.rollup("total", &[]).unwrap(), SqlValue::Integer(7));
+}

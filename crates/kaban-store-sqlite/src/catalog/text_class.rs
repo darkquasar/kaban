@@ -74,6 +74,8 @@ impl IndexClass for TextClass {
             stage_rows(txn, &rids, &budget)?;
         }
         if let Some((label, maintenance)) = txn.text_projection {
+            // Refuse the declaration together with its partially staged rows on exhaustion.
+            // The caller can retry under a larger configured maintenance budget.
             let budget = QueryBudget::new(maintenance.memory_bytes, Some(maintenance.deadline));
             let limit = u32::try_from(REBUILD_BATCH_ROWS).unwrap_or(u32::MAX);
             let _ids = budget.reserve(u64::from(limit) * 2 * size_of::<i64>() as u64)?;

@@ -73,7 +73,8 @@ impl TypeTable {
 /// As-is opens may inspect the supported format from before typed declarations.
 pub(crate) fn has_declared_columns(conn: &Connection) -> Result<bool> {
     conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('schema_type') WHERE name='columns')",
+        // MAX returns NULL for a missing table, which the bool conversion reports as a storage error.
+        "SELECT max(name='columns') FROM pragma_table_info('schema_type')",
         [],
         |row| row.get(0),
     )
@@ -225,6 +226,9 @@ pub(crate) fn seed(conn: &Connection, now: &str) -> Result<()> {
         TypeTable::Qualified => {
             // The open transaction already holds the write lock. A project written before
             // typed declarations has the same supported schema version and keeps its data.
+            // Once a declaration installs expression indexes or triggers using this adapter's
+            // functions, writers and integrity checks require a binary registering those functions.
+            // Earlier v14 binaries have no feature gate for these newer declarations.
             if !has_declared_columns(conn)? {
                 conn.execute_batch("ALTER TABLE schema_type ADD COLUMN columns TEXT; ALTER TABLE schema_type ADD COLUMN rollups TEXT;").sql()?;
             }

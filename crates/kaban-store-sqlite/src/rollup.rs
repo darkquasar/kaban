@@ -5,7 +5,7 @@ use crate::catalog::commit::Derived;
 use crate::sql_error::SqlResultExt;
 use kaban_core::ontology::{ColumnDecl, ColumnType, RollupDecl, RollupOp};
 use kaban_core::{Result, SqlValue, StoreError, TypeDeclaration, TypeDef};
-use rusqlite::functions::FunctionFlags;
+use rusqlite::functions::{Aggregate, Context, FunctionFlags};
 use rusqlite::types::{Value as DbValue, ValueRef};
 use rusqlite::{Connection, OptionalExtension, params};
 use std::collections::{BTreeMap, BTreeSet};
@@ -56,6 +56,8 @@ pub(crate) fn register(conn: &Connection) -> Result<()> {
     let flags = FunctionFlags::SQLITE_UTF8
         | FunctionFlags::SQLITE_DETERMINISTIC
         | FunctionFlags::SQLITE_INNOCUOUS;
+    conn.create_aggregate_function("kaban_integer_sum", 1, flags, IntegerSum)
+        .sql()?;
     conn.create_scalar_function("kaban_valid_timestamp", 1, flags, |ctx| {
         Ok(crate::rows::rfc3339_ms(ctx.get_raw(0).as_str()?).is_some())
     })
@@ -67,6 +69,26 @@ pub(crate) fn register(conn: &Connection) -> Result<()> {
         encode_key(&key).map_err(|e| rusqlite::Error::UserFunctionError(Box::new(e)))
     })
     .sql()
+}
+
+/// Match the incremental integer accumulator: cancellation may bring a temporary
+/// overflow back into range. SQLite cannot have enough i64 rows to overflow i128.
+struct IntegerSum;
+
+impl Aggregate<i128, Option<i64>> for IntegerSum {
+    fn init(&self, _: &mut Context<'_>) -> rusqlite::Result<i128> {
+        Ok(0)
+    }
+
+    fn step(&self, ctx: &mut Context<'_>, total: &mut i128) -> rusqlite::Result<()> {
+        *total += i128::from(ctx.get::<i64>(0)?);
+        Ok(())
+    }
+
+    fn finalize(&self, _: &mut Context<'_>, total: Option<i128>) -> rusqlite::Result<Option<i64>> {
+        // The rebuild distinguishes an out-of-range NULL from an empty SUM by its nonnull count.
+        Ok(total.and_then(|sum| i64::try_from(sum).ok()))
+    }
 }
 
 fn group_expr(r: &RollupDecl, prefix: &str) -> String {
@@ -211,18 +233,76 @@ struct Delta {
     real_sum: bool,
 }
 
+/// Rebuild from the final canonical rows, including writes on either side of a
+/// declaration change in this transaction. The database groups its own rows.
+fn rebuild(derived: &Derived<'_>, name: &str) -> Result<()> {
+    derived.execute("DELETE FROM main.rollup WHERE name=?", [name])?;
+    let reader = derived.reader();
+    let Some((rule, columns)) = reader.prepare(
+        "SELECT j.value,s.columns FROM schema_type s,json_each(s.rollups) j WHERE json_extract(j.value,'$.name')=?"
+    )?.query_row([name], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))? else {
+        return Ok(()); // Removed declaration.
+    };
+    let rule: RollupDecl = serde_json::from_str(&rule)?;
+    let columns: Vec<ColumnDecl> = serde_json::from_str(&columns)?;
+    let (nonnull, value) = match &rule.op {
+        RollupOp::Count => ("count(*)".to_owned(), "count(*)".to_owned()),
+        RollupOp::Sum(col) => {
+            let quoted = identifier(col);
+            let real = columns
+                .iter()
+                .any(|c| c.name == *col && c.ty == ColumnType::Real);
+            let value = if real {
+                format!("sum({quoted} ORDER BY rid)")
+            } else {
+                format!("kaban_integer_sum({quoted}) FILTER (WHERE {quoted} IS NOT NULL)")
+            };
+            (format!("count({quoted})"), value)
+        }
+    };
+    let key = group_expr(&rule, "");
+    let table = identifier(&format!("col_{}", rule.label));
+    derived.execute(
+        &format!(
+            "INSERT INTO main.rollup(name,key,members,nonnull,value)
+                  SELECT ?1,{key},count(*),{nonnull},{value}
+                  FROM {table} WHERE _active=1 GROUP BY {key}"
+        ),
+        [name],
+    )?;
+    if matches!(rule.op, RollupOp::Sum(_))
+        && reader
+            .prepare(
+                "SELECT 1 FROM main.rollup WHERE name=? AND nonnull>0 AND
+         (value IS NULL OR value NOT BETWEEN ? AND ?) LIMIT 1",
+            )?
+            .query_row(params![name, -f64::MAX, f64::MAX], |_| Ok(()))?
+            .is_some()
+    {
+        return Err(StoreError::RollupOverflow);
+    }
+    Ok(())
+}
+
 pub(crate) fn maintain(derived: &Derived<'_>, changes: &BatchChanges) -> Result<()> {
     if changes.rollups.is_empty() {
         return Ok(());
     }
     let mut groups = BTreeMap::<(&str, &[u8]), Delta>::new();
-    let mut resets = BTreeSet::new();
+    let resets: BTreeSet<_> = changes
+        .rollups
+        .iter()
+        .filter(|input| input.key.is_none())
+        .map(|input| input.name.as_str())
+        .collect();
+    for name in &resets {
+        rebuild(derived, name)?;
+    }
     for input in &changes.rollups {
-        let Some(key) = &input.key else {
-            groups.retain(|(name, _), _| *name != input.name);
-            resets.insert(input.name.as_str());
+        if resets.contains(input.name.as_str()) {
             continue;
-        };
+        }
+        let Some(key) = &input.key else { continue };
         let d = groups.entry((&input.name, key)).or_default();
         d.members += input.delta;
         d.real_sum = input.real_sum;
@@ -232,9 +312,6 @@ pub(crate) fn maintain(derived: &Derived<'_>, changes: &BatchChanges) -> Result<
                 d.integer_sum += i128::from(input.delta) * i128::from(v);
             }
         }
-    }
-    for name in resets {
-        derived.execute("DELETE FROM main.rollup WHERE name=?", [name])?;
     }
     let reader = derived.reader();
     let mut previous =
@@ -250,8 +327,18 @@ pub(crate) fn maintain(derived: &Derived<'_>, changes: &BatchChanges) -> Result<
                 ))
             })?
             .unwrap_or((0, 0, DbValue::Null));
-        let members = members + d.members;
-        let nonnull = nonnull + d.nonnull;
+        let members = members
+            .checked_add(d.members)
+            .ok_or(StoreError::RollupOverflow)?;
+        let nonnull = nonnull
+            .checked_add(d.nonnull)
+            .ok_or(StoreError::RollupOverflow)?;
+        if !(0..=members).contains(&nonnull) {
+            return Err(StoreError::InvalidName(
+                name.into(),
+                "invalid rollup cardinality",
+            ));
+        }
         if members == 0 {
             derived.execute(
                 "DELETE FROM main.rollup WHERE name=? AND key=?",
@@ -272,7 +359,7 @@ pub(crate) fn maintain(derived: &Derived<'_>, changes: &BatchChanges) -> Result<
                     return Err(StoreError::InvalidName(name.into(), "expected real SUM"));
                 };
                 let select = format!(
-                    "SELECT sum(x) FROM (SELECT {} AS x FROM {} WHERE _active=1 AND {}=? ORDER BY rid)",
+                    "SELECT sum({} ORDER BY rid) FROM {} WHERE _active=1 AND {}=?",
                     identifier(col),
                     identifier(&format!("col_{}", r.label)),
                     group_expr(&r, "")
@@ -282,8 +369,9 @@ pub(crate) fn maintain(derived: &Derived<'_>, changes: &BatchChanges) -> Result<
             let f: f64 = recounts
                 .get_mut(name)
                 .ok_or_else(|| StoreError::InvalidName(name.into(), "missing recount"))?
-                .query_row([key], |r| r.get(0))?
-                .ok_or_else(|| StoreError::InvalidName(name.into(), "missing sum"))?;
+                .query_row([key], |r| r.get::<_, Option<f64>>(0))?
+                .ok_or_else(|| StoreError::InvalidName(name.into(), "missing sum"))?
+                .ok_or(StoreError::RollupOverflow)?;
             if !f.is_finite() {
                 return Err(StoreError::RollupOverflow);
             }
@@ -304,6 +392,9 @@ pub(crate) fn maintain(derived: &Derived<'_>, changes: &BatchChanges) -> Result<
 
 pub(crate) fn read(conn: &Connection, name: &str, key: &[SqlValue]) -> Result<SqlValue> {
     let key_bytes = encode_key(key)?;
+    if !crate::ontology::has_declared_columns(conn)? {
+        return Err(StoreError::InvalidName(name.into(), "unknown rollup"));
+    }
     // One SQLite statement pins both the declared operation and the value to one commit.
     let result = conn
         .query_row(
@@ -320,11 +411,7 @@ pub(crate) fn read(conn: &Connection, name: &str, key: &[SqlValue]) -> Result<Sq
             },
         )
         .optional()
-        .sql();
-    let result = match result {
-        Err(_) if !crate::ontology::has_declared_columns(conn)? => None,
-        other => other?,
-    };
+        .sql()?;
     let (rule, columns, stored, members) =
         result.ok_or_else(|| StoreError::InvalidName(name.into(), "unknown rollup"))?;
     let rule: RollupDecl = serde_json::from_str(&rule)?;
@@ -463,14 +550,20 @@ pub(crate) fn declare(
     let au = identifier(&format!("col_update_{label}"));
     let had_table = !old.columns.is_empty() || !old.rollups.is_empty();
     let keep_table = !fields.columns.is_empty() || !fields.rollups.is_empty();
+    let resets: BTreeSet<_> = old
+        .rollups
+        .iter()
+        .chain(&fields.rollups)
+        .map(|r| &r.name)
+        .collect();
+    for name in resets {
+        conn.execute(
+            "INSERT INTO rollup_input(name,key,delta,real_sum) VALUES (?,NULL,0,0)",
+            [name],
+        )
+        .sql()?;
+    }
     if had_table {
-        for r in &old.rollups {
-            conn.execute(
-                "INSERT INTO rollup_input(name,key,delta,real_sum) VALUES (?,NULL,0,0)",
-                [&r.name],
-            )
-            .sql()?;
-        }
         if keep_table {
             conn.execute_batch(&format!(
                 "CREATE TEMP TABLE previous_label_columns AS SELECT * FROM {table};
@@ -503,7 +596,6 @@ pub(crate) fn declare(
     }
     conn.execute_batch(&format!("CREATE TABLE {table}({}) STRICT;", defs.join(",")))
         .sql()?;
-    capture_triggers(conn, label, &table, fields)?;
     for c in fields.columns.iter().filter(|c| c.indexed) {
         let index = identifier(&format!("col_idx_{}_{}_{}", label.len(), label, c.name));
         conn.execute_batch(&format!(
@@ -517,7 +609,7 @@ pub(crate) fn declare(
         values.extend(fields.columns.iter().map(|c| projected(c, row)));
         values.join(",")
     };
-    let label = literal(label);
+    let quoted_label = literal(label);
     let columns = names.join(",");
     let updates = names
         .iter()
@@ -527,7 +619,7 @@ pub(crate) fn declare(
         .join(",");
     let new = projection("new");
     let insert = format!(
-        "INSERT INTO {table}({columns}) SELECT {new} WHERE new.kind={label} AND new.lifecycle<>'purged'"
+        "INSERT INTO {table}({columns}) SELECT {new} WHERE new.kind={quoted_label} AND new.lifecycle<>'purged'"
     );
     let mut changed = vec!["_active=excluded._active".to_owned()];
     for column in &fields.columns {
@@ -544,10 +636,10 @@ pub(crate) fn declare(
     }
     let changed = changed.join(",");
     conn.execute_batch(&format!(
-        "CREATE TRIGGER {ai} AFTER INSERT ON node WHEN new.kind={label} BEGIN
+        "CREATE TRIGGER {ai} AFTER INSERT ON node WHEN new.kind={quoted_label} BEGIN
            {insert} ON CONFLICT(rid) DO UPDATE SET {updates}; END;
-         CREATE TRIGGER {au} AFTER UPDATE OF kind,props,lifecycle ON node WHEN new.kind={label} OR old.kind={label} BEGIN
-           DELETE FROM {table} WHERE rid=old.rid AND (new.kind<>{label} OR new.lifecycle='purged');
+         CREATE TRIGGER {au} AFTER UPDATE OF kind,props,lifecycle ON node WHEN new.kind={quoted_label} OR old.kind={quoted_label} BEGIN
+           DELETE FROM {table} WHERE rid=old.rid AND (new.kind<>{quoted_label} OR new.lifecycle='purged');
            {insert} ON CONFLICT(rid) DO UPDATE SET {changed}; END;"
     )).sql()?;
     let mut values = vec!["n.rid".to_owned(), "n.lifecycle='active'".into()];
@@ -564,7 +656,10 @@ pub(crate) fn declare(
                 ColumnType::Real => "'integer','real'",
                 ColumnType::Text | ColumnType::Timestamp => "'text'",
             };
-            format!("CASE WHEN typeof(p.{name}) IN ('null',{allowed}) THEN p.{name} ELSE x'00' END")
+            let fallback = projected(column, "n");
+            format!(
+                "CASE WHEN p.rid IS NULL THEN {fallback} WHEN typeof(p.{name}) IN ('null',{allowed}) THEN p.{name} ELSE x'00' END"
+            )
         } else {
             projected(column, "n")
         };
@@ -572,18 +667,19 @@ pub(crate) fn declare(
     }
     let values = values.join(",");
     let previous = if had_table {
-        " JOIN temp.previous_label_columns p ON p.rid=n.rid"
+        " LEFT JOIN temp.previous_label_columns p ON p.rid=n.rid"
     } else {
         ""
     };
     conn.execute_batch(&format!(
         "INSERT INTO {table}({columns}) SELECT {values}
-        FROM node n{previous} WHERE n.kind={label} AND n.lifecycle<>'purged';"
+        FROM node n{previous} WHERE n.kind={quoted_label} AND n.lifecycle<>'purged';"
     ))
     .sql()?;
     if had_table {
         conn.execute_batch("DROP TABLE temp.previous_label_columns")
             .sql()?;
     }
+    capture_triggers(conn, label, &table, fields)?;
     Ok(())
 }

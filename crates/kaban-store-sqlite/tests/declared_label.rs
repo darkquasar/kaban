@@ -83,3 +83,15 @@ fn a_project_created_before_declared_columns_keeps_its_rows_on_reopen() {
     assert_eq!(read.text, before.text);
     assert!(store.schema().unwrap().iter().any(|def| def.name == "Fact"));
 }
+
+#[test]
+fn a_missing_schema_catalog_is_reported_as_a_storage_error_on_a_rollup_read() {
+    let scratch = Scratch::new("kaban-declared", "broken-catalog");
+    let store = SqliteStore::open(&scratch.db(), &scratch.keys()).unwrap();
+    let db = rusqlite::Connection::open(scratch.db()).unwrap();
+    db.execute_batch("DROP TABLE schema_type").unwrap();
+    assert!(matches!(
+        kaban_core::MemoryStore::rollup(&store, "any", &[]),
+        Err(kaban_core::StoreError::Backend { .. })
+    ));
+}

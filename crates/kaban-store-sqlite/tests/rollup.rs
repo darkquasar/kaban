@@ -519,3 +519,166 @@ fn case_distinct_rollup_names_are_independent_of_sqlite_index_names() {
         );
     }
 }
+
+#[test]
+fn redeclaration_rebuilds_grouped_and_ungrouped_totals_from_the_final_rows() {
+    let scratch = Scratch::new("kaban-rollup", "setwise-backfill");
+    let store = SqliteStore::open(&scratch.db(), &scratch.keys()).unwrap();
+    let reader = SqliteStore::open(&scratch.db(), &scratch.keys()).unwrap();
+    let mut def = definition();
+    let grouped = std::mem::take(&mut def.declaration.rollups);
+    store.schema_extend(def.clone()).unwrap();
+    let rows = [
+        json!({"tool":"edit","ms":i64::MAX,"cost":1e20}),
+        json!({"tool":"edit","ms":1,"cost":3.75}),
+        json!({"tool":"edit","ms":-1,"cost":-1e20}),
+        json!({}),
+    ];
+    store
+        .apply_batch(
+            WriteBatch::new(
+                kaban_core::WorkspaceId::default(),
+                rows.into_iter()
+                    .map(|p| upsert(&NodeId::new(), p))
+                    .collect(),
+            ),
+            &ctx(),
+        )
+        .unwrap();
+    // A missing prior physical row is restored from the canonical node during redeclaration.
+    kaban_store_sqlite::catalog_testing::corrupt(&store, "DELETE FROM col_ToolCall WHERE ms=1")
+        .unwrap();
+    def.declaration.rollups = grouped.clone();
+    for mut r in grouped {
+        r.name.push_str("_total");
+        r.group_by.clear();
+        def.declaration.rollups.push(r);
+    }
+    store.schema_extend(def.clone()).unwrap();
+    let edit = [SqlValue::Text("edit".into())];
+    for (key, suffix) in [(edit.as_slice(), ""), (&[][..], "_total")] {
+        for (name, expected) in [
+            (
+                "calls",
+                SqlValue::Integer(if key.is_empty() { 4 } else { 3 }),
+            ),
+            ("elapsed", SqlValue::Integer(i64::MAX)),
+            ("costs", SqlValue::Real(3.75)),
+        ] {
+            assert_eq!(
+                reader.rollup(&format!("{name}{suffix}"), key).unwrap(),
+                expected
+            );
+        }
+    }
+    assert_eq!(
+        reader.rollup("elapsed", &[SqlValue::Null]).unwrap(),
+        SqlValue::Null
+    );
+    assert_eq!(
+        reader.rollup("costs", &[SqlValue::Null]).unwrap(),
+        SqlValue::Null
+    );
+
+    // A newly declared integer total overflows even though each group fits.
+    def.declaration
+        .rollups
+        .retain(|r| r.name != "elapsed_total");
+    store.schema_extend(def.clone()).unwrap();
+    store
+        .apply_batch(
+            WriteBatch::new(
+                kaban_core::WorkspaceId::default(),
+                vec![upsert(&NodeId::new(), json!({"tool":"other","ms":1}))],
+            ),
+            &ctx(),
+        )
+        .unwrap();
+    let mut total = def.declaration.rollups[1].clone();
+    total.name = "elapsed_total".into();
+    total.group_by.clear();
+    def.declaration.rollups.push(total);
+    assert!(matches!(
+        store.schema_extend(def),
+        Err(kaban_core::StoreError::RollupOverflow)
+    ));
+    assert!(reader.rollup("elapsed_total", &[]).is_err());
+    assert_eq!(
+        reader.rollup("elapsed", &edit).unwrap(),
+        SqlValue::Integer(i64::MAX)
+    );
+}
+
+#[test]
+fn an_overflowing_real_backfill_rolls_back_and_an_empty_total_remains_typed() {
+    let store = SqliteStore::open_memory().unwrap();
+    let mut def = definition();
+    let mut real = def.declaration.rollups.pop().unwrap();
+    real.group_by.clear();
+    let count = def.declaration.rollups.first_mut().unwrap();
+    count.group_by.clear();
+    store.schema_extend(def.clone()).unwrap();
+    assert_eq!(store.rollup("calls", &[]).unwrap(), SqlValue::Integer(0));
+    let ops = (0..2)
+        .map(|_| upsert(&NodeId::new(), json!({"cost":f64::MAX})))
+        .collect();
+    store
+        .apply_batch(
+            WriteBatch::new(kaban_core::WorkspaceId::default(), ops),
+            &ctx(),
+        )
+        .unwrap();
+    def.declaration.rollups.push(real);
+    assert!(matches!(
+        store.schema_extend(def.clone()),
+        Err(kaban_core::StoreError::RollupOverflow)
+    ));
+    assert!(store.rollup("costs", &[]).is_err());
+    assert_eq!(store.rollup("calls", &[]).unwrap(), SqlValue::Integer(2));
+    kaban_store_sqlite::catalog_testing::corrupt(&store, "UPDATE col_ToolCall SET cost=NULL")
+        .unwrap();
+    store.schema_extend(def).unwrap();
+    assert_eq!(store.rollup("costs", &[]).unwrap(), SqlValue::Null);
+    let indeterminate = kaban_store_sqlite::catalog_testing::corrupt(
+        &store,
+        "UPDATE col_ToolCall SET cost=CASE WHEN rid=(SELECT min(rid) FROM col_ToolCall)
+          THEN 1e999 ELSE -1e999 END",
+    );
+    assert!(matches!(
+        indeterminate,
+        Err(kaban_core::StoreError::RollupOverflow)
+    ));
+    assert_eq!(store.rollup("costs", &[]).unwrap(), SqlValue::Null);
+}
+
+#[test]
+fn a_negative_aggregate_cardinality_refuses_the_triggering_write() {
+    let store = SqliteStore::open_memory().unwrap();
+    store.schema_extend(definition()).unwrap();
+    let id = NodeId::new();
+    store
+        .apply_batch(
+            WriteBatch::new(
+                kaban_core::WorkspaceId::default(),
+                vec![upsert(&id, json!({}))],
+            ),
+            &ctx(),
+        )
+        .unwrap();
+    kaban_store_sqlite::catalog_testing::corrupt(
+        &store,
+        "UPDATE rollup SET members=0 WHERE name='calls'",
+    )
+    .unwrap();
+    assert!(matches!(
+        store.forget(&id, ForgetMode::Archive, &ctx()),
+        Err(kaban_core::StoreError::InvalidName(
+            _,
+            "invalid rollup cardinality"
+        ))
+    ));
+    assert_eq!(
+        store.get(&id, false).unwrap().unwrap().lifecycle,
+        kaban_core::Lifecycle::Active
+    );
+}

@@ -1068,3 +1068,59 @@ fn the_json_declaration_columns_are_written_at_the_load_seam_and_described() {
         );
     }
 }
+
+#[test]
+fn redeploying_ontology_keeps_runtime_text_and_drops_old_ontology_only_fields() {
+    let repo = Repo::new("runtime-redeploy");
+    repo.api
+        .schema_extend(
+            serde_json::from_value(serde_json::json!({
+                "kind":"label","name":"Report","description":"record","fts_fields":["props.note"]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    let report = NodeId::new();
+    let fact = NodeId::new();
+    write(
+        &repo,
+        vec![
+            record(&report, "Report", serde_json::json!({"note":"saffron"})),
+            record(
+                &fact,
+                "Fact",
+                serde_json::json!({"transient":"ultramarine"}),
+            ),
+        ],
+    );
+    let mut overlay = kaban_core::shipped::resolved().unwrap();
+    let kind = overlay
+        .kinds
+        .iter_mut()
+        .find(|(name, _)| kaban_core::stored_name(name) == "Fact")
+        .unwrap()
+        .1;
+    kind.fts_fields = vec!["props.transient".into()];
+    let store = SqliteStore::open(&repo.scratch.db(), &repo.scratch.keys())
+        .unwrap()
+        .with_ontology(Arc::new(overlay))
+        .unwrap();
+    assert_search(&store, "ultramarine", &fact);
+    assert_search(&store, "saffron", &report);
+    let mut replacement = kaban_core::shipped::resolved().unwrap();
+    replacement
+        .kinds
+        .retain(|name, _| kaban_core::stored_name(name) != "Fact");
+    let store = store.with_ontology(Arc::new(replacement)).unwrap();
+    assert_search(&store, "saffron", &report);
+    assert!(
+        store
+            .recall(&kaban_core::RecallQuery {
+                query: "ultramarine".into(),
+                ..Default::default()
+            })
+            .unwrap()
+            .iter()
+            .all(|hit| hit.node.id != fact.as_str())
+    );
+}
