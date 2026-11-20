@@ -16,7 +16,7 @@ pub(crate) struct Args {
     /// S4 non-local symbol export (JSONL)
     #[arg(long, default_value = "symbols.jsonl")]
     corpus: PathBuf,
-    /// Write parity, per-query results, latency samples and gates here
+    /// Write parity, per-query results, latency samples and target comparisons here
     #[arg(long, default_value = "text.jsonl")]
     out: PathBuf,
     /// Directory of the prepared store for a fresh-process observation
@@ -553,7 +553,8 @@ mod imp {
                 } else {
                     "p99"
                 };
-                eprintln!(
+                let _ = writeln!(
+                    std::io::stderr(),
                     "S4 warm {class} {metric} measured {observed:.3} µs against {target_us} µs"
                 );
             }
@@ -716,7 +717,8 @@ mod imp {
             record["target_us"] = json!(1000);
             record["target_met"] = json!(median <= 1000.0);
             if median > 1000.0 {
-                eprintln!(
+                let _ = writeln!(
+                    std::io::stderr(),
                     "S4 fresh text index and first query measured {median:.3} µs at median against 1000 µs"
                 );
             }
