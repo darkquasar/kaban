@@ -31,6 +31,8 @@ use rusqlite::{Connection, OpenFlags};
 use serde_json::Value;
 
 mod common;
+#[path = "cli/go_producer.rs"]
+mod go_producer;
 
 // ---------------------------------------------------------------------------------------------
 // harness
@@ -3154,12 +3156,9 @@ fn index_applies_gc_keep_5_after_a_successful_write() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// the real producer: scip-go 0.2.7 over the scripted go-drivers history under the tier doctor
-// selects (gated on a reachable scip-go: `$SCIP_GO`, `~/go/bin/scip-go`, else PATH; a visible
-// marker otherwise). The published rows are compared with the CG3.4 goldens table by table
-// (the committed `index.scip` was produced by the same version); the `meta` table differs by
-// construction (repo_id, policy_version, provenance, the `--output` argv), so bytes are not
-// compared and the difference is reported, not hidden.
+// The live Go producer over the scripted C2 history. The 0.2.7 control compares the
+// archived tables exactly. The 0.2.9 check compares every semantic row against the
+// reviewed deltas for Go 1.26.0 and 1.27.3, and checks both raw relationship multisets.
 //
 // cgo: the namespaces view binds `gcc` (`/usr/bin`) but not `/usr/include`, so Go's cgo
 // autodetection turns cgo on and the cgo-dependent standard-library packages fail to build
@@ -3406,6 +3405,19 @@ fn index_go_drivers_real() {
         eprintln!(
             "index_go_drivers_real: meta keys differing from the golden by construction: {differing:?}"
         );
+    } else if version == "0.2.9" {
+        let (go_version, _) = go_versions_for_directive_tests().expect("go version");
+        go_producer::assert_snapshot(&path, &go_version);
+        go_producer::assert_relationships(&scip_go, &go_version, &repo, s.path());
+        let (symbols, edges) = if go_version == "1.27.3" {
+            (69, 165)
+        } else {
+            (66, 162)
+        };
+        assert_eq!(counts["files"], 7);
+        assert_eq!(counts["symbols"], symbols);
+        assert_eq!(counts["edges"], edges);
+        assert_eq!(counts["occurrences"], 82);
     } else {
         eprintln!(
             "index_go_drivers_real: scip-go {version} is not the fixture's 0.2.7; sizes and counts compared only: golden files={} symbols={} edges={} occurrences={} bytes={}",
@@ -3451,7 +3463,7 @@ fn index_go_drivers_real() {
         report["snapshot_bytes"],
         report["wall_ms_per_indexer"]["go"]
     );
-    if version == "0.2.7" {
+    if matches!(version.as_str(), "0.2.7" | "0.2.9") {
         assert_eq!(counts["files"].to_string(), golden_meta["counts:files"]);
         assert_eq!(
             counts["occurrences"].to_string(),
@@ -3594,16 +3606,6 @@ fn go_external_fixture(s: &Scratch) -> Option<(PathBuf, PathBuf)> {
     Some((modcache, fs::canonicalize(&repo).unwrap()))
 }
 
-/// The `ref` of every external symbol of a snapshot.
-fn external_symbol_refs(path: &Path) -> Vec<String> {
-    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
-    let mut stmt = conn
-        .prepare("SELECT ref FROM symbols WHERE external = 1 ORDER BY ref")
-        .unwrap();
-    let rows = stmt.query_map([], |r| r.get::<_, String>(0)).unwrap();
-    rows.map(Result::unwrap).collect()
-}
-
 // G1 (GO-FIX-1, safety of results): the user's module cache is an input of every Go run on
 // both tiers, with no flag. `index --isolation off` of a module with one external dependency
 // resolves the external symbol from `GOMODCACHE` (a dedicated empty cache left a third of the
@@ -3660,13 +3662,7 @@ fn go_module_cache_is_an_input_on_every_tier() {
         "no cache flag and no cache warning: {}",
         report["warnings"]
     );
-    let externals = external_symbol_refs(&snapshot_path(&home, &repo_id, &c1));
-    assert!(
-        externals
-            .iter()
-            .any(|r| r.contains("example.com/dep") && r.contains("Answer")),
-        "the external symbol resolves from the module cache on the none tier; externals: {externals:?}\n--- gated log\n{log}"
-    );
+    go_producer::assert_dependency_call(&snapshot_path(&home, &repo_id, &c1));
     let off_counts = report["counts"].clone();
     eprintln!("go_module_cache_is_an_input_on_every_tier: none tier counts {off_counts}");
     if doctor_selected_tier(&home, &repo) != "namespaces" {
@@ -3692,13 +3688,7 @@ fn go_module_cache_is_an_input_on_every_tier() {
         report["counts"], off_counts,
         "the namespaces run publishes the counts of the none run"
     );
-    let externals = external_symbol_refs(&snapshot_path(&home, &repo_id, &c1));
-    assert!(
-        externals
-            .iter()
-            .any(|r| r.contains("example.com/dep") && r.contains("Answer")),
-        "the external symbol resolves inside the view too; externals: {externals:?}"
-    );
+    go_producer::assert_dependency_call(&snapshot_path(&home, &repo_id, &c1));
 }
 
 /// The version of the `go` on this host as `go version` prints it (`1.26.0`), and the next
