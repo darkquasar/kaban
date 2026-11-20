@@ -82,6 +82,9 @@ thread_local! {
     /// before they are published into the main file (the two-first-openers interleaving).
     pub(crate) static BEFORE_PUBLICATION: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         const { std::cell::RefCell::new(None) };
+    /// Resume the creator after a stats open observes its unfinished bootstrap.
+    static STATS_WAITING_FOR_CREATOR: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 /// How long a hook's connection waits for a lock (M4-6): well inside the host's 2 s budget,
@@ -489,7 +492,47 @@ impl SqliteStore {
         settings: CatalogCfg,
     ) -> Result<Self> {
         Self::validate_catalog_config(&settings)?;
-        let (mut conn, db_id, report, live) = Self::open_file(path, actor, Self::CAPABILITIES)?;
+        let opened = Self::open_file(path, actor, Self::CAPABILITIES)?;
+        Self::attach_writable(path, keys_dir, settings, opened)
+    }
+
+    /// Inspect a project without seeding it or recovering its indexes. On first use,
+    /// only the opener that creates the schema initializes a writable project.
+    ///
+    /// # Errors
+    /// The format, file, key and configuration errors of [`Self::open_as`].
+    pub fn open_for_stats(
+        path: &Path,
+        keys_dir: &Path,
+        actor: &ActorId,
+        settings: CatalogCfg,
+    ) -> Result<Self> {
+        Self::validate_catalog_config(&settings)?;
+        let (mut conn, live) = match open_existing_as_is(path, Self::CAPABILITIES) {
+            Err(StoreError::FileMode(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+                prepare_database_files(path, Self::CAPABILITIES)?
+            }
+            opened => opened?,
+        };
+        // ensure_current rechecks under the schema creation transaction. A file another
+        // process creates after the existing-only open still takes the inspection path.
+        let report = Self::prepare_schema(&mut conn, actor)?;
+        if report.from == report.to {
+            live.publish(&conn)?;
+            Self::await_project_key(&conn)?;
+            return Self::attach_existing(path, keys_dir, conn, live, report);
+        }
+        let db_id = Self::seed_schema(&mut conn)?;
+        live.publish(&conn)?;
+        Self::attach_writable(path, keys_dir, settings, (conn, db_id, report, live))
+    }
+
+    fn attach_writable(
+        path: &Path,
+        keys_dir: &Path,
+        settings: CatalogCfg,
+        (mut conn, db_id, report, live): (Connection, String, MigrationReport, LiveGuard),
+    ) -> Result<Self> {
         // the catalog attaches first (the key record commits through it), but its artefacts
         // are created only once the key is admitted: a refused project gains none
         let mut catalog = Catalog::open_as_is(path, &mut conn)?;
@@ -507,6 +550,35 @@ impl SqliteStore {
         )
         .finish_text_projection()
     }
+    fn key_recorded(conn: &Connection) -> Result<bool> {
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM index_meta WHERE key = ?1)",
+            [KEY_RECORDED],
+            |r| r.get(0),
+        )
+        .sql()
+    }
+
+    // A concurrent creator commits the schema, seeds db_id, then records the key. A
+    // shared open can see the schema before either of those last two commits. Never
+    // create an identity on inspection, even if a creator stopped partway through.
+    fn await_project_key(conn: &Connection) -> Result<()> {
+        let deadline = std::time::Instant::now() + crate::schema::BUSY_TIMEOUT;
+        while !Self::key_recorded(conn)? {
+            if std::time::Instant::now() >= deadline {
+                return Err(StoreError::Audit(
+                    "project initialization has not recorded its audit key".into(),
+                ));
+            }
+            #[cfg(test)]
+            if let Some(resume) = STATS_WAITING_FOR_CREATOR.with(|seam| seam.borrow_mut().take()) {
+                resume();
+            }
+            std::thread::sleep(crate::connection::PROBE_RETRY_INTERVAL);
+        }
+        Ok(())
+    }
+
     /// The database's HMAC key: created with the project, required ever after. A project
     /// that has recorded its key (`index_meta` `KEY_RECORDED`) must never get a fresh one:
     /// that would silently change every keyed identity it stores, so a lost key is a startup
@@ -519,14 +591,7 @@ impl SqliteStore {
         keys_dir: &Path,
         db_id: &str,
     ) -> Result<KeySigner> {
-        let recorded: bool = conn
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM index_meta WHERE key = ?1)",
-                [KEY_RECORDED],
-                |r| r.get(0),
-            )
-            .sql()?;
-        if recorded {
+        if Self::key_recorded(conn)? {
             return KeySigner::open_existing(keys_dir, db_id)
                 .map_err(|e| StoreError::Audit(Box::new(e)));
         }
@@ -616,7 +681,7 @@ impl SqliteStore {
         capabilities: StoreCapabilities,
     ) -> Result<(Self, DatabaseFileModes)> {
         let modes = database_file_modes(path)?;
-        let (mut conn, live) = open_existing_as_is(path, capabilities)?;
+        let (conn, live) = open_existing_as_is(path, capabilities)?;
         configure_connection(&conn)?;
         crate::stamp::bind(&conn, actor)?;
         let version = Migrator::check(&conn)?;
@@ -624,6 +689,23 @@ impl SqliteStore {
         crate::body_codec::verify(&conn)?;
         // a project another opener created after this open's probe: published first (CMP-01)
         live.publish(&conn)?;
+        let store = Self::attach_existing(
+            path,
+            keys_dir,
+            conn,
+            live,
+            MigrationReport::unchanged(version),
+        )?;
+        Ok((store, modes))
+    }
+
+    fn attach_existing(
+        path: &Path,
+        keys_dir: &Path,
+        mut conn: Connection,
+        live: LiveGuard,
+        report: MigrationReport,
+    ) -> Result<Self> {
         let db_id: Option<String> = conn
             .query_row(
                 "SELECT value FROM index_meta WHERE key = 'db_id'",
@@ -637,9 +719,8 @@ impl SqliteStore {
         })?;
         let signer = KeySigner::open_existing(keys_dir, &db_id)
             .map_err(|e| StoreError::Audit(Box::new(e)))?;
-        let report = MigrationReport::unchanged(version);
         let catalog = Catalog::open_as_is(path, &mut conn)?;
-        let store = Self::assemble(
+        Ok(Self::assemble(
             conn,
             catalog,
             db_id,
@@ -647,8 +728,7 @@ impl SqliteStore {
             report,
             Some(live),
             Some(path),
-        );
-        Ok((store, modes))
+        ))
     }
     /// Open for a host hook (core-plan C4.3 as amended by M4-6; review R4-2): a hook fired in a
     /// repository must never create a stray database, migrate one (a `VACUUM INTO` backup and
@@ -811,11 +891,20 @@ impl SqliteStore {
     /// database or refuse one at another version (spec 05 OWN-P, [`Migrator`]), seed builtin
     /// types and return the database id (created once).
     fn init_schema(conn: &mut Connection, actor: &ActorId) -> Result<(String, MigrationReport)> {
+        let report = Self::prepare_schema(conn, actor)?;
+        Ok((Self::seed_schema(conn)?, report))
+    }
+
+    fn prepare_schema(conn: &mut Connection, actor: &ActorId) -> Result<MigrationReport> {
         configure_connection(conn)?;
         crate::stamp::bind(conn, actor)?;
         let report = Migrator::ensure_current(conn)?;
         // the bodies are served only under their own dictionary (SS-17, t8c-6)
         crate::body_codec::verify(conn)?;
+        Ok(report)
+    }
+
+    fn seed_schema(conn: &mut Connection) -> Result<String> {
         // builtin seeds, the db_id insert and its read in one write transaction (R2-5): one
         // lock acquisition instead of dozens of contended autocommit writes, and the seed and
         // identity result are atomic; the first opener wins the db_id
@@ -844,7 +933,7 @@ impl SqliteStore {
             )
             .sql()?;
         tx.commit().sql()?;
-        Ok((db_id, report))
+        Ok(db_id)
     }
 
     pub(crate) fn kind_exists(conn: &Connection, kind: &str) -> Result<bool> {
@@ -1290,11 +1379,17 @@ impl MemoryStore for SqliteStore {
             .sql()?
             .and_then(|v| v.parse().ok())
             .unwrap_or(0);
-        Ok(json!({
+        let mut stats = json!({
             "nodes": nodes, "edges": edges, "by_kind": by_kind, "by_rel": by_rel, "db_bytes": page,
             "engine": "sqlite", "schema_version": schema_version,
             "scope": { "workspace": workspace_id.unwrap_or(WorkspaceId::ALL), "db_bytes": "global" },
-        }))
+        });
+        if let Some(path) = &self.path
+            && matches!(crate::catalog::kbx::kbx_path(path).try_exists(), Ok(false))
+        {
+            stats["index_container"] = json!("missing");
+        }
+        Ok(stats)
     }
 }
 

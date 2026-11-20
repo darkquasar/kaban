@@ -142,7 +142,7 @@ fn check_startup_rebuild_budget(missing_container: bool) {
         };
         (status, std::fs::read_to_string(stderr).unwrap())
     };
-    let (refused, error) = run(&["stats"], 16);
+    let (refused, error) = run(&["recall", "wombat"], 16);
     assert_eq!(
         refused.code(),
         Some(5),

@@ -496,6 +496,14 @@ fn an_existing_project_requires_its_key_and_never_gets_a_fresh_one() {
     std::fs::remove_file(&key).unwrap();
     let err = SqliteStore::open(&d.db(), &d.keys()).unwrap_err();
     assert!(matches!(err, StoreError::Audit(_)), "{err:?}");
+    let err = SqliteStore::open_for_stats(
+        &d.db(),
+        &d.keys(),
+        &ActorId::default(),
+        CatalogCfg::default(),
+    )
+    .unwrap_err();
+    assert!(matches!(err, StoreError::Audit(_)), "{err:?}");
     assert!(!key.exists(), "no fresh key for an existing project");
 }
 
@@ -1074,6 +1082,44 @@ fn sealed_text_store(dir: &Scratch) -> SqliteStore {
     store.remember(mk("Fact", "quokka"), &[], &ctx()).unwrap();
     store.reindex_text().unwrap();
     store
+}
+
+#[test]
+fn stats_can_open_while_the_project_creator_is_publishing_its_identity_and_key() {
+    for seeded in [false, true] {
+        let dir = Scratch::new(if seeded {
+            "stats-before-key"
+        } else {
+            "stats-before-id"
+        });
+        let db = dir.db();
+        let keys = dir.keys();
+        let (mut conn, live) = prepare_database_files(&db, SqliteStore::CAPABILITIES).unwrap();
+        let actor = ActorId::default();
+        let report = SqliteStore::prepare_schema(&mut conn, &actor).unwrap();
+        assert_eq!(report.from, 0);
+        let id = seeded.then(|| SqliteStore::seed_schema(&mut conn).unwrap());
+        // Two live connections, with the creator's remaining steps scheduled precisely
+        // after the other connection observes the partially initialized schema.
+        STATS_WAITING_FOR_CREATOR.with(|seam| {
+            *seam.borrow_mut() = Some(Box::new(move || {
+                let id = id.unwrap_or_else(|| SqliteStore::seed_schema(&mut conn).unwrap());
+                live.publish(&conn).unwrap();
+                SqliteStore::attach_writable(
+                    &db,
+                    &keys,
+                    CatalogCfg::default(),
+                    (conn, id, report, live),
+                )
+                .unwrap();
+            }));
+        });
+        let stats =
+            SqliteStore::open_for_stats(&dir.db(), &dir.keys(), &actor, CatalogCfg::default())
+                .unwrap();
+        assert_eq!(stats.stats(None).unwrap()["nodes"], 0);
+        assert_eq!(stats.migration().from, crate::LATEST_SCHEMA_VERSION);
+    }
 }
 
 fn text_query<'a>(text: &'a str, recall: &'a RecallQuery) -> TextQuery<'a> {

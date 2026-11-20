@@ -25,9 +25,10 @@ refusal text ("no upgrade path exists; create a fresh project and re-ingest") an
 exits `0`, leaving the files unchanged. This is not a forensic promise of zero
 writes to a database that opens.
 
-`stats` reports counters, policy information, and the producers with their budgets. It
-uses the normal service open path, so do not substitute it for diagnostic opening
-when investigating an absent or older database.
+`stats` reports counters, policy information, and the producers with their budgets.
+On an existing project it reads the canonical counts even if the text projection
+is stale or the index container is missing. A missing container adds
+`"index_container": "missing"` to the report. On first use, `stats` creates the project.
 
 ## Full-text maintenance
 

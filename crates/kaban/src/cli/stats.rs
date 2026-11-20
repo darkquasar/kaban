@@ -15,6 +15,7 @@ pub(crate) struct Flags {
 
 impl ToolArgs for Flags {
     const NAME: &'static str = "stats";
+    const OPEN_MODE: crate::OpenMode = crate::OpenMode::Inspect;
     fn any_given(&self) -> bool {
         self.workspace_id.is_some()
     }
