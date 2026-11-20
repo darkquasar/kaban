@@ -1,7 +1,8 @@
 //! Reproduce the S4 names-only workload on a freshly populated store.
 //! `kaban bench text --cases s4 --corpus symbols.jsonl --out text.jsonl`
 //! takes the non-local S4 export in (path, ref) order. The checked query fixture
-//! supplies the semantic oracle. Each clock measures the complete store call.
+//! supplies the semantic oracle. Warm calls time the store. Fresh processes time
+//! the pinned text index and the whole writable store independently.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -21,6 +22,9 @@ pub(crate) struct Args {
     /// Directory of the prepared store for a fresh-process observation
     #[arg(long, hide = true)]
     first_child: Option<PathBuf>,
+    /// Pinned tier manifest for a fresh index-only observation
+    #[arg(long, hide = true, conflicts_with = "first_child")]
+    first_index_child: Option<PathBuf>,
 }
 
 /// Run the S4 workload, retaining measured misses of its targets.
@@ -35,7 +39,13 @@ pub(crate) fn run(args: &Args) -> ExitCode {
 /// Without the bench feature, retain the normal feature refusal.
 #[cfg(not(feature = "bench"))]
 pub(crate) fn run(args: &Args) -> ExitCode {
-    let _ = (&args.cases, &args.corpus, &args.out, &args.first_child);
+    let _ = (
+        &args.cases,
+        &args.corpus,
+        &args.out,
+        &args.first_child,
+        &args.first_index_child,
+    );
     crate::cli::stubs::not_available("bench text", "feature bench")
 }
 
@@ -45,18 +55,23 @@ mod imp {
     use std::fs;
     use std::io::{BufWriter, Write};
     use std::os::unix::fs::MetadataExt;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::process::ExitCode;
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
     use anyhow::{Context, Result, bail, ensure};
-    use kaban_core::text_index::{MatchMode, Searched, SeedFilter, TextHit, TextQuery};
+    use kaban_core::config::Recall;
+    use kaban_core::query_budget::QueryBudget;
+    use kaban_core::text_index::{
+        ExtentSpan, MatchMode, Searched, SeedFilter, TextHit, TextIndex, TextQuery, TextSnapshot,
+    };
     use kaban_core::{
         Actor, IngestStore, NamespaceSet, NewNode, NodeId, OntologyFile, Op, SchemaStore, TypeDef,
         WorkspaceId, WriteBatch, WriteCtx,
     };
-    use kaban_store_sqlite::SqliteStore;
+    use kaban_index_tantivy::TantivyIndex;
+    use kaban_store_sqlite::{SqliteStore, catalog_testing};
     use serde::{Deserialize, Serialize};
     use serde_json::{Value, json};
 
@@ -536,7 +551,8 @@ mod imp {
 
     #[derive(Deserialize, Serialize)]
     struct First {
-        open_us: f64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        open_us: Option<f64>,
         open_plus_first_us: f64,
         rids: Vec<i64>,
     }
@@ -552,6 +568,14 @@ mod imp {
         let open_us = began.elapsed().as_secs_f64() * 1e6;
         let hits = search(&store, &q)?;
         let open_plus_first_us = began.elapsed().as_secs_f64() * 1e6;
+        print_first(Some(open_us), open_plus_first_us, &hits)
+    }
+
+    fn print_first(
+        open_us: Option<f64>,
+        open_plus_first_us: f64,
+        hits: &[TextHit],
+    ) -> Result<ExitCode> {
         let result = First {
             open_us,
             open_plus_first_us,
@@ -561,15 +585,83 @@ mod imp {
         Ok(ExitCode::SUCCESS)
     }
 
-    fn fresh(dir: &Path, rows: &[Symbol], out: &mut impl Write) -> Result<bool> {
-        let expected = exact_rids(rows, "SqliteStore");
+    /// Only sealed KBX ranges cross the process boundary. The parent's catalog
+    /// pin protects them until the last child has exited.
+    #[derive(Deserialize, Serialize)]
+    struct PinnedIndex {
+        kbx: PathBuf,
+        generation: u64,
+        tiers: Vec<(u64, u64)>,
+    }
+
+    fn first_index_child(manifest: &Path) -> Result<ExitCode> {
+        let pinned: PinnedIndex = serde_json::from_slice(&fs::read(manifest)?)?;
+        let tiers: Vec<_> = pinned
+            .tiers
+            .iter()
+            .map(|&(offset, len)| ExtentSpan { offset, len })
+            .collect();
+        let snapshot = TextSnapshot {
+            generation: pinned.generation,
+            kbx: &pinned.kbx,
+            tiers: &tiers,
+            sediment: &[],
+        };
+        let q = query("SqliteStore", MatchMode::Exact, &[], None, 10);
+        let began = Instant::now();
+        let ontology = kaban_core::shipped::resolved()?;
+        let index = TantivyIndex::new(&ontology, &Recall::default());
+        let budget = QueryBudget::new(256 << 20, Some(Duration::from_secs(30)));
+        let found = index.search(&snapshot, &q, &budget)?;
+        let elapsed = began.elapsed().as_secs_f64() * 1e6;
+        let Searched::Hits { hits, .. } = found else {
+            bail!("fresh text index unavailable")
+        };
+        print_first(None, elapsed, &hits)
+    }
+
+    fn fresh_index(
+        at: &TextSnapshot<'_>,
+        dir: &Path,
+        expected: &[i64],
+        out: &mut impl Write,
+    ) -> Result<bool> {
+        ensure!(
+            at.sediment.is_empty() && !at.tiers.is_empty(),
+            "expected sealed S4 text index"
+        );
+        let pinned = PinnedIndex {
+            kbx: at.kbx.to_path_buf(),
+            generation: at.generation,
+            tiers: at
+                .tiers
+                .iter()
+                .map(|span| (span.offset, span.len))
+                .collect(),
+        };
+        let manifest = dir.join("pinned-text.json");
+        fs::write(&manifest, serde_json::to_vec(&pinned)?)?;
+        fresh(&manifest, Some(&pinned), expected, out)
+    }
+
+    fn fresh(
+        input: &Path,
+        index: Option<&PinnedIndex>,
+        expected: &[i64],
+        out: &mut impl Write,
+    ) -> Result<bool> {
         let mut valid = expected.len() == 8;
         let mut samples = Vec::with_capacity(FRESH_RUNS);
         let args = [
             "bench".as_ref(),
             "text".as_ref(),
-            "--first-child".as_ref(),
-            dir.as_os_str(),
+            if index.is_some() {
+                "--first-index-child"
+            } else {
+                "--first-child"
+            }
+            .as_ref(),
+            input.as_os_str(),
         ];
         for _ in 0..FRESH_RUNS {
             let child = crate::bench::run_self(&args, &[], Duration::from_secs(60))?;
@@ -587,16 +679,30 @@ mod imp {
         times.sort_by(f64::total_cmp);
         let median = f64::midpoint(times[(times.len() - 1) / 2], times[times.len() / 2]);
         let p99 = pct(&mut times, 0.99);
-        writeln!(
-            out,
-            "{}",
-            json!({"op":"fresh","query":"SqliteStore","mode":"exact","limit":10,
-            "clock":"in each new process, before SqliteStore::open through first search_text return; process launch, CLI dispatch and output excluded; OS page cache retained",
+        let mut record = json!({"query":"SqliteStore","mode":"exact","limit":10,
             "unit":"us","n":samples.len(),"samples":samples,"expected_rids":expected,"results_valid":valid,
-            "min_us":times.first(),"median_us":median,"p99_us":p99,"max_us":times.last(),
-            "metric":"median","target_us":1000,"target_met":median <= 1000.0})
-        )?;
-        Ok(valid && median <= 1000.0)
+            "min_us":times.first(),"median_us":median,"p99_us":p99,"max_us":times.last(),"metric":"median",
+            "environment":"new process per sample; process launch, CLI dispatch and output excluded; OS page cache retained"});
+        let passed = if let Some(pinned) = index {
+            record["op"] = json!("fresh_index");
+            record["clock"] = json!(
+                "from resolving the shipped ontology through production TantivyIndex::search return, including adapter and budget setup, KBX mapping, reader open and first exact query; parent catalog pin and child manifest read excluded"
+            );
+            record["generation"] = json!(pinned.generation);
+            record["tiers"] = json!(pinned.tiers);
+            record["informational"] = json!(false);
+            record["target_us"] = json!(1000);
+            record["target_met"] = json!(median <= 1000.0);
+            valid && median <= 1000.0
+        } else {
+            record["op"] = json!("fresh");
+            record["clock"] =
+                json!("before writable SqliteStore::open through first search_text return");
+            record["informational"] = json!(true);
+            valid
+        };
+        writeln!(out, "{record}")?;
+        Ok(passed)
     }
 
     fn measure(dir: &Path, rows: &[Symbol], out: &mut impl Write) -> Result<bool> {
@@ -629,19 +735,27 @@ mod imp {
             "pass":parity_ok})
         )?;
         let warm_ok = warm(&store, rows, out)?;
+        let expected = exact_rids(rows, "SqliteStore");
+        let budget = QueryBudget::new(256 << 20, Some(Duration::from_secs(30)));
+        let fresh_ok = catalog_testing::with_main_text(&store, &budget, |at| {
+            Ok(fresh_index(at, dir, &expected, out))
+        })??;
         drop(store);
-        let fresh_ok = fresh(dir, rows, out)?;
-        let pass = parity_ok && warm_ok && fresh_ok;
+        let store_valid = fresh(dir, None, &expected, out)?;
+        let pass = parity_ok && warm_ok && fresh_ok && store_valid;
         writeln!(
             out,
             "{}",
-            json!({"op":"summary","parity_pass":parity_ok,"warm_pass":warm_ok,"fresh_pass":fresh_ok,
+            json!({"op":"summary","parity_pass":parity_ok,"warm_pass":warm_ok,"fresh_pass":fresh_ok,"fresh_store_results_valid":store_valid,
             "pass":pass})
         )?;
         Ok(pass)
     }
 
     pub(super) fn run(args: &Args) -> Result<ExitCode> {
+        if let Some(manifest) = &args.first_index_child {
+            return first_index_child(manifest);
+        }
         if let Some(dir) = &args.first_child {
             return first_child(dir);
         }

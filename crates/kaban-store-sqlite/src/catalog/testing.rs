@@ -983,6 +983,18 @@ impl<'v> MainGraph<'v> {
     }
 }
 
+/// Run `f` while the production catalog pin protects `main`'s text tiers and sediment.
+///
+/// # Errors
+/// Returns the error from loading the snapshot or running the callback.
+pub fn with_main_text<T>(
+    store: &SqliteStore,
+    budget: &QueryBudget,
+    f: impl FnOnce(&kaban_core::text_index::TextSnapshot<'_>) -> Result<T>,
+) -> Result<T> {
+    store.catalog().with_text(store.connection(), budget, f)
+}
+
 /// Run `f` over `main`'s memory graph in one snapshot of `store` under `budget` (the pin, the
 /// load and every query share it).
 ///
