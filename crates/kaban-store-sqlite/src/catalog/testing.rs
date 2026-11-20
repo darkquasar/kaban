@@ -992,7 +992,9 @@ pub fn with_main_text<T>(
     budget: &QueryBudget,
     f: impl FnOnce(&kaban_core::text_index::TextSnapshot<'_>) -> Result<T>,
 ) -> Result<T> {
-    store.catalog().with_text(store.connection(), budget, f)
+    store
+        .catalog()
+        .with_text(store.connection(), &store.text_index, budget, |_, at| f(at))
 }
 
 /// Run `f` over `main`'s memory graph in one snapshot of `store` under `budget` (the pin, the
