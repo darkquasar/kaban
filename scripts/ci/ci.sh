@@ -325,12 +325,15 @@ macos() {
   selection="$selection | (binary_id(=kaban-index::cli) & (test(=cli_index_required_without_isolating_tier_is_exit_8) | test(=rust_required_unavailable_never_runs_native_producer_probes) | test(=trust_revalidated_before_each_spawn) | test(=indexer_replaced_after_admission_is_refused) | test(=checkout_replaced_between_revalidation_and_spawn_is_refused)))"
   selection="$selection | (package(kaban-ingest) & (binary(golden_markdown) | binary(chunk) | binary(golden_pdf)))"
   selection="$selection | (package(kaban) & (binary(walkthrough) | binary(recall_determinism) | binary(code_smoke) | binary(mcp_control) | binary(mcp_scrub) | binary(mcp_docs) | binary(hook_hosts) | binary(hooks_roundtrip)))"
+  selection="$selection | binary_id(=kaban-store-sqlite::rollup) | binary_id(=kaban-store-sqlite::declared_label) | binary_id(=kaban-api::ontology_load)"
   step rust_runner "${CARGO:-cargo}" nextest run --locked \
     -p kaban-core -p kaban-codegraph -p kaban-index -p kaban-ingest -p kaban \
+    -p kaban-store-sqlite -p kaban-api \
     --test process --test open --test discover --test writer --test runner --test trust --test cli \
     --test golden_markdown --test chunk --test golden_pdf --test walkthrough \
     --test recall_determinism --test code_smoke --test mcp_control --test mcp_scrub --test mcp_docs \
     --test hook_hosts --test hooks_roundtrip \
+    --test rollup --test declared_label --test ontology_load \
     --features kaban-ingest/pdf,kaban-ingest/md-splitter \
     -E "$selection" -j 1 --no-fail-fast --success-output immediate
   if [ "${KABAN_MACOS_PRODUCER_QUALIFY:-0}" = 1 ]; then
