@@ -321,6 +321,45 @@ fn incidents_yaml() -> String {
     INCIDENTS_YAML.to_owned()
 }
 
+#[test]
+fn the_work_file_loads_typed_columns_and_rollups_under_the_qualified_label() {
+    let repo = Repo::new("typed-work");
+    let file = repo.write(
+        "work.yaml",
+        include_str!("../../kaban-core/fixtures/ontology/work.yaml"),
+    );
+    repo.registry.load_file(&repo.api, &file).unwrap();
+    let task = repo
+        .api
+        .schema_describe()
+        .unwrap()
+        .labels
+        .into_iter()
+        .find(|label| label.name == "work:Task")
+        .unwrap();
+    let task = serde_json::to_value(task).unwrap();
+    assert_eq!(task["columns"][0]["name"], "state");
+    assert_eq!(task["rollups"][0]["name"], "tasks_by_state");
+}
+
+#[test]
+fn schema_extend_registers_the_tool_call_columns_and_rollups() {
+    let repo = Repo::new("typed-api");
+    let request = serde_json::json!({
+        "kind":"label", "name":"ToolCall", "description":"A tool invocation",
+        "fts_fields":["props.output"],
+        "columns":[{"name":"tool","ty":"text","indexed":true},{"name":"ms","ty":"integer"}],
+        "rollups":[{"name":"calls_by_tool","label":"ToolCall","group_by":["tool"],"op":"count"}]
+    });
+    let result = repo
+        .api
+        .schema_extend(serde_json::from_value(request).unwrap())
+        .unwrap();
+    let result = serde_json::to_value(result).unwrap();
+    assert_eq!(result["columns"][0]["name"], "tool");
+    assert_eq!(result["rollups"][0]["name"], "calls_by_tool");
+}
+
 /// EN-F2: a user namespace loads under stored `ns:Kind` names, `schema_describe` shows the
 /// namespace and the stored name, `index_meta` records the blake3 hash and the version, and a
 /// reload with the same bytes writes nothing (`changed: false`, zero `changes` rows).
@@ -559,6 +598,7 @@ fn schema_extend_accepts_stored_names_keeps_todays_rejections_and_remember_round
             to_kinds: vec![],
             directed: None,
             props_schema: None,
+            ..Default::default()
         })
     };
     for bad in ["vendor", "Vendor-X", "INCIDENTS:Decision"] {

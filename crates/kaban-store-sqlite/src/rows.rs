@@ -112,8 +112,22 @@ pub(crate) fn row_typedef(r: &rusqlite::Row<'_>) -> rusqlite::Result<TypeDef> {
             column_weights: json_col(r, 11)?,
             extract: json_col(r, 12)?,
             display: json_col(r, 13)?,
+            columns: list_col(r, 14, |s| serde_json::from_str(s))?,
+            rollups: list_col(r, 15, |s| serde_json::from_str(s))?,
+            fts_fields: list_col(r, 16, |s| serde_json::from_str(s))?,
         },
     })
+}
+
+fn list_col<T>(
+    r: &rusqlite::Row<'_>,
+    idx: usize,
+    decode: impl FnOnce(&str) -> serde_json::Result<Vec<T>>,
+) -> rusqlite::Result<Vec<T>> {
+    match r.get::<_, Option<String>>(idx)? {
+        Some(text) => decode(&text).map_err(|e| bad_json(idx, e)),
+        None => Ok(Vec::new()),
+    }
 }
 /// A nullable JSON text column (the 0004 declaration columns; `NULL` on the 0003 shape).
 fn json_col(r: &rusqlite::Row<'_>, idx: usize) -> rusqlite::Result<Option<serde_json::Value>> {

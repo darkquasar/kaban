@@ -58,10 +58,10 @@ impl TypeTable {
     const fn columns(self) -> &'static str {
         match self {
             Self::Stored => {
-                "kind, name, description, from_kinds, to_kinds, directed, props_schema, builtin, NULL, NULL, NULL, NULL, NULL, NULL"
+                "kind, name, description, from_kinds, to_kinds, directed, props_schema, builtin, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL"
             }
             Self::Qualified => {
-                "kind, name, description, from_kinds, to_kinds, directed, props_schema, builtin, ns, rules, rank, column_weights, extract, display"
+                "kind, name, description, from_kinds, to_kinds, directed, props_schema, builtin, ns, rules, rank, column_weights, extract, display, columns, rollups, fts_fields"
             }
         }
     }
@@ -210,6 +210,15 @@ pub(crate) fn seed(conn: &Connection, now: &str) -> Result<()> {
             }
         }
         TypeTable::Qualified => {
+            // The open transaction already holds the write lock. A project written before
+            // typed declarations has the same supported schema version and keeps its data.
+            let present = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('schema_type') WHERE name='columns')",
+                [], |r| r.get::<_, bool>(0),
+            ).sql()?;
+            if !present {
+                conn.execute_batch("ALTER TABLE schema_type ADD COLUMN columns TEXT; ALTER TABLE schema_type ADD COLUMN rollups TEXT;").sql()?;
+            }
             let mut st = conn.prepare_cached(&format!(
                 "INSERT OR IGNORE INTO schema_type({BUILTIN_COLS}, builtin, created_at) VALUES ({BUILTIN_BINDS}, 1, ?)"
             )).sql()?;
@@ -358,11 +367,13 @@ pub(crate) fn extend(conn: &Connection, def: &TypeDef, now: &str) -> Result<bool
             }
             let [rules, rank, column_weights, extract, display] = def.declaration.texts();
             conn.execute(
-                "INSERT INTO schema_type(ns, kind, name, description, from_kinds, to_kinds, directed, props_schema, builtin, created_at, rules, rank, column_weights, extract, display) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)
+                "INSERT INTO schema_type(ns, kind, name, description, from_kinds, to_kinds, directed, props_schema, builtin, created_at, rules, rank, column_weights, extract, display, columns, rollups, fts_fields) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                  ON CONFLICT(ns, kind, name) DO UPDATE SET description = excluded.description, from_kinds = excluded.from_kinds, to_kinds = excluded.to_kinds, directed = excluded.directed, props_schema = excluded.props_schema,
-                   rules = excluded.rules, rank = excluded.rank, column_weights = excluded.column_weights, extract = excluded.extract, display = excluded.display
+                   rules = excluded.rules, rank = excluded.rank, column_weights = excluded.column_weights, extract = excluded.extract, display = excluded.display,
+                   columns = excluded.columns, rollups = excluded.rollups, fts_fields = excluded.fts_fields
                  WHERE schema_type.builtin = 0",
-                params![ns, def.kind, bare, def.description, from, to, i64::from(def.directed), schema, now, rules, rank, column_weights, extract, display],
+                params![ns, def.kind, bare, def.description, from, to, i64::from(def.directed), schema, now, rules, rank, column_weights, extract, display,
+                    serde_json::to_string(&def.declaration.columns)?, serde_json::to_string(&def.declaration.rollups)?, serde_json::to_string(&def.declaration.fts_fields)?],
             )
             .sql()?
         }

@@ -8,7 +8,10 @@
 pub mod meta;
 pub mod resolve;
 
-pub use meta::{IdentifierError, KindBody, KindName, Ns, OntologyFile, RelBody, RelName, Rules};
+pub use meta::{
+    ColumnDecl, ColumnType, IdentifierError, KindBody, KindName, Ns, OntologyFile, RelBody,
+    RelName, RollupDecl, RollupOp, Rules,
+};
 pub use resolve::{NamespaceSet, Ontology, Qualified, resolve, split_stored, stored_name};
 
 use crate::validator::SchemaError;

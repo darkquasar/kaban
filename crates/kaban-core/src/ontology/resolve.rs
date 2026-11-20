@@ -109,6 +109,10 @@ impl FromIterator<Ns> for NamespaceSet {
 /// A kind after inheritance and mixins.
 #[derive(Debug, Clone)]
 pub struct ResolvedKind {
+    /// Typed columns of this label.
+    pub columns: Vec<super::ColumnDecl>,
+    /// Named aggregates for this label.
+    pub rollups: Vec<super::RollupDecl>,
     /// Identity.
     pub id: Qualified,
     /// Human description (required on a kind).
@@ -600,6 +604,8 @@ fn resolve_kind(
         .ok_or_else(|| file_error(&path("description")))?;
     let mut merged = MergedSchema::default();
     let mut resolved = ResolvedKind {
+        columns: body.columns.clone(),
+        rollups: body.rollups.clone(),
         id: q.clone(),
         description,
         is_a: None,

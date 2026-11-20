@@ -341,6 +341,15 @@ pub struct TypeDef {
 /// `canon.rs`), `None` where the kind declares none.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct TypeDeclaration {
+    /// Typed columns projected from this label's properties.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub columns: Vec<crate::ontology::ColumnDecl>,
+    /// Named aggregates over active rows of the label.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rollups: Vec<crate::ontology::RollupDecl>,
+    /// Extra property paths searchable through the text index.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fts_fields: Vec<String>,
     /// The `rules` block (EN-F4).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rules: Option<Value>,
@@ -368,6 +377,9 @@ impl TypeDeclaration {
             serde_json::from_str(&crate::canon::canonical_json(&value)).ok()
         }
         Self {
+            columns: kind.columns.clone(),
+            rollups: kind.rollups.clone(),
+            fts_fields: kind.fts_fields.clone(),
             rules: kind.rules.as_ref().and_then(canon),
             rank: kind.rank.as_ref().and_then(canon),
             column_weights: kind.column_weights.as_ref().and_then(canon),

@@ -176,6 +176,12 @@ pub struct OntologyFile {
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct KindBody {
+    /// Typed properties stored in the label's column table.
+    #[serde(default)]
+    pub columns: Vec<ColumnDecl>,
+    /// Aggregates maintained for this label.
+    #[serde(default)]
+    pub rollups: Vec<RollupDecl>,
     /// Human description.
     #[serde(default)]
     pub description: Option<String>,
@@ -207,6 +213,60 @@ pub struct KindBody {
     /// Extraction hints (EN-F25, EN-F36).
     #[serde(default)]
     pub extract: Option<Extract>,
+}
+
+/// A typed column projected from the property of the same name.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, serde::Serialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ColumnDecl {
+    /// Property and column name.
+    pub name: String,
+    /// Required type of non-null values.
+    pub ty: ColumnType,
+    /// Create a secondary index on the column.
+    #[serde(default)]
+    pub indexed: bool,
+}
+
+/// The scalar types a label can store in a column.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Deserialize, serde::Serialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ColumnType {
+    /// Signed 64-bit integer.
+    Integer,
+    /// Floating-point number.
+    Real,
+    /// UTF-8 text.
+    Text,
+    /// A timestamp stored as text.
+    Timestamp,
+}
+
+/// A named aggregate over active rows of one label.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, serde::Serialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RollupDecl {
+    /// Database-wide aggregate name.
+    pub name: String,
+    /// Canonical stored label name.
+    pub label: String,
+    /// Ordered columns forming a group key; empty for a total.
+    #[serde(default)]
+    pub group_by: Vec<String>,
+    /// Aggregate maintained for each group.
+    pub op: RollupOp,
+}
+
+/// How a row contributes to its group.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, serde::Serialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RollupOp {
+    /// Count all eligible rows.
+    Count,
+    /// Sum the non-null values of the named numeric column.
+    Sum(String),
 }
 
 /// Display labels.
