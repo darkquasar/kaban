@@ -81,6 +81,65 @@ fn the_scoped_body_reader_returns_the_hot_bytes_from_the_current_commit() {
         .unwrap();
 }
 
+#[test]
+fn the_scoped_body_reader_distinguishes_cold_references_from_hot_and_corrupt_values() {
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute("CREATE TABLE node(rid INTEGER PRIMARY KEY, text)", [])
+        .unwrap();
+    let phases = super::phase::Phases::default();
+    let reader = super::phase::Reader::new(&conn, &phases);
+    let read = |stored: &dyn rusqlite::ToSql| {
+        conn.execute("INSERT OR REPLACE INTO node VALUES (1, ?)", [stored])
+            .unwrap();
+        crate::body_codec::read_body(&reader, 1)
+    };
+    let mut reference = vec![0, b'K', b'Z', 2, 0];
+    reference.extend_from_slice(&42_i64.to_le_bytes());
+    reference.extend_from_slice(&0_u32.to_le_bytes());
+    assert!(matches!(read(&reference), Err(StoreError::ColdTierAbsent)));
+
+    let compressed = "a body that benefits from compression ".repeat(50);
+    for (body, format) in [("x", 0), (compressed.as_str(), 1)] {
+        let blob = crate::body_codec::encode(body.as_bytes());
+        assert_eq!(blob[3], format);
+        assert_eq!(read(&blob).unwrap(), body.as_bytes());
+    }
+    let legacy = std::str::from_utf8(&reference).unwrap();
+    assert_eq!(
+        read(&legacy).unwrap(),
+        reference,
+        "TEXT is always plaintext"
+    );
+
+    let mut bad_header = reference.clone();
+    bad_header[4] = 1;
+    let mut unknown = reference.clone();
+    unknown[3] = 9;
+    let mut invalid_extent = reference.clone();
+    invalid_extent[5..13].fill(0);
+    let mut trailing = reference.clone();
+    trailing.push(0);
+    let mut bad_hot = crate::body_codec::encode(b"x");
+    bad_hot.pop();
+    for (blob, reason) in [
+        (reference[..4].to_vec(), "corrupt body payload"),
+        (
+            reference[..reference.len() - 1].to_vec(),
+            "corrupt body payload",
+        ),
+        (bad_header, "corrupt body payload"),
+        (unknown, "unknown body format 9"),
+        (invalid_extent, "corrupt body payload"),
+        (trailing, "corrupt body payload"),
+        (bad_hot, "corrupt body payload"),
+    ] {
+        let Err(StoreError::Backend { source }) = read(&blob) else {
+            panic!("expected a conversion failure for {blob:?}");
+        };
+        assert!(source.driver().to_string().contains(reason), "{blob:?}");
+    }
+}
+
 /// A fresh in-memory store with two nodes; their ids and `rid`s.
 fn store_with_two_nodes() -> (SqliteStore, [(String, i64); 2]) {
     let store = SqliteStore::open_memory().unwrap();

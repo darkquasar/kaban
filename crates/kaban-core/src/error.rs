@@ -50,6 +50,9 @@ impl std::error::Error for BackendSource {}
 #[derive(Error)]
 #[non_exhaustive] // later milestones add variants (migrations, leases, governance); match with a fallback arm
 pub enum StoreError {
+    /// The body is stored in a cold extent and the cold tier is unavailable.
+    #[error("cold_tier_absent")]
+    ColdTierAbsent,
     /// The aggregate exceeds its declared numeric range.
     #[error("rollup numeric overflow")]
     RollupOverflow,
@@ -263,6 +266,7 @@ impl std::fmt::Debug for StoreError {
         match self {
             Self::UnknownKind(_) => f.write_str("UnknownKind(<name withheld>)"),
             Self::RollupOverflow => f.write_str("RollupOverflow"),
+            Self::ColdTierAbsent => f.write_str("ColdTierAbsent"),
             Self::UnknownRel(_) => f.write_str("UnknownRel(<name withheld>)"),
             Self::InvalidName(name, why) => {
                 f.debug_tuple("InvalidName").field(name).field(why).finish()

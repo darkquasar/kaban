@@ -10,9 +10,11 @@
 //!             zstd did not pay, or the body is above the decode bound)
 //!   format 1: the payload is one zstd frame with a checksum, compressed at level 3 with the
 //!             dictionary the id names; the frame carries the content size
+//!   format 2: reserved byte 0 in the dictionary slot | file extent id (positive i64 LE) |
+//!             row group (u32 LE). Only the scoped [`read_body`] recognizes this reference.
 //! ```
 //!
-//! Every format carries the decoded length and a checksum (T8c review t8c-3): a payload cut
+//! Both inline formats carry the decoded length and a checksum (T8c review t8c-3): a payload cut
 //! short or altered in place, even to valid UTF-8, fails the read instead of reading as a
 //! shorter or different body. [`decode`] returns the exact original bytes for a format 0 body
 //! and a format 1 body under the shipped dictionary, and refuses everything else by name
@@ -71,6 +73,8 @@ use zstd::zstd_safe::{CParameter, get_frame_content_size};
 pub(crate) const MAGIC: [u8; 3] = [0, b'K', b'Z'];
 /// The format this binary writes (1: one zstd frame under the shipped dictionary).
 pub(crate) const FORMAT_VERSION: u8 = 1;
+/// The stored reference to a file extent and row group. Hot writers emit only formats 0 and 1.
+const COLD_REFERENCE: u8 = 2;
 /// The id of the shipped dictionary in every encoded body's tag.
 pub(crate) const DICTIONARY_ID: u8 = 1;
 /// Magic, format version and dictionary id.
@@ -347,16 +351,20 @@ pub(crate) fn register(conn: &Connection) -> Result<()> {
 /// `rusqlite::Error::FromSqlConversionFailure` with the codec's or UTF-8 error as source for
 /// a blob; the driver's own errors for a text column.
 pub(crate) fn read_column(row: &rusqlite::Row<'_>, idx: usize) -> rusqlite::Result<String> {
-    let failed = |e: Box<dyn std::error::Error + Send + Sync>| {
-        rusqlite::Error::FromSqlConversionFailure(idx, rusqlite::types::Type::Blob, e)
-    };
     match row.get_ref(idx)? {
         ValueRef::Blob(bytes) => {
-            let plain = decode(bytes).map_err(|e| failed(Box::new(e)))?;
-            String::from_utf8(plain).map_err(|e| failed(Box::new(e)))
+            let plain = decode(bytes).map_err(|e| blob_error(idx, e))?;
+            String::from_utf8(plain).map_err(|e| blob_error(idx, e))
         }
         _ => row.get(idx),
     }
+}
+
+fn blob_error(
+    idx: usize,
+    error: impl std::error::Error + Send + Sync + 'static,
+) -> rusqlite::Error {
+    rusqlite::Error::FromSqlConversionFailure(idx, rusqlite::types::Type::Blob, Box::new(error))
 }
 
 /// Read the body of one record through the current catalog snapshot.
@@ -367,8 +375,24 @@ pub(crate) fn read_column(row: &rusqlite::Row<'_>, idx: usize) -> rusqlite::Resu
 pub(crate) fn read_body(reader: &crate::catalog::phase::Reader<'_>, rid: i64) -> Result<Vec<u8>> {
     reader
         .prepare("SELECT text FROM node WHERE rid=?")?
-        .query_row([rid], |row| read_column(row, 0).map(String::into_bytes))?
-        .ok_or_else(|| StoreError::NotFound(rid.to_string()))
+        .query_row([rid], |row| {
+            if let ValueRef::Blob(bytes) = row.get_ref(0)?
+                && let Some([COLD_REFERENCE, reserved, payload @ ..]) = bytes.strip_prefix(&MAGIC)
+            {
+                if *reserved == 0
+                    && let Some((extent, group)) = payload.split_first_chunk::<8>()
+                    && i64::from_le_bytes(*extent) > 0
+                    && group.len() == size_of::<u32>()
+                {
+                    return Ok(None);
+                }
+                return Err(blob_error(0, corrupt("invalid cold body reference")));
+            }
+            read_column(row, 0).map(Some)
+        })?
+        .ok_or_else(|| StoreError::NotFound(rid.to_string()))?
+        .map(String::into_bytes)
+        .ok_or(StoreError::ColdTierAbsent)
 }
 
 /// The writer of a body column: every body is bound as a tagged `BLOB`. Built inside the write
