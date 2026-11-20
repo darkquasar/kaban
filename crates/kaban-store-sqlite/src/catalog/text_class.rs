@@ -44,7 +44,7 @@ const TEXT: &[ExtentClass] = &[ExtentClass::TextTier];
 /// byte per indexed byte, the body indexed three times).
 const STAGE_MEMORY_BYTES: u64 = 512 << 20;
 
-/// The rows a rebuild indexes per writer (PC-17): each batch is its own segment under its own
+/// The maximum rows a rebuild indexes per writer (PC-17): each batch is its own segment under its own
 /// reservation, and the batches are merged under the budget.
 const REBUILD_BATCH_ROWS: usize = 1024;
 
@@ -196,22 +196,26 @@ pub(super) fn rebuild_in(
     crate::ident::mark_indexed(txn.conn())
 }
 
-/// One tier of `rows`, indexed `batch` rows per writer under `budget`: each batch's pack is
-/// charged while it is held, then the packs are merged into one.
+/// One tier of `rows`, indexed in batches bounded by row count and projected bytes under
+/// `budget`. Each pack is charged while held for the merge.
 ///
 /// # Errors
 /// The budget's refusal; Tantivy failures.
-fn rebuilt_tier(rows: &[IndexRow], batch: usize, budget: &QueryBudget) -> Result<Vec<u8>> {
-    if rows.len() <= batch {
-        return kaban_index_tantivy::segment(rows, &[], budget);
-    }
+fn rebuilt_tier(mut rows: &[IndexRow], batch: usize, budget: &QueryBudget) -> Result<Vec<u8>> {
     let mut packs = Vec::new();
     let mut held = Vec::new();
-    for rows in rows.chunks(batch.max(1)) {
-        let pack = kaban_index_tantivy::segment(rows, &[], budget)?;
+    loop {
+        let (pack, remaining) = kaban_index_tantivy::rebuild_batch(rows, batch, budget)?;
+        if packs.is_empty() && remaining.is_empty() {
+            return Ok(pack);
+        }
         let bytes = pack.len() + size_of::<OwnedBytes>();
         held.push(budget.reserve(u64::try_from(bytes).unwrap_or(u64::MAX))?);
         packs.push(OwnedBytes::new(pack));
+        if remaining.is_empty() {
+            break;
+        }
+        rows = remaining;
     }
     kaban_index_tantivy::merge(&packs, &[], None, budget)?
         .ok_or_else(|| StoreError::NotFound("the merged rebuild batches".into()))
@@ -554,5 +558,27 @@ mod tests {
         let mut rids: Vec<i64> = hits.iter().map(|h| h.rid).collect();
         rids.sort_unstable();
         assert_eq!(rids, vec![1, 2, 3, 4, 5, 6]);
+    }
+
+    #[test]
+    fn a_rebuild_below_the_row_limit_indexes_large_rows_and_refuses_an_unaffordable_row() {
+        let rows: Vec<_> = (1..=2)
+            .map(|rid| large_row(rid, "quokka", 384 << 10))
+            .collect();
+        let low = QueryBudget::new(8 << 20, None);
+        let refused = super::rebuilt_tier(&rows[..1], super::REBUILD_BATCH_ROWS, &low);
+        assert!(matches!(
+            refused,
+            Err(StoreError::BudgetExceeded(BudgetExceeded {
+                limit: Limit::Memory,
+                ..
+            }))
+        ));
+        assert_eq!(low.live_bytes(), 0);
+
+        let budget = QueryBudget::new(20 << 20, None);
+        let tier = super::rebuilt_tier(&rows, super::REBUILD_BATCH_ROWS, &budget).unwrap();
+        assert!(kaban_index_tantivy::has_segment(&tier));
+        assert_eq!(budget.live_bytes(), 0);
     }
 }

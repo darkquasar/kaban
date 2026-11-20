@@ -28,7 +28,7 @@ mod writer;
 pub use crate::kbx_dir::has_segment;
 use crate::query::Weights;
 use crate::schema::{ACTIVE, Fields};
-pub use crate::writer::{merge, segment};
+pub use crate::writer::{merge, rebuild_batch, segment};
 use kaban_core::config::Recall;
 use kaban_core::query_budget::{BudgetExceeded, QueryBudget};
 use kaban_core::text_index::{IndexRow, Searched, TextIndex, TextQuery, TextSnapshot};
