@@ -94,7 +94,7 @@ fn execute(
         if !same {
             return Err(refused("database", "database identity changed"));
         }
-        let payload = Payload::new(tx, store, &guard);
+        let payload = Payload::new(tx, pin, &s.view, store, &guard)?;
         let plan = |name, input: &kaban_vtab::PlanInput<'_>, _: &QueryBudget| {
             Ok(payload.plan(name, input))
         };
@@ -140,7 +140,7 @@ fn execute(
                     // Catalog packs can hold many user values. Their reads are already charged
                     // to the shared memory budget and run before the first public VM step.
                     conn.set_limit(length, catalog_limit).map_err(error)?;
-                    guard.catalog(|| payload.load(pin, budget))?;
+                    guard.catalog(|| payload.load(budget))?;
                     conn.set_limit(length, public_limit).map_err(error)?;
                 }
                 for (i, param) in s.params.iter().enumerate() {

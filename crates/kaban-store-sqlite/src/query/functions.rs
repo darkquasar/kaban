@@ -48,6 +48,9 @@ pub(super) fn register(conn: &QueryConnection<'_>) -> rusqlite::Result<()> {
 
 pub(super) struct Payload<'a, 'conn> {
     tx: &'a Transaction<'conn>,
+    pin: &'a Pin,
+    view: &'a ViewName,
+    node_ceiling: i64,
     store: &'a SqliteStore,
     guard: &'a Guard,
     text: OnceCell<TextInputs>,
@@ -61,11 +64,23 @@ pub(super) struct Payload<'a, 'conn> {
 impl<'a, 'conn> Payload<'a, 'conn> {
     pub(super) fn new(
         tx: &'a Transaction<'conn>,
+        pin: &'a Pin,
+        view: &'a ViewName,
         store: &'a SqliteStore,
         guard: &'a Guard,
-    ) -> Self {
-        Self {
+    ) -> Result<Self> {
+        // The INTEGER PRIMARY KEY's rightmost entry bounds the number of public node IDs.
+        // Capture this statistic in the pin's transaction before SQLite invokes xBestIndex.
+        let node_ceiling = tx
+            .query_row("SELECT coalesce(max(rid),0) FROM main.node", [], |row| {
+                row.get(0)
+            })
+            .sql()?;
+        Ok(Self {
             tx,
+            pin,
+            view,
+            node_ceiling,
             store,
             guard,
             text: OnceCell::new(),
@@ -74,7 +89,7 @@ impl<'a, 'conn> Payload<'a, 'conn> {
             uses_expand: Cell::new(false),
             truncated: Cell::new(false),
             error: RefCell::new(None),
-        }
+        })
     }
     pub(super) fn plan(&self, name: &'static str, input: &PlanInput<'_>) -> Plan {
         let cap = if name == "search" {
@@ -91,41 +106,44 @@ impl<'a, 'conn> Payload<'a, 'conn> {
                 (Some(Value::Integer(n)), key) if key == cap => Some((*n).max(1)),
                 _ => None,
             })
-            .unwrap_or(50);
+            .unwrap_or(50)
+            .min(self.node_ceiling);
         Plan {
             rows,
+            strategy: i32::from(name == "search" && self.node_ceiling == 0),
             cost: 10.0 + f64::from(u32::try_from(rows).unwrap_or(u32::MAX)),
             ..Default::default()
         }
     }
     /// Only the classes requested by the prepared statement, through its held transaction.
-    pub(super) fn load(&self, pin: &Pin, budget: &QueryBudget) -> Result<()> {
-        if self.uses_search.get() {
-            let text = self.store.catalog().pinned_text(pin, self.tx)?;
+    pub(super) fn load(&self, budget: &QueryBudget) -> Result<()> {
+        if self.uses_search.get() && self.node_ceiling != 0 {
+            let text = self.store.catalog().pinned_text(self.pin, self.tx)?;
             self.text
                 .set(text)
                 .map_err(|_| refused("search", "text was already loaded"))?;
         }
         if self.uses_expand.get() {
-            let graph = graph_class::load_view(
-                self.tx,
-                pin,
-                &ViewName::Main,
-                graph_class::CLASSES,
-                budget,
-            )?;
+            let graph =
+                graph_class::load_view(self.tx, self.pin, self.view, graph_class::CLASSES, budget)?;
             self.graph
                 .set(graph)
                 .map_err(|_| refused("expand", "graph was already loaded"))?;
         }
         Ok(())
     }
-    fn scan(&self, name: &str, args: &[Value], budget: &QueryBudget) -> Result<Cursor> {
+    fn scan(&self, name: &str, scan: &Scan<'_>, budget: &QueryBudget) -> Result<Cursor> {
         // The next row holds two Values and a public UUID string during transfer to SQLite.
         let mut storage = budget.reserve(256)?;
-        let data = match (name, args) {
+        let data = match (name, scan.args) {
             ("search", [Value::Text(q), Value::Integer(k)]) => {
                 let limit = usize::try_from(*k).map_err(|_| refused("search", "invalid k"))?;
+                if scan.strategy == 1 {
+                    return Ok(Cursor {
+                        data: Data::Empty,
+                        _storage: storage,
+                    });
+                }
                 super::charge(
                     &mut storage,
                     (limit as u64).saturating_mul(size_of::<TextHit>() as u64),
@@ -236,8 +254,7 @@ impl ExecutionPayload for Payload<'_, '_> {
         scan: &Scan<'_>,
         budget: &QueryBudget,
     ) -> std::result::Result<Cursor, FnError> {
-        self.scan(name, scan.args, budget)
-            .map_err(|e| self.record(e))
+        self.scan(name, scan, budget).map_err(|e| self.record(e))
     }
     fn next(
         &self,
