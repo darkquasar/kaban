@@ -370,33 +370,24 @@ impl Catalog {
         let (pin, inputs, selected) = {
             let conn = conn.lock().unwrap_or_else(PoisonError::into_inner);
             let pin = self.pin_untouched(&conn, budget, &[(ViewName::Main, TEXT)])?;
-            let inputs = text_inputs(&pin, &conn, self.kbx.clone())?;
-            let mut tiers = inputs
-                .view
-                .chain()
-                .iter()
-                .filter(|e| e.class == ExtentClass::TextTier);
-            let tier = match (tiers.next(), tiers.next(), inputs.tiers.as_slice()) {
-                (Some(e), None, [span]) if inputs.view.sediment().is_empty() => {
-                    Some((e.id.0, e.generation.0, *span))
-                }
-                _ => None,
-            };
-            let selected = index.observe(inputs.generation, &inputs.kbx, tier);
+            let inputs = self.pinned_text(&pin, &conn)?;
+            let selected = inputs.select(index);
             (pin, inputs, selected)
         };
-        let sediment = inputs.sediment();
-        let out = index.with_reader(selected, budget, |reader| {
-            f(reader, &inputs.snapshot(&sediment))
-        });
+        let out = inputs.with_reader(index, selected, budget, f);
         drop(pin);
         out
+    }
+
+    /// Resolve the text inputs through the held transaction and pin.
+    pub(crate) fn pinned_text(&self, pin: &Pin, conn: &Connection) -> Result<TextInputs> {
+        text_inputs(pin, conn, self.kbx.clone())
     }
 }
 
 /// The text inputs of a pin's `main` view: the tiers in its chain and its pending text packs.
 #[derive(Debug)]
-struct TextInputs {
+pub(crate) struct TextInputs {
     generation: u64,
     kbx: PathBuf,
     view: Arc<PinnedView>,
@@ -428,6 +419,35 @@ fn text_inputs(pin: &Pin, conn: &Connection, kbx: PathBuf) -> Result<TextInputs>
 }
 
 impl TextInputs {
+    pub(crate) fn select(&self, index: &crate::tantivy::Attached) -> crate::tantivy::Selection {
+        let mut tiers = self
+            .view
+            .chain()
+            .iter()
+            .filter(|e| e.class == ExtentClass::TextTier);
+        let tier = match (tiers.next(), tiers.next(), self.tiers.as_slice()) {
+            (Some(e), None, [span]) if self.view.sediment().is_empty() => {
+                Some((e.id.0, e.generation.0, *span))
+            }
+            _ => None,
+        };
+        index.observe(self.generation, &self.kbx, tier)
+    }
+
+    pub(crate) fn with_reader<T>(
+        &self,
+        index: &crate::tantivy::Attached,
+        selected: crate::tantivy::Selection,
+        budget: &QueryBudget,
+        f: impl FnOnce(&dyn kaban_core::text_index::TextIndex, &TextSnapshot<'_>) -> Result<T>,
+    ) -> Result<T> {
+        let _sediment = budget.reserve((self.view.sediment().len() * size_of::<&[u8]>()) as u64)?;
+        let sediment = self.sediment();
+        index.with_reader(selected, budget, |reader| {
+            f(reader, &self.snapshot(&sediment))
+        })
+    }
+
     /// The pending text packs, oldest first.
     fn sediment(&self) -> Vec<&[u8]> {
         self.view

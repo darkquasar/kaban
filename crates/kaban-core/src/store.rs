@@ -20,6 +20,7 @@ mod ingest;
 mod jobs;
 mod lease;
 mod memory;
+mod query;
 mod schema;
 mod session;
 mod types;
@@ -38,6 +39,7 @@ pub use jobs::{
 };
 pub use lease::LeaseStore;
 pub use memory::MemoryStore;
+pub use query::{QueryLimits, RowSet, Statement};
 pub use schema::SchemaStore;
 pub use session::SessionStore;
 pub use types::DatabaseFileModes;

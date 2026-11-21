@@ -684,7 +684,7 @@ impl LoadedView<'_> {
         let id: Option<String> = self
             .rows
             .query_row(
-                "SELECT id FROM node WHERE rid = ?1 AND lifecycle <> ?2",
+                "SELECT id FROM main.node WHERE rid = ?1 AND lifecycle <> ?2",
                 rusqlite::params![n.0, PURGED],
                 |r| r.get(0),
             )
@@ -706,7 +706,7 @@ impl LoadedView<'_> {
         let rid: Option<i64> = self
             .rows
             .query_row(
-                "SELECT rid FROM node WHERE id = ?1 AND lifecycle <> ?2",
+                "SELECT rid FROM main.node WHERE id = ?1 AND lifecycle <> ?2",
                 rusqlite::params![id.as_str(), PURGED],
                 |r| r.get(0),
             )

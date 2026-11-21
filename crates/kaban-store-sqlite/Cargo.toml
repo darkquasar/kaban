@@ -31,6 +31,7 @@ crc32fast.workspace = true # the length and checksum framing of a body stored pl
 sha2.workspace = true # the content hash of every published extent (spec 11 7.4)
 
 [dev-dependencies]
+kaban-vtab = { workspace = true, features = ["process-bootstrap"] } # initialize the query allocator before any SQLite call in store test processes
 kaban-core = { workspace = true, features = ["test-fake"] } # `FakeIndex` for the `recall_with` seam test (spec 05 SS-07)
 kaban-store-sqlite = { path = ".", features = ["text-index-override", "failpoints"] } # the override constructor for `tests/text_index_override.rs` and the adapter goldens (spec 05 SS-07)
 rusqlite = { workspace = true, features = ["trace"] }

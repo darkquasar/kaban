@@ -29,6 +29,7 @@ mod jobs;
 mod leases;
 mod ontology;
 mod producers;
+mod query;
 mod recall;
 mod rollup;
 mod rows;

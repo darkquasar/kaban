@@ -50,6 +50,22 @@ impl std::error::Error for BackendSource {}
 #[derive(Error)]
 #[non_exhaustive] // later milestones add variants (migrations, leases, governance); match with a fallback arm
 pub enum StoreError {
+    /// A query construct cannot be executed. Diagnostics contain no statement text or values.
+    #[error("query refused ({construct}): {reason}")]
+    QueryRefused {
+        /// Name of the refused construct.
+        construct: String,
+        /// Reason for refusing it.
+        reason: String,
+    },
+    /// A resource bound of the query was exceeded.
+    #[error("query limit {limit} exceeded ({value})")]
+    QueryLimit {
+        /// Name of the limit.
+        limit: &'static str,
+        /// Measured or requested value.
+        value: u64,
+    },
     /// The body is stored in a cold extent and the cold tier is unavailable.
     #[error("cold_tier_absent")]
     ColdTierAbsent,
@@ -265,6 +281,16 @@ impl std::fmt::Debug for StoreError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::UnknownKind(_) => f.write_str("UnknownKind(<name withheld>)"),
+            Self::QueryLimit { limit, value } => f
+                .debug_struct("QueryLimit")
+                .field("limit", limit)
+                .field("value", value)
+                .finish(),
+            Self::QueryRefused { construct, reason } => f
+                .debug_struct("QueryRefused")
+                .field("construct", construct)
+                .field("reason", reason)
+                .finish(),
             Self::RollupOverflow => f.write_str("RollupOverflow"),
             Self::ColdTierAbsent => f.write_str("ColdTierAbsent"),
             Self::UnknownRel(_) => f.write_str("UnknownRel(<name withheld>)"),

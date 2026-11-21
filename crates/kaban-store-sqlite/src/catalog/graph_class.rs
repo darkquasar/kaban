@@ -25,10 +25,6 @@
 mod order;
 mod read;
 
-#[cfg_attr(
-    not(feature = "failpoints"),
-    expect(unused_imports, reason = "T14 and T16 load graph views")
-)]
 pub(crate) use read::{LoadedView, load_view};
 #[cfg(feature = "failpoints")]
 pub(crate) use read::{advance_clock as advance_cache_clock, cache_holds};
@@ -54,7 +50,7 @@ use crate::rows::rfc3339_ms;
 use crate::sql_error::SqlResultExt;
 
 /// The classes of the graph's extents: compaction names a seal's extent after the first.
-const CLASSES: &[ExtentClass] = &[ExtentClass::GraphLayer, ExtentClass::GraphBase];
+pub(crate) const CLASSES: &[ExtentClass] = &[ExtentClass::GraphLayer, ExtentClass::GraphBase];
 
 /// The class of the graph's sediment rows.
 const SEDIMENT: ExtentClass = ExtentClass::GraphLayer;

@@ -15,6 +15,15 @@ use serde_json::Value;
 /// `stats` tool. Used by the service layer's remember/query/mutate paths, the MCP adapter and
 /// the bench.
 pub trait MemoryStore: Send + Sync {
+    /// Evaluate a single read-only statement at its selected view.
+    ///
+    /// # Errors
+    /// Returns a refusal when the store cannot execute the statement.
+    fn query(
+        &self,
+        statement: &super::Statement,
+        limits: &super::QueryLimits,
+    ) -> Result<super::RowSet>;
     /// Read a declared aggregate for the ordered, typed group key.
     /// A group with no members counts zero and sums to NULL.
     ///

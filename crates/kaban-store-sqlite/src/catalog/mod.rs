@@ -29,7 +29,7 @@ pub(crate) mod commit;
 pub(crate) mod compact;
 pub(crate) mod fail;
 pub(crate) mod failpoint;
-mod graph_class;
+pub(crate) mod graph_class;
 pub(crate) mod io;
 pub(crate) mod kbx;
 pub(crate) mod phase;
@@ -42,7 +42,7 @@ pub(crate) mod tables;
 pub mod testing;
 #[cfg(test)]
 mod tests;
-mod text_class;
+pub(crate) mod text_class;
 mod views;
 
 use std::path::{Path, PathBuf};
