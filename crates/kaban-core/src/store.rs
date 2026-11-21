@@ -39,7 +39,7 @@ pub use jobs::{
 };
 pub use lease::LeaseStore;
 pub use memory::MemoryStore;
-pub use query::{QueryLimits, RowSet, Statement};
+pub use query::{QueryExecution, QueryLimits, RowSet, Statement};
 pub use schema::SchemaStore;
 pub use session::SessionStore;
 pub use types::DatabaseFileModes;

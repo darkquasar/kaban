@@ -1148,12 +1148,12 @@ impl SqliteStore {
 }
 
 impl MemoryStore for SqliteStore {
-    fn query(
+    fn query_with_execution(
         &self,
         statement: &kaban_core::Statement,
-        limits: &kaban_core::QueryLimits,
+        execution: kaban_core::QueryExecution,
     ) -> Result<kaban_core::RowSet> {
-        crate::query::run(self, self.path.as_deref(), statement, limits)
+        crate::query::run(self, self.path.as_deref(), statement, execution)
     }
 
     fn rollup(&self, name: &str, key: &[kaban_core::SqlValue]) -> Result<kaban_core::SqlValue> {

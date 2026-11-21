@@ -23,6 +23,17 @@ pub trait MemoryStore: Send + Sync {
         &self,
         statement: &super::Statement,
         limits: &super::QueryLimits,
+    ) -> Result<super::RowSet> {
+        self.query_with_execution(statement, super::QueryExecution::new(*limits))
+    }
+    /// Evaluate a one-use request with caller-controlled cancellation.
+    ///
+    /// # Errors
+    /// As [`Self::query`], including cancellation before admission.
+    fn query_with_execution(
+        &self,
+        statement: &super::Statement,
+        request: super::QueryExecution,
     ) -> Result<super::RowSet>;
     /// Read a declared aggregate for the ordered, typed group key.
     /// A group with no members counts zero and sums to NULL.

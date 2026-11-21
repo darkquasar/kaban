@@ -1,5 +1,6 @@
 //! Inputs and bounded materialized output of a store query.
 
+use crate::query_budget::QueryBudget;
 use crate::{SqlValue, ViewName};
 use std::time::Duration;
 
@@ -35,6 +36,38 @@ impl Default for QueryLimits {
             memory_bytes: 64 << 20,
             value_bytes: 16 << 20,
         }
+    }
+}
+
+/// A single execution. Its deadline starts at construction, including any time before admission.
+/// Clone its budget handle to cancel it from another thread, before or during execution.
+/// Passing the request to the store consumes it, so a retry starts with new accounting.
+#[derive(Debug)]
+pub struct QueryExecution {
+    limits: QueryLimits,
+    budget: QueryBudget,
+}
+
+impl QueryExecution {
+    /// Start one request with the supplied bounds.
+    #[must_use]
+    pub fn new(limits: QueryLimits) -> Self {
+        Self {
+            budget: QueryBudget::new(limits.memory_bytes, Some(limits.time)),
+            limits,
+        }
+    }
+
+    /// The same budget the allocator, SQL VM and Rust operators check.
+    #[must_use]
+    pub fn budget(&self) -> &QueryBudget {
+        &self.budget
+    }
+
+    /// Hand ownership of the bounds and their matching budget to the executor.
+    #[must_use]
+    pub fn into_parts(self) -> (QueryLimits, QueryBudget) {
+        (self.limits, self.budget)
     }
 }
 

@@ -116,8 +116,8 @@ pub mod shipped {
 #[allow(deprecated)] // the EN-E10b alias, re-exported for one minor version (removed in 3.2)
 pub use store::OutboxStore;
 pub use store::{
-    ChangeLogStore, GraphStore, IngestStore, LeaseStore, MemoryStore, QueryLimits, RowSet,
-    SchemaStore, SessionStore, Statement,
+    ChangeLogStore, GraphStore, IngestStore, LeaseStore, MemoryStore, QueryExecution, QueryLimits,
+    RowSet, SchemaStore, SessionStore, Statement,
 };
 pub use store::{
     DatabaseFileModes, DocumentIndexSummary, FailedDocumentRow, MaintenanceOutcome,

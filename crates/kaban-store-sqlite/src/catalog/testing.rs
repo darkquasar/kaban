@@ -1254,6 +1254,89 @@ fn publish_base(store: &SqliteStore, class: ExtentClass, bytes: &[u8]) -> Result
     Ok(id.0)
 }
 
+/// A single-writer fixture commit: apply canonical rows, then publish a correctly typed
+/// code graph base (first write) or a layer sealed over the view's actual parent. The
+/// caller can independently choose whether the canonical batch also has a memory-graph edge.
+///
+/// # Errors
+/// Refuses an invalid fixture, a failed publication or a failed budget.
+pub fn publish_code_batch(
+    store: &SqliteStore,
+    db: &Path,
+    view: &ViewName,
+    batch: kaban_core::WriteBatch,
+    source: &kaban_core::NodeId,
+    target: &kaban_core::NodeId,
+    relation: &str,
+) -> Result<u64> {
+    use kaban_index_graph::{Attr, EdgeOp, LocalId, NodeOp, OpKind, Records};
+    if !matches!(view, ViewName::Code(_)) {
+        return Err(StoreError::NotFound("fixture code view".into()));
+    }
+    let reader =
+        Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).sql()?;
+    let catalog = store.catalog();
+    let budget = QueryBudget::new(64 << 20, Some(std::time::Duration::from_secs(10)));
+    catalog.with_snapshot(&reader, &budget, |tx, pin| {
+        let parent = load_view(tx, pin, view, CODE, &budget)?;
+        let graph = parent.view(&budget)?;
+        let rel = parent
+            .rel_id(relation)
+            .ok_or_else(|| StoreError::NotFound("fixture relation".into()))?;
+        let exists: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM cat_view WHERE name=?1 AND state='live')",
+                [view.to_string()],
+                |r| r.get(0),
+            )
+            .sql()?;
+        let hold = catalog.maintenance_hold()?.map(Arc::new);
+        catalog.commit(&mut store.lock(), Durability::Normal, |txn| {
+            store.apply_batch_body(txn.conn(), batch)?;
+            let local = |id: &kaban_core::NodeId| -> Result<LocalId> {
+                txn.conn()
+                    .query_row(
+                        "SELECT rid FROM main.node WHERE id=?1",
+                        [id.as_str()],
+                        |r| r.get::<_, u32>(0).map(LocalId),
+                    )
+                    .sql()
+            };
+            let (src, dst) = (local(source)?, local(target)?);
+            let records = Records {
+                nodes: [src, dst]
+                    .map(|node| NodeOp {
+                        node,
+                        kind: OpKind::Add,
+                    })
+                    .to_vec(),
+                edges: vec![EdgeOp {
+                    src,
+                    rel,
+                    dst,
+                    kind: OpKind::Add,
+                    attr: Attr::default(),
+                }],
+                ..Default::default()
+            };
+            let (class, bytes) = if exists {
+                (
+                    ExtentClass::CodeLayer,
+                    kaban_index_graph::seal(&graph, &records),
+                )
+            } else {
+                (
+                    ExtentClass::CodeBase,
+                    kaban_index_graph::build_base(&records, 0),
+                )
+            };
+            let extent = super::kbx::append(&catalog.kbx, class, &bytes, hold)?;
+            txn.publish(extent, std::slice::from_ref(view))?;
+            Ok(txn.generation()?.0)
+        })
+    })
+}
+
 /// Stage `payload` (encoded graph records) as one pending graph sediment row of `main` in its
 /// own commit, as a commit's staging writes one: a bench's pending ops.
 ///

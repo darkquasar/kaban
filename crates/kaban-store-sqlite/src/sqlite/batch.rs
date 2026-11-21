@@ -206,7 +206,7 @@ impl SqliteStore {
     }
 
     /// Shared transaction body: callers retain lock/transaction ownership.
-    pub(super) fn apply_batch_body(
+    pub(crate) fn apply_batch_body(
         &self,
         tx: &Connection,
         mut batch: WriteBatch,

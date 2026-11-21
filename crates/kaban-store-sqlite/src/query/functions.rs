@@ -1,6 +1,7 @@
 //! Statement-local search and graph scans.
 use super::{guard::Guard, refused};
 use crate::SqliteStore;
+use crate::catalog::class::ExtentClass;
 use crate::catalog::{graph_class, pin::Pin, text_class::TextInputs};
 use crate::sql_error::SqlResultExt;
 use kaban_core::query_budget::{BudgetLease, QueryBudget};
@@ -69,6 +70,21 @@ impl<'a, 'conn> Payload<'a, 'conn> {
         store: &'a SqliteStore,
         guard: &'a Guard,
     ) -> Result<Self> {
+        if *view != ViewName::Main {
+            if !matches!(view, ViewName::Code(_)) {
+                return Err(refused("view", "unsupported graph view"));
+            }
+            let live: bool = tx
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM main.cat_view WHERE name=?1 AND state='live')",
+                    [view.to_string()],
+                    |row| row.get(0),
+                )
+                .sql()?;
+            if !live {
+                return Err(refused("view", "code view unavailable"));
+            }
+        }
         // The INTEGER PRIMARY KEY's rightmost entry bounds the number of public node IDs.
         // Capture this statistic in the pin's transaction before SQLite invokes xBestIndex.
         let node_ceiling = tx
@@ -124,8 +140,12 @@ impl<'a, 'conn> Payload<'a, 'conn> {
                 .map_err(|_| refused("search", "text was already loaded"))?;
         }
         if self.uses_expand.get() {
-            let graph =
-                graph_class::load_view(self.tx, self.pin, self.view, graph_class::CLASSES, budget)?;
+            let classes = match self.view {
+                ViewName::Main => graph_class::CLASSES,
+                ViewName::Code(_) => &[ExtentClass::CodeLayer, ExtentClass::CodeBase],
+                _ => return Err(refused("view", "unsupported graph view")),
+            };
+            let graph = graph_class::load_view(self.tx, self.pin, self.view, classes, budget)?;
             self.graph
                 .set(graph)
                 .map_err(|_| refused("expand", "graph was already loaded"))?;

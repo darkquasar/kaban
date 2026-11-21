@@ -6,7 +6,7 @@ use crate::SqliteStore;
 use functions::Payload;
 use guard::Guard;
 use kaban_core::query_budget::{BudgetExceeded, BudgetLease, GrowError, Limit, QueryBudget};
-use kaban_core::{QueryLimits, Result, RowSet, SqlValue, Statement, StoreError, ViewName};
+use kaban_core::{QueryLimits, Result, RowSet, SqlValue, Statement, StoreError};
 use kaban_vtab::{Execution, RequestScope, Runtime};
 use rusqlite::{Batch, ErrorCode, OpenFlags, fallible_iterator::FallibleIterator, types::ValueRef};
 use std::path::Path;
@@ -46,16 +46,14 @@ pub(crate) fn run(
     store: &SqliteStore,
     path: Option<&Path>,
     statement: &Statement,
-    limits: &QueryLimits,
+    execution: kaban_core::QueryExecution,
 ) -> Result<RowSet> {
+    let (limits, budget) = execution.into_parts();
+    budget.check().map_err(exceeded)?;
     if limits.rows > 1500 {
         return Err(limit("rows", u64::from(limits.rows)));
     }
-    if statement.view != ViewName::Main {
-        return Err(refused("view", "unsupported graph view"));
-    }
-    let budget = QueryBudget::new(limits.memory_bytes, Some(limits.time));
-    let result = execute(store, path, statement, limits, &budget);
+    let result = execute(store, path, statement, &limits, &budget);
     budget.check().map_err(exceeded)?;
     result.map_err(|e| match e {
         StoreError::BudgetExceeded(e) => exceeded(e),
