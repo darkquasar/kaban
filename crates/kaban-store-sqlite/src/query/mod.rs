@@ -1,6 +1,8 @@
 //! Read-only SQL over one request budget, catalog pin and SQLite read transaction.
+mod declarations;
 mod functions;
 mod guard;
+mod model;
 
 use crate::SqliteStore;
 use functions::Payload;
@@ -92,7 +94,8 @@ fn execute(
         if !same {
             return Err(refused("database", "database identity changed"));
         }
-        let payload = Payload::new(tx, pin, &s.view, store, &guard)?;
+        let model = guard.install_model(tx, budget)?;
+        let payload = Payload::new(tx, pin, &s.view, store, &guard, model)?;
         let plan = |name, input: &kaban_vtab::PlanInput<'_>, _: &QueryBudget| {
             Ok(payload.plan(name, input))
         };

@@ -333,6 +333,10 @@ fn incidents_yaml() -> String {
 }
 
 #[test]
+#[expect(
+    clippy::print_stderr,
+    reason = "record observed extent states and independently checked public query results"
+)]
 fn the_work_file_loads_typed_columns_and_rollups_under_the_qualified_label() {
     let repo = Repo::with_catalog(
         "typed-work",
@@ -364,6 +368,17 @@ fn the_work_file_loads_typed_columns_and_rollups_under_the_qualified_label() {
     assert_eq!(task["rollups"][0]["name"], "tasks_by_state");
     let epics: Vec<_> = (0..50).map(|_| NodeId::new()).collect();
     let tasks: Vec<_> = (0..1000).map(|_| NodeId::new()).collect();
+    let initial = extent_counts(&repo);
+    write(
+        &repo,
+        vec![record(&NodeId::new(), "Entity", serde_json::json!({}))],
+    );
+    let core = extent_counts(&repo);
+    let core_classes = staged_classes(&initial, &core);
+    assert_eq!(
+        core_classes,
+        ["graph_layer".to_owned(), "text_tier".to_owned()]
+    );
     for half in epics.chunks(25) {
         write(
             &repo,
@@ -372,7 +387,8 @@ fn the_work_file_loads_typed_columns_and_rollups_under_the_qualified_label() {
                 .collect(),
         );
     }
-    assert_text_compaction(&repo, kaban_store_sqlite::WorkKind::Seal);
+    let epic_counts = extent_counts(&repo);
+    assert_eq!(staged_classes(&core, &epic_counts), core_classes);
     let mut ops = Vec::new();
     for (i, id) in tasks.iter().enumerate() {
         let state = if i % 4 == 0 { "done" } else { "open" };
@@ -391,14 +407,55 @@ fn the_work_file_loads_typed_columns_and_rollups_under_the_qualified_label() {
             write(&repo, std::mem::take(&mut ops));
         }
     }
-    for transition in [
-        None,
-        Some(kaban_store_sqlite::WorkKind::Seal),
-        Some(kaban_store_sqlite::WorkKind::Fold),
-    ] {
-        if let Some(kind) = transition {
-            assert_text_compaction(&repo, kind);
+    assert_eq!(
+        staged_classes(&epic_counts, &extent_counts(&repo)),
+        core_classes
+    );
+    // The fixture's PART_OF points from the task to its epic. A distinct, outgoing
+    // edge from that epic returns the marker task's public identity through expansion.
+    let marker = 719;
+    let epic = &epics[marker % epics.len()];
+    write(
+        &repo,
+        vec![Op::UpsertEdge {
+            src: epic.clone(),
+            dst: tasks[marker].clone(),
+            rel: "RELATES_TO".into(),
+            props: None,
+        }],
+    );
+    let mut missing = Vec::new();
+    for stage in ["sediment", "sealed", "folded"] {
+        match stage {
+            "sealed" => assert_work_compaction(&repo, kaban_store_sqlite::WorkKind::Seal),
+            "folded" => {
+                // A fold needs a second sealed extent. These two independent core writes
+                // add two text packs and graph operations without changing the work corpus.
+                for _ in 0..2 {
+                    write(
+                        &repo,
+                        vec![record(&NodeId::new(), "Entity", serde_json::json!({}))],
+                    );
+                }
+                assert_work_compaction(&repo, kaban_store_sqlite::WorkKind::Seal);
+                let second = extent_counts(&repo);
+                for class in &core_classes {
+                    assert_eq!(second[class], (0, 2), "{class} before fold");
+                }
+                assert_work_compaction(&repo, kaban_store_sqlite::WorkKind::Fold);
+            }
+            _ => {}
         }
+        let counts = extent_counts(&repo);
+        for class in &core_classes {
+            let (pending, live) = counts[class];
+            if stage == "sediment" {
+                assert!(pending > 0 && live == 0, "{stage} {class}: {counts:?}");
+            } else {
+                assert_eq!((pending, live), (0, 1), "{stage} {class}");
+            }
+        }
+        eprintln!("{stage} (pending,live): {counts:?}");
         for (group, expected) in [("done", 250), ("open", 750)] {
             assert_count(
                 &repo,
@@ -431,8 +488,114 @@ fn the_work_file_loads_typed_columns_and_rollups_under_the_qualified_label() {
                 .collect();
             assert_eq!(actual, expected);
         }
-        assert_search(&repo.store, "taskmarker719", &tasks[719]);
+        assert_search(&repo.store, "taskmarker719", &tasks[marker]);
+        let public = |sql: &str, params: Vec<SqlValue>| {
+            repo.store.query(
+                &kaban_core::Statement {
+                    sql: sql.into(),
+                    view: kaban_core::ViewName::Main,
+                    params,
+                },
+                &kaban_core::QueryLimits {
+                    rows: 1500,
+                    ..Default::default()
+                },
+            )
+        };
+        let target = SqlValue::Text(tasks[marker].to_string());
+        let parent = SqlValue::Text(epic.to_string());
+        let joined = public(
+            "SELECT s.id,p.id,c.id FROM search(?1,1) s
+            JOIN expand(s.id,'work:PART_OF',1,1) p JOIN expand(p.id,'RELATES_TO',1,1) c",
+            vec![SqlValue::Text("taskmarker719".into())],
+        )
+        .unwrap();
+        assert_eq!(
+            joined.rows,
+            vec![vec![target.clone(), parent.clone(), target.clone()]],
+            "{stage}"
+        );
+        assert!(!joined.truncated);
+        eprintln!(
+            "{stage} public search/task -> PART_OF/epic -> RELATES_TO/task matched all three IDs"
+        );
+        for (subject, result, expected) in [
+            (
+                "rollup",
+                public(
+                    "SELECT state,value FROM rollup_tasks_by_state ORDER BY state",
+                    vec![],
+                ),
+                vec![
+                    vec![SqlValue::Text("done".into()), SqlValue::Integer(250)],
+                    vec![SqlValue::Text("open".into()), SqlValue::Integer(750)],
+                ],
+            ),
+            (
+                "canonical edge endpoints",
+                public(
+                    "SELECT src,dst FROM edges WHERE rel='work:PART_OF' AND src=?1",
+                    vec![target.clone()],
+                ),
+                vec![vec![target.clone(), parent.clone()]],
+            ),
+            (
+                "declared relationship",
+                public(
+                    "SELECT dst FROM \"work:PART_OF\" WHERE src=?1",
+                    vec![target.clone()],
+                ),
+                vec![vec![parent.clone()]],
+            ),
+            (
+                "declared task",
+                public(
+                    "SELECT id,state FROM \"work:Task\" WHERE id=?1",
+                    vec![target.clone()],
+                ),
+                vec![vec![target, SqlValue::Text("open".into())]],
+            ),
+            (
+                "declared epic",
+                public(
+                    "SELECT id FROM \"work:Epic\" WHERE id=?1",
+                    vec![parent.clone()],
+                ),
+                vec![vec![parent]],
+            ),
+        ] {
+            match result {
+                Ok(set) => {
+                    assert_eq!(set.rows, expected, "{stage} {subject}");
+                    assert!(!set.truncated);
+                }
+                Err(e) => missing.push(format!("{stage} {subject}: {e}")),
+            }
+        }
+        match public("SELECT * FROM model()", vec![]) {
+            Ok(set) => {
+                assert!(!set.truncated);
+                for (view, column) in [
+                    ("work:Epic", "id"),
+                    ("work:Task", "state"),
+                    ("rollup_tasks_by_state", "value"),
+                ] {
+                    assert!(
+                        set.rows.iter().any(|row| [view, column]
+                            .into_iter()
+                            .all(|s| row.contains(&SqlValue::Text(s.into())))),
+                        "{stage}: {view}.{column}"
+                    );
+                }
+            }
+            Err(e) => missing.push(format!("{stage} model(): {e}")),
+        }
     }
+    assert_eq!(
+        missing,
+        Vec::<String>::new(),
+        "admitted ontology query surface"
+    );
 }
 
 #[test]
@@ -459,15 +622,224 @@ fn a_mixin_cannot_declare_label_local_columns_or_rollups() {
     }
 }
 
-fn assert_text_compaction(repo: &Repo, kind: kaban_store_sqlite::WorkKind) {
-    let report = repo.store.compact().unwrap();
-    assert!(
-        report
-            .published
-            .iter()
-            .any(|unit| unit.class == "text_tier" && unit.kind == kind),
-        "expected {kind:?}, got {report:?}"
+#[test]
+fn model_maps_colliding_sql_names_and_records_per_commit_relationships() {
+    let repo = Repo::new("query-model-names");
+    let path = repo.write(
+        "scoped.yaml",
+        r"ontology: scoped
+version: 1
+extends: [core]
+kinds: {}
+rels:
+  HISTORY: {from: [], to: [], directed: true, description: commit history, per_commit: true}
+  MEASURED:
+    from: []
+    to: []
+    directed: true
+    props_schema: {type: object, properties: {weight: {type: integer}}}
+",
     );
+    repo.registry.load_file(&repo.api, &path).unwrap();
+    let prototype = repo
+        .store
+        .schema()
+        .unwrap()
+        .into_iter()
+        .find(|d| d.name == "Entity")
+        .unwrap();
+    for name in ["Nodes", "Topic", "TOPIC"] {
+        let mut def = prototype.clone();
+        def.name = name.into();
+        def.ns = None;
+        def.builtin = false;
+        def.description = "synthetic label".into();
+        def.declaration = kaban_core::TypeDeclaration::default();
+        if name == "Nodes" {
+            def.declaration.columns = serde_json::from_value(
+                serde_json::json!([{"name":"weight","ty":"integer"},{"name":"value","ty":"text"}]),
+            )
+            .unwrap();
+            def.declaration.rollups = serde_json::from_value(serde_json::json!([
+                {"name":"weight_counts","label":"Nodes","op":"count","group_by":["value","weight"]}
+            ]))
+            .unwrap();
+        }
+        repo.store.schema_extend(def).unwrap();
+    }
+    let query = |sql: &str, params: Vec<SqlValue>| {
+        repo.store.query(
+            &kaban_core::Statement {
+                sql: sql.into(),
+                params,
+                view: kaban_core::ViewName::Main,
+            },
+            &kaban_core::QueryLimits::default(),
+        )
+    };
+    let mut aliases = std::collections::BTreeSet::new();
+    for name in ["Nodes", "Topic", "TOPIC"] {
+        let id = NodeId::new();
+        write(
+            &repo,
+            vec![record(&id, name, serde_json::json!({"weight":37}))],
+        );
+        let params = vec![SqlValue::Text(name.into())];
+        let metadata = query(
+            "SELECT sql_name FROM model()
+                            WHERE kind='label' AND declared_name=?1 AND column_name='id'",
+            params,
+        )
+        .unwrap();
+        let [row] = metadata.rows.as_slice() else {
+            panic!("missing {name} mapping: {metadata:?}")
+        };
+        let [SqlValue::Text(sql_name)] = row.as_slice() else {
+            panic!("invalid name mapping")
+        };
+        assert!(aliases.insert(sql_name.to_ascii_lowercase()));
+        assert!(!sql_name.eq_ignore_ascii_case("nodes"));
+        let projection = if name == "Nodes" { "id,weight" } else { "id" };
+        let result = query(
+            &format!(
+                "SELECT {projection} FROM \"{}\"",
+                sql_name.replace('"', "\"\"")
+            ),
+            vec![],
+        )
+        .unwrap();
+        let mut expected = vec![SqlValue::Text(id.to_string())];
+        if name == "Nodes" {
+            expected.push(SqlValue::Integer(37));
+        }
+        assert_eq!(result.rows, vec![expected]);
+        assert_eq!(
+            query(
+                "SELECT label FROM nodes WHERE id=?1",
+                vec![SqlValue::Text(id.to_string())]
+            )
+            .unwrap()
+            .rows,
+            vec![vec![SqlValue::Text(name.into())]]
+        );
+    }
+    let groups = query(
+        "SELECT sql_column FROM model() WHERE sql_name='rollup_weight_counts'
+                      AND column_name='value' AND sql_column <> 'value'",
+        vec![],
+    )
+    .unwrap();
+    let [row] = groups.rows.as_slice() else {
+        panic!("missing group column: {groups:?}")
+    };
+    let [SqlValue::Text(group)] = row.as_slice() else {
+        panic!("invalid group column")
+    };
+    let sql = format!(
+        "SELECT \"{}\",weight,value FROM rollup_weight_counts",
+        group.replace('"', "\"\"")
+    );
+    assert_eq!(
+        query(&sql, vec![]).unwrap().rows,
+        vec![vec![
+            SqlValue::Null,
+            SqlValue::Integer(37),
+            SqlValue::Integer(1)
+        ]]
+    );
+    let (src, dst) = (NodeId::new(), NodeId::new());
+    write(
+        &repo,
+        vec![
+            record(&src, "Entity", serde_json::json!({})),
+            record(&dst, "Entity", serde_json::json!({})),
+            Op::UpsertEdge {
+                src: src.clone(),
+                dst: dst.clone(),
+                rel: "scoped:MEASURED".into(),
+                props: Some(serde_json::json!({"weight":41})),
+            },
+            Op::UpsertEdge {
+                src: src.clone(),
+                dst: dst.clone(),
+                rel: "scoped:HISTORY".into(),
+                props: None,
+            },
+        ],
+    );
+    assert_eq!(
+        query("SELECT src,dst,weight FROM \"scoped:MEASURED\"", vec![])
+            .unwrap()
+            .rows,
+        vec![vec![
+            SqlValue::Text(src.to_string()),
+            SqlValue::Text(dst.to_string()),
+            SqlValue::Integer(41)
+        ]]
+    );
+    assert_eq!(
+        query("SELECT rel FROM edges", vec![]).unwrap().rows,
+        vec![vec![SqlValue::Text("scoped:MEASURED".into())]]
+    );
+    let arguments = query(
+        "SELECT column_name FROM model() WHERE kind='function'
+                         AND sql_name='search' AND role='argument' ORDER BY column_name",
+        vec![],
+    )
+    .unwrap();
+    assert_eq!(
+        arguments.rows,
+        vec![
+            vec![SqlValue::Text("k".into())],
+            vec![SqlValue::Text("q".into())]
+        ]
+    );
+    let history = query(
+        "SELECT per_commit,sql_name FROM model()
+                       WHERE kind='rel' AND declared_name='scoped:HISTORY'",
+        vec![],
+    )
+    .unwrap();
+    assert_eq!(
+        history.rows,
+        vec![vec![SqlValue::Integer(1), SqlValue::Null]]
+    );
+    assert!(query("SELECT * FROM \"scoped:HISTORY\"", vec![]).is_err());
+}
+
+/// Class names map to (pending sediment rows, live extents).
+fn extent_counts(repo: &Repo) -> std::collections::BTreeMap<String, (u64, u64)> {
+    repo.store
+        .catalog_status()
+        .unwrap()
+        .classes
+        .into_iter()
+        .map(|c| (c.class, (c.sediment_rows, c.live)))
+        .collect()
+}
+
+fn staged_classes(
+    before: &std::collections::BTreeMap<String, (u64, u64)>,
+    after: &std::collections::BTreeMap<String, (u64, u64)>,
+) -> Vec<String> {
+    after
+        .iter()
+        .filter(|(name, (pending, _))| *pending > before.get(*name).map_or(0, |c| c.0))
+        .map(|(name, _)| name.clone())
+        .collect()
+}
+
+fn assert_work_compaction(repo: &Repo, kind: kaban_store_sqlite::WorkKind) {
+    let report = repo.store.compact().unwrap();
+    for class in ["graph_layer", "text_tier"] {
+        assert!(
+            report
+                .published
+                .iter()
+                .any(|unit| unit.class == class && unit.kind == kind),
+            "expected {class} {kind:?}, got {report:?}"
+        );
+    }
 }
 
 fn record(id: &NodeId, kind: &str, props: serde_json::Value) -> Op {

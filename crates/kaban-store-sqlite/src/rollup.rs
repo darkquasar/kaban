@@ -52,6 +52,11 @@ fn encode_key(key: &[SqlValue]) -> Result<Vec<u8>> {
     Ok(serde_json::to_vec(&normalized)?)
 }
 
+/// Select one typed scalar from the ordered JSON array stored by `encode_key`.
+pub(crate) fn key_column(position: usize) -> String {
+    format!("json_extract(CAST(r.key AS TEXT), '$[{position}]')")
+}
+
 pub(crate) fn register(conn: &Connection) -> Result<()> {
     let flags = FunctionFlags::SQLITE_UTF8
         | FunctionFlags::SQLITE_DETERMINISTIC
@@ -156,7 +161,7 @@ fn capture_triggers(
     Ok(())
 }
 
-fn identifier(s: &str) -> String {
+pub(crate) fn identifier(s: &str) -> String {
     format!("\"{}\"", s.replace('"', "\"\""))
 }
 
@@ -441,7 +446,7 @@ pub(crate) fn read(conn: &Connection, name: &str, key: &[SqlValue]) -> Result<Sq
     })
 }
 
-fn literal(s: &str) -> String {
+pub(crate) fn literal(s: &str) -> String {
     format!("'{}'", s.replace('\'', "''"))
 }
 
@@ -453,6 +458,12 @@ fn valid_name(s: &str) -> bool {
 
 pub(crate) fn validate(def: &TypeDef, existing: &[TypeDef]) -> Result<()> {
     let fields = &def.declaration;
+    if fields.per_commit && def.kind != "rel" {
+        return Err(StoreError::InvalidName(
+            def.name.clone(),
+            "per_commit requires a relationship",
+        ));
+    }
     if fields.columns.is_empty() && fields.rollups.is_empty() && fields.fts_fields.is_empty() {
         return Ok(());
     }

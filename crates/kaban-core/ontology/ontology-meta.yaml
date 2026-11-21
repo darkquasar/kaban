@@ -19,6 +19,7 @@ properties:
   prefixes: {type: object}
   mixins: {type: object}
   kinds: {type: object}
+  # RelBody checks per_commit (boolean, default false) and the optional props_schema.
   rels: {type: object}
   source_types: {type: object}
   default_kind: {type: string}

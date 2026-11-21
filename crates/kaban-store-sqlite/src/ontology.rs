@@ -55,8 +55,8 @@ impl TypeTable {
 
     /// The projection [`row_typedef`] decodes: the stored name is rebuilt from `(ns, name)` by
     /// the decoder, and `ns` is `NULL` on the old shape (derived by the API layer there).
-    fn columns(self, conn: &Connection) -> Result<&'static str> {
-        Ok(match self {
+    fn columns(self, conn: &Connection) -> Result<String> {
+        let columns = match self {
             Self::Stored => {
                 "kind, name, description, from_kinds, to_kinds, directed, props_schema, builtin, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL"
             }
@@ -66,7 +66,13 @@ impl TypeTable {
             Self::Qualified => {
                 "kind, name, description, from_kinds, to_kinds, directed, props_schema, builtin, ns, rules, rank, column_weights, extract, display, columns, rollups, fts_fields"
             }
-        })
+        };
+        let flag = if self == Self::Qualified && has_per_commit(conn)? {
+            "per_commit"
+        } else {
+            "0"
+        };
+        Ok(format!("{columns},{flag}"))
     }
 }
 
@@ -74,11 +80,15 @@ impl TypeTable {
 pub(crate) fn has_declared_columns(conn: &Connection) -> Result<bool> {
     conn.query_row(
         // MAX returns NULL for a missing table, which the bool conversion reports as a storage error.
-        "SELECT max(name='columns') FROM pragma_table_info('schema_type')",
+        "SELECT max(name='columns') FROM pragma_table_info('schema_type','main')",
         [],
         |row| row.get(0),
     )
     .sql()
+}
+
+pub(crate) fn has_per_commit(conn: &Connection) -> Result<bool> {
+    conn.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('schema_type','main') WHERE name='per_commit')",[],|r|r.get(0)).sql()
 }
 
 /// One builtin `schema_type` row resolved from the shipped files: identity, description, the
@@ -102,6 +112,7 @@ pub(crate) struct TypeRow {
     pub(crate) declared_to: String,
     /// The declared direction; written on the 0004 shape.
     pub(crate) declared_directed: bool,
+    pub(crate) per_commit: bool,
     /// The resolved `props_schema` as JSON (kinds only); written on the 0004 shape.
     pub(crate) declared_props_schema: Option<String>,
     /// The parent's stored name.
@@ -123,7 +134,7 @@ impl TypeRow {
 
 /// The stored name of `(ns, name)` by the core rule (a namespace that fails the regex cannot
 /// come from the store: the column is written from parsed values only).
-fn format_stored(ns: &str, name: &str) -> String {
+pub(crate) fn format_stored(ns: &str, name: &str) -> String {
     match kaban_core::Ns::parse(ns) {
         Ok(ns) => stored_name(&Qualified {
             ns,
@@ -167,6 +178,7 @@ pub(crate) fn builtin_rows() -> Result<&'static [TypeRow]> {
                 declared_from: "[]".to_owned(),
                 declared_to: "[]".to_owned(),
                 declared_directed: true,
+                per_commit: false,
                 declared_props_schema: Some(k.props_schema.as_value().to_string()),
                 is_a: k.is_a.as_ref().map(stored_name),
                 mixins: serde_json::Value::Array(
@@ -188,7 +200,8 @@ pub(crate) fn builtin_rows() -> Result<&'static [TypeRow]> {
                 declared_from: json_ends(&r.from),
                 declared_to: json_ends(&r.to),
                 declared_directed: r.directed,
-                declared_props_schema: None,
+                per_commit: r.per_commit,
+                declared_props_schema: r.props_schema.as_ref().map(ToString::to_string),
                 is_a: None,
                 mixins: "[]".to_owned(),
                 fts_fields: None,
@@ -233,6 +246,12 @@ pub(crate) fn seed(conn: &Connection, now: &str) -> Result<()> {
                 conn.execute_batch("ALTER TABLE schema_type ADD COLUMN columns TEXT; ALTER TABLE schema_type ADD COLUMN rollups TEXT;").sql()?;
             }
             conn.execute_batch(crate::rollup::TABLES).sql()?;
+            if !has_per_commit(conn)? {
+                conn.execute_batch(
+                    "ALTER TABLE schema_type ADD COLUMN per_commit INTEGER NOT NULL DEFAULT 0",
+                )
+                .sql()?;
+            }
             let mut st = conn.prepare_cached(&format!(
                 "INSERT OR IGNORE INTO schema_type({BUILTIN_COLS}, builtin, created_at) VALUES ({BUILTIN_BINDS}, 1, ?)"
             )).sql()?;
@@ -250,8 +269,8 @@ pub(crate) fn seed(conn: &Connection, now: &str) -> Result<()> {
 }
 
 /// The declaration columns of a builtin row on the 0004 shape, in [`builtin_values`] order.
-const BUILTIN_COLS: &str = "ns, kind, name, description, is_a, mixins, fts_fields, ident_fields, from_kinds, to_kinds, directed, props_schema, rules, rank, column_weights, extract, display";
-const BUILTIN_BINDS: &str = "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?";
+const BUILTIN_COLS: &str = "ns, kind, name, description, is_a, mixins, fts_fields, ident_fields, from_kinds, to_kinds, directed, props_schema, rules, rank, column_weights, extract, display, per_commit";
+const BUILTIN_BINDS: &str = "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?";
 
 fn builtin_values(row: &TypeRow) -> Vec<rusqlite::types::Value> {
     use rusqlite::types::Value;
@@ -275,6 +294,7 @@ fn builtin_values(row: &TypeRow) -> Vec<rusqlite::types::Value> {
         opt(&row.declaration[2]),
         opt(&row.declaration[3]),
         opt(&row.declaration[4]),
+        Value::Integer(i64::from(row.per_commit)),
     ]
 }
 
@@ -391,13 +411,13 @@ pub(crate) fn extend(
             }
             let [rules, rank, column_weights, extract, display] = def.declaration.texts();
             conn.execute(
-                "INSERT INTO schema_type(ns, kind, name, description, from_kinds, to_kinds, directed, props_schema, builtin, created_at, rules, rank, column_weights, extract, display, columns, rollups, fts_fields) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                "INSERT INTO schema_type(ns, kind, name, description, from_kinds, to_kinds, directed, props_schema, builtin, created_at, rules, rank, column_weights, extract, display, columns, rollups, fts_fields,per_commit) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?,?)
                  ON CONFLICT(ns, kind, name) DO UPDATE SET description = excluded.description, from_kinds = excluded.from_kinds, to_kinds = excluded.to_kinds, directed = excluded.directed, props_schema = excluded.props_schema,
                    rules = excluded.rules, rank = excluded.rank, column_weights = excluded.column_weights, extract = excluded.extract, display = excluded.display,
-                   columns = excluded.columns, rollups = excluded.rollups, fts_fields = excluded.fts_fields
+                   columns = excluded.columns, rollups = excluded.rollups, fts_fields = excluded.fts_fields,per_commit=excluded.per_commit
                  WHERE schema_type.builtin = 0",
                 params![ns, def.kind, bare, def.description, from, to, i64::from(def.directed), schema, now, rules, rank, column_weights, extract, display,
-                    serde_json::to_string(&def.declaration.columns)?, serde_json::to_string(&def.declaration.rollups)?, serde_json::to_string(&def.declaration.fts_fields)?],
+                    serde_json::to_string(&def.declaration.columns)?, serde_json::to_string(&def.declaration.rollups)?, serde_json::to_string(&def.declaration.fts_fields)?,def.declaration.per_commit],
             )
             .sql()?
         }

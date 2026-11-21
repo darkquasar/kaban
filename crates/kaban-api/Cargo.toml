@@ -22,6 +22,7 @@ yaml_serde.workspace = true # `.kaban/*.md` frontmatter (C5.1, M5-1, M5-21)
 blake3.workspace = true       # `index_meta.ontology_hash:<ns>` of a loaded ontology file (EN-F2, E1.3; already locked)
 
 [dev-dependencies]
+kaban-vtab = { workspace = true, features = ["process-bootstrap"] } # store query tests initialize the allocator before the first SQLite call
 kaban-store-sqlite.workspace = true
 kaban-codegraph = { workspace = true, features = ["test-support", "instrumented"] } # `testing::FixedSnapshot` (CG5.2); `symbol::testing` recorder (CG5.1)
 kaban-index.workspace = true  # publishes the go-drivers and ts-drivers fixture snapshots for `tests/code_tools.rs` (CG7.1)

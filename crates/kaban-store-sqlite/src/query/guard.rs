@@ -4,15 +4,17 @@ use kaban_core::{NodeId, Result, StoreError};
 use kaban_vtab::QueryConnection;
 use rusqlite::hooks::{AuthAction as A, AuthContext, Authorization};
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 const CATALOG: u8 = 0;
+const MODEL_SETUP: u8 = 3;
 const USER: u8 = 1;
 const ID_LOOKUP: u8 = 2;
 
 pub(super) struct Guard {
     phase: AtomicU8,
     private: String,
+    model: OnceLock<super::model::Model>,
     denied: Mutex<Option<&'static str>>,
 }
 
@@ -42,29 +44,41 @@ impl Guard {
                 break candidate;
             }
         };
-        conn.execute_batch(&format!(
-            "CREATE TEMP VIEW {private} AS SELECT id, kind AS label, summary, tags, status,
-               created_at, updated_at, workspace_id AS workspace FROM main.node WHERE lifecycle <> 'purged';
-             CREATE TEMP VIEW nodes AS SELECT id, label, summary, tags, status, created_at,
-               updated_at, workspace FROM temp.{private};"
-        )).map_err(|_| super::refused("nodes","cannot prepare model"))?;
         // Connect the eponymous modules using fixed SQL before SQLite authorizes public SQL.
-        for sql in [
-            "PRAGMA main.table_xinfo(search)",
-            "PRAGMA main.table_xinfo(expand)",
-        ] {
-            conn.query_row(sql, [], |_| Ok(()))
+        for name in super::functions::FUNCTIONS
+            .iter()
+            .map(|(name, _)| *name)
+            .chain(["json_each", "pragma_table_info"])
+        {
+            conn.query_row(&format!("PRAGMA main.table_xinfo({name})"), [], |_| Ok(()))
                 .map_err(|_| super::refused("model", "cannot connect module"))?;
         }
         let this = Arc::new(Self {
             phase: AtomicU8::new(CATALOG),
             private,
+            model: OnceLock::new(),
             denied: Mutex::new(None),
         });
         let hook = Arc::clone(&this);
         conn.set_authorizer(move |ctx| hook.authorize(ctx))
             .map_err(|_| super::refused("authorizer", "cannot install guard"))?;
         Ok(this)
+    }
+
+    pub(super) fn install_model(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+        budget: &QueryBudget,
+    ) -> Result<&super::model::Model> {
+        let model = self.during(MODEL_SETUP, || {
+            super::model::Model::install(tx, &self.private, budget)
+        })?;
+        self.model
+            .set(model)
+            .map_err(|_| super::refused("model", "already installed"))?;
+        self.model
+            .get()
+            .ok_or_else(|| super::refused("model", "missing model"))
     }
 
     pub(super) fn user<T>(&self, f: impl FnOnce() -> T) -> T {
@@ -92,27 +106,54 @@ impl Guard {
     fn authorize(&self, ctx: AuthContext<'_>) -> Authorization {
         let phase = self.phase.load(Ordering::Relaxed);
         // Catalog runs only fixed store-issued SQL with the public VM suspended or unstarted.
+        // Only the fixed store templates run in this scope, before the user statement is prepared.
+        if phase == MODEL_SETUP {
+            return match (ctx.database_name, ctx.action) {
+                (
+                    _,
+                    A::Select
+                    | A::Function {
+                        function_name: "max" | "json_extract" | "json_type",
+                    },
+                )
+                | (
+                    Some("main"),
+                    A::Pragma {
+                        pragma_name: "table_info",
+                        pragma_value: Some("schema_type"),
+                    }
+                    | A::Read {
+                        table_name: "schema_type" | "pragma_table_info" | "json_each",
+                        ..
+                    },
+                )
+                | (
+                    Some("temp"),
+                    A::CreateTempView { .. }
+                    | A::Insert {
+                        table_name: "sqlite_temp_master",
+                    }
+                    | A::Update {
+                        table_name: "sqlite_temp_master",
+                        ..
+                    }
+                    | A::Read {
+                        table_name: "sqlite_temp_master",
+                        ..
+                    },
+                ) => Authorization::Allow,
+                _ => Authorization::Deny,
+            };
+        }
         if phase == CATALOG {
             return match ctx.action {
+                A::Read { .. } if ctx.database_name == Some("temp") => Authorization::Deny,
                 A::Select | A::Read { .. } | A::Function { .. } | A::Transaction { .. } => {
                     Authorization::Allow
                 }
                 _ => Authorization::Deny,
             };
         }
-        let public_col = |c: &str| {
-            matches!(
-                c,
-                "" | "id"
-                    | "label"
-                    | "summary"
-                    | "tags"
-                    | "status"
-                    | "created_at"
-                    | "updated_at"
-                    | "workspace"
-            )
-        };
         let deny = match ctx.action {
             A::Select => return Authorization::Allow,
             A::Read {
@@ -123,30 +164,10 @@ impl Guard {
                     (ID_LOOKUP, Some("main"), "node", None) => {
                         matches!(column_name, "id" | "rid" | "lifecycle")
                     }
-                    (USER, Some("temp"), "nodes", _) => public_col(column_name),
-                    (USER, Some("temp"), name, Some("nodes")) if name == self.private => {
-                        public_col(column_name)
-                    }
-                    (USER, Some("main"), "node", Some(source)) if source == self.private => {
-                        matches!(
-                            column_name,
-                            "id" | "kind"
-                                | "summary"
-                                | "tags"
-                                | "status"
-                                | "created_at"
-                                | "updated_at"
-                                | "workspace_id"
-                                | "lifecycle"
-                        )
-                    }
-                    (USER, Some("main"), "search", _) => {
-                        matches!(column_name, "" | "id" | "score" | "q" | "k")
-                    }
-                    (USER, Some("main"), "expand", _) => matches!(
-                        column_name,
-                        "" | "id" | "depth" | "src" | "rels" | "cap" | "max_depth"
-                    ),
+                    (USER, db, table, source) => self
+                        .model
+                        .get()
+                        .is_some_and(|m| m.allows_read(db, table, column_name, source)),
                     _ => false,
                 };
                 if ok {
@@ -158,6 +179,16 @@ impl Guard {
                     "sqlite_master" | "sqlite_schema" => "sqlite_schema",
                     _ => "table or column",
                 }
+            }
+            A::Function {
+                function_name: "json_extract",
+            } if phase == USER
+                && self
+                    .model
+                    .get()
+                    .is_some_and(|m| m.allows_json(ctx.accessor)) =>
+            {
+                return Authorization::Allow;
             }
             A::Function { function_name }
                 if phase == USER

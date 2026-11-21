@@ -313,7 +313,7 @@ impl Pin {
         let mut stmt = conn
             .prepare(
                 "SELECT e.class, e.generation, e.kbx_offset, e.kbx_len, e.relpath, e.id
-                 FROM cat_view_extent v JOIN cat_extent e ON e.id = v.extent_id
+                 FROM main.cat_view_extent v JOIN main.cat_extent e ON e.id = v.extent_id
                  WHERE v.view = ?1 AND e.dead_since IS NULL ORDER BY v.position",
             )
             .sql()?;
@@ -617,7 +617,7 @@ impl ViewPlan {
             conn,
             "SELECT count(*), COALESCE(sum(length(CAST(e.relpath AS BLOB))), 0),
                     COALESCE(sum(length(CAST(e.relpath AS BLOB)) > 0), 0)
-             FROM cat_view_extent v JOIN cat_extent e ON e.id = v.extent_id
+             FROM main.cat_view_extent v JOIN main.cat_extent e ON e.id = v.extent_id
              WHERE v.view = ?1 AND e.dead_since IS NULL",
             [name],
             (size_of::<ExtentRef>(), align_of::<ExtentRef>()),
@@ -715,7 +715,7 @@ fn sediment_classes(classes: &[ExtentClass]) -> Vec<&'static str> {
 /// classes, bound as `?1..?classes`.
 fn sediment_sql(columns: &str, classes: usize) -> String {
     let marks = vec!["?"; classes].join(", ");
-    format!("SELECT {columns} FROM cat_sediment WHERE dead IS NULL AND class IN ({marks})")
+    format!("SELECT {columns} FROM main.cat_sediment WHERE dead IS NULL AND class IN ({marks})")
 }
 
 /// The class column `idx` of `row` names, read in place (no transient string).
@@ -746,7 +746,7 @@ fn connection_id(conn: &Connection) -> usize {
 /// The latest generation `tx` sees.
 pub(super) fn latest_generation(tx: &Transaction<'_>) -> Result<u64> {
     tx.query_row(
-        "SELECT COALESCE(max(generation), 0) FROM cat_generation",
+        "SELECT COALESCE(max(generation), 0) FROM main.cat_generation",
         [],
         |r| uint(r, 0),
     )
@@ -756,8 +756,8 @@ pub(super) fn latest_generation(tx: &Transaction<'_>) -> Result<u64> {
 /// `reclaim_floor` and the latest generation, in one statement on `conn`.
 fn floor_and_latest(conn: &Connection) -> Result<(u64, u64)> {
     conn.query_row(
-        "SELECT (SELECT value FROM cat_meta WHERE key = 'reclaim_floor'),
-                (SELECT COALESCE(max(generation), 0) FROM cat_generation)",
+        "SELECT (SELECT value FROM main.cat_meta WHERE key = 'reclaim_floor'),
+                (SELECT COALESCE(max(generation), 0) FROM main.cat_generation)",
         [],
         |r| Ok((uint(r, 0)?, uint(r, 1)?)),
     )

@@ -1491,6 +1491,7 @@ dependencies = [
  "kaban-index",
  "kaban-policy",
  "kaban-store-sqlite",
+ "kaban-vtab",
  "proptest",
  "protobuf",
  "rusqlite",

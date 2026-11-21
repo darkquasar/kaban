@@ -129,7 +129,7 @@ CREATE TABLE "schema_type"(
   props_schema TEXT, builtin INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL,
   is_a TEXT NULL, mixins TEXT NOT NULL DEFAULT '[]', rules TEXT NULL, rank TEXT NULL, fts_fields TEXT NULL,
   ident_fields TEXT NULL, column_weights TEXT NULL, extract TEXT NULL, display TEXT NULL,
-  columns TEXT, rollups TEXT,
+  columns TEXT, rollups TEXT, per_commit INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY(ns, kind, name)
 );
 

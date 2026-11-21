@@ -357,6 +357,9 @@ pub struct TypeDef {
 /// `canon.rs`), `None` where the kind declares none.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct TypeDeclaration {
+    /// Relationship edges live in a commit graph, without a SQL row view.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub per_commit: bool,
     /// Typed columns projected from this label's properties.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub columns: Vec<crate::ontology::ColumnDecl>,
@@ -394,6 +397,7 @@ impl TypeDeclaration {
         }
         Self {
             columns: kind.columns.clone(),
+            per_commit: false,
             rollups: kind.rollups.clone(),
             fts_fields: kind.fts_fields.clone(),
             rules: kind.rules.as_ref().and_then(canon),

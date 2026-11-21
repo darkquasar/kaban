@@ -140,6 +140,10 @@ pub struct ResolvedKind {
 /// A relationship type after resolution.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResolvedRel {
+    /// Declared relationship properties validated against the same subset as kind properties.
+    pub props_schema: Option<Value>,
+    /// Whether this relationship belongs exclusively to a commit graph.
+    pub per_commit: bool,
     /// Identity.
     pub id: Qualified,
     /// Allowed source kinds (empty = any).
@@ -463,9 +467,14 @@ pub fn resolve_with(
                 .map(|name| decl.lookup(&q.ns, name, &path(key), &decl.kinds))
                 .collect()
         };
+        if let Some(schema) = &body.props_schema {
+            Schema::parse(schema, limits)?;
+        }
         ontology.rels.insert(
             q.clone(),
             ResolvedRel {
+                props_schema: body.props_schema.clone(),
+                per_commit: body.per_commit,
                 id: q.clone(),
                 from: ends(from, "from")?,
                 to: ends(to, "to")?,

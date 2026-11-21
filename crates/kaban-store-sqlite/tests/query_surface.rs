@@ -7,8 +7,8 @@ mod common;
 
 use common::{Scratch, created, ctx, nid};
 use kaban_core::{
-    IngestStore, MemoryStore, NewNode, NodeId, Op, QueryLimits, SqlValue, Statement, ViewName,
-    WorkspaceId, WriteBatch,
+    IngestStore, MemoryStore, NewNode, NodeId, Op, QueryLimits, SchemaStore, SqlValue, Statement,
+    ViewName, WorkspaceId, WriteBatch,
 };
 use kaban_store_sqlite::SqliteStore;
 use kaban_store_sqlite::catalog_testing::{self, Window};
@@ -22,6 +22,51 @@ const WRITER_SOURCE: &str = "KABAN_QUERY_TEST_SOURCE";
 const WRITER_TARGET: &str = "KABAN_QUERY_TEST_TARGET";
 const WAIT: Duration = Duration::from_secs(10);
 const CODE: &str = "code@0123456789abcdef0123456789abcdef01234567";
+
+#[test]
+fn the_ontology_used_at_prepare_time_belongs_to_the_pinned_transaction() {
+    let scratch = Scratch::new("kaban-query", "ontology-pin");
+    let reader = SqliteStore::open(&scratch.db(), &scratch.keys()).unwrap();
+    let writer = SqliteStore::open(&scratch.db(), &scratch.keys()).unwrap();
+    let fact = created(&reader, "Fact", "a quiet harbor").id;
+    let mut def = reader
+        .schema()
+        .unwrap()
+        .into_iter()
+        .find(|d| d.name == "Entity")
+        .unwrap();
+    def.name = "Milestone".into();
+    def.ns = None;
+    def.builtin = false;
+    def.declaration = kaban_core::TypeDeclaration::default();
+    catalog_testing::set_failpoint(
+        &reader,
+        Window::ReaderInTransaction,
+        Some(Arc::new(move || {
+            writer.schema_extend(def.clone()).unwrap();
+        })),
+    );
+    let statement = Statement {
+        view: ViewName::Main,
+        params: vec![SqlValue::Text(fact.clone())],
+        sql: "SELECT f.id,m.declared_name FROM Fact f CROSS JOIN model() m WHERE f.id=?1
+         AND m.kind='label' AND m.declared_name IN ('Fact','Milestone') AND m.column_name='id'
+         ORDER BY m.declared_name"
+            .into(),
+    };
+    let limits = QueryLimits::default();
+    let held = reader.query(&statement, &limits);
+    catalog_testing::set_failpoint(&reader, Window::ReaderInTransaction, None);
+    let old = vec![SqlValue::Text(fact.clone()), SqlValue::Text("Fact".into())];
+    assert_eq!(held.unwrap().rows, vec![old.clone()]);
+    assert_eq!(
+        reader.query(&statement, &limits).unwrap().rows,
+        vec![
+            old,
+            vec![SqlValue::Text(fact), SqlValue::Text("Milestone".into())]
+        ]
+    );
+}
 
 const GROUPS: usize = 20;
 const WRITES: usize = 3;

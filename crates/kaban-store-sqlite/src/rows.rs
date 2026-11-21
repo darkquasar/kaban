@@ -107,6 +107,7 @@ pub(crate) fn row_typedef(r: &rusqlite::Row<'_>) -> rusqlite::Result<TypeDef> {
         props_schema: ps.map(|s| decode_json_value(6, &s)).transpose()?,
         builtin: r.get::<_, i64>(7)? != 0,
         declaration: kaban_core::TypeDeclaration {
+            per_commit: r.get(17)?,
             rules: json_col(r, 9)?,
             rank: json_col(r, 10)?,
             column_weights: json_col(r, 11)?,

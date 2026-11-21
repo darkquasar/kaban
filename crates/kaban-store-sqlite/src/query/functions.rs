@@ -27,24 +27,38 @@ const fn column(name: &'static str, kind: ColumnKind, hidden: bool) -> ColumnDef
     }
 }
 
+use ColumnKind::{Integer, Real, Text};
+const SEARCH: &[ColumnDef] = &[
+    column("id", Text, false),
+    column("score", Real, false),
+    column("q", Text, true),
+    column("k", Integer, true),
+];
+const EXPAND: &[ColumnDef] = &[
+    column("id", Text, false),
+    column("depth", Integer, false),
+    column("src", Text, true),
+    column("rels", Text, true),
+    column("max_depth", Integer, true),
+    column("cap", Integer, true),
+];
+const MODEL: &[ColumnDef] = &[
+    column("kind", Text, false),
+    column("ontology", Text, false),
+    column("declared_name", Text, false),
+    column("sql_name", Text, false),
+    column("column_name", Text, false),
+    column("sql_column", Text, false),
+    column("role", Text, false),
+    column("per_commit", Integer, false),
+];
+pub(super) const FUNCTIONS: &[(&str, &[ColumnDef])] =
+    &[("search", SEARCH), ("expand", EXPAND), ("model", MODEL)];
 pub(super) fn register(conn: &QueryConnection<'_>) -> rusqlite::Result<()> {
-    use ColumnKind::{Integer, Real, Text};
-    const SEARCH: &[ColumnDef] = &[
-        column("id", Text, false),
-        column("score", Real, false),
-        column("q", Text, true),
-        column("k", Integer, true),
-    ];
-    const EXPAND: &[ColumnDef] = &[
-        column("id", Text, false),
-        column("depth", Integer, false),
-        column("src", Text, true),
-        column("rels", Text, true),
-        column("max_depth", Integer, true),
-        column("cap", Integer, true),
-    ];
-    kaban_vtab::register_execution(conn, "search", SEARCH)?;
-    kaban_vtab::register_execution(conn, "expand", EXPAND)
+    for &(name, columns) in FUNCTIONS {
+        kaban_vtab::register_execution(conn, name, columns)?;
+    }
+    Ok(())
 }
 
 pub(super) struct Payload<'a, 'conn> {
@@ -54,6 +68,7 @@ pub(super) struct Payload<'a, 'conn> {
     node_ceiling: i64,
     store: &'a SqliteStore,
     guard: &'a Guard,
+    model: &'a super::model::Model,
     text: OnceCell<TextInputs>,
     graph: OnceCell<graph_class::LoadedView<'a>>,
     uses_search: Cell<bool>,
@@ -69,6 +84,7 @@ impl<'a, 'conn> Payload<'a, 'conn> {
         view: &'a ViewName,
         store: &'a SqliteStore,
         guard: &'a Guard,
+        model: &'a super::model::Model,
     ) -> Result<Self> {
         if *view != ViewName::Main {
             if !matches!(view, ViewName::Code(_)) {
@@ -99,6 +115,7 @@ impl<'a, 'conn> Payload<'a, 'conn> {
             node_ceiling,
             store,
             guard,
+            model,
             text: OnceCell::new(),
             graph: OnceCell::new(),
             uses_search: Cell::new(false),
@@ -108,6 +125,12 @@ impl<'a, 'conn> Payload<'a, 'conn> {
         })
     }
     pub(super) fn plan(&self, name: &'static str, input: &PlanInput<'_>) -> Plan {
+        if name == "model" {
+            return Plan {
+                rows: i64::try_from(self.model.rows.len()).unwrap_or(i64::MAX),
+                ..Default::default()
+            };
+        }
         let cap = if name == "search" {
             self.uses_search.set(true);
             "k"
@@ -156,6 +179,10 @@ impl<'a, 'conn> Payload<'a, 'conn> {
         // The next row holds two Values and a public UUID string during transfer to SQLite.
         let mut storage = budget.reserve(256)?;
         let data = match (name, scan.args) {
+            ("model", []) => {
+                super::charge(&mut storage, self.model.max_row_bytes)?;
+                Data::Model(0)
+            }
             ("search", [Value::Text(q), Value::Integer(k)]) => {
                 let limit = usize::try_from(*k).map_err(|_| refused("search", "invalid k"))?;
                 if scan.strategy == 1 {
@@ -262,6 +289,7 @@ pub(super) struct Cursor {
     _storage: BudgetLease,
 }
 enum Data {
+    Model(usize),
     Empty,
     Search(std::vec::IntoIter<TextHit>),
     Expand(Charged<Reached>, usize),
@@ -283,6 +311,11 @@ impl ExecutionPayload for Payload<'_, '_> {
     ) -> Option<std::result::Result<Vec<Value>, FnError>> {
         let (id, value) = match &mut cursor.data {
             Data::Empty => return None,
+            Data::Model(at) => {
+                let row = self.model.rows.get(*at)?;
+                *at += 1;
+                return Some(Ok(row.clone()));
+            }
             Data::Search(hits) => {
                 let hit = hits.next()?;
                 let id: Result<String> = self.guard.id_lookup(|| {

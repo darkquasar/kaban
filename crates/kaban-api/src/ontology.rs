@@ -597,9 +597,12 @@ fn write_namespace(api: &KabanApi, ontology: &Ontology, file: &Loaded) -> Result
             from_kinds: ends(&rel.from),
             to_kinds: ends(&rel.to),
             directed: rel.directed,
-            props_schema: None,
+            props_schema: rel.props_schema.clone(),
             builtin: false,
-            declaration: kaban_core::TypeDeclaration::default(),
+            declaration: kaban_core::TypeDeclaration {
+                per_commit: rel.per_commit,
+                ..Default::default()
+            },
         })?;
     }
     api.store.set_index_meta(

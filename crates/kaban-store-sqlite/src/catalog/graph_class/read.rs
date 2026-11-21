@@ -59,15 +59,15 @@ use crate::sql_error::SqlResultExt;
 /// The pending rows of the class `?1`: its rows (index `cat_sediment_class`) less the consumed
 /// ones (the partial index `cat_sediment_dead`), so the scan never reads a row itself (`dead`
 /// is stored after the payload).
-const PENDING_SQL: &str = "FROM cat_sediment WHERE class = ?1
-     AND seq NOT IN (SELECT seq FROM cat_sediment WHERE dead IS NOT NULL)";
+const PENDING_SQL: &str = "FROM main.cat_sediment WHERE class = ?1
+     AND seq NOT IN (SELECT seq FROM main.cat_sediment WHERE dead IS NOT NULL)";
 
 /// How long a cache entry may go unused before a load drops it.
 const IDLE: Duration = Duration::from_secs(60);
 
 /// The declared relations in declaration order (`schema_type` row order).
 pub(super) const REL_SQL: &str =
-    "SELECT ns, name FROM schema_type WHERE kind = 'rel' ORDER BY rowid";
+    "SELECT ns, name FROM main.schema_type WHERE kind = 'rel' ORDER BY rowid";
 
 /// The relation dictionary: a relation's id is the rank of its stored name among the declared
 /// relations in declaration order, deduplicated. Declarations are only ever added (and keep their
@@ -91,7 +91,7 @@ impl Rels {
             .query_row(
                 "SELECT count(*), COALESCE(sum(length(CAST(ns AS BLOB))
                      + length(CAST(name AS BLOB)) + 1), 0)
-                 FROM schema_type WHERE kind = 'rel'",
+                 FROM main.schema_type WHERE kind = 'rel'",
                 [],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
@@ -622,7 +622,7 @@ fn payloads_from(
     let from = sql_int(from.0).sql()?;
     let (n, bytes): (i64, i64) = rows
         .query_row(
-            "SELECT count(*), COALESCE(sum(length(payload)), 0) FROM cat_sediment
+            "SELECT count(*), COALESCE(sum(length(payload)), 0) FROM main.cat_sediment
              WHERE dead IS NULL AND class = ?1 AND seq >= ?2",
             rusqlite::params![layer.as_str(), from],
             |r| Ok((r.get(0)?, r.get(1)?)),
@@ -634,7 +634,7 @@ fn payloads_from(
     let mut out = Vec::with_capacity(n);
     let mut stmt = rows
         .prepare(
-            "SELECT payload FROM cat_sediment WHERE dead IS NULL AND class = ?1 AND seq >= ?2
+            "SELECT payload FROM main.cat_sediment WHERE dead IS NULL AND class = ?1 AND seq >= ?2
              ORDER BY seq",
         )
         .sql()?;

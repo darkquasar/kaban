@@ -370,6 +370,12 @@ pub enum OnLink {
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RelBody {
+    /// Optional EN-F3 schema for relationship properties.
+    #[serde(default)]
+    pub props_schema: Option<Value>,
+    /// Stores edges only in the selected code commit's graph.
+    #[serde(default)]
+    pub per_commit: bool,
     /// Allowed source kinds (empty = any).
     #[serde(default)]
     pub from: Option<Vec<String>>,
