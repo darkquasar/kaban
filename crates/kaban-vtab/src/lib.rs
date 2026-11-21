@@ -6,6 +6,8 @@
 //! `QueryBudget`; scans outside a scope are refused. The allocator adapter behind it is
 //! installed once per process, by [`initialize_for_embedding`] or, with the `process-bootstrap`
 //! feature, by the `bootstrap` module's startup constructor before `main`.
+//! [`register_execution`] installs a function that plans and scans through the snapshot payload
+//! borrowed by [`with_execution`] on its dedicated query connection.
 //!
 //! This crate is the workspace's sole `unsafe` exception (see `docs/developer/SAFETY.md`): the
 //! virtual-table glue, the allocator adapter, the embedding initializer, the request scope's
@@ -21,13 +23,15 @@ mod allocator;
 pub mod bootstrap;
 mod budget_scope;
 mod bytes;
+mod execution;
 mod plan;
 mod runtime;
 mod value;
 
-pub use adapter::{FnError, Rows, TableFunction, register};
+pub use adapter::{FnError, Rows, TableFunction, register, register_execution};
 pub use budget_scope::{QueryConnection, QueryError, RequestScope, ScopeActive};
 pub use bytes::retain_owner;
+pub use execution::{Execution, ExecutionPayload, PlanFunction, with_execution};
 pub use plan::{
     Arg, BoundArg, BoundConstraint, ColumnDef, ColumnKind, ConstraintOp, MAX_CONSTRAINTS,
     OrderTerm, Plan, PlanInput, ResultConstraint, Scan,

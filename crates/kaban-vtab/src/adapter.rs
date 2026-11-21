@@ -7,7 +7,7 @@ use std::mem;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 
-use kaban_core::query_budget::{BudgetExceeded, BudgetLease, QueryBudget};
+use kaban_core::query_budget::{BudgetExceeded, BudgetLease, Limit, QueryBudget};
 use rusqlite::vtab::{
     Context, Filters, IndexConstraintOp, IndexFlags, IndexInfo, Module, VTab, VTabConnection,
     VTabCursor, escape_double_quote,
@@ -79,9 +79,23 @@ const MAX_ARGUMENTS: usize = 31;
 /// declares more than 31 argument columns or its metadata panics; also when its name is not a
 /// valid C string or SQLite refuses the module.
 pub fn register(conn: &rusqlite::Connection, f: Arc<dyn TableFunction>) -> rusqlite::Result<()> {
+    let function = ContainedFunction(Some(f));
+    let declared = function
+        .get()
+        .ok_or_else(|| Error::ModuleError("table function released".into()))?;
+    let name = contain("table function", "name", || declared.name())?;
+    let columns = contain(name, "columns", || declared.columns())?;
+    install(conn, Implementation::Table(function), name, columns)
+}
+
+fn install(
+    conn: &rusqlite::Connection,
+    implementation: Implementation,
+    name: &'static str,
+    columns: &'static [ColumnDef],
+) -> rusqlite::Result<()> {
     const MODULE: Module<'static, FunctionTable> = Module::eponymous_only_module();
-    let registered = Registered::new(f)?;
-    let name = registered.name;
+    let registered = Registered::new(implementation, name, columns)?;
     if Runtime::get().is_none() {
         return Err(Error::ModuleError(format!(
             "{name}: table functions need kaban's installed runtime (initialize_for_embedding or \
@@ -89,6 +103,23 @@ pub fn register(conn: &rusqlite::Connection, f: Arc<dyn TableFunction>) -> rusql
         )));
     }
     conn.create_module(name, &MODULE, Some(Arc::new(registered)))
+}
+
+/// Register a function provided by each statement's execution payload.
+///
+/// # Errors
+/// Returns a SQLite registration error for an invalid declaration.
+pub fn register_execution(
+    conn: &crate::QueryConnection<'_>,
+    name: &'static str,
+    columns: &'static [ColumnDef],
+) -> rusqlite::Result<()> {
+    install(
+        conn,
+        Implementation::Execution(Arc::clone(&conn.identity)),
+        name,
+        columns,
+    )
 }
 
 /// Run a call into the table function, turning a panic into an error so it never unwinds into C.
@@ -124,10 +155,6 @@ impl Drop for ContainedFunction {
     fn drop(&mut self) {
         drop_contained(self.0.take());
     }
-}
-
-fn refusal(error: &FnError) -> Error {
-    Error::ModuleError(error.to_string())
 }
 
 /// The budget of the request scope active on this thread: planning and scanning a table function
@@ -237,7 +264,7 @@ fn schema(columns: &[ColumnDef]) -> rusqlite::Result<CString> {
 /// shared (`Arc`) by each connection's [`FunctionTable`] and each [`FunctionCursor`]; nothing
 /// mutates it after construction, so references to it never alias a value SQLite writes.
 struct Registered {
-    function: ContainedFunction,
+    implementation: Implementation,
     /// The SQL name, read once at registration.
     name: &'static str,
     /// Every declared column, read once at registration.
@@ -252,16 +279,34 @@ struct Registered {
     results: usize,
 }
 
+enum Implementation {
+    Table(ContainedFunction),
+    Execution(Arc<()>),
+}
+
 impl Registered {
-    /// Read and validate `function`'s declaration once; callbacks never call `name` or `columns`
-    /// again, so a declaration cannot change (or panic) after it was validated.
-    fn new(function: Arc<dyn TableFunction>) -> rusqlite::Result<Self> {
-        let function = ContainedFunction(Some(function));
-        let Some(declared) = function.get() else {
-            return Err(Error::ModuleError("table function released".to_owned()));
-        };
-        let name = contain("table function", "name", || declared.name())?;
-        let columns = contain(name, "columns", || declared.columns())?;
+    // A scoped callback reports a breached budget by code. rusqlite allocates an SQLite
+    // string for ModuleError; cancellation or a deadline refuses even that allocation.
+    fn callback_result<T>(&self, result: rusqlite::Result<T>) -> rusqlite::Result<T> {
+        if matches!(self.implementation, Implementation::Execution(_))
+            && let Some(budget) = allocator::current_budget()
+            && let Err(exceeded) = budget.check()
+        {
+            let code = match exceeded.limit {
+                Limit::Memory => ffi::SQLITE_NOMEM,
+                Limit::Time | Limit::Cancelled => ffi::SQLITE_INTERRUPT,
+            };
+            return Err(Error::SqliteFailure(ffi::Error::new(code), None));
+        }
+        result
+    }
+
+    /// Validate the registration's immutable declaration once for every callback.
+    fn new(
+        implementation: Implementation,
+        name: &'static str,
+        columns: &'static [ColumnDef],
+    ) -> rusqlite::Result<Self> {
         let mut slots = Vec::with_capacity(columns.len());
         let mut arguments = Vec::new();
         let mut results = 0;
@@ -282,7 +327,7 @@ impl Registered {
         }
         let schema = schema(columns)?;
         Ok(Self {
-            function,
+            implementation,
             name,
             columns,
             schema,
@@ -290,13 +335,6 @@ impl Registered {
             arguments,
             results,
         })
-    }
-
-    /// The function, for a callback to call (contained).
-    fn function(&self) -> rusqlite::Result<&dyn TableFunction> {
-        self.function
-            .get()
-            .ok_or_else(|| Error::ModuleError(format!("{}: table function released", self.name)))
     }
 
     fn column_name(&self, column: usize) -> &'static str {
@@ -367,6 +405,31 @@ unsafe impl<'vtab> VTab<'vtab> for FunctionTable {
     }
 
     fn best_index(&self, info: &mut IndexInfo) -> rusqlite::Result<bool> {
+        self.registered.callback_result(self.plan_index(info))
+    }
+
+    fn open(&'vtab mut self) -> rusqlite::Result<FunctionCursor<'vtab>> {
+        // Only the shared `Registered` allocation is borrowed for `'vtab`, never `self`: the
+        // reference points into the `Arc`'s own heap block, and the cursor keeps that block alive
+        // with its own handle.
+        let table: &'vtab Self = self;
+        Ok(FunctionCursor {
+            base: ffi::sqlite3_vtab_cursor::default(),
+            registered: &table.registered,
+            args: Vec::new(),
+            bound: Vec::new(),
+            strategy: 0,
+            args_charge: None,
+            rows: None,
+            current: None,
+            rowid: 0,
+            _keep: Arc::clone(&table.registered),
+        })
+    }
+}
+
+impl FunctionTable {
+    fn plan_index(&self, info: &mut IndexInfo) -> rusqlite::Result<bool> {
         let registered = &*self.registered;
         let name = registered.name;
         // Plan-time argument values are copied into Rust for the function: charged to the
@@ -489,8 +552,16 @@ unsafe impl<'vtab> VTab<'vtab> for FunctionTable {
             limit_known,
             constraints: &constraints,
         };
-        let function = registered.function()?;
-        let plan = contain(name, "plan", || function.plan(&input))?;
+        let plan = contain(name, "plan", || match &registered.implementation {
+            Implementation::Table(function) => function
+                .get()
+                .map(|f| f.plan(&input))
+                .ok_or_else(|| Error::ModuleError(format!("{name}: table function released"))),
+            Implementation::Execution(connection) => {
+                crate::execution::plan(connection, name, &input)
+                    .map_err(|e| Error::ModuleError(e.to_string()))
+            }
+        })??;
 
         for (constraint, argv_index) in assignments {
             let mut usage = info.constraint_usage(constraint);
@@ -529,25 +600,6 @@ unsafe impl<'vtab> VTab<'vtab> for FunctionTable {
         }
         Ok(true)
     }
-
-    fn open(&'vtab mut self) -> rusqlite::Result<FunctionCursor<'vtab>> {
-        // Only the shared `Registered` allocation is borrowed for `'vtab`, never `self`: the
-        // reference points into the `Arc`'s own heap block, and the cursor keeps that block alive
-        // with its own handle.
-        let table: &'vtab Self = self;
-        Ok(FunctionCursor {
-            base: ffi::sqlite3_vtab_cursor::default(),
-            registered: &table.registered,
-            args: Vec::new(),
-            bound: Vec::new(),
-            strategy: 0,
-            args_charge: None,
-            rows: None,
-            current: None,
-            rowid: 0,
-            _keep: Arc::clone(&table.registered),
-        })
-    }
 }
 
 /// One scan over a table function's rows.
@@ -576,62 +628,7 @@ struct FunctionCursor<'vtab> {
 }
 
 impl FunctionCursor<'_> {
-    /// Move to the next row, ending the scan on exhaustion or error.
-    fn advance(&mut self) -> rusqlite::Result<()> {
-        let registered = self.registered;
-        let name = registered.name;
-        let next = match self.rows.as_mut() {
-            Some(rows) => contain(name, "rows", || rows.next()),
-            None => Ok(None),
-        };
-        match next {
-            Ok(Some(Ok(row))) if row.len() == registered.results => {
-                self.current = Some(row);
-                self.rowid += 1;
-                Ok(())
-            }
-            Ok(Some(Ok(row))) => {
-                self.stop();
-                Err(Error::ModuleError(format!(
-                    "{name}: a row holds {} values but {} result columns are declared",
-                    row.len(),
-                    registered.results
-                )))
-            }
-            Ok(Some(Err(error))) => {
-                self.stop();
-                Err(refusal(&error))
-            }
-            Ok(None) => {
-                self.stop();
-                Ok(())
-            }
-            Err(error) => {
-                self.stop();
-                Err(error)
-            }
-        }
-    }
-
-    /// End the scan. The row iterator's `Drop` is table-function code: it runs contained.
-    fn stop(&mut self) {
-        drop_contained(self.rows.take());
-        self.current = None;
-    }
-}
-
-impl Drop for FunctionCursor<'_> {
-    fn drop(&mut self) {
-        self.stop();
-    }
-}
-
-// SAFETY: rusqlite's `VTabCursor` contract requires the implementing struct to be `#[repr(C)]` with
-// `ffi::sqlite3_vtab_cursor` as its first field, because rusqlite casts the cursor pointer SQLite
-// passes back to `*mut FunctionCursor`. `FunctionCursor` is `#[repr(C)]` and `base` is its first
-// field. It holds no reference into the `sqlite3_vtab` allocation (see the `VTab` impl above).
-unsafe impl VTabCursor for FunctionCursor<'_> {
-    fn filter(
+    fn start_scan(
         &mut self,
         idx_num: c_int,
         idx_str: Option<&str>,
@@ -686,20 +683,96 @@ unsafe impl VTabCursor for FunctionCursor<'_> {
         self.bound = bound;
         self.strategy = strategy;
         self.args_charge = Some(charge);
-        let function = registered.function()?;
         let scan = Scan {
             args: &self.args,
             bound: &self.bound,
             strategy: self.strategy,
         };
-        let rows = contain(name, "rows", || function.rows(&scan, &budget))?
-            .map_err(|error| refusal(&error))?;
+        let rows = contain(name, "rows", || match &registered.implementation {
+            Implementation::Table(function) => function
+                .get()
+                .ok_or_else(|| FnError {
+                    construct: name.into(),
+                    reason: "table function released".into(),
+                })?
+                .rows(&scan, &budget),
+            Implementation::Execution(connection) => {
+                crate::execution::rows(connection, name, &scan)
+            }
+        })?
+        .map_err(|error| Error::ModuleError(error.to_string()))?;
         self.rows = Some(rows);
         self.advance()
     }
 
+    /// Move to the next row, ending the scan on exhaustion or error.
+    fn advance(&mut self) -> rusqlite::Result<()> {
+        let registered = self.registered;
+        let name = registered.name;
+        let next = match self.rows.as_mut() {
+            Some(rows) => contain(name, "rows", || rows.next()),
+            None => Ok(None),
+        };
+        match next {
+            Ok(Some(Ok(row))) if row.len() == registered.results => {
+                self.current = Some(row);
+                self.rowid += 1;
+                Ok(())
+            }
+            Ok(Some(Ok(row))) => {
+                self.stop();
+                Err(Error::ModuleError(format!(
+                    "{name}: a row holds {} values but {} result columns are declared",
+                    row.len(),
+                    registered.results
+                )))
+            }
+            Ok(Some(Err(error))) => {
+                self.stop();
+                Err(Error::ModuleError(error.to_string()))
+            }
+            Ok(None) => {
+                self.stop();
+                Ok(())
+            }
+            Err(error) => {
+                self.stop();
+                Err(error)
+            }
+        }
+    }
+
+    /// End the scan. The row iterator's `Drop` is table-function code: it runs contained.
+    fn stop(&mut self) {
+        drop_contained(self.rows.take());
+        self.current = None;
+    }
+}
+
+impl Drop for FunctionCursor<'_> {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+// SAFETY: rusqlite's `VTabCursor` contract requires the implementing struct to be `#[repr(C)]` with
+// `ffi::sqlite3_vtab_cursor` as its first field, because rusqlite casts the cursor pointer SQLite
+// passes back to `*mut FunctionCursor`. `FunctionCursor` is `#[repr(C)]` and `base` is its first
+// field. It holds no reference into the `sqlite3_vtab` allocation (see the `VTab` impl above).
+unsafe impl VTabCursor for FunctionCursor<'_> {
+    fn filter(
+        &mut self,
+        idx_num: c_int,
+        idx_str: Option<&str>,
+        args: &Filters<'_>,
+    ) -> rusqlite::Result<()> {
+        let result = self.start_scan(idx_num, idx_str, args);
+        self.registered.callback_result(result)
+    }
+
     fn next(&mut self) -> rusqlite::Result<()> {
-        self.advance()
+        let result = self.advance();
+        self.registered.callback_result(result)
     }
 
     fn eof(&self) -> bool {

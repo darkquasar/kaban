@@ -10,10 +10,10 @@
 
 use std::ffi::{c_int, c_void};
 use std::fmt;
-use std::marker::PhantomData;
 use std::ops::Deref;
 use std::path::Path;
 use std::ptr;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use kaban_core::query_budget::{BudgetExceeded, Limit, QueryBudget};
@@ -86,7 +86,8 @@ impl RequestScope {
         self.configure(&mut conn).map_err(|e| self.translate(e))?;
         Ok(QueryConnection {
             conn,
-            _scope: PhantomData,
+            scope: self,
+            identity: Arc::new(()),
         })
     }
 
@@ -215,10 +216,24 @@ fn disable_lookaside(conn: &Connection) -> rusqlite::Result<()> {
 #[derive(Debug)]
 pub struct QueryConnection<'scope> {
     conn: Connection,
-    _scope: PhantomData<&'scope RequestScope>,
+    pub(crate) scope: &'scope RequestScope,
+    pub(crate) identity: Arc<()>,
 }
 
 impl QueryConnection<'_> {
+    /// Install the store's read authorizer before acquiring the statement snapshot.
+    ///
+    /// # Errors
+    /// Returns the SQLite error if the connection refuses the hook.
+    pub fn set_authorizer<F>(&mut self, hook: F) -> rusqlite::Result<()>
+    where
+        F: for<'a> FnMut(rusqlite::hooks::AuthContext<'a>) -> rusqlite::hooks::Authorization
+            + Send
+            + 'static,
+    {
+        self.conn.authorizer(Some(hook))
+    }
+
     /// Close the connection inside the scope, reporting a failure to close.
     ///
     /// # Errors

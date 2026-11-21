@@ -14,7 +14,7 @@ safe Rust.
 
 **What it may contain.** Three things and nothing else (PC-8, PC-17, QRY-07):
 
-- The virtual-table glue: the module implementation, cursor and row-production code.
+- The virtual-table glue, including cursor and row production and the statement execution binding.
 - The allocator adapter: hooks that charge request-scoped SQLite allocations to a `QueryBudget`,
   the unsafe embedding initializer that installs them, the request scope and its dedicated query
   connection, and the process-level bootstrap behind the `process-bootstrap` feature, which
@@ -47,7 +47,7 @@ site is listed below with the one it meets:
   SQLite; table-function code (metadata, plans, rows, destructors, panic payloads) runs contained.
 
 **What exists (T12).** The crate holds the virtual-table glue (`src/adapter.rs`, `src/plan.rs`,
-`src/value.rs`), the allocator adapter (`src/allocator.rs`), the embedding initializer
+`src/value.rs`, `src/execution.rs`), the allocator adapter (`src/allocator.rs`), the embedding initializer
 (`src/runtime.rs`), the request scope and its dedicated query connection (`src/budget_scope.rs`)
 and, behind `process-bootstrap`, the startup constructor (`src/bootstrap.rs`). `QueryBudget` itself
 is safe code in `kaban-core`.
@@ -73,8 +73,8 @@ is safe code in `kaban-core`.
 
 ### Virtual-table glue
 
-The glue has no `unsafe` block and no `unsafe fn`; it has exactly two `unsafe impl` blocks, both in
-`crates/kaban-vtab/src/adapter.rs`:
+The virtual table and cursor in `crates/kaban-vtab/src/adapter.rs` implement two unsafe traits.
+The statement binding adds one pointer dereference in `src/execution.rs`, described below.
 
 | `unsafe impl` | rusqlite contract it meets | Invariants the adapter keeps |
 |---|---|---|
@@ -149,6 +149,45 @@ budget to `rows` by reference. At most one request scope is active on a thread
 (`RequestScope::enter` refuses a second, `ScopeActive`), and a `QueryConnection` cannot leave the
 thread of its scope (it borrows the `!Send` `RequestScope`), so the slot names the request whose
 connection runs the statement: a connection's work is never charged to another request.
+
+**Statement-bound functions (C8).** `register_execution` installs a function on a dedicated
+`QueryConnection`. SQLite keeps the registration on that connection. The registration and
+connection share an `Arc` identity for as long as either exists. The original `register`
+continues to supply its functions with the active request budget.
+
+`with_execution` borrows that connection, its request budget, the planning statistics callback
+and the store's payload for one synchronous call. It stores a pointer to its stack binding in
+a private thread-local slot. A second binding on that thread is refused. The private guard
+clears the slot before the binding drops on return, error or unwind. The caller cannot take
+or forget the guard. The one unsafe dereference occurs inside `bound`, after checking the slot
+is occupied. The referent is live at the same address throughout the call. Its shared
+references retain their original lifetimes and thread. The higher-ranked callback's result
+type is independent of the borrow lifetime. No callback can move a reference out of the slot.
+
+The adapter checks connection identity before invoking a registered callback. Planning
+receives pinned statistics, arguments and the budget. It performs no SQL lookups. Scan creation
+and row production receive the store's fixed operations through the payload. Each cursor owns
+its state (`'static`) and a separate statement identity held by `Rc`. Before constructing
+that state, the adapter reserves its boxed storage on the request budget. The charge lives
+until the cursor drops. The payload reserves its own working buffers. Each row step reacquires
+the binding and checks that identity. Even when the same connection runs another statement,
+an old cursor cannot use its payload. Metadata callbacks and cursor destruction need no payload.
+Function code and cursor destructors retain the panic containment described above. When a
+scoped callback reaches its budget, its SQLite error code requires no SQLite error-string
+allocation. `RequestScope::translate` recovers the first named budget breach.
+
+The store owns acquisition of the transaction and pin, installation of its authorizer with
+`QueryConnection::set_authorizer`, and the fixed read operations permitted by that authorizer.
+Nested lookups use a distinct uncached statement on the same connection. The store keeps
+its private permission active through preparation and stepping (including automatic reprepare)
+and releases it before returning to user SQL. The adapter exposes no privileged SQL entry
+point or SQL connection to its planner. The executor prepares one user statement per binding,
+materializes bounded values and finalizes its cursors before releasing the pin. It must
+complete synchronously without yielding the thread to another request.
+
+`tests/execution.rs` exercises actual SQLite planning and row steps, a fixed authorized read
+of an uncommitted row, direct read denial, wrong and missing bindings, nested entry, stale
+cursors, error and unwind cleanup, cancellation and release of the budget at close.
 
 **Request memory the adapter owns (MAJ-03).**
 
